@@ -22,6 +22,7 @@ from app.pipeline import (
     generate_recipe_from_source_text,
     generate_recipe_full_text,
     generate_recipe_steps,
+    generate_viral_concept_brief,
     generate_script,
 )
 
@@ -178,6 +179,34 @@ def test_pipeline_llm_steps_scenes_payload_carries_feedback_and_previous():
     assert "режим РЕДАКТИРОВАНИЯ" in prompt
     assert pipeline_llm_steps.FINAL_SCENE_SUBSCRIBE_CTA in prompt
     assert pipeline_llm_steps.FINAL_SCENE_SUBSCRIBE_CTA_VEO3 in prompt
+
+
+def test_viral_concept_brief_prompt_contract():
+    prompt = pipeline_llm_steps.build_viral_concept_brief_prompt(
+        concept="медовик",
+        full_recipe_text="Ингредиенты: мед, мука. Собрать торт.",
+        sponsored_content=True,
+        brand_context="мед бренда",
+    )
+    assert "Viral Concept Brief" in prompt
+    assert "first_frame_type" in prompt
+    assert "hooks должен быть объектом" in prompt
+    assert "brand_context" in prompt
+
+
+def test_generate_viral_concept_brief_fallback_on_bad_json(monkeypatch):
+    async def fake_text(prompt: str) -> str:
+        return "not json"
+
+    monkeypatch.setattr(pipeline_llm_steps, "gemini_text", fake_text)
+    out = asyncio.run(
+        generate_viral_concept_brief(
+            "медовик",
+            full_recipe_text="Ингредиенты: мед, мука. Собрать торт.",
+        )
+    )
+    assert out["main_hook"]
+    assert len(out["hooks"]["emotional"]) >= 3
 
 
 def test_generate_recipe_full_text_mocked(monkeypatch):

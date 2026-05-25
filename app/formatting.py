@@ -101,6 +101,11 @@ def build_human_readable_plan(scenes: list[dict[str, Any]]) -> str:
             "recipe_step", "Бабушка выполняет конкретный шаг рецепта, кот активно взаимодействует с ингредиентом."
         )
         text_line = _safe_text(scene.get("text")) or "—"
+        retention_function = _safe_text(scene.get("retention_function")) or "—"
+        micro_events_raw = scene.get("micro_events") if isinstance(scene.get("micro_events"), list) else []
+        micro_events = ", ".join(_safe_text(x) for x in micro_events_raw if _safe_text(x)) or "—"
+        risk = scene.get("boring_scene_risk", "—")
+        suggestion = _safe_text(scene.get("retention_suggestion")) or "—"
         voice_provider = scene.get(
             "voice_provider", "native" if str(model).lower().startswith("veo3") else "elevenlabs"
         )
@@ -114,6 +119,11 @@ def build_human_readable_plan(scenes: list[dict[str, Any]]) -> str:
             f"Lip sync: {'да' if has_lipsync else 'нет'}\n\n"
             "Что происходит:\n"
             f"{action}\n\n"
+            "Retention:\n"
+            f"Функция: {retention_function}\n"
+            f"Микрособытия: {micro_events}\n"
+            f"Риск скучной сцены: {risk}/10\n"
+            f"Рекомендация: {suggestion}\n\n"
             "Фраза бабушки (будет в сцене):\n"
             f"{text_line}\n\n"
             f"Нужна ли озвучка: {'да' if voice_needed else 'нет'}\n\n"
@@ -123,6 +133,58 @@ def build_human_readable_plan(scenes: list[dict[str, Any]]) -> str:
             f"Примерная стоимость: {cost_label(model)}"
         )
     return "\n\n---\n\n".join(blocks)
+
+
+def _hook_lines(hooks: dict[str, Any]) -> list[str]:
+    labels = {
+        "emotional": "эмоциональные",
+        "intrigue": "интригующие",
+        "useful": "полезные",
+        "cliffhanger": "cliffhanger",
+    }
+    lines: list[str] = []
+    for key, label in labels.items():
+        values = hooks.get(key) if isinstance(hooks, dict) else []
+        if not isinstance(values, list):
+            continue
+        clean = [_safe_text(x) for x in values if _safe_text(x)]
+        if clean:
+            lines.append(f"{label}: " + " | ".join(clean))
+    return lines
+
+
+def format_viral_concept_brief(brief: dict[str, Any] | None) -> str:
+    """Formats the Viral Concept Brief for Telegram approval context."""
+    if not isinstance(brief, dict) or not brief:
+        return "VIRAL CONCEPT BRIEF:\n—"
+    analysis = brief.get("analysis") if isinstance(brief.get("analysis"), dict) else {}
+    hooks = brief.get("hooks") if isinstance(brief.get("hooks"), dict) else {}
+    hook_text = "\n".join(_hook_lines(hooks)) or "—"
+    brand_plan = _safe_text(brief.get("brand_integration_plan")) or "—"
+    return (
+        "VIRAL CONCEPT BRIEF\n\n"
+        f"Главный хук: {_safe_text(brief.get('main_hook')) or '—'}\n"
+        f"Обещание зрителю: {_safe_text(brief.get('viewer_promise')) or '—'}\n"
+        f"Причина досмотреть: {_safe_text(brief.get('reason_to_watch_end')) or '—'}\n"
+        f"Визуальный payoff: {_safe_text(brief.get('main_visual_payoff')) or '—'}\n"
+        f"Тон: {_safe_text(brief.get('emotional_tone')) or '—'}\n"
+        f"Первая фраза: {_safe_text(brief.get('strongest_first_phrase')) or '—'}\n"
+        f"Первый кадр: {_safe_text(brief.get('strongest_first_frame')) or '—'}\n"
+        f"Тип первого кадра: {_safe_text(brief.get('first_frame_type')) or '—'}\n"
+        f"Тип финала: {_safe_text(brief.get('payoff_type')) or '—'}\n\n"
+        "Хуки:\n"
+        f"{hook_text}\n\n"
+        "Финальные фразы:\n"
+        + "\n".join(f"- {_safe_text(x)}" for x in (brief.get("final_phrases") or []) if _safe_text(x))
+        + "\n\n"
+        f"Реклама: {brand_plan}\n\n"
+        "Оценки:\n"
+        f"hook={analysis.get('hook_strength', '—')}/10, "
+        f"first_frame={analysis.get('first_frame_strength', '—')}/10, "
+        f"retention={analysis.get('retention_score', '—')}/10, "
+        f"payoff={analysis.get('visual_payoff_score', '—')}/10, "
+        f"save={analysis.get('saveability_score', '—')}/10"
+    )
 
 
 def format_concepts(concepts: list[dict[str, str]]) -> str:
@@ -282,10 +344,17 @@ def format_production_bundle_for_approval(scenes: list[dict[str, Any]]) -> str:
         if speech_map:
             phrase = "\n".join(f"[{lang}] {_safe_text(text)}" for lang, text in speech_map.items())
         action = _safe_text(scene.get("action")) or "—"
+        retention_function = _safe_text(scene.get("retention_function")) or "—"
+        micro_events_raw = scene.get("micro_events") if isinstance(scene.get("micro_events"), list) else []
+        micro_events = ", ".join(_safe_text(x) for x in micro_events_raw if _safe_text(x)) or "—"
+        payoff = _safe_text(scene.get("payoff_type")) or "—"
         blocks.append(
             f"СЦЕНА {scene_no}\n"
             f"Что происходит: {action}\n"
-            f"Фраза: {phrase}\n\n"
+            f"Фраза: {phrase}\n"
+            f"Retention function: {retention_function}\n"
+            f"Микрособытия: {micro_events}\n"
+            f"Payoff: {payoff}\n\n"
             "START FRAME (RU):\n"
             f"{start}\n\n"
             "END FRAME (RU):\n"

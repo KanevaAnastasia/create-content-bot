@@ -49,6 +49,9 @@ def build_concepts_prompt(idea: str, feedback: str, previous: list[Any]) -> str:
         "- не повторяться\n"
         "- блюда должны быть простые, визуально интересные и потенциально вирусные\n"
         "- если идея пользователя похожа на конкретное блюдо, обязательно включи его + 2-3 вариации\n\n"
+        "ФОРМАТ КОНЦЕПТА:\n"
+        "- каждый концепт должен быть коротким: name + why + hook суммарно до 200 символов\n"
+        "- не превращай концепт в рецепт и не расписывай шаги приготовления\n\n"
         "Верни ТОЛЬКО JSON-объект формата:\n"
         '{"concepts":[{"name":"...","why":"...","hook":"..."}]}'
     )
@@ -100,6 +103,51 @@ def build_recipe_from_source_text_prompt(source_text: str, source_url: str | Non
         "Верни только текст рецепта.\n\n"
         "ТЕКСТ ИСТОЧНИКА:\n"
         f"{src}"
+    )
+
+
+def build_viral_concept_brief_prompt(
+    *,
+    concept: str,
+    full_recipe_text: str,
+    sponsored_content: bool = False,
+    brand_context: str | None = None,
+    analytics_feedback: dict[str, Any] | None = None,
+) -> str:
+    """Prompt for the pre-scenario Viral Concept Brief."""
+    payload = {
+        "concept": concept,
+        "full_recipe_text": full_recipe_text,
+        "sponsored_content": bool(sponsored_content),
+        "brand_context": brand_context or "",
+        "analytics_feedback": analytics_feedback or {},
+    }
+    return (
+        "Ты сценарный редактор уютного food/cartoon-блога с бабушкой, котом и домашними рецептами.\n"
+        "Нужно подготовить Viral Concept Brief ДО генерации сцен: ролик должен удерживать внимание, "
+        "но не превращаться в агрессивный кликбейт.\n\n"
+        "Стиль: уют, бабушка, кот, домашняя еда, семейность, тепло, мультяшность, аппетитность. "
+        "Разрешён только мягкий кликбейт: интрига, эмоция, обещание результата, красивый payoff. "
+        "Запрещены обманные обещания, токсичность, страх, шок-контент и неуместный экстрим.\n\n"
+        "Если sponsored_content=true, встрои бренд естественно: как ингредиент, бабушкин совет, подарок к столу, "
+        "семейный ритуал, решение проблемы, предмет реакции кота, красивая упаковка в кадре или способ улучшить результат. "
+        "Запрещены сухая рекламная вставка, длинный список преимуществ, фраза «а теперь реклама», неестественная похвала.\n\n"
+        "Верни строго JSON объект без markdown с ключами:\n"
+        "main_hook, viewer_promise, reason_to_watch_end, main_visual_payoff, emotional_tone, series_format, "
+        "strongest_first_phrase, strongest_first_frame, first_frame_type, hooks, alternative_hooks, final_phrases, "
+        "payoff_type, brand_integration_plan, analysis.\n\n"
+        "first_frame_type выбери одно значение из: ready_dish_closeup, cake_cut, cheese_pull, spoon_shot, "
+        "grandma_shows_dish, cat_smells, unexpected_phrase, before_after, secret_tease.\n"
+        "payoff_type выбери одно значение из: cut, spoon, crunch, cheese_pull, grandma_taste_smile, cat_reaction, "
+        "final_plating, family_table, save_cta.\n"
+        "hooks должен быть объектом: emotional 3 шт, intrigue 3 шт, useful 2 шт, cliffhanger 2 шт.\n"
+        "final_phrases: ровно 3 финальные фразы.\n"
+        "analysis должен содержать оценки 1-10: hook_strength, first_frame_strength, retention_score, "
+        "visual_payoff_score, emotional_warmth_score, recipe_clarity_score, saveability_score, "
+        "brand_integration_safety_score, risk_of_boring_scene; и строки expected_rewatch_reason, "
+        "expected_comment_reason, expected_save_reason.\n\n"
+        "INPUT:\n"
+        + json.dumps(payload, ensure_ascii=False, indent=2)
     )
 
 
@@ -196,6 +244,10 @@ def build_scenes_plan_payload(
     feedback: str,
     previous_scenes: list[dict[str, Any]],
     allowed_locations: list[str] | None = None,
+    viral_concept_brief: dict[str, Any] | None = None,
+    sponsored_content: bool = False,
+    brand_context: str | None = None,
+    analytics_feedback: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     _ = allowed_locations
     return {
@@ -206,6 +258,10 @@ def build_scenes_plan_payload(
         "assets": _character_assets_only(),
         "required_characters": ["grandma", "cat"],
         "requirements": scenes_plan_requirements(),
+        "viral_concept_brief": viral_concept_brief or {},
+        "sponsored_content": bool(sponsored_content),
+        "brand_context": brand_context or "",
+        "analytics_feedback": analytics_feedback or {},
     }
 
 
@@ -227,12 +283,24 @@ def build_scenes_plan_prompt(payload: dict[str, Any]) -> str:
         "(например та же кастрюля, миска, тарелка, разделочная доска, плита/конфорка как предмет, ложка, венчик, "
         "ингредиенты, поверхность стола, поза кота). Добавь continuity_state: текущее состояние еды и посуды.\n"
         "СЦЕНА 1: только сильный хук и аппетитная витрина — крупно бабушка, кот и уже готовое блюдо; "
-        "короткая завлекающая реплика (как вкусно и т.п.). В сцене 1 НЕ начинай процесс готовки.\n"
+        "короткая hook-first реплика (не описание блюда, а причина остановиться). В сцене 1 НЕ начинай процесс готовки. "
+        "Если в viral_concept_brief есть strongest_first_frame/first_frame_type — следуй им. "
+        "Первая сцена должна содержать одно из: готовое блюдо крупным планом, разрез торта, тянущийся сыр, "
+        "ложка с супом/кремом, бабушка показывает готовое блюдо, кот реагирует на запах, неожиданная фраза, "
+        "контраст было/стало, интрига «в конце покажу секрет».\n"
         "Готовка по рецепту (действия типа режем/мешаем/жарим) начинается строго со СЦЕНЫ 2.\n"
         "ПОСЛЕДНЯЯ СЦЕНА: презентация/подача готового блюда, аппетит, реплика от первого лица. "
+        "Финал обязан иметь сильный visual payoff: разрез, ложка, хруст, тянущийся сыр, бабушка пробует и улыбается, "
+        "кот смотрит на блюдо, финальная сервировка, семейный стол или «сохрани, чтобы не потерять». "
         "После основной фразы про блюдо ОБЯЗАТЕЛЬНО закончи text подписочной фразой: "
         f"{FINAL_SCENE_SUBSCRIBE_CTA}. Для veo3/veo3_fast в самом конце text используй TTS-форму без пунктуации: "
         f"{FINAL_SCENE_SUBSCRIBE_CTA_VEO3}.\n"
+        "RETENTION LAYER: у каждой сцены добавь retention_function — одно из hook, visual_proof, recipe_progress, "
+        "grandma_secret, cat_humor, texture_shot, transformation, suspense, payoff, cta_save_reason, brand_integration. "
+        "Добавь micro_events: 2-4 коротких события каждые 2-3 секунды (смена крупности, ингредиент, реакция бабушки, "
+        "реакция кота, изменение текстуры, food close-up, мини-шутка, подсказка, переход, трансформация). "
+        "Если одно действие может длиться слишком долго, укажи retention_suggestion: монтажное ускорение, нарезка или замена.\n"
+        "Для sponsored_content=true встрои бренд только нативно в одну подходящую сцену; не делай отдельный рекламный блок.\n"
         "При нарезке — явно стиль нарезки (кубик соломка ломтики и т.д.).\n"
         "ЗАПРЕЩЕН ракурс снизу (low-angle/from-below).\n"
         "КАДРИРОВАНИЕ: в каждой сцене крупный или средне-крупный план; бабушка целиком видна (не только лицо), все персонажи сцены полностью в кадре, действие с едой читаемо; без дальних планов.\n"

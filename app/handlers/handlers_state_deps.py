@@ -35,6 +35,7 @@ from ..formatting import (
     format_frame_prompts_for_approval,
     format_full_recipe_for_approval,
     format_production_bundle_for_approval,
+    format_viral_concept_brief,
 )
 from ..llm_utils import gemini_generate_sync
 from ..pipeline import (
@@ -44,6 +45,7 @@ from ..pipeline import (
     generate_recipe_from_source_text,
     generate_recipe_full_text,
     generate_scenes_plan,
+    generate_viral_concept_brief,
 )
 from ..scene_utils import apply_veo3_lowercase_format
 from ..state import SESSIONS

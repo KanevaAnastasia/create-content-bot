@@ -22,10 +22,12 @@ from .handlers_state_deps import (
     _build_direct_recipe_session,
     ok_only_markup,
     format_full_recipe_for_approval,
+    format_viral_concept_brief,
     generate_recipe_from_source_text,
     generate_recipe_concepts,
     generate_recipe_full_text,
     generate_scenes_plan,
+    generate_viral_concept_brief,
     logger,
     re,
     ServiceUnavailableRetriesExhaustedError,
@@ -113,6 +115,15 @@ def _concept_choice_markup(concepts: list[dict]) -> object | None:
         rows.append(buttons[i : i + 2])
     rows.extend([["Добавь"], ["Исправь"], [NAV_BUTTON_START_OVER]])
     return ReplyKeyboardMarkup(rows, resize_keyboard=True, one_time_keyboard=False)
+
+
+def _parse_concept_choice(text: str) -> int | None:
+    """Возвращает номер концепта только для явного выбора, а не для любого числа в фидбеке."""
+    match = re.fullmatch(r"(?:концепт\s*)?(\d+)", text.strip(), flags=re.IGNORECASE)
+    if not match:
+        return None
+    return int(match.group(1))
+
 
 async def generate(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Команда ``/generate <текст>``: обычный старт пайплайна (без fastpath)."""
@@ -297,9 +308,9 @@ async def _handle_waiting_concept_state(
     text: str,
 ) -> bool:
     """Обрабатывает состояние `STATE_WAITING_CONCEPT`."""
-    match = re.search(r"\d+", text)
-    if match:
-        idx = int(match.group()) - 1
+    choice = _parse_concept_choice(text)
+    if choice is not None:
+        idx = choice - 1
         concepts = session.get("concepts") or []
         if idx < 0 or idx >= len(concepts):
             await update.message.reply_text("Неверный номер концепта. Выбери из списка.")
@@ -402,7 +413,20 @@ async def _handle_waiting_recipe_approval_state(
             return True
 
         try:
-            await reply_text_without_keyboard(update.message, "Генерирую план сцен, ждите.")
+            await reply_text_without_keyboard(update.message, "Готовлю viral brief и план сцен, ждите.")
+            viral_brief = await _call_with_503_retries(
+                update,
+                context,
+                chat_id,
+                "generate_viral_concept_brief",
+                lambda: generate_viral_concept_brief(
+                    session["selected_concept"],
+                    full_recipe_text=full_recipe,
+                    sponsored_content=bool(session.get("sponsored_content")),
+                    brand_context=session.get("brand_context"),
+                    analytics_feedback=session.get("analytics_feedback"),
+                ),
+            )
             scenes = await _call_with_503_retries(
                 update,
                 context,
@@ -412,6 +436,10 @@ async def _handle_waiting_recipe_approval_state(
                     session["selected_concept"],
                     full_recipe_text=full_recipe,
                     on_attempt_failure=_on_scene_plan_fail,
+                    viral_concept_brief=viral_brief,
+                    sponsored_content=bool(session.get("sponsored_content")),
+                    brand_context=session.get("brand_context"),
+                    analytics_feedback=session.get("analytics_feedback"),
                 ),
             )
         except ServiceUnavailableRetriesExhaustedError as e:
@@ -427,6 +455,8 @@ async def _handle_waiting_recipe_approval_state(
             if isinstance(s, dict)
         ]
         session["state"] = STATE_WAITING_SCENE_APPROVAL
+        session["viral_concept_brief"] = scenes.get("viral_concept_brief") or viral_brief
+        session["retention_review"] = scenes.get("retention_review") or {}
         session["scenes_plan"] = scenes["json_plan"]
         session["scenes_text"] = scenes["text_plan"]
         session["frame_prompts"] = None
@@ -434,6 +464,7 @@ async def _handle_waiting_recipe_approval_state(
         report = _format_scenes_regeneration_report(scenes.get("regeneration_events") or [])
         if report:
             await _reply_text_chunked(update, report)
+        await _reply_text_chunked(update, format_viral_concept_brief(session["viral_concept_brief"]))
         await _reply_text_chunked(update, scenes["text_plan"])
         await _reply_text_with_optional_markup(
             update,

@@ -38,6 +38,7 @@ from .scene_utils import (
     normalize_recipe_steps,
     normalize_scenes_for_pipeline,
 )
+from .viral_retention import enrich_scenes_with_retention, normalize_viral_concept_brief
 from .visual_props import append_visual_prop_descriptions
 
 logger = logging.getLogger("bot")
@@ -651,6 +652,47 @@ async def generate_recipe_from_source_text(
     return text
 
 
+async def generate_viral_concept_brief(
+    concept: str,
+    *,
+    full_recipe_text: str,
+    sponsored_content: bool = False,
+    brand_context: str | None = None,
+    analytics_feedback: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """
+    Генерирует Viral Concept Brief перед сценарным планом.
+
+    Это мягкий слой: если LLM вернула битый JSON, пайплайн не падает, а
+    использует нормализованный fallback с хуками, first frame и payoff.
+    """
+    concept = (concept or "").strip()
+    body = (full_recipe_text or "").strip()
+    if not concept:
+        raise ValueError("Empty concept for viral brief.")
+    if not body:
+        raise ValueError("Empty full_recipe_text for viral brief.")
+    prompt = llm_steps.build_viral_concept_brief_prompt(
+        concept=concept,
+        full_recipe_text=body,
+        sponsored_content=sponsored_content,
+        brand_context=brand_context,
+        analytics_feedback=analytics_feedback,
+    )
+    try:
+        raw = await llm_steps.gemini_text(prompt)
+        parsed = extract_json_object(raw)
+    except Exception:
+        logger.exception("viral concept brief generation failed; using fallback brief")
+        parsed = {}
+    return normalize_viral_concept_brief(
+        parsed,
+        concept=concept,
+        sponsored_content=sponsored_content,
+        brand_context=brand_context,
+    )
+
+
 async def expand_recipe_steps(recipe_steps: list[str]) -> list[str]:
     """
     Увеличивает число шагов до допустимого диапазона, дробя крупные шаги (без новых ингредиентов).
@@ -810,7 +852,9 @@ def _humanize_scene_errors(errors: list[str]) -> list[str]:
         "veo3_text_no_pause_token": "в реплике veo3 нет [пауза]",
         "first_scene_hook_missing": "в первой сцене нет хука",
         "first_scene_dish_name_missing": "в первой сцене не названо, что готовим",
+        "first_scene_boring_preparation": "первая сцена начинается со скучной подготовки",
         "final_presentation_missing": "в финальной сцене нет презентации блюда",
+        "final_payoff_missing": "в финальной сцене нет сильного визуального payoff",
     }
     out: list[str] = []
     for e in errors:
@@ -842,6 +886,10 @@ async def generate_scenes_plan(
     user_feedback: str | None = None,
     previous_scenes: list[dict[str, Any]] | None = None,
     on_attempt_failure: Callable[[dict[str, Any]], Awaitable[None]] | None = None,
+    viral_concept_brief: dict[str, Any] | None = None,
+    sponsored_content: bool = False,
+    brand_context: str | None = None,
+    analytics_feedback: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """
     Один запрос к Gemini: сценарий из 4–6 сцен по **полному тексту рецепта**, с репликами Veo3 в ``text``.
@@ -861,15 +909,29 @@ async def generate_scenes_plan(
             cached_plan = cached.get("json_plan")
             if isinstance(cached_plan, list):
                 fixed = _postprocess_scenes_output(cached_plan, concept)
+                fixed, retention_review = enrich_scenes_with_retention(
+                    fixed,
+                    viral_concept_brief=viral_concept_brief,
+                    sponsored_content=sponsored_content,
+                )
                 return {
                     "text_plan": build_human_readable_plan(fixed),
                     "json_plan": fixed,
+                    "viral_concept_brief": viral_concept_brief or cached.get("viral_concept_brief") or {},
+                    "retention_review": retention_review,
                     "regeneration_events": cached.get("regeneration_events") or [],
                 }
         return cached
 
     payload = llm_steps.build_scenes_plan_payload(
-        concept, body, fb, _strip_location_context_for_llm(list(previous_scenes or []))
+        concept,
+        body,
+        fb,
+        _strip_location_context_for_llm(list(previous_scenes or [])),
+        viral_concept_brief=viral_concept_brief,
+        sponsored_content=sponsored_content,
+        brand_context=brand_context,
+        analytics_feedback=analytics_feedback,
     )
     prompt = llm_steps.build_scenes_plan_prompt(payload)
 
@@ -902,9 +964,16 @@ async def generate_scenes_plan(
     arr = normalize_scenes_for_pipeline(extract_json_array(raw_once))
     arr = _ensure_scene_block_len(arr)
     raw_scenes = _postprocess_scenes_output(arr, concept)
+    raw_scenes, retention_review = enrich_scenes_with_retention(
+        raw_scenes,
+        viral_concept_brief=viral_concept_brief,
+        sponsored_content=sponsored_content,
+    )
     out_raw = {
         "text_plan": build_human_readable_plan(raw_scenes),
         "json_plan": raw_scenes,
+        "viral_concept_brief": viral_concept_brief or {},
+        "retention_review": retention_review,
         "regeneration_events": [],
     }
     if not has_previous_scenes:
@@ -1067,6 +1136,9 @@ async def generate_full_production(
     *,
     user_feedback: str | None = None,
     previous_enriched_scenes: list[dict[str, Any]] | None = None,
+    viral_concept_brief: dict[str, Any] | None = None,
+    sponsored_content: bool = False,
+    brand_context: str | None = None,
 ) -> dict[str, Any]:
     """
     Сборка промптов для медиа по сценам.
@@ -1079,6 +1151,7 @@ async def generate_full_production(
     зафиксированными кадрами).
     """
     scenes = [dict(scene) for scene in scenes_plan]
+    viral_brief = viral_concept_brief if isinstance(viral_concept_brief, dict) else {}
     target_languages = target_languages_from_env()
     if approved_frame_prompts is not None:
         if len(approved_frame_prompts) != len(scenes):
@@ -1114,6 +1187,14 @@ async def generate_full_production(
                     "plate, cutting board, stovetop/working surface, utensils, ingredient state and food texture"
                 ),
                 "kitchen_physics_rule": VIDEO_KITCHEN_PHYSICS_RULE,
+                "viral_retention_rule": (
+                    "Respect retention_function and micro_events. Avoid empty long actions. "
+                    "Scene 1 must be hook-first and readable from the first frame. "
+                    "The final scene must strongly show payoff_type."
+                ),
+                "viral_concept_brief": viral_brief,
+                "sponsored_content": bool(sponsored_content),
+                "brand_context": brand_context or "",
             },
         }
         fb = (user_feedback or "").strip()
@@ -1154,6 +1235,9 @@ async def generate_full_production(
             + VIDEO_KITCHEN_PHYSICS_RULE
             + "\n"
             "Do not mention location names or location references; preserve continuity through recurring props and food state.\n"
+            "Respect the Viral Concept Brief and scene retention fields. First frame must not be boring preparation; "
+            "final scene must deliver the visual payoff. If sponsored_content is true, integrate the brand naturally "
+            "inside the cooking story, not as an ad break.\n"
             + feedback_block
             + "\n"
             + json.dumps(payload, ensure_ascii=False, indent=2)
@@ -1214,8 +1298,16 @@ async def generate_full_production(
                     "start_frame_ru and video_prompt_en must preserve continuity_anchors and continuity_state: "
                     "same cookware, plate, cutting board, stovetop/working surface, utensils, ingredient state "
                     "and food texture"
-                ),
+            ),
             "kitchen_physics_rule": VIDEO_KITCHEN_PHYSICS_RULE,
+            "viral_retention_rule": (
+                "Respect retention_function and micro_events. Avoid empty long actions. "
+                "Scene 1 must be hook-first and readable from the first frame. "
+                "The final scene must strongly show payoff_type."
+            ),
+            "viral_concept_brief": viral_brief,
+            "sponsored_content": bool(sponsored_content),
+            "brand_context": brand_context or "",
         },
     }
     prompt = (
@@ -1247,6 +1339,9 @@ async def generate_full_production(
         + VIDEO_KITCHEN_PHYSICS_RULE
         + "\n"
         "Do not mention location names or location references; preserve continuity through recurring props and food state.\n"
+        "Respect the Viral Concept Brief and scene retention fields. First frame must not be boring preparation; "
+        "final scene must deliver the visual payoff. If sponsored_content is true, integrate the brand naturally "
+        "inside the cooking story, not as an ad break.\n"
         + json.dumps(payload, ensure_ascii=False, indent=2)
     )
     obj = extract_json_object(await asyncio.to_thread(gemini_generate_sync, prompt))

@@ -314,3 +314,33 @@ class VideoResult(Base):
 
     run: Mapped["GenerationRun"] = relationship(back_populates="video_results")
     scene: Mapped["Scene"] = relationship(back_populates="video_results")
+
+
+class PublishedVideoAnalytics(Base):
+    """Analytics for published short-form videos, used as feedback for future briefs."""
+
+    __tablename__ = "published_video_analytics"
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
+    platform: Mapped[str] = mapped_column(String(64), nullable=False)
+    title: Mapped[str | None] = mapped_column(Text, nullable=True)
+    recipe: Mapped[str | None] = mapped_column(Text, nullable=True)
+    format: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    hook: Mapped[str | None] = mapped_column(Text, nullable=True)
+    first_frame_type: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    duration: Mapped[float | None] = mapped_column(Float, nullable=True)
+    views: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    reach: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    average_view_duration: Mapped[float | None] = mapped_column(Float, nullable=True)
+    average_percentage_viewed: Mapped[float | None] = mapped_column(Float, nullable=True)
+    retention_3s: Mapped[float | None] = mapped_column(Float, nullable=True)
+    retention_5s: Mapped[float | None] = mapped_column(Float, nullable=True)
+    retention_10s: Mapped[float | None] = mapped_column(Float, nullable=True)
+    likes: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    comments: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    saves: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    shares: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    follows: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    posted_at: Mapped[DateTime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    notes: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[DateTime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())

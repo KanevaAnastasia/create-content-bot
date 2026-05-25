@@ -477,6 +477,41 @@ def scenes_quality_errors(
         "фишк",
         "понадоб",
     )
+    first_frame_payoff_markers = (
+        "готов",
+        "разрез",
+        "тянущ",
+        "сыр",
+        "ложк",
+        "крем",
+        "показывает",
+        "нюха",
+        "запах",
+        "было",
+        "стало",
+        "секрет",
+    )
+    boring_first_prep_markers = (
+        "нарез",
+        "чистит",
+        "моет",
+        "подготав",
+        "достает ингредиенты",
+        "кладет ингредиенты",
+    )
+    final_payoff_markers = (
+        "разрез",
+        "ложк",
+        "хруст",
+        "тянущ",
+        "сыр",
+        "улыба",
+        "пробует",
+        "кот",
+        "сервиров",
+        "семейный стол",
+        "сохрани",
+    )
     presentation_markers = ("презентац", "подач", "подаем", "крупный план", "готовое блюдо", "результат")
     banned_low_angle_markers = ("снизу", "нижний ракурс", "low angle", "worm eye", "worm's eye")
 
@@ -635,6 +670,10 @@ def scenes_quality_errors(
         has_hook = any(k in blob for k in hook_markers)
         if not has_hook:
             errors.append("scene_1: first_scene_hook_missing")
+        has_payoff_first_frame = any(k in blob for k in first_frame_payoff_markers)
+        starts_as_boring_prep = any(k in blob for k in boring_first_prep_markers)
+        if starts_as_boring_prep and not has_payoff_first_frame:
+            errors.append("scene_1: first_scene_boring_preparation")
         step_tokens = _step_tokens(canonical_step)
         if step_tokens and not any(t in blob for t in step_tokens):
             errors.append("scene_1: first_scene_dish_name_missing")
@@ -656,6 +695,8 @@ def scenes_quality_errors(
         )
         if not has_presentation:
             errors.append(f"scene_{i}: final_presentation_missing")
+        if not any(k in blob for k in final_payoff_markers):
+            errors.append(f"scene_{i}: final_payoff_missing")
 
     def _validate_shot_and_scene_transition(scene: dict[str, Any], i: int, blob: str) -> None:
         """Проверяет запрет ракурса снизу и смену ракурса/предметного фокуса между соседними сценами."""

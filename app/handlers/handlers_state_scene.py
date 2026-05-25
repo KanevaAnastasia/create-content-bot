@@ -35,6 +35,7 @@ from .handlers_state_deps import (
     format_frame_prompts_for_approval,
     format_full_recipe_for_approval,
     format_production_bundle_for_approval,
+    format_viral_concept_brief,
     generate_frame_prompts_for_approval,
     generate_full_production,
     generate_scenes_plan,
@@ -649,7 +650,13 @@ async def _handle_waiting_scene_approval_state(
                 context,
                 chat_id,
                 "generate_full_production",
-                lambda: generate_full_production(session["scenes_plan"], approved_frame_prompts=None),
+                lambda: generate_full_production(
+                    session["scenes_plan"],
+                    approved_frame_prompts=None,
+                    viral_concept_brief=session.get("viral_concept_brief"),
+                    sponsored_content=bool(session.get("sponsored_content")),
+                    brand_context=session.get("brand_context"),
+                ),
             )
         except ServiceUnavailableRetriesExhaustedError as e:
             await update.message.reply_text(str(e))
@@ -701,6 +708,9 @@ async def _handle_waiting_frame_prompts_approval_state(
                 lambda: generate_full_production(
                     session["scenes_plan"],
                     approved_frame_prompts=session.get("frame_prompts"),
+                    viral_concept_brief=session.get("viral_concept_brief"),
+                    sponsored_content=bool(session.get("sponsored_content")),
+                    brand_context=session.get("brand_context"),
                 ),
             )
         except ServiceUnavailableRetriesExhaustedError as e:
@@ -764,6 +774,9 @@ async def _handle_waiting_production_bundle_approval_state(
                 approved_frame_prompts=session.get("frame_prompts"),
                 user_feedback=text,
                 previous_enriched_scenes=scenes,
+                viral_concept_brief=session.get("viral_concept_brief"),
+                sponsored_content=bool(session.get("sponsored_content")),
+                brand_context=session.get("brand_context"),
             ),
         )
     except ServiceUnavailableRetriesExhaustedError as e:
@@ -859,6 +872,10 @@ async def _handle_scene_approval_refine(update: Update, context: ContextTypes.DE
                 user_feedback=text,
                 previous_scenes=session.get("scenes_plan"),
                 on_attempt_failure=_on_scene_plan_fail_refine,
+                viral_concept_brief=session.get("viral_concept_brief"),
+                sponsored_content=bool(session.get("sponsored_content")),
+                brand_context=session.get("brand_context"),
+                analytics_feedback=session.get("analytics_feedback"),
             ),
         )
     except ServiceUnavailableRetriesExhaustedError as e:
@@ -866,6 +883,8 @@ async def _handle_scene_approval_refine(update: Update, context: ContextTypes.DE
     except Exception as e:
         logger.exception("scene regeneration failed"); await update.message.reply_text(f"Ошибка перегенерации сцен: {_user_error_message(e)}"); session["state"] = STATE_WAITING_SCENE_APPROVAL; return True
     session["state"] = STATE_WAITING_SCENE_APPROVAL
+    session["viral_concept_brief"] = scenes.get("viral_concept_brief") or session.get("viral_concept_brief") or {}
+    session["retention_review"] = scenes.get("retention_review") or {}
     session["scenes_plan"] = scenes["json_plan"]
     session["scenes_text"] = scenes["text_plan"]
     session["recipe_steps"] = [
@@ -878,6 +897,8 @@ async def _handle_scene_approval_refine(update: Update, context: ContextTypes.DE
     await update.message.reply_text("Обновила план по правкам:")
     rft = session.get("recipe_full_text")
     if isinstance(rft, str) and rft.strip(): await _reply_text_chunked(update, format_full_recipe_for_approval(rft))
+    if session.get("viral_concept_brief"):
+        await _reply_text_chunked(update, format_viral_concept_brief(session["viral_concept_brief"]))
     await _reply_text_chunked(update, scenes["text_plan"])
     await _reply_text_with_optional_markup(
         update,
