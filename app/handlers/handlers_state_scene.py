@@ -82,7 +82,12 @@ from .handlers_state_start import (
     _start_description_with_recipe,
     _start_generation_with_recipe,
 )
-from .handlers_state_media import _handle_waiting_scene_media_state
+from .handlers_state_media import (
+    STATE_REFINING_SOCIAL_DESCRIPTIONS,
+    STATE_WAITING_SOCIAL_DESCRIPTIONS_APPROVAL,
+    _handle_waiting_scene_media_state,
+    _handle_waiting_social_descriptions_approval_state,
+)
 
 
 async def _reply_text_with_optional_markup(update: Update, text: str, reply_markup=None) -> None:
@@ -807,6 +812,7 @@ async def _handle_refining_state(update: Update, state: str) -> bool:
         STATE_REFINING_SCENES: "Дорабатываю сцены. Отправь сообщение еще раз через пару секунд.",
         STATE_REFINING_FRAME_PROMPTS: "Дорабатываю frame prompts. Отправь сообщение еще раз через пару секунд.",
         STATE_REFINING_PRODUCTION_BUNDLE: "Перегенерирую промпты. Отправь сообщение ещё раз через пару секунд.",
+        STATE_REFINING_SOCIAL_DESCRIPTIONS: "Дорабатываю описания. Отправь сообщение ещё раз через пару секунд.",
     }
     text = mapping.get(state)
     if not text:
@@ -1435,6 +1441,8 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         await _handle_frame_prompts_refine(update, context, chat_id=chat_id, session=session, text=text)
         return
     if state == STATE_WAITING_PRODUCTION_BUNDLE_APPROVAL and await _handle_waiting_production_bundle_approval_state(update, context, chat_id=chat_id, session=session, text=text):
+        return
+    if state == STATE_WAITING_SOCIAL_DESCRIPTIONS_APPROVAL and await _handle_waiting_social_descriptions_approval_state(update, context, chat_id=chat_id, session=session, text=text):
         return
     if state == STATE_WAITING_SCENE_MEDIA and await _handle_waiting_scene_media_state(update, context, chat_id=chat_id, session=session, text=text):
         return

@@ -5,6 +5,7 @@ from telegram.error import NetworkError, RetryAfter, TimedOut
 
 from .handlers_state_deps import (
     ContextTypes,
+    SESSIONS,
     SCENE_MEDIA_AI_APPROVE_BUTTON,
     SCENE_MEDIA_APPROVE_MODE_AI,
     SCENE_MEDIA_APPROVE_MODE_AUTO,
@@ -89,6 +90,9 @@ SCENE_SPEECH_PENDING_KEY = "scene_speech_shorten_pending"
 SCENE_PHRASE_INPUT_PENDING_KEY = "scene_phrase_input_pending"
 SCENE_PHRASE_TRANSLATION_PENDING_KEY = "scene_phrase_translation_pending"
 SOCIAL_DESCRIPTIONS_SENT_KEY = "social_descriptions_sent"
+STATE_WAITING_SOCIAL_DESCRIPTIONS_APPROVAL = "waiting_social_descriptions_approval"
+STATE_REFINING_SOCIAL_DESCRIPTIONS = "refining_social_descriptions"
+SOCIAL_DESCRIPTIONS_PENDING_KEY = "social_descriptions_pending"
 SCENE_IMAGE_EDIT_PENDING_KEY = "scene_image_edit_pending"
 SCENE_MEDIA_AI_HUMAN_REVIEW_SESSION_KEY = "scene_media_ai_human_review"
 SOCIAL_FIXED_HASHTAGS_RU = ["#убабушкивкуснее", "#бабушкинырецепты", "#рецепты"]
@@ -565,6 +569,99 @@ async def _generate_social_copy_from_recipe(recipe: str) -> dict[str, str]:
     return out
 
 
+def _social_descriptions_approval_markup() -> ReplyKeyboardMarkup:
+    return ReplyKeyboardMarkup(
+        keyboard=[
+            ["ОК"],
+            ["ФИДБЕК"],
+            ["Исправь"],
+            [NAV_BUTTON_START_OVER],
+        ],
+        resize_keyboard=True,
+        one_time_keyboard=False,
+    )
+
+
+def _social_copy_messages(copy: dict[str, str]) -> list[tuple[str, str]]:
+    return [
+        ("YouTube Shorts RU заголовок, скопировать отдельно", copy["youtube_ru_title"]),
+        ("YouTube Shorts RU описание, скопировать отдельно", copy["youtube_ru_description"]),
+        ("Instagram RU описание, скопировать отдельно", copy["instagram_ru"]),
+        ("VK RU описание, скопировать отдельно", copy["vk_ru"]),
+        ("TikTok RU описание, скопировать отдельно", copy["tiktok_ru"]),
+        ("Instagram EN description, copy separately", copy["instagram_en"]),
+        ("YouTube Shorts EN title, copy separately", copy["youtube_en_title"]),
+        ("YouTube Shorts EN description, copy separately", copy["youtube_en_description"]),
+    ]
+
+
+async def _send_social_copy_for_approval(update: Update, copy: dict[str, str]) -> None:
+    for title, body in _social_copy_messages(copy):
+        await _send_copyable_message(update, title, body)
+    await _reply_text_with_optional_markup(
+        update,
+        "Проверьте описания.\n"
+        "«ОК» — утвердить.\n"
+        "«ФИДБЕК» или «Исправь» — пришлите, что поменять, и я перепишу описания.",
+        reply_markup=_social_descriptions_approval_markup(),
+    )
+
+
+async def _refine_social_copy_from_feedback(
+    *,
+    recipe: str,
+    previous_copy: dict[str, str],
+    feedback: str,
+) -> dict[str, str]:
+    fallback = previous_copy or _fallback_social_copy(recipe)
+    prompt = (
+        "Ты редактируешь публикационные тексты для Reels, YouTube Shorts, VK и TikTok.\n\n"
+        "Сохрани структуру JSON и все требования к хэштегам.\n"
+        "Учти фидбэк пользователя, но не выдумывай ингредиенты и количества.\n"
+        "Русские описания: #убабушкивкуснее #бабушкинырецепты #рецепты + 1-2 хэштега по рецепту.\n"
+        "Английские описания: #grandmatastesbetter #grandmasrecipes #recipes + 1-2 английских хэштега по рецепту.\n"
+        "Верни строго JSON объект без markdown с ключами:\n"
+        "youtube_ru_title, youtube_ru_description, instagram_ru, vk_ru, tiktok_ru, "
+        "instagram_en, youtube_en_title, youtube_en_description.\n\n"
+        f"РЕЦЕПТ:\n{recipe.strip()}\n\n"
+        f"ПРЕДЫДУЩИЕ ОПИСАНИЯ JSON:\n{previous_copy}\n\n"
+        f"ФИДБЭК ПОЛЬЗОВАТЕЛЯ:\n{feedback.strip()}\n"
+    )
+    try:
+        raw = await asyncio.to_thread(gemini_generate_sync, prompt)
+        obj = extract_json_object(raw or "")
+    except Exception:
+        logger.exception("social copy refinement failed")
+        return fallback
+    out: dict[str, str] = {}
+    for key, fallback_value in fallback.items():
+        value = _clean_social_copy_message(str(obj.get(key) or ""))
+        value = value or fallback_value
+        if key in {"youtube_ru_description", "instagram_ru", "vk_ru", "tiktok_ru"}:
+            value = _with_social_hashtags(value, recipe=recipe, language="ru")
+        elif key in {"instagram_en", "youtube_en_description"}:
+            value = _with_social_hashtags(value, recipe=recipe, language="en")
+        out[key] = value
+    return out
+
+
+async def _start_social_descriptions_approval(
+    update: Update,
+    *,
+    session: dict,
+    recipe: str,
+    copy: dict[str, str],
+    origin: str,
+) -> None:
+    session["state"] = STATE_WAITING_SOCIAL_DESCRIPTIONS_APPROVAL
+    session[SOCIAL_DESCRIPTIONS_PENDING_KEY] = {
+        "recipe": recipe,
+        "copy": copy,
+        "origin": origin,
+    }
+    await _send_social_copy_for_approval(update, copy)
+
+
 async def _send_copyable_message(update: Update, title: str, body: str) -> None:
     clean = _clean_social_copy_message(body)
     text = f"{title}\n\n```\n{clean}\n```".strip()
@@ -584,60 +681,118 @@ async def _send_copyable_message(update: Update, title: str, body: str) -> None:
         head = f"{title} продолжение\n\n```\n"
 
 
-async def _send_final_social_descriptions(update: Update, session: dict) -> None:
+async def _send_final_social_descriptions(update: Update, session: dict) -> bool:
     recipe = str(session.get("recipe_full_text") or "").strip()
     if not recipe or session.get(SOCIAL_DESCRIPTIONS_SENT_KEY):
-        return
-    session[SOCIAL_DESCRIPTIONS_SENT_KEY] = True
+        return False
     await reply_text_without_keyboard(update.message, "Готовлю описания для публикаций на основе утверждённого рецепта.")
     copy = await _generate_social_copy_from_recipe(recipe)
-    messages = [
-        ("YouTube Shorts RU заголовок, скопировать отдельно", copy["youtube_ru_title"]),
-        ("YouTube Shorts RU описание, скопировать отдельно", copy["youtube_ru_description"]),
-        ("Instagram RU описание, скопировать отдельно", copy["instagram_ru"]),
-        ("VK RU описание, скопировать отдельно", copy["vk_ru"]),
-        ("TikTok RU описание, скопировать отдельно", copy["tiktok_ru"]),
-        ("Instagram EN description, copy separately", copy["instagram_en"]),
-        ("YouTube Shorts EN title, copy separately", copy["youtube_en_title"]),
-        ("YouTube Shorts EN description, copy separately", copy["youtube_en_description"]),
-    ]
-    for title, body in messages:
-        await _send_copyable_message(update, title, body)
+    await _start_social_descriptions_approval(
+        update,
+        session=session,
+        recipe=recipe,
+        copy=copy,
+        origin="production_final",
+    )
+    return True
 
 
 async def send_social_descriptions_for_recipe(update: Update, recipe: str) -> None:
     """Generate and send copyable social descriptions for an arbitrary recipe text."""
     recipe_text = str(recipe or "").strip()
-    if not recipe_text or update.message is None:
+    if not recipe_text or update.message is None or update.effective_chat is None:
         return
+    chat_id = update.effective_chat.id
+    session = SESSIONS.setdefault(chat_id, {})
     await reply_text_without_keyboard(update.message, "Готовлю описания для публикаций на основе рецепта.")
     copy = await _generate_social_copy_from_recipe(recipe_text)
-    messages = [
-        ("YouTube Shorts RU заголовок, скопировать отдельно", copy["youtube_ru_title"]),
-        ("YouTube Shorts RU описание, скопировать отдельно", copy["youtube_ru_description"]),
-        ("Instagram RU описание, скопировать отдельно", copy["instagram_ru"]),
-        ("VK RU описание, скопировать отдельно", copy["vk_ru"]),
-        ("TikTok RU описание, скопировать отдельно", copy["tiktok_ru"]),
-        ("Instagram EN description, copy separately", copy["instagram_en"]),
-        ("YouTube Shorts EN title, copy separately", copy["youtube_en_title"]),
-        ("YouTube Shorts EN description, copy separately", copy["youtube_en_description"]),
-    ]
-    for title, body in messages:
-        await _send_copyable_message(update, title, body)
-    await update.message.reply_text(
-        "Описания готовы. Выберите первый шаг кнопкой.",
-        reply_markup=first_step_menu_markup(),
+    await _start_social_descriptions_approval(
+        update,
+        session=session,
+        recipe=recipe_text,
+        copy=copy,
+        origin="description_mode",
     )
 
 
 async def _finish_scene_media_production(update: Update, session: dict, *, message: str = "Все сцены обработаны. Production завершён.") -> bool:
-    session["state"] = STATE_READY_FOR_PRODUCTION
     session.pop(SCENE_MEDIA_AUTO_APPROVE_SESSION_KEY, None)
-    await _send_final_social_descriptions(update, session)
-    await update.message.reply_text(
-        f"{message}\n\nВыберите первый шаг кнопкой.",
-        reply_markup=first_step_menu_markup(),
+    await update.message.reply_text(f"{message}\n\nГотовлю описания для апрува.")
+    started = await _send_final_social_descriptions(update, session)
+    if not started:
+        session["state"] = STATE_READY_FOR_PRODUCTION
+        await update.message.reply_text(
+            "Production завершён. Описания не сформированы: нет текста рецепта.\n\nВыберите первый шаг кнопкой.",
+            reply_markup=first_step_menu_markup(),
+        )
+    return True
+
+
+async def _handle_waiting_social_descriptions_approval_state(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+    *,
+    chat_id: int,
+    session: dict,
+    text: str,
+) -> bool:
+    pending = session.get(SOCIAL_DESCRIPTIONS_PENDING_KEY)
+    if not isinstance(pending, dict):
+        session["state"] = ""
+        await update.message.reply_text(
+            "Нет описаний на апрув. Выберите первый шаг кнопкой.",
+            reply_markup=first_step_menu_markup(),
+        )
+        return True
+    low = (text or "").strip().lower()
+    if low in {"ок", "ok", "okay", "approve", "утвердить"}:
+        origin = str(pending.get("origin") or "description_mode")
+        session.pop(SOCIAL_DESCRIPTIONS_PENDING_KEY, None)
+        session[SOCIAL_DESCRIPTIONS_SENT_KEY] = True
+        if origin == "production_final":
+            session["state"] = STATE_READY_FOR_PRODUCTION
+            await update.message.reply_text(
+                "Описания утверждены. Production завершён.\n\nВыберите первый шаг кнопкой.",
+                reply_markup=first_step_menu_markup(),
+            )
+        else:
+            session["state"] = ""
+            await update.message.reply_text(
+                "Описания утверждены. Выберите первый шаг кнопкой.",
+                reply_markup=first_step_menu_markup(),
+            )
+        return True
+    if low in {"фидбек", "feedback", "исправь", "добавь"}:
+        await update.message.reply_text("Пришлите фидбэк текстом: что именно поменять в описаниях.")
+        return True
+    feedback = (text or "").strip()
+    if not feedback:
+        await update.message.reply_text("Пришлите фидбэк по описаниям или нажмите «ОК».")
+        return True
+    recipe = str(pending.get("recipe") or "").strip()
+    previous_copy = pending.get("copy")
+    if not recipe or not isinstance(previous_copy, dict):
+        session.pop(SOCIAL_DESCRIPTIONS_PENDING_KEY, None)
+        session["state"] = ""
+        await update.message.reply_text(
+            "Не нашла черновик описаний для правки. Выберите первый шаг кнопкой.",
+            reply_markup=first_step_menu_markup(),
+        )
+        return True
+    session["state"] = STATE_REFINING_SOCIAL_DESCRIPTIONS
+    await reply_text_without_keyboard(update.message, "Правлю описания по фидбэку, ждите.")
+    copy = await _refine_social_copy_from_feedback(
+        recipe=recipe,
+        previous_copy={str(k): str(v) for k, v in previous_copy.items()},
+        feedback=feedback,
     )
+    session["state"] = STATE_WAITING_SOCIAL_DESCRIPTIONS_APPROVAL
+    session[SOCIAL_DESCRIPTIONS_PENDING_KEY] = {
+        **pending,
+        "copy": copy,
+        "last_feedback": feedback,
+    }
+    await _send_social_copy_for_approval(update, copy)
     return True
 
 
@@ -645,15 +800,16 @@ def _sync_scene_text_into_video_prompt(video_prompt: str, new_text: str) -> str:
     """Синхронизирует секцию `CHARACTERS SPEAKS` с новой ручной репликой."""
     prompt = str(video_prompt or "").strip()
     marker = "CHARACTERS SPEAKS:"
-    if marker.lower() in prompt.lower():
-        head, sep, tail = prompt.partition(marker)
-        if sep:
-            tail_lines = tail.splitlines()
-            tail_rest = "\n".join(tail_lines[1:]) if len(tail_lines) > 1 else ""
-            merged = f"{head}{marker} {new_text}".rstrip()
-            if tail_rest:
-                merged = f"{merged}\n{tail_rest}"
-            return merged
+    match = re.search(r"characters\s+speaks\s*:", prompt, flags=re.IGNORECASE)
+    if match:
+        head = prompt[: match.start()]
+        tail = prompt[match.end():]
+        tail_lines = tail.splitlines()
+        tail_rest = "\n".join(tail_lines[1:]) if len(tail_lines) > 1 else ""
+        merged = f"{head}{marker} {new_text}".rstrip()
+        if tail_rest:
+            merged = f"{merged}\n{tail_rest}"
+        return merged
     return f"{prompt}\n{marker} {new_text}".strip() if prompt else f"{marker} {new_text}"
 
 
@@ -737,11 +893,18 @@ def _schedule_scene_speech_timeout(
                 )
                 _schedule_scene_speech_timeout(context=context, session=session, chat_id=chat_id)
                 return
-            scene["text"] = shortened["text"]
-            scene["video_prompt"] = _compose_locked_video_prompt(
+            prompt = _compose_locked_video_prompt(
                 scene,
                 "ru",
                 shortened["video_prompt"],
+            )
+            _set_scene_video_prompt_for_language(scene, "ru", prompt)
+            _apply_scene_phrase_update_to_scene(
+                session,
+                scene,
+                scene_idx=idx,
+                language="ru",
+                phrase_text=shortened["text"],
             )
             _set_scene_speech_pending(
                 session,
@@ -939,6 +1102,31 @@ def _invalidate_scene_language_video(scene: dict, language: str) -> None:
     scene["video_approvals_by_lang"] = approvals
 
 
+def _apply_scene_phrase_update_to_scene(
+    session: dict,
+    scene: dict,
+    *,
+    scene_idx: int,
+    language: str,
+    phrase_text: str,
+) -> str:
+    """Update every canonical phrase/prompt field for a scene language."""
+    phrase = (phrase_text or "").strip()
+    lang = normalize_language_code(language) or "ru"
+    _set_scene_speech_for_language(scene, lang, phrase)
+    locked = _compose_locked_video_prompt(
+        scene,
+        lang,
+        _scene_video_prompt_for_language(scene, lang),
+    )
+    _set_scene_video_prompt_for_language(scene, lang, locked)
+    _invalidate_scene_language_video(scene, lang)
+    languages = _scene_target_languages(session, scene)
+    if lang in languages:
+        session["scene_media_language_index"] = languages.index(lang)
+    return phrase
+
+
 async def _translate_scene_phrase_adaptive(source_text: str, target_language: str) -> str:
     """Adaptive phrase translation via LLM for dubbing line."""
     target = normalize_language_code(target_language) or "en"
@@ -968,16 +1156,14 @@ async def _apply_scene_phrase_update(
     auto_offer_en_translation: bool = True,
 ) -> bool:
     """Apply phrase, lock prompt, and optionally ask whether to adaptively translate to EN."""
-    phrase = (phrase_text or "").strip()
     lang = normalize_language_code(language) or "ru"
-    _set_scene_speech_for_language(scene, lang, phrase)
-    locked = _compose_locked_video_prompt(
+    phrase = _apply_scene_phrase_update_to_scene(
+        session,
         scene,
-        lang,
-        _scene_video_prompt_for_language(scene, lang),
+        scene_idx=scene_idx,
+        language=lang,
+        phrase_text=phrase_text,
     )
-    _set_scene_video_prompt_for_language(scene, lang, locked)
-    _invalidate_scene_language_video(scene, lang)
 
     langs = _scene_target_languages(session, scene)
     if auto_offer_en_translation and lang == "ru" and "en" in langs:
@@ -1917,11 +2103,18 @@ async def _maybe_shorten_scene_speech_for_video_budget(
             reply_markup=_scene_speech_options_markup(),
         )
         return True
-    scene["text"] = shortened["text"]
-    scene["video_prompt"] = _compose_locked_video_prompt(
+    prompt = _compose_locked_video_prompt(
         scene,
         "ru",
         shortened["video_prompt"],
+    )
+    _set_scene_video_prompt_for_language(scene, "ru", prompt)
+    _apply_scene_phrase_update_to_scene(
+        session,
+        scene,
+        scene_idx=scene_idx,
+        language="ru",
+        phrase_text=shortened["text"],
     )
     spoken_after = speech_chars_excluding_pauses(str(scene.get("text", "")).strip())
     if spoken_after > max_chars:
@@ -2667,14 +2860,13 @@ async def _handle_waiting_scene_media_state(
                 "Перевод не готов. Повторите команду `ФРАЗА:` при необходимости."
             )
             return True
-        _set_scene_speech_for_language(scene, target_lang, candidate)
-        locked = _compose_locked_video_prompt(
+        _apply_scene_phrase_update_to_scene(
+            session,
             scene,
-            target_lang,
-            _scene_video_prompt_for_language(scene, target_lang),
+            scene_idx=idx,
+            language=target_lang,
+            phrase_text=candidate,
         )
-        _set_scene_video_prompt_for_language(scene, target_lang, locked)
-        _invalidate_scene_language_video(scene, target_lang)
         languages = _scene_target_languages(session, scene)
         if target_lang in languages:
             session["scene_media_language_index"] = languages.index(target_lang)
@@ -2757,11 +2949,12 @@ async def _handle_waiting_scene_media_state(
             if not manual_phrase:
                 await update.message.reply_text("Пришлите фразу текстом или подтвердите «ОК».")
                 return True
-            scene["text"] = manual_phrase
-            scene["video_prompt"] = _compose_locked_video_prompt(
+            manual_phrase = _apply_scene_phrase_update_to_scene(
+                session,
                 scene,
-                "ru",
-                str(scene.get("video_prompt", "")),
+                scene_idx=idx,
+                language="ru",
+                phrase_text=manual_phrase,
             )
             _set_scene_speech_pending(
                 session,
@@ -2780,11 +2973,12 @@ async def _handle_waiting_scene_media_state(
             if not manual_phrase:
                 await update.message.reply_text("Пришлите фразу текстом.")
                 return True
-            scene["text"] = manual_phrase
-            scene["video_prompt"] = _compose_locked_video_prompt(
+            manual_phrase = _apply_scene_phrase_update_to_scene(
+                session,
                 scene,
-                "ru",
-                str(scene.get("video_prompt", "")),
+                scene_idx=idx,
+                language="ru",
+                phrase_text=manual_phrase,
             )
             _set_scene_speech_pending(
                 session,
@@ -2835,11 +3029,12 @@ async def _handle_waiting_scene_media_state(
                 await update.message.reply_text("Пришлите фразу текстом.")
                 return True
             _cancel_scene_speech_timeout(chat_id)
-            scene["text"] = manual_phrase
-            scene["video_prompt"] = _compose_locked_video_prompt(
+            manual_phrase = _apply_scene_phrase_update_to_scene(
+                session,
                 scene,
-                "ru",
-                str(scene.get("video_prompt", "")),
+                scene_idx=idx,
+                language="ru",
+                phrase_text=manual_phrase,
             )
             session.pop(SCENE_SPEECH_PENDING_KEY, None)
             await _reply_text_with_optional_markup(

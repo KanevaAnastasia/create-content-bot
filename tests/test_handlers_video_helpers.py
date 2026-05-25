@@ -1483,9 +1483,10 @@ def test_finish_scene_media_production_sends_copyable_social_descriptions(monkey
     }
     out = asyncio.run(handlers_state_media._finish_scene_media_production(update, session))
     assert out is True
-    assert session["state"] == "ready_for_production"
+    assert session["state"] == handlers_state_media.STATE_WAITING_SOCIAL_DESCRIPTIONS_APPROVAL
     assert handlers_state_media.SCENE_MEDIA_AUTO_APPROVE_SESSION_KEY not in session
-    assert session[handlers_state_media.SOCIAL_DESCRIPTIONS_SENT_KEY] is True
+    assert handlers_state_media.SOCIAL_DESCRIPTIONS_SENT_KEY not in session
+    assert handlers_state_media.SOCIAL_DESCRIPTIONS_PENDING_KEY in session
     assert any(m.startswith("YouTube Shorts RU заголовок") for m in messages)
     assert any(m.startswith("YouTube Shorts RU описание") for m in messages)
     assert any(m.startswith("Instagram EN description") for m in messages)
@@ -1495,6 +1496,40 @@ def test_finish_scene_media_production_sends_copyable_social_descriptions(monkey
     assert any("#убабушкивкуснее" in m for m in messages)
     assert any("#grandmatastesbetter #grandmasrecipes #recipes" in m for m in messages)
     assert not any(m.startswith("Instagram EN description") and "#убабушкивкуснее" in m for m in messages)
+    assert any("Проверьте описания" in m for m in messages)
+
+
+def test_social_descriptions_approval_ok_finishes_production():
+    messages: list[tuple[str, object | None]] = []
+
+    class _Msg:
+        async def reply_text(self, text, **kwargs):
+            messages.append((text, kwargs.get("reply_markup")))
+
+    update = SimpleNamespace(message=_Msg())
+    session = {
+        "state": handlers_state_media.STATE_WAITING_SOCIAL_DESCRIPTIONS_APPROVAL,
+        handlers_state_media.SOCIAL_DESCRIPTIONS_PENDING_KEY: {
+            "recipe": "Картофель натереть и пожарить.",
+            "copy": handlers_state_media._fallback_social_copy("Картофель натереть и пожарить."),
+            "origin": "production_final",
+        },
+    }
+
+    out = asyncio.run(
+        handlers_state_media._handle_waiting_social_descriptions_approval_state(
+            update,
+            context=None,
+            chat_id=1,
+            session=session,
+            text="ОК",
+        )
+    )
+    assert out is True
+    assert session["state"] == "ready_for_production"
+    assert session[handlers_state_media.SOCIAL_DESCRIPTIONS_SENT_KEY] is True
+    assert handlers_state_media.SOCIAL_DESCRIPTIONS_PENDING_KEY not in session
+    assert any("Production завершён" in text for text, _ in messages)
 
 
 def test_waiting_scene_media_ok_all_languages_moves_to_next_scene():
@@ -1642,7 +1677,16 @@ def test_waiting_scene_media_manual_phrase_updates_scene_and_waits_for_approval(
     session = {
         "production": {
             "json_plan": [
-                {"video_prompt": "wide shot\nCHARACTERS SPEAKS: старая реплика", "text": "старая реплика"}
+                {
+                    "video_prompt": "wide shot\ncharacters speaks: старая реплика",
+                    "video_prompt_by_lang": {
+                        "ru": "wide shot\ncharacters speaks: старая реплика",
+                    },
+                    "speech_by_lang": {"ru": "старая реплика"},
+                    "video_results_by_lang": {"ru": {"video_b64": _encode_b64(b"old-video")}},
+                    "video_approvals_by_lang": {"ru": True},
+                    "text": "старая реплика",
+                }
             ]
         },
         "image_scene_index": 0,
@@ -1669,6 +1713,14 @@ def test_waiting_scene_media_manual_phrase_updates_scene_and_waits_for_approval(
         == "новая короткая фраза"
     )
     assert "CHARACTERS SPEAKS: новая короткая фраза" in session["production"]["json_plan"][0]["video_prompt"]
+    assert (
+        session["production"]["json_plan"][0]["speech_by_lang"]["ru"]
+        == "новая короткая фраза"
+    )
+    assert "CHARACTERS SPEAKS: новая короткая фраза" in session["production"]["json_plan"][0]["video_prompt_by_lang"]["ru"]
+    assert "старая реплика" not in session["production"]["json_plan"][0]["video_prompt_by_lang"]["ru"]
+    assert "ru" not in session["production"]["json_plan"][0]["video_results_by_lang"]
+    assert session["production"]["json_plan"][0]["video_approvals_by_lang"]["ru"] is False
     assert (
         session[handlers_state_media.SCENE_SPEECH_PENDING_KEY]["stage"]
         == "approval"
