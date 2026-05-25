@@ -1,0 +1,27 @@
+[tool.poetry]
+name = "content-fabric-bot"
+version = "0.1.0"
+description = "Telegram bot for multi-step content generation pipeline"
+authors = []
+readme = "README.md"
+package-mode = false
+
+[tool.poetry.dependencies]
+python = "^3.11"
+python-telegram-bot = "*"
+google-cloud-aiplatform = "*"
+certifi = "*"
+requests = "^2.32.0"
+telethon = "*"
+pillow = "*"
+imageio-ffmpeg = "*"
+sqlalchemy = "*"
+psycopg2-binary = "*"
+alembic = "*"
+
+[tool.poetry.group.dev.dependencies]
+pytest = "*"
+
+[build-system]
+requires = ["poetry-core>=1.0.0"]
+build-backend = "poetry.core.masonry.api"

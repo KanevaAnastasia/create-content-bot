@@ -1,0 +1,964 @@
+"""Media/reference helper functions extracted from handlers."""
+
+import asyncio
+import base64
+import io
+import os
+import re
+import weakref
+from typing import Any, Awaitable, Callable, TypeVar
+
+from telegram import Update
+from telegram.constants import ChatAction
+from telegram.ext import ContextTypes
+
+from ..assets import ASSETS
+from ..constants import ELEVENLABS_VOICE_ID_ENV_NAME, STATE_READY_FOR_PRODUCTION
+from ..llm_utils import (
+    GEMINI_QUOTA_EXHAUSTED_USER_MESSAGE,
+    GeminiQuotaError,
+    gemini_generate_sync,
+    pop_runtime_notices,
+    reset_prefer_vertex_api,
+    set_prefer_vertex_api,
+)
+from ..scene_utils import normalize_recipe_steps, extract_recipe_steps_text
+from ..pipeline import GRANDMA_VOICE_LOCK_FULL, VEO3_CARTOON_CHARACTER_RULE, append_veo3_video_framing_constraints
+from ..multilingual import language_name, normalize_language_code
+from .handlers_media_core_recipe import (
+    _normalize_user_recipe_steps,
+    _is_obvious_placeholder_recipe,
+    _try_parse_direct_recipe_from_user_text,
+)
+
+from ..state import SESSIONS
+from ..syntax_fallback_output import video_bytes_from_fallback_result
+from ..syntax_video_fallback import try_generate_via_syntax
+from ..vertex_images import generate_image_vertex
+from ..video_generation import generate_video_bytes
+
+logger = __import__('logging').getLogger("bot")
+PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))
+VIDEO_HIGH_LOAD_RETRY_DELAY_SEC = 15
+VIDEO_HIGH_LOAD_MAX_ATTEMPTS = 3
+SERVICE_UNAVAILABLE_RETRY_COUNT = 20
+SERVICE_UNAVAILABLE_RETRY_DELAY_SEC = 15
+SCENE_MEDIA_SUBSTEP_START = "start_prompt"
+SCENE_MEDIA_SUBSTEP_END = "end_prompt"
+SCENE_MEDIA_SUBSTEP_VIDEO = "video_prompt"
+_DEBOUNCE_SEQ: dict[int, int] = {}
+T = TypeVar("T")
+_SYNTAX_FALLBACK_LOCKS: weakref.WeakKeyDictionary[
+    asyncio.AbstractEventLoop,
+    asyncio.Lock,
+] = weakref.WeakKeyDictionary()
+
+_CHARACTER_ALIASES: dict[str, str] = {
+    "grandma": "grandma",
+    "бабушка": "grandma",
+    "babushka": "grandma",
+    "cat": "cat",
+    "кот": "cat",
+    "koshka": "cat",
+    "granddaughter": "granddaughter",
+    "внучка": "granddaughter",
+    "daughter": "daughter",
+    "дочь": "daughter",
+    "grandson": "grandson",
+    "внук": "grandson",
+    "grandfather": "grandfather",
+    "дедушка": "grandfather",
+    "dog": "dog",
+    "собака": "dog",
+}
+
+_LOCATION_ALIASES: dict[str, str] = {
+    "kitchen": "kitchen",
+    "кухня": "kitchen",
+    "sink": "sink",
+    "мойка": "sink",
+    "раковина": "sink",
+    "stove": "stove",
+    "плита": "stove",
+    "serving": "serving",
+    "подача": "serving",
+    "fridge": "fridge",
+    "холодильник": "fridge",
+    "cutting": "cutting",
+    "разделка": "cutting",
+    "разделочная зона": "cutting",
+}
+_VOICE_RULES_BY_LANGUAGE = {
+    "ru": "all spoken phrases and voiceover are in Russian language only",
+    "en": "all spoken phrases and voiceover are in English language only",
+}
+_NON_REALISM_RULE = (
+    "visual style is strictly non-photorealistic, non-realistic, and cartoon; no realism or photorealism; "
+    "grandmother is a cartoon grandmother and the cat is a cartoon cat; include the exact phrase cartoon cat"
+)
+_NO_SUBTITLES_MUSIC_RULE = (
+    "no on-screen text or subtitles; no background music or soundtrack"
+)
+_VOICE_LOCK_LANGUAGE_TOKEN_BY_LANG = {
+    "ru": "Russian language",
+    "en": "English language",
+}
+
+
+def _voice_lock_for_language(target_language: str) -> str:
+    """Return language-adjusted voice lock text for grandma."""
+    lang = (target_language or "ru").strip().lower()
+    token = _VOICE_LOCK_LANGUAGE_TOKEN_BY_LANG.get(lang, _VOICE_LOCK_LANGUAGE_TOKEN_BY_LANG["en"])
+    accent = "neutral Russian accent" if lang == "ru" else f"neutral {language_name(lang)} accent"
+    return GRANDMA_VOICE_LOCK_FULL.replace("Russian language", token).replace("neutral Russian accent", accent)
+
+
+def _sanitize_video_prompt_language_references(video_prompt: str, target_language: str) -> str:
+    """Remove stale Russian speech instructions from non-Russian prompts."""
+    prompt = str(video_prompt or "").strip()
+    lang = normalize_language_code(target_language) or "ru"
+    if lang == "ru":
+        return prompt
+    label = language_name(lang)
+    token = _VOICE_LOCK_LANGUAGE_TOKEN_BY_LANG.get(lang, f"{label} language")
+    replacements = {
+        "Russian language": token,
+        "Russian line": f"{label} line",
+        "spoken Russian speech": f"spoken {label} speech",
+        "Russian speech": f"{label} speech",
+        "neutral Russian accent": f"neutral {label} accent",
+        "all spoken phrases and voiceover are in Russian language only": (
+            _VOICE_RULES_BY_LANGUAGE.get(lang, f"all spoken phrases and voiceover are in {label} language only")
+        ),
+    }
+    out = prompt
+    for source, target in replacements.items():
+        out = out.replace(source, target)
+    return out
+
+
+def _normalize_character_key(value: str) -> str:
+    key = (value or "").strip().lower()
+    return _CHARACTER_ALIASES.get(key, key)
+
+
+def _normalize_location_key(value: str) -> str:
+    key = (value or "").strip().lower()
+    return _LOCATION_ALIASES.get(key, key)
+
+
+def _mask_secret_tail(value: str) -> str:
+    if not value:
+        return "-"
+    tail = value[-4:] if len(value) >= 4 else value
+    return f"***{tail}"
+
+
+def _normalize_veo_duration_sec(raw_seconds: int) -> int:
+    """Нормализует длительность под ограничения `veo3_fast` (6/8 сек)."""
+    allowed = (6, 8)
+    return min(allowed, key=lambda x: abs(x - int(raw_seconds)))
+
+
+def _parse_video_command_args(raw_text: str) -> tuple[int, str]:
+    """
+    Разбирает `/video <seconds> <prompt>`.
+
+    Returns:
+        (duration_sec, prompt), где duration_sec нормализован к 6/8.
+    Raises:
+        ValueError: если формат команды неверный.
+    """
+    text = (raw_text or "").strip()
+    parts = text.split(maxsplit=2)
+    if len(parts) < 3:
+        raise ValueError('Формат: /video <секунды> <промпт>. Пример: /video 6 Бабушка замешивает тесто.')
+    try:
+        sec_raw = int(parts[1])
+    except Exception as e:
+        raise ValueError("Секунды должны быть числом (например 6 или 8).") from e
+    if sec_raw <= 0:
+        raise ValueError("Секунды должны быть положительным числом.")
+    prompt = parts[2].strip()
+    if not prompt:
+        raise ValueError("После секунд укажите video prompt.")
+    return _normalize_veo_duration_sec(sec_raw), prompt
+
+
+def _bump_debounce_generation(chat_id: int) -> None:
+    """Сбрасывает ожидающий debounce on_text (например после /generate)."""
+    _DEBOUNCE_SEQ[chat_id] = _DEBOUNCE_SEQ.get(chat_id, 0) + 1
+
+
+def _user_error_message(e: Exception, *, domain: str = "gemini") -> str:
+    """
+    Maps low-level exceptions to user-facing messages.
+
+    Args:
+        e: original exception.
+        domain: logical source of error (`gemini`, `video`, ...).
+    """
+    if isinstance(e, GeminiQuotaError):
+        return str(e)
+    text = str(e)
+    low = text.lower()
+    if "RESOURCE_EXHAUSTED" in text or "quotaValue" in text:
+        if domain == "video":
+            return "Лимит Vertex Video API временно превышен. Подождите немного и повторите запрос."
+        return GEMINI_QUOTA_EXHAUSTED_USER_MESSAGE
+    if "429" in text:
+        if domain == "video":
+            return "Лимит Vertex Video API временно превышен (429). Подождите немного и повторите запрос."
+        return "Лимит Gemini временно превышен. Подождите немного и повторите запрос."
+    if domain == "video" and "404" in text and (
+        "aiplatform.googleapis.com" in low
+        or "predictlongrunning" in low
+        or "<!doctype html>" in low
+        or "<html" in low
+    ):
+        if "locations/global" in low or "global-aiplatform.googleapis.com" in low:
+            return (
+                "Vertex Video API вернул 404: Veo video endpoint недоступен в регионе global. "
+                "Для видео используйте us-central1 или задайте VERTEX_VIDEO_LOCATION."
+            )
+        return (
+            "Vertex Video API вернул 404: проверьте регион и доступность модели Veo в этом проекте."
+        )
+    if "403" in text and ("permission_denied" in low or "permission denied" in low):
+        if domain == "video":
+            return (
+                "Нет прав на вызов Vertex Video API (403). Проверьте GOOGLE_CLOUD_PROJECT, регион, "
+                "включение Vertex AI API и доступ к модели."
+            )
+        if "denied access" in low or "contact support" in low:
+            return (
+                "Google отклонил доступ к Gemini для этого проекта (403 PERMISSION_DENIED: denied access). "
+                "Это на стороне аккаунта/проекта: проверьте Vertex AI в Cloud Console "
+                "(console.cloud.google.com) "
+                "(включён Gemini API, биллинг, регион, ограничения организации). "
+                "Если в консоли всё ок — напишите в поддержку Google Cloud."
+            )
+        return (
+            "Нет прав на вызов Gemini (403). Проверьте API-ключ, проект GCP и что Gemini API включён."
+        )
+    compact = text.replace("\n", " ").strip()
+    if len(compact) > 1200:
+        return compact[:1200] + "…"
+    return compact
+
+
+def _is_service_unavailable_retryable(e: Exception) -> bool:
+    text = str(e).lower()
+    return "503" in text or "unavailable" in text or "high demand" in text
+
+
+class ServiceUnavailableRetriesExhaustedError(RuntimeError):
+    """Все retry 503/UNAVAILABLE исчерпаны."""
+
+
+async def _send_chat_action_safely(
+    context: ContextTypes.DEFAULT_TYPE,
+    *,
+    chat_id: int,
+    action_name: str,
+) -> None:
+    """Best-effort typing indicator; Telegram hiccups must not abort generation."""
+    try:
+        await context.bot.send_chat_action(chat_id=chat_id, action=ChatAction.TYPING)
+    except Exception as e:
+        logger.warning("%s typing indicator failed, continuing: %s", action_name, e)
+
+
+async def _call_with_503_retries(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+    chat_id: int,
+    action_name: str,
+    op: Callable[[], Awaitable[T]],
+) -> T:
+    """
+    Выполняет LLM-операцию с retry на 503/UNAVAILABLE: 20 повторов с паузой 15 секунд.
+    """
+    session = SESSIONS.get(chat_id) or {}
+    prefer_vertex = bool(session.get("prefer_vertex_api"))
+    for attempt in range(SERVICE_UNAVAILABLE_RETRY_COUNT + 1):
+        try:
+            await _send_chat_action_safely(context, chat_id=chat_id, action_name=action_name)
+            token = set_prefer_vertex_api(prefer_vertex)
+            try:
+                result = await op()
+            finally:
+                reset_prefer_vertex_api(token)
+            if update.message is not None:
+                for note in pop_runtime_notices():
+                    await update.message.reply_text(note)
+            return result
+        except Exception as e:
+            if _is_service_unavailable_retryable(e) and attempt < SERVICE_UNAVAILABLE_RETRY_COUNT:
+                retry_no = attempt + 1
+                logger.warning(
+                    "%s got 503/unavailable, retry %s/%s after %ss: %s",
+                    action_name,
+                    retry_no,
+                    SERVICE_UNAVAILABLE_RETRY_COUNT,
+                    SERVICE_UNAVAILABLE_RETRY_DELAY_SEC,
+                    e,
+                )
+                if update.message is not None:
+                    await update.message.reply_text(
+                        (
+                            "Сервис модели сейчас перегружен. "
+                            f"Повторяю через {SERVICE_UNAVAILABLE_RETRY_DELAY_SEC} секунд "
+                            f"(попытка {retry_no}/{SERVICE_UNAVAILABLE_RETRY_COUNT})."
+                        )
+                    )
+                await asyncio.sleep(SERVICE_UNAVAILABLE_RETRY_DELAY_SEC)
+                continue
+            if _is_service_unavailable_retryable(e):
+                raise ServiceUnavailableRetriesExhaustedError(
+                    "Сервис модели перегружен слишком долго. Попробуйте позже."
+                ) from e
+            raise
+    raise ServiceUnavailableRetriesExhaustedError("Сервис модели перегружен слишком долго. Попробуйте позже.")
+
+
+def _elevenlabs_voice_warning() -> str | None:
+    voice_id = (os.getenv(ELEVENLABS_VOICE_ID_ENV_NAME) or "").strip()
+    if voice_id:
+        return None
+    return (
+        "Предупреждение: не задан ELEVENLABS_VOICE_ID. "
+        "Для сцен с провайдером озвучки elevenlabs поставится заглушка voice_id."
+    )
+
+
+_BASE_FRAME_CHARACTERS = frozenset({"grandma", "cat"})
+
+
+def _character_mentions_in_prompt(prompt: str) -> set[str]:
+    """
+    Грубое множество персонажей, явно упомянутых в тексте промпта кадра (RU/EN).
+    """
+    low = (prompt or "").lower()
+    found: set[str] = set()
+    if "бабуш" in low or "grandma" in low:
+        found.add("grandma")
+    if "кот" in low or "кош" in low or "cat" in low:
+        found.add("cat")
+    if "granddaughter" in low or "внуч" in low:
+        found.add("granddaughter")
+    if "grandson" in low or "внук" in low:
+        found.add("grandson")
+    if "daughter" in low or "дочь" in low or "дочер" in low:
+        found.add("daughter")
+    if "grandfather" in low or "grandpa" in low or "дед" in low or "дедуш" in low:
+        found.add("grandfather")
+    if "husband" in low or "муж" in low:
+        found.add("husband")
+    if "dog" in low or "собак" in low:
+        found.add("dog")
+    return found
+
+
+def _scene_character_keys(scene: dict) -> set[str]:
+    chars = scene.get("characters")
+    if not isinstance(chars, list):
+        return set(_BASE_FRAME_CHARACTERS)
+    out = {_normalize_character_key(str(c)) for c in chars if str(c).strip()}
+    return out if out else set(_BASE_FRAME_CHARACTERS)
+
+
+def _end_frame_image_warranted(scene: dict) -> bool:
+    """
+    Конечный кадр рисуем только если в сцене есть персонаж вне пары бабушка+кот,
+    которого нет в тексте стартового кадра (вошёл в кадр к финалу сцены).
+    """
+    start_src = (
+        str(scene.get("start_frame_prompt", "")).strip()
+        or str(scene.get("start_frame_prompt_ru", "")).strip()
+    )
+    mentioned = _character_mentions_in_prompt(start_src)
+    in_scene = _scene_character_keys(scene)
+    extra = in_scene - mentioned
+    extra -= _BASE_FRAME_CHARACTERS
+    return bool(extra)
+
+
+def _image_scene_prompt(scene: dict) -> str:
+    start = str(scene.get("start_frame_prompt", "")).strip() or str(scene.get("start_frame_prompt_ru", "")).strip()
+    if start:
+        return start
+    fallback = str(scene.get("video_prompt", "")).strip()
+    if fallback:
+        return fallback
+    raise RuntimeError("В сцене нет промпта для генерации изображения.")
+
+
+def _image_end_scene_prompt(scene: dict) -> str | None:
+    end_prompt = str(scene.get("end_frame_prompt", "")).strip() or str(scene.get("end_frame_prompt_ru", "")).strip()
+    if not end_prompt or end_prompt.lower() == "пусто":
+        return None
+    if not _end_frame_image_warranted(scene):
+        return None
+    continuity_block = (
+        "Референс: приложенный стартовый кадр — полная база композиции. "
+        "Текст ниже задаёт ТОЛЬКО отличия финала от старта (дельта): кто вошёл в кадр, что сдвинулось, степень готовности еды. "
+        "Запрещено описывать весь кадр заново «с нуля». Всё, что уже есть на старте, сохраняется; новые элементы — только из дельты."
+    )
+    return f"{end_prompt}\n\n{continuity_block}"
+
+
+def _encode_b64(data: bytes) -> str:
+    return base64.b64encode(data).decode("ascii")
+
+
+def _decode_b64(value: str | None) -> bytes | None:
+    if not value:
+        return None
+    try:
+        return base64.b64decode(value)
+    except Exception:
+        return None
+
+
+def _is_video_policy_error(e: Exception) -> bool:
+    low = str(e).lower()
+    return "policy" in low or "safety" in low or "content violation" in low or "moderation" in low
+
+
+def _is_video_safety_error(e: Exception) -> bool:
+    low = str(e).lower()
+    return "finish_reason=safety" in low or "safety" in low
+
+
+def _is_video_prompt_filtered_error(e: Exception) -> bool:
+    """Detect RAI filtering where provider suggests rephrasing prompt."""
+    low = str(e).lower()
+    return (
+        "raimediafilteredcount" in low
+        or "raimediafilteredreasons" in low
+        or ("filtered out" in low and "usage guidelines" in low)
+        or ("violated" in low and "usage guidelines" in low)
+    )
+
+
+def _is_video_invalid_image_error(e: Exception) -> bool:
+    low = str(e).lower()
+    return (
+        ("image" in low and ("invalid" in low or "unsupported" in low or "corrupt" in low))
+        or "bad reference image" in low
+        or "reference image rejected" in low
+    )
+
+
+def _is_video_high_load_error(e: Exception) -> bool:
+    low = str(e).lower()
+    return (
+        '"code":8' in low
+        or "'code': 8" in low
+        or "code=8" in low
+        or "experiencing high load" in low
+        or "please try again later" in low
+    )
+
+
+def _is_video_model_unavailable_error(e: Exception) -> bool:
+    """Model is unavailable in region (404 NOT_FOUND publisher model)."""
+    low = str(e).lower()
+    return (
+        "http 404" in low
+        or '"code": 404' in low
+        or '"code":404' in low
+        or "status\": \"not_found" in low
+        or "publisher model" in low and ("was not found" in low or "does not have access" in low)
+    )
+
+
+def _is_video_vertex_quota_like_error(e: Exception) -> bool:
+    """Quota / rate-limit style failures — Syntax fallback must not run."""
+    if isinstance(e, GeminiQuotaError):
+        return True
+    text = str(e)
+    low = text.lower()
+    return (
+        "resource_exhausted" in low
+        or "resource exhausted" in low
+        or "quota exceeded" in low
+        or "quotavalue" in low
+        or "429" in text
+    )
+
+
+def _is_syntax_fallback_trigger_error(e: Exception) -> bool:
+    """
+    True only for Vertex policy / safety / RAI-filter blocks.
+
+    Excludes high load, per-region model 404, invalid reference images, and quota-like errors.
+    """
+    if (
+        _is_video_high_load_error(e)
+        or _is_video_model_unavailable_error(e)
+        or _is_video_invalid_image_error(e)
+        or _is_video_vertex_quota_like_error(e)
+    ):
+        return False
+    return (
+        _is_video_policy_error(e)
+        or _is_video_safety_error(e)
+        or _is_video_prompt_filtered_error(e)
+    )
+
+
+def _syntax_fallback_env_enabled() -> bool:
+    """True when ``SYNTAX_FALLBACK_ENABLED`` is a common truthy token (1/true/yes/on)."""
+    raw = (os.getenv("SYNTAX_FALLBACK_ENABLED") or "").strip().lower()
+    return raw in ("1", "true", "yes", "on")
+
+
+def _syntax_fallback_mode() -> str:
+    """
+    Legacy mode parser for ``SYNTAX_FALLBACK_MODE``.
+
+    ``auto`` is returned only for explicit ``auto`` token; anything else maps to ``manual``.
+    Current video fallback path runs automatically even if mode is ``manual``.
+    """
+    raw = (os.getenv("SYNTAX_FALLBACK_MODE") or "manual").strip().lower()
+    return "auto" if raw == "auto" else "manual"
+
+
+def _syntax_fallback_lock() -> asyncio.Lock:
+    """Return per-event-loop lock to serialize Telethon fallback access."""
+    loop = asyncio.get_running_loop()
+    lock = _SYNTAX_FALLBACK_LOCKS.get(loop)
+    if lock is None:
+        lock = asyncio.Lock()
+        _SYNTAX_FALLBACK_LOCKS[loop] = lock
+    return lock
+
+
+class SyntaxFallbackPendingConfirmation(Exception):
+    """
+    Vertex video was blocked by policy/safety after regional retries and Syntax fallback is enabled
+    in ``manual`` mode: the handler should ask the user and call :func:`run_syntax_fallback_from_session_payload` only after approval.
+    """
+
+    def __init__(
+        self,
+        *,
+        prompt: str,
+        model: str,
+        duration_sec: int,
+        start_image: bytes,
+        end_image: bytes | None,
+        quality: str,
+        aspect_ratio: str,
+        audio_enabled: bool,
+        vertex_error_message: str,
+    ) -> None:
+        super().__init__(vertex_error_message)
+        self.prompt = prompt
+        self.model = model
+        self.duration_sec = duration_sec
+        self.start_image = start_image
+        self.end_image = end_image
+        self.quality = quality
+        self.aspect_ratio = aspect_ratio
+        self.audio_enabled = audio_enabled
+        self.vertex_error_message = vertex_error_message
+
+
+def encode_syntax_fallback_pending_for_session(exc: SyntaxFallbackPendingConfirmation) -> dict[str, Any]:
+    """Serializes a pending Syntax attempt for ``SESSIONS`` / scene JSON (base64 images)."""
+    end = exc.end_image
+    return {
+        "schema": 1,
+        "prompt": exc.prompt,
+        "model": exc.model,
+        "duration_sec": exc.duration_sec,
+        "quality": exc.quality,
+        "aspect_ratio": exc.aspect_ratio,
+        "audio_enabled": exc.audio_enabled,
+        "start_image_b64": base64.b64encode(exc.start_image).decode("ascii"),
+        "end_image_b64": base64.b64encode(end).decode("ascii") if end else "",
+        "vertex_error_message": (exc.vertex_error_message or "")[:8000],
+    }
+
+
+async def run_syntax_fallback_from_session_payload(payload: dict[str, Any]) -> bytes | None:
+    """Runs Syntax fallback using a dict from :func:`encode_syntax_fallback_pending_for_session`."""
+    end_raw = (payload.get("end_image_b64") or "").strip()
+    end_im: bytes | None = base64.b64decode(end_raw) if end_raw else None
+    return await _attempt_syntax_video_fallback_bytes(
+        prompt=str(payload["prompt"]),
+        model=str(payload["model"]),
+        duration_sec=int(payload["duration_sec"]),
+        start_image=base64.b64decode(str(payload["start_image_b64"])),
+        end_image=end_im,
+    )
+
+
+def syntax_fallback_parse_user_confirmation(text: str) -> bool | None:
+    """``True`` / ``False`` for clear yes/no replies; ``None`` if the user should be prompted again."""
+    low = (text or "").strip().lower()
+    if low in {"да", "yes", "y", "ок", "ok", "okay", "approve", "запуск", "syntax", "+"}:
+        return True
+    if low in {"нет", "no", "n", "отмена", "cancel", "не надо", "decline", "-"}:
+        return False
+    return None
+
+
+async def _attempt_syntax_video_fallback_bytes(
+    *,
+    prompt: str,
+    model: str,
+    duration_sec: int,
+    start_image: bytes,
+    end_image: bytes | None,
+) -> bytes | None:
+    """Runs Syntax adapter in a worker thread; returns bytes or None."""
+    if not _syntax_fallback_env_enabled():
+        return None
+    timeout_raw = (os.getenv("SYNTAX_FALLBACK_TIMEOUT_SEC") or "").strip()
+    timeout_sec: int | None = int(timeout_raw) if timeout_raw.isdigit() else None
+    lock = _syntax_fallback_lock()
+    if lock.locked():
+        logger.info("video.syntax_fallback wait_for_lock")
+    async with lock:
+        result = await asyncio.to_thread(
+            try_generate_via_syntax,
+            prompt=prompt,
+            model=model,
+            duration_sec=duration_sec,
+            start_image=start_image,
+            end_image=end_image,
+            timeout_sec=timeout_sec,
+        )
+    if not result.success:
+        logger.warning(
+            "video.syntax_fallback not_used attempt_id=%s msg=%s",
+            result.attempt_id,
+            (result.provider_message or "")[:400],
+        )
+        return None
+    try:
+        payload = await asyncio.to_thread(video_bytes_from_fallback_result, result)
+    except Exception as e:
+        logger.warning(
+            "video.syntax_fallback download_failed attempt_id=%s err=%s",
+            result.attempt_id,
+            str(e)[:400],
+        )
+        return None
+    logger.info(
+        "video.syntax_fallback ok attempt_id=%s bytes=%s",
+        result.attempt_id,
+        len(payload),
+    )
+    return payload
+
+
+def _video_region_candidates() -> list[str]:
+    """Build ordered unique Vertex regions: primary + optional fallbacks from env."""
+    primary = (
+        os.getenv("VERTEX_VIDEO_LOCATION")
+        or os.getenv("GOOGLE_CLOUD_LOCATION")
+        or "us-central1"
+    ).strip() or "us-central1"
+    if primary.lower() == "global":
+        primary = "us-central1"
+    raw = (os.getenv("VERTEX_VIDEO_LOCATION_FALLBACKS") or "").strip()
+    fallbacks = [x.strip() for x in raw.split(",") if x.strip()] if raw else []
+    out: list[str] = []
+    for region in [primary, *fallbacks]:
+        if region and region not in out:
+            out.append(region)
+    return out
+
+
+async def _generate_video_bytes_with_high_load_retry(
+    update: Update,
+    *,
+    prompt: str,
+    model: str,
+    duration_sec: int,
+    start_image: bytes,
+    end_image: bytes | None,
+    quality: str,
+    aspect_ratio: str,
+    audio_enabled: bool,
+) -> bytes:
+    """Generate video with regional retries; if enabled, Syntax fallback can run immediately."""
+
+    async def _run_or_request_syntax_fallback(error: Exception) -> bytes | None:
+        """Runs Syntax fallback immediately when enabled."""
+        if not _syntax_fallback_env_enabled():
+            return None
+        if update.message is not None:
+            await update.message.reply_text(
+                "Vertex отклонил генерацию в регионе. Сразу запускаю резервный канал Syntax…"
+            )
+        fallback_bytes = await _attempt_syntax_video_fallback_bytes(
+            prompt=prompt,
+            model=model,
+            duration_sec=duration_sec,
+            start_image=start_image,
+            end_image=end_image,
+        )
+        if fallback_bytes is None:
+            if update.message is not None:
+                await update.message.reply_text(
+                    "Резервный канал Syntax не вернул видео. Продолжаю стандартный retry по регионам."
+                )
+            return None
+        if update.message is not None:
+            await update.message.reply_text("Видео получено через Syntax fallback.")
+        return fallback_bytes
+
+    last_err: Exception | None = None
+    regions = _video_region_candidates()
+    total_attempts = len(regions) * VIDEO_HIGH_LOAD_MAX_ATTEMPTS
+    global_attempt = 0
+    for region in regions:
+        for region_attempt in range(VIDEO_HIGH_LOAD_MAX_ATTEMPTS):
+            global_attempt += 1
+            try:
+                return await asyncio.to_thread(
+                    generate_video_bytes,
+                    prompt=prompt,
+                    model=model,
+                    duration_sec=duration_sec,
+                    start_image=start_image,
+                    end_image=end_image,
+                    quality=quality,
+                    aspect_ratio=aspect_ratio,
+                    audio_enabled=audio_enabled,
+                    location=region,
+                )
+            except Exception as e:
+                last_err = e
+                model_unavailable = _is_video_model_unavailable_error(e)
+                should_retry_by_region = (
+                    _is_video_high_load_error(e)
+                    or _is_video_policy_error(e)
+                    or _is_video_safety_error(e)
+                    or _is_video_prompt_filtered_error(e)
+                    or model_unavailable
+                )
+                if not should_retry_by_region:
+                    raise
+                immediate_syntax_result = None
+                if _is_syntax_fallback_trigger_error(e):
+                    immediate_syntax_result = await _run_or_request_syntax_fallback(e)
+                if immediate_syntax_result is not None:
+                    return immediate_syntax_result
+                if global_attempt >= total_attempts:
+                    if _is_syntax_fallback_trigger_error(e) and _syntax_fallback_env_enabled():
+                        if update.message is not None:
+                            await update.message.reply_text(
+                                "Vertex отклонил генерацию по политике/безопасности после всех попыток в регионах. "
+                                "Запускаю резервный канал Syntax…"
+                            )
+                        fb = await _attempt_syntax_video_fallback_bytes(
+                            prompt=prompt,
+                            model=model,
+                            duration_sec=duration_sec,
+                            start_image=start_image,
+                            end_image=end_image,
+                        )
+                        if fb is not None:
+                            if update.message is not None:
+                                await update.message.reply_text("Видео получено через Syntax fallback.")
+                            return fb
+                        if update.message is not None:
+                            await update.message.reply_text(
+                                "Резервный канал Syntax не вернул видео. Дальше — обычное восстановление (переписывание промпта), если применимо."
+                            )
+                    raise
+                wait_sec = 0 if model_unavailable else VIDEO_HIGH_LOAD_RETRY_DELAY_SEC * (region_attempt + 1)
+                same_region_retry_left = (region_attempt < VIDEO_HIGH_LOAD_MAX_ATTEMPTS - 1) and not model_unavailable
+                next_region = region if same_region_retry_left else regions[(regions.index(region) + 1) % len(regions)]
+                logger.warning(
+                    "video.region.retry attempt=%s/%s region=%s wait=%ss next_region=%s error=%s",
+                    global_attempt,
+                    total_attempts,
+                    region,
+                    wait_sec,
+                    next_region,
+                    str(e),
+                )
+                if update.message is not None:
+                    if model_unavailable:
+                        await update.message.reply_text(
+                            f"Модель видео недоступна в регионе {region} (404). "
+                            f"Переключаюсь на регион {next_region}."
+                        )
+                    elif same_region_retry_left:
+                        await update.message.reply_text(
+                            f"Vertex Video API отклонил генерацию в регионе {region}. "
+                            f"Жду {wait_sec} сек и пробую снова в этом же регионе."
+                        )
+                    else:
+                        await update.message.reply_text(
+                            f"Vertex Video API отклонил генерацию в регионе {region}. "
+                            f"Жду {wait_sec} сек и переключаюсь на регион {next_region}."
+                        )
+                if wait_sec > 0:
+                    await asyncio.sleep(wait_sec)
+                if model_unavailable:
+                    # Для 404 по модели бессмысленно повторять в том же регионе.
+                    break
+    if last_err is not None:
+        raise last_err
+    raise RuntimeError("Video generation failed: retry loop exited unexpectedly.")
+
+
+async def _regenerate_video_prompt_from_error(scene: dict, error_text: str) -> str:
+    """
+    Предлагает безопасный видео-промпт после policy-модерации.
+    """
+    current = str(scene.get("video_prompt", "")).strip()
+    speech = str(scene.get("text", "")).strip()
+    speech_hint = (
+        f"\nРЕПЛИКА СЦЕНЫ (поле text) — в итоговом prompt ОБЯЗАТЕЛЬНО одна подстрока вида "
+        f"`CHARACTERS SPEAKS: ` сразу после двоеточия и пробела, затем ЭТОТ ТЕКСТ ДОСЛОВНО, без перефразирования:\n{speech}\n"
+        if speech
+        else ""
+    )
+    prompt = (
+        "Перепиши video prompt для генерации ролика так, чтобы пройти модерацию политики.\n"
+        "Верни только один готовый prompt, без пояснений.\n"
+        "Сохрани действие сцены, персонажей, стиль референсов и предметную непрерывность кадра.\n"
+        "Стиль кадра должен быть не-реалистичным: без реализма и без фотореализма.\n"
+        "Бабушка и кот обязательно мультяшные; кот обязательно описан точной фразой cartoon cat.\n"
+        "Запрети любые субтитры/текст в кадре и любую фоновую музыку/саундтрек.\n"
+        "Если указана реплика сцены выше — твой ответ ДОЛЖЕН содержать подстроку `CHARACTERS SPEAKS: ` + дословная реплика; "
+        "код её не допишет.\n"
+        "Обязательно включи точный фрагмент: "
+        f"voice_lock_full: {GRANDMA_VOICE_LOCK_FULL}\n"
+        "Обязательно включи точный фрагмент: "
+        f"{VEO3_CARTOON_CHARACTER_RULE}\n"
+        "Обязательно явно укажи язык озвучки в соответствии с целевым языком сцены.\n"
+        "Убери потенциально рискованные/запрещенные формулировки.\n\n"
+        f"ТЕКУЩИЙ VIDEO PROMPT:\n{current}\n"
+        f"{speech_hint}\n"
+        f"ТЕКСТ ОШИБКИ ПРОВАЙДЕРА:\n{error_text}\n"
+    )
+    raw = await asyncio.to_thread(gemini_generate_sync, prompt)
+    target_language = normalize_language_code(str(scene.get("video_prompt_current_language", "ru"))) or "ru"
+    return enforce_video_prompt_voice_requirements(raw.strip(), scene, target_language=target_language)
+
+
+def _build_video_prompt_rewrite_llm_prompt(
+    prompt_text: str,
+    error_text: str,
+    *,
+    phrases: str | None,
+) -> str:
+    """
+    Собирает пользовательское сообщение для Gemini при переписывании video prompt после отклонения.
+    Включает полный текст ошибки и (если есть) реплики, которые нельзя потерять.
+    """
+    stripped_prompt = prompt_text.strip()
+    err = (error_text or "").strip()
+    p = (phrases or "").strip()
+    phrases_block = p if p else "(отдельный список реплик не передан.)"
+    return (
+        "Перепиши video prompt для генерации ролика так, чтобы пройти модерацию политики (RAI/safety).\n"
+        "Верни только один готовый prompt, без пояснений.\n"
+        "Сохрани действие сцены и визуальный стиль, убери рискованные формулировки.\n"
+        "Стиль кадра должен быть не-реалистичным: без реализма и без фотореализма.\n"
+        "Бабушка и кот обязательно мультяшные; кот обязательно описан точной фразой cartoon cat.\n"
+        "Запрети любые субтитры/текст в кадре и любую фоновую музыку/саундтрек.\n"
+        "Ориентируйся на раздел «ПОЧЕМУ ОТКЛОНЕНО»: исправь те части промпта, на которые указывает "
+        "ошибка (filtered reasons, policy, safety, коды модерации и т.п.).\n"
+        "Если в «ФРАЗЫ И РЕПЛИКИ» есть текст — сохрани смысл и формулировки в итоговом описании сцены.\n\n"
+        "Обязательно включи точный фрагмент: "
+        f"voice_lock_full: {GRANDMA_VOICE_LOCK_FULL}\n"
+        "Обязательно включи точный фрагмент: "
+        f"{VEO3_CARTOON_CHARACTER_RULE}\n"
+        "Обязательно явно укажи, что все фразы и озвучка на русском языке.\n"
+        "Если в «ФРАЗЫ И РЕПЛИКИ» есть непустой текст — итоговый prompt ОБЯЗАН содержать подстроку "
+        "`CHARACTERS SPEAKS: ` + тот же текст дословно (символ в символ); без этого озвучка по сценарию пропадёт; код не дописывает.\n\n"
+        f"ИСХОДНЫЙ VIDEO PROMPT:\n{stripped_prompt}\n\n"
+        f"ФРАЗЫ И РЕПЛИКИ (сохранить по смыслу):\n{phrases_block}\n\n"
+        f"ПОЧЕМУ ОТКЛОНЕНО (полный текст ошибки провайдера / модерации):\n{err}\n"
+    )
+
+
+async def _regenerate_video_prompt_from_text(
+    prompt_text: str,
+    error_text: str,
+    *,
+    phrases: str | None = None,
+) -> str:
+    """
+    Переписывает сырой video prompt после отклонения модерацией.
+
+    В Gemini уходит исходный промпт, полный текст ошибки и при необходимости реплики для озвучки.
+    """
+    stripped = prompt_text.strip()
+    logger.info("[video prompt rewrite] rejected prompt:\n%s", stripped)
+    llm_prompt = _build_video_prompt_rewrite_llm_prompt(
+        prompt_text, error_text, phrases=phrases
+    )
+    raw = await asyncio.to_thread(gemini_generate_sync, llm_prompt)
+    return enforce_video_prompt_voice_requirements(raw.strip(), None)
+
+
+def enforce_video_prompt_voice_requirements(
+    video_prompt: str,
+    scene: dict[str, Any] | None = None,
+    *,
+    target_language: str = "ru",
+) -> str:
+    """
+    Добавляет в video prompt обязательные ограничения по голосу, если модель их опустила:
+    блок ``voice_lock_full`` и явное требование целевого языка озвучки.
+
+    Для ``veo3*`` дописывает ``VEO3_FAST_VIDEO_FRAMING_RULE`` (полная бабушка и все персонажи в кадре,
+    крупный план, липсинк, смена ракурса).
+
+    Строку ``CHARACTERS SPEAKS:`` с репликой формирует только LLM (см. промпты production / rewrite).
+    """
+    vp = (video_prompt or "").strip()
+    lang = (target_language or "ru").strip().lower()
+    lang_rule = _VOICE_RULES_BY_LANGUAGE.get(lang, _VOICE_RULES_BY_LANGUAGE["en"])
+    required_lock = _voice_lock_for_language(lang)
+    if not vp:
+        vp = (
+            f"voice_lock_full: {required_lock}. {lang_rule}. {_NON_REALISM_RULE}. "
+            f"{_NO_SUBTITLES_MUSIC_RULE}."
+        )
+    else:
+        source_token = _VOICE_LOCK_LANGUAGE_TOKEN_BY_LANG["en" if lang == "ru" else "ru"]
+        target_token = _VOICE_LOCK_LANGUAGE_TOKEN_BY_LANG.get(lang, _VOICE_LOCK_LANGUAGE_TOKEN_BY_LANG["en"])
+        vp = _sanitize_video_prompt_language_references(vp.replace(source_token, target_token), lang)
+        if "voice_lock_full:" not in vp.lower():
+            vp = f"{vp} voice_lock_full: {required_lock}".strip()
+        if lang_rule.lower() not in vp.lower():
+            vp = f"{vp}. {lang_rule}".strip()
+        if "photoreal" not in vp.lower() and "no realism" not in vp.lower():
+            vp = f"{vp}. {_NON_REALISM_RULE}".strip()
+        if "subtitles" not in vp.lower() or "music" not in vp.lower():
+            vp = f"{vp}. {_NO_SUBTITLES_MUSIC_RULE}".strip()
+    return _sanitize_video_prompt_language_references(append_veo3_video_framing_constraints(vp, scene), lang)
+
+
+async def _regenerate_image_prompt_from_video_error(scene: dict, error_text: str) -> str:
+    """
+    Предлагает новый start-frame prompt, если видео-генератор отклонил входное изображение.
+    """
+    current = str(scene.get("start_frame_prompt", "")).strip()
+    continuity = ", ".join(str(x) for x in (scene.get("continuity_anchors") or []) if str(x).strip())
+    prompt = (
+        "Перепиши промпт стартового кадра так, чтобы изображение стало валидным для video generator.\n"
+        "Верни только один готовый prompt на русском, без пояснений.\n"
+        "Сохрани персонажей, основное действие и предметную непрерывность: посуда, кастрюля/сковорода, "
+        "плита или рабочая поверхность, ингредиенты и состояние еды должны оставаться узнаваемыми.\n"
+        "Избегай сложных артефактов, размытий, лишних объектов, логотипов и текста поверх кадра.\n\n"
+        f"CONTINUITY ANCHORS: {continuity or '-'}\n"
+        f"ТЕКУЩИЙ START PROMPT:\n{current}\n\n"
+        f"ТЕКСТ ОШИБКИ VIDEO GENERATOR:\n{error_text}\n"
+    )
+    raw = await asyncio.to_thread(gemini_generate_sync, prompt)
+    return raw.strip()

@@ -1,0 +1,78 @@
+# Local environment and secrets
+.env
+.env.*
+!.env.example
+.bot.pid
+adc_key.json
+*_key.json
+*service-account*.json
+*credentials*.json
+*credential*.json
+*secret*.json
+*.pem
+*.key
+*.p8
+*.p12
+*.crt
+token/
+*.session
+*.session-journal
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+.python-version
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+coverage.xml
+
+# Virtual environments and dependency installs
+.venv/
+venv/
+env/
+ENV/
+
+# Runtime logs
+logs/
+*.log
+*.log.*
+
+# Generated media and temporary probes
+artifacts/
+outputs/
+tmp_*
+*.mp4
+*.mov
+*.webm
+*.avi
+*.mkv
+*.mp3
+*.wav
+*.m4a
+*.aac
+*.pdf
+*.xlsx
+*.xls
+*.zip
+
+# Generated data exports
+*.csv
+*.tsv
+*.jsonl
+
+# Local editor and OS files
+.DS_Store
+.idea/
+.vscode/
+.cursor/
+
+# Local databases and dumps
+*.db
+*.sqlite
+*.sqlite3
+*.dump
+*.bak
