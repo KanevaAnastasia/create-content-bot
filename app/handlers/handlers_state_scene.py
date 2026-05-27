@@ -35,6 +35,7 @@ from .handlers_state_deps import (
     format_frame_prompts_for_approval,
     format_full_recipe_for_approval,
     format_production_bundle_for_approval,
+    format_viral_application_summary,
     format_viral_concept_brief,
     generate_frame_prompts_for_approval,
     generate_full_production,
@@ -898,7 +899,14 @@ async def _handle_scene_approval_refine(update: Update, context: ContextTypes.DE
     rft = session.get("recipe_full_text")
     if isinstance(rft, str) and rft.strip(): await _reply_text_chunked(update, format_full_recipe_for_approval(rft))
     if session.get("viral_concept_brief"):
-        await _reply_text_chunked(update, format_viral_concept_brief(session["viral_concept_brief"]))
+        await _reply_text_chunked(
+            update,
+            format_viral_application_summary(
+                session["viral_concept_brief"],
+                session["scenes_plan"],
+                session.get("retention_review"),
+            ),
+        )
     await _reply_text_chunked(update, scenes["text_plan"])
     await _reply_text_with_optional_markup(
         update,

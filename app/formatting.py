@@ -201,6 +201,58 @@ def format_viral_concept_brief(brief: dict[str, Any] | None) -> str:
     )
 
 
+def format_viral_application_summary(
+    brief: dict[str, Any] | None,
+    scenes: list[dict[str, Any]] | None,
+    retention_review: dict[str, Any] | None = None,
+) -> str:
+    """Shows how the Viral Retention Layer affected the actual scenario."""
+    brief_data = brief if isinstance(brief, dict) else {}
+    scene_list = [s for s in (scenes or []) if isinstance(s, dict)]
+    review = retention_review if isinstance(retention_review, dict) else {}
+    if not scene_list:
+        return "VIRAL LAYER: КАК ПРИМЕНЕНО\n— сценарий ещё не собран"
+
+    first_scene = scene_list[0]
+    final_scene = scene_list[-1]
+    first_phrase_review = (
+        first_scene.get("first_phrase_review")
+        if isinstance(first_scene.get("first_phrase_review"), dict)
+        else review.get("first_scene_review")
+        if isinstance(review.get("first_scene_review"), dict)
+        else {}
+    )
+    first_phrase_score = first_scene.get("first_phrase_score") or first_phrase_review.get("score") or "—"
+    first_phrase_issues = (
+        first_phrase_review.get("issues")
+        if isinstance(first_phrase_review.get("issues"), list)
+        else []
+    )
+    first_phrase_status = (
+        "нужно усилить: " + "; ".join(_safe_text(x) for x in first_phrase_issues if _safe_text(x))
+        if first_phrase_issues
+        else "ок, первая фраза поддерживает удержание"
+    )
+    scene_functions = []
+    for scene in scene_list:
+        scene_no = scene.get("scene", scene.get("scene_id", "?"))
+        fn = _safe_text(scene.get("retention_function")) or "—"
+        scene_functions.append(f"{scene_no}:{fn}")
+    return (
+        "VIRAL LAYER: КАК ПРИМЕНЕНО\n\n"
+        "Это не отдельный отчёт: эти решения уже встроены в сценарий и дальше уйдут в промпты кадров/видео.\n\n"
+        f"Первая фраза в сценарии: {_safe_text(first_scene.get('text')) or '—'}\n"
+        f"Проверка первой фразы: {first_phrase_score}/10, {first_phrase_status}\n"
+        f"Первый кадр из brief: {_safe_text(brief_data.get('strongest_first_frame')) or '—'}\n"
+        f"Что реально в сцене 1: {_safe_text(first_scene.get('action')) or '—'}\n\n"
+        f"Причина досмотреть: {_safe_text(brief_data.get('reason_to_watch_end')) or '—'}\n"
+        f"Финальный payoff в сценарии: {_safe_text(final_scene.get('payoff_type')) or _safe_text(brief_data.get('payoff_type')) or '—'}\n"
+        f"Что реально в финале: {_safe_text(final_scene.get('action')) or '—'}\n\n"
+        "Функции удержания по сценам: "
+        + ", ".join(scene_functions)
+    )
+
+
 def format_concepts(concepts: list[dict[str, str]]) -> str:
     """
     Форматирует список концептов блюд для шага выбора пользователем (номером).

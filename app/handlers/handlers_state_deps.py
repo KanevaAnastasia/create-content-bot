@@ -35,6 +35,7 @@ from ..formatting import (
     format_frame_prompts_for_approval,
     format_full_recipe_for_approval,
     format_production_bundle_for_approval,
+    format_viral_application_summary,
     format_viral_concept_brief,
 )
 from ..llm_utils import gemini_generate_sync

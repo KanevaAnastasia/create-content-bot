@@ -9,6 +9,7 @@ from app.formatting import (
     format_production_cards,
     format_recipe_step_scene_draft,
     format_recipe_steps,
+    format_viral_application_summary,
 )
 
 
@@ -47,6 +48,44 @@ def test_build_human_readable_plan_supports_raw_scene_aliases():
     assert "СЦЕНА 3" in out
     assert "Нейросеть: veo3_fast" in out
     assert "Lip sync: да" in out
+
+
+def test_format_viral_application_summary_explains_usage():
+    out = format_viral_application_summary(
+        {
+            "strongest_first_frame": "крупный разрез торта",
+            "reason_to_watch_end": "досмотреть до красивого разреза",
+            "payoff_type": "cut",
+        },
+        [
+            {
+                "scene": 1,
+                "text": "Досмотрите до разреза медовика он нежный",
+                "action": "Бабушка показывает готовый медовик и разрез",
+                "retention_function": "hook",
+                "first_phrase_score": 9,
+                "first_phrase_review": {"issues": []},
+            },
+            {
+                "scene": 2,
+                "action": "Бабушка смешивает крем",
+                "retention_function": "recipe_progress",
+            },
+            {
+                "scene": 3,
+                "action": "Бабушка делает финальный разрез",
+                "retention_function": "payoff",
+                "payoff_type": "cut",
+            },
+        ],
+        {"overall_retention_score": 8},
+    )
+
+    assert "КАК ПРИМЕНЕНО" in out
+    assert "уже встроены в сценарий" in out
+    assert "Первая фраза в сценарии" in out
+    assert "1:hook" in out
+    assert "3:payoff" in out
 
 
 def test_concepts_recipe_and_production_formatting():
