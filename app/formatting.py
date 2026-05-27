@@ -106,6 +106,19 @@ def build_human_readable_plan(scenes: list[dict[str, Any]]) -> str:
         micro_events = ", ".join(_safe_text(x) for x in micro_events_raw if _safe_text(x)) or "—"
         risk = scene.get("boring_scene_risk", "—")
         suggestion = _safe_text(scene.get("retention_suggestion")) or "—"
+        first_phrase_score = scene.get("first_phrase_score")
+        first_phrase_review = scene.get("first_phrase_review") if isinstance(scene.get("first_phrase_review"), dict) else {}
+        first_phrase_issues = first_phrase_review.get("issues") if isinstance(first_phrase_review.get("issues"), list) else []
+        first_phrase_issue_text = ", ".join(_safe_text(x) for x in first_phrase_issues if _safe_text(x)) or "—"
+        first_phrase_suggestion = _safe_text(scene.get("first_phrase_suggestion")) or _safe_text(first_phrase_review.get("suggestion")) or "—"
+        first_phrase_block = (
+            "Проверка первой фразы:\n"
+            f"Оценка: {first_phrase_score}/10\n"
+            f"Замечания: {first_phrase_issue_text}\n"
+            f"Предложение: {first_phrase_suggestion}\n\n"
+            if first_phrase_score is not None
+            else ""
+        )
         voice_provider = scene.get(
             "voice_provider", "native" if str(model).lower().startswith("veo3") else "elevenlabs"
         )
@@ -124,6 +137,7 @@ def build_human_readable_plan(scenes: list[dict[str, Any]]) -> str:
             f"Микрособытия: {micro_events}\n"
             f"Риск скучной сцены: {risk}/10\n"
             f"Рекомендация: {suggestion}\n\n"
+            f"{first_phrase_block}"
             "Фраза бабушки (будет в сцене):\n"
             f"{text_line}\n\n"
             f"Нужна ли озвучка: {'да' if voice_needed else 'нет'}\n\n"

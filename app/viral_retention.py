@@ -63,6 +63,54 @@ DEFAULT_ANALYSIS = {
     "expected_save_reason": "сохранить рецепт и повторить дома",
 }
 
+FIRST_PHRASE_MAX_WORDS = 14
+FIRST_PHRASE_MAX_CHARS = 115
+FIRST_PHRASE_GENERIC_BAD_PATTERNS = (
+    "сегодня готов",
+    "мы готовим",
+    "я готовлю",
+    "давайте приготов",
+    "начинаем готов",
+    "в этом видео",
+    "это блюдо",
+    "вкусное блюдо",
+    "рецепт пользователя",
+    "простой рецепт",
+)
+FIRST_PHRASE_POWER_MARKERS = (
+    "в конце",
+    "секрет",
+    "разрез",
+    "ложк",
+    "хруст",
+    "тян",
+    "сыр",
+    "крем",
+    "нежн",
+    "пахнет",
+    "детство",
+    "покупной",
+    "нельзя терять",
+    "сохрани",
+    "слишком красив",
+    "кот",
+)
+FIRST_SCENE_VISUAL_HOOK_MARKERS = (
+    "готов",
+    "разрез",
+    "ложк",
+    "хруст",
+    "тян",
+    "сыр",
+    "крем",
+    "показывает",
+    "нюха",
+    "запах",
+    "было",
+    "стало",
+    "секрет",
+)
+
 
 def _text(value: Any) -> str:
     if value is None:
@@ -136,6 +184,72 @@ def flatten_hooks(hooks: dict[str, list[str]]) -> list[str]:
     return out
 
 
+def _word_count(text: str) -> int:
+    return len(re.findall(r"[a-zA-Zа-яА-ЯёЁ0-9]+", text or ""))
+
+
+def _normalize_first_phrase(raw: str, *, fallback: str) -> str:
+    phrase = re.sub(r"\s+", " ", (raw or "").strip())
+    if not phrase:
+        phrase = fallback.strip()
+    if _word_count(phrase) <= FIRST_PHRASE_MAX_WORDS and len(phrase) <= FIRST_PHRASE_MAX_CHARS:
+        return phrase
+    words = re.findall(r"\S+", phrase)
+    shortened = " ".join(words[:FIRST_PHRASE_MAX_WORDS]).strip(" ,.;:!?")
+    return shortened or fallback.strip()
+
+
+def review_first_phrase(
+    phrase: str,
+    *,
+    scene: dict[str, Any] | None = None,
+    brief: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Scores whether the first spoken line is strong enough for a short-form hook."""
+    text = _text(phrase)
+    low = text.lower()
+    issues: list[str] = []
+    positives: list[str] = []
+    score = 10
+    words = _word_count(text)
+    if not text:
+        issues.append("первая фраза пустая")
+        score -= 6
+    if words > FIRST_PHRASE_MAX_WORDS or len(text) > FIRST_PHRASE_MAX_CHARS:
+        issues.append("первая фраза слишком длинная для первых секунд")
+        score -= 2
+    if any(p in low for p in FIRST_PHRASE_GENERIC_BAD_PATTERNS):
+        issues.append("начинается как обычное вступление вместо hook-first фразы")
+        score -= 3
+    if not any(p in low for p in FIRST_PHRASE_POWER_MARKERS):
+        issues.append("нет открытой петли, payoff-слова или эмоционального повода досмотреть")
+        score -= 2
+    else:
+        positives.append("есть интрига, эмоция или payoff-маркер")
+    if scene is not None:
+        scene_blob = _blob(scene)
+        if not any(p in scene_blob for p in FIRST_SCENE_VISUAL_HOOK_MARKERS):
+            issues.append("первая сцена визуально не подтверждает hook")
+            score -= 2
+        else:
+            positives.append("первый кадр поддерживает фразу визуальным доказательством")
+    if brief is not None:
+        first_frame = _text(brief.get("strongest_first_frame"))
+        if first_frame:
+            positives.append("есть рекомендованный первый кадр из viral brief")
+    suggestion = ""
+    if issues:
+        if isinstance(brief, dict):
+            suggestion = _text(brief.get("strongest_first_phrase")) or _text(brief.get("main_hook"))
+        suggestion = suggestion or "В конце покажу секрет, из-за которого это блюдо хочется сохранить."
+    return {
+        "score": max(1, min(10, score)),
+        "issues": issues,
+        "positive_notes": positives,
+        "suggestion": suggestion,
+    }
+
+
 def normalize_viral_concept_brief(
     data: dict[str, Any] | None,
     *,
@@ -173,6 +287,14 @@ def normalize_viral_concept_brief(
             analysis[key] = _clamp_score(raw_analysis.get(key), default)
         else:
             analysis[key] = _text(raw_analysis.get(key)) or default
+    strongest_first_phrase = _normalize_first_phrase(
+        _text(raw.get("strongest_first_phrase")),
+        fallback=main_hook,
+    )
+    phrase_review = review_first_phrase(strongest_first_phrase)
+    if phrase_review["score"] < 7:
+        strongest_first_phrase = _normalize_first_phrase(main_hook, fallback=flatten_hooks(hooks)[0])
+        phrase_review = review_first_phrase(strongest_first_phrase)
     return {
         "main_hook": main_hook,
         "viewer_promise": _text(raw.get("viewer_promise")) or "уютный домашний рецепт с понятным результатом",
@@ -180,7 +302,8 @@ def normalize_viral_concept_brief(
         "main_visual_payoff": _text(raw.get("main_visual_payoff")) or "крупный финальный кадр готового блюда",
         "emotional_tone": _text(raw.get("emotional_tone")) or "уютно, тепло, семейно, с мягким юмором",
         "series_format": _text(raw.get("series_format")) or "",
-        "strongest_first_phrase": _text(raw.get("strongest_first_phrase")) or main_hook,
+        "strongest_first_phrase": strongest_first_phrase,
+        "first_phrase_review": phrase_review,
         "strongest_first_frame": _text(raw.get("strongest_first_frame"))
         or "крупный план готового блюда, бабушка рядом, кот реагирует на запах",
         "first_frame_type": first_frame_type,
@@ -308,6 +431,15 @@ def enrich_scenes_with_retention(
             item["retention_suggestion"] = suggestion
         if idx == 1:
             item["recommended_first_frame_type"] = brief.get("first_frame_type") or "ready_dish_closeup"
+            first_phrase_review = review_first_phrase(
+                _text(item.get("text")),
+                scene=item,
+                brief=brief,
+            )
+            item["first_phrase_score"] = first_phrase_review["score"]
+            item["first_phrase_review"] = first_phrase_review
+            if first_phrase_review["suggestion"]:
+                item["first_phrase_suggestion"] = first_phrase_review["suggestion"]
         if idx == total:
             item["payoff_type"] = _text(item.get("payoff_type")) or _text(brief.get("payoff_type")) or "cut"
             item.setdefault("save_reason", "сохранить рецепт, чтобы повторить дома")
@@ -319,6 +451,7 @@ def enrich_scenes_with_retention(
                 "boring_scene_risk": risk,
                 "micro_events": events,
                 "suggestion": suggestion,
+                "first_phrase_score": item.get("first_phrase_score") if idx == 1 else None,
             }
         )
     max_risk = max((int(x["boring_scene_risk"]) for x in items), default=1)
@@ -329,5 +462,6 @@ def enrich_scenes_with_retention(
         "weak_scenes": weak,
         "first_frame_type": brief.get("first_frame_type") or "ready_dish_closeup",
         "payoff_type": brief.get("payoff_type") or "cut",
+        "first_scene_review": out[0].get("first_phrase_review") if out else {},
     }
     return out, review

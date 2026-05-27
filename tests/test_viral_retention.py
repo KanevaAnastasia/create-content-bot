@@ -3,6 +3,7 @@ from app.viral_retention import (
     flatten_hooks,
     normalize_hooks,
     normalize_viral_concept_brief,
+    review_first_phrase,
 )
 
 
@@ -47,3 +48,38 @@ def test_enrich_scenes_with_retention_marks_hook_and_payoff() -> None:
     assert enriched[-1]["retention_function"] == "payoff"
     assert enriched[-1]["payoff_type"] == brief["payoff_type"]
     assert review["overall_retention_score"] >= 1
+
+
+def test_review_first_phrase_penalizes_generic_intro() -> None:
+    review = review_first_phrase(
+        "Сегодня мы готовим вкусное блюдо",
+        scene={"action": "Бабушка нарезает овощи"},
+    )
+
+    assert review["score"] < 7
+    assert review["issues"]
+
+
+def test_review_first_phrase_rewards_payoff_and_visual_match() -> None:
+    review = review_first_phrase(
+        "Досмотрите до разреза медовика он слишком нежный",
+        scene={"action": "Бабушка показывает готовый медовик и красивый разрез"},
+    )
+
+    assert review["score"] >= 8
+    assert not review["issues"]
+
+
+def test_enrich_scenes_adds_first_phrase_review_to_first_scene() -> None:
+    scenes = [
+        {"scene": 1, "action": "Бабушка показывает готовый торт и разрез", "text": "Сегодня мы готовим вкусное блюдо"},
+        {"scene": 2, "action": "Бабушка смешивает крем", "text": "секрет крема"},
+        {"scene": 3, "action": "Бабушка делает финальный разрез", "text": "сохрани"},
+    ]
+    brief = normalize_viral_concept_brief({}, concept="торт")
+
+    enriched, review = enrich_scenes_with_retention(scenes, viral_concept_brief=brief)
+
+    assert enriched[0]["first_phrase_score"] < 7
+    assert enriched[0]["first_phrase_suggestion"]
+    assert review["first_scene_review"]["issues"]
