@@ -114,10 +114,8 @@ def test_append_veo3_video_framing_constraints_idempotent_for_veo3():
     scene = {"model": "veo3_fast"}
     once = append_veo3_video_framing_constraints("kitchen close-up", scene)
     assert "veo3_framing:" in once.lower()
-    assert "veo3_cartoon_character_rule:" in once.lower()
-    assert "cartoon cat" in once
-    assert "kitchen_physics_rule:" in once.lower()
-    assert "motor base" in once
+    assert "veo3_cartoon_character_rule:" not in once.lower()
+    assert "kitchen_physics_rule:" not in once.lower()
     twice = append_veo3_video_framing_constraints(once, scene)
     assert twice == once
 
@@ -137,9 +135,8 @@ def test_append_veo3_video_framing_constraints_adds_cooking_cast_rule_by_default
     assert "character_identity_rule:" not in out.lower()
     assert "Зая" not in out
     assert "Маркиз" not in out
-    assert "cartoon grandmother" in out
-    assert "cartoon cat" in out
-    assert "stovetop burner" in out
+    assert "cartoon grandmother" not in out
+    assert "cartoon cat" not in out
 
 
 def test_append_veo3_video_framing_constraints_skips_cooking_cast_rule_for_other_scope(monkeypatch):
@@ -147,8 +144,8 @@ def test_append_veo3_video_framing_constraints_skips_cooking_cast_rule_for_other
     out = append_veo3_video_framing_constraints("close-up kitchen", {"model": "veo3_fast"})
     assert "veo3_framing:" in out.lower()
     assert "veo3_cast_rule:" not in out.lower()
-    assert "veo3_cartoon_character_rule:" in out.lower()
-    assert "kitchen_physics_rule:" in out.lower()
+    assert "veo3_cartoon_character_rule:" not in out.lower()
+    assert "kitchen_physics_rule:" not in out.lower()
 
 
 def test_finalize_scene_video_prompt_adds_voice_lock_and_veo_framing():
@@ -156,8 +153,8 @@ def test_finalize_scene_video_prompt_adds_voice_lock_and_veo_framing():
     out = pipeline._finalize_scene_video_prompt("close-up kitchen", scene)
     assert "voice_lock_full:" in out
     assert "veo3_framing:" in out.lower()
-    assert "cartoon cat" in out
-    assert "kitchen_physics_rule:" in out.lower()
+    assert "cartoon cat" not in out
+    assert "kitchen_physics_rule:" not in out.lower()
     assert out.startswith(
         pipeline._enforce_voice_lock_if_needed("close-up kitchen", scene)
     )
@@ -188,6 +185,8 @@ def test_pipeline_llm_steps_scenes_payload_carries_feedback_and_previous():
     assert "белая кошка преимущественно находится ЗА ОКНОМ" in prompt
     assert "CAT COUNT RULE" in prompt
     assert "Не создавай дополнительных котов" in prompt
+    assert "Не добавляй лишних персонажей" in prompt
+    assert "не вставляй в результат громоздкие служебные метки" in prompt
     assert "подробные описания внешности" in prompt
     assert "ВЕСЬ ролик" in prompt
     assert "ТЫ САМ придумываешь" in prompt
@@ -716,7 +715,7 @@ def test_generate_full_production_with_approved_frames(monkeypatch):
     assert "Zaya" not in scene["video_prompt"]
     assert "Timosha" not in scene["video_prompt"]
     assert "Markiz" not in scene["video_prompt"]
-    assert "cartoon cat" in scene["video_prompt"]
+    assert "cartoon cat" not in scene["video_prompt"]
     assert set(scene["speech_by_lang"].keys()) == {"ru", "en"}
     assert set(scene["video_prompt_by_lang"].keys()) == {"ru", "en"}
     assert scene["video_approvals_by_lang"]["ru"] is False
@@ -724,6 +723,7 @@ def test_generate_full_production_with_approved_frames(monkeypatch):
     assert "no background music" in captured_prompt["text"].lower()
     assert "kitchen_physics_rule" in captured_prompt["text"]
     assert "blender" in captured_prompt["text"]
+    assert "do not invent extra characters" in captured_prompt["text"].lower()
     assert "scene1_spoken_dish_name_rule" in captured_prompt["text"]
     assert "viewer must hear the dish name in the first scene" in captured_prompt["text"]
     assert "romantic_drama_rule" in captured_prompt["text"]
@@ -764,11 +764,12 @@ def test_generate_full_production_without_approved_frames_fills_placeholders(mon
     assert scene["start_frame_prompt"] == "пусто"
     assert scene["end_frame_prompt"] == "пусто"
     assert scene["video_prompt"]
-    assert "cartoon cat" in scene["video_prompt"]
+    assert "cartoon cat" not in scene["video_prompt"]
     assert "speech_by_lang" in scene
     assert "video_prompt_by_lang" in scene
     assert "подробные описания ингредиентов" in captured_prompt["text"]
     assert "kitchen_physics_rule" in captured_prompt["text"]
+    assert "do not invent extra characters" in captured_prompt["text"].lower()
     assert '"location"' not in captured_prompt["text"]
 
 

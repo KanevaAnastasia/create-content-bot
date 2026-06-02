@@ -22,7 +22,7 @@ from ..llm_utils import (
     set_prefer_vertex_api,
 )
 from ..scene_utils import normalize_recipe_steps, extract_recipe_steps_text
-from ..pipeline import GRANDMA_VOICE_LOCK_FULL, VEO3_CARTOON_CHARACTER_RULE, append_veo3_video_framing_constraints
+from ..pipeline import GRANDMA_VOICE_LOCK_FULL, append_veo3_video_framing_constraints
 from ..multilingual import language_name, normalize_language_code
 from .handlers_media_core_recipe import (
     _normalize_user_recipe_steps,
@@ -103,10 +103,7 @@ _VOICE_RULES_BY_LANGUAGE = {
     "ru": "all spoken phrases and voiceover are in Russian language only",
     "en": "all spoken phrases and voiceover are in English language only",
 }
-_NON_REALISM_RULE = (
-    "visual style is strictly non-photorealistic, non-realistic, and cartoon; no realism or photorealism; "
-    "grandmother is a cartoon grandmother and the cat is a cartoon cat; include the exact phrase cartoon cat"
-)
+_NON_REALISM_RULE = "visual style is strictly non-photorealistic, non-realistic, and cartoon; no realism or photorealism"
 _NO_SUBTITLES_MUSIC_RULE = (
     "no on-screen text or subtitles; no background music or soundtrack"
 )
@@ -984,15 +981,14 @@ async def _regenerate_video_prompt_from_error(scene: dict, error_text: str) -> s
         "Не копируй в ответ строки `ТЕКУЩИЙ VIDEO PROMPT`, `ФИДБЕК ПОЛЬЗОВАТЕЛЯ` или `ТЕКСТ ОШИБКИ ПРОВАЙДЕРА`.\n"
         "Сохрани действие сцены, персонажей, стиль референсов и предметную непрерывность кадра.\n"
         "Стиль кадра должен быть не-реалистичным: без реализма и без фотореализма.\n"
-        "Бабушка и кот обязательно мультяшные; кот обязательно описан точной фразой cartoon cat.\n"
+        "Бабушка и кот обязательно мультяшные; при необходимости мягко уточни cartoon style без громоздких служебных блоков.\n"
         "Запрети любые субтитры/текст в кадре и любую фоновую музыку/саундтрек.\n"
         "Если указана реплика сцены выше — твой ответ ДОЛЖЕН содержать подстроку `CHARACTERS SPEAKS: ` + дословная реплика; "
         "код её не допишет.\n"
         "Обязательно включи точный фрагмент: "
         f"voice_lock_full: {GRANDMA_VOICE_LOCK_FULL}\n"
-        "Обязательно включи точный фрагмент: "
-        f"{VEO3_CARTOON_CHARACTER_RULE}\n"
         "Обязательно явно укажи язык озвучки в соответствии с целевым языком сцены.\n"
+        "Соблюдай физическую правдоподобность кухни и не добавляй лишних персонажей или лишних параллельных действий.\n"
         "Убери потенциально рискованные/запрещенные формулировки.\n\n"
         f"ТЕКСТ ОШИБКИ ПРОВАЙДЕРА:\n{error_text}\n"
         f"{speech_hint}\n"
@@ -1022,15 +1018,14 @@ def _build_video_prompt_rewrite_llm_prompt(
         "Верни только один готовый prompt, без пояснений.\n"
         "Сохрани действие сцены и визуальный стиль, убери рискованные формулировки.\n"
         "Стиль кадра должен быть не-реалистичным: без реализма и без фотореализма.\n"
-        "Бабушка и кот обязательно мультяшные; кот обязательно описан точной фразой cartoon cat.\n"
+        "Бабушка и кот обязательно мультяшные; при необходимости мягко уточни cartoon style без громоздких служебных блоков.\n"
         "Запрети любые субтитры/текст в кадре и любую фоновую музыку/саундтрек.\n"
         "Ориентируйся на раздел «ПОЧЕМУ ОТКЛОНЕНО»: исправь те части промпта, на которые указывает "
         "ошибка (filtered reasons, policy, safety, коды модерации и т.п.).\n"
         "Если в «ФРАЗЫ И РЕПЛИКИ» есть текст — сохрани смысл и формулировки в итоговом описании сцены.\n\n"
         "Обязательно включи точный фрагмент: "
         f"voice_lock_full: {GRANDMA_VOICE_LOCK_FULL}\n"
-        "Обязательно включи точный фрагмент: "
-        f"{VEO3_CARTOON_CHARACTER_RULE}\n"
+        "Соблюдай физическую правдоподобность кухни и не добавляй лишних персонажей или лишних параллельных действий.\n"
         "Обязательно явно укажи, что все фразы и озвучка на русском языке.\n"
         "Если в «ФРАЗЫ И РЕПЛИКИ» есть непустой текст — итоговый prompt ОБЯЗАН содержать подстроку "
         "`CHARACTERS SPEAKS: ` + тот же текст дословно (символ в символ); без этого озвучка по сценарию пропадёт; код не дописывает.\n\n"

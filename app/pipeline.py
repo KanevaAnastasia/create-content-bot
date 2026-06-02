@@ -307,12 +307,6 @@ def append_veo3_video_framing_constraints(
     if "veo3_framing:" not in low:
         out = f"{out} {VEO3_FAST_VIDEO_FRAMING_RULE}".strip()
         low = out.lower()
-    if "veo3_cartoon_character_rule:" not in low:
-        out = f"{out} {VEO3_CARTOON_CHARACTER_RULE}".strip()
-        low = out.lower()
-    if "kitchen_physics_rule:" not in low:
-        out = f"{out} {VIDEO_KITCHEN_PHYSICS_RULE}".strip()
-        low = out.lower()
     if _is_grandma_cat_cooking_project_scope() and "veo3_cast_rule:" not in low:
         out = f"{out} {VEO3_COOKING_CAST_RULE}".strip()
         low = out.lower()
@@ -358,8 +352,12 @@ def _enforce_voice_lock_if_needed(video_prompt: str, scene: dict[str, Any]) -> s
 
 def _finalize_scene_video_prompt(video_prompt_en: str, scene: dict[str, Any]) -> str:
     """
-    Добавляет ``voice_lock_full`` при необходимости и правила кадра Veo 3 fast (липсинк, полная бабушка,
-    все персонажи в кадре, крупный план, смена ракурса). ``CHARACTERS SPEAKS`` задаёт только модель.
+    Добавляет ``voice_lock_full`` при необходимости и runtime-критичные правила кадра Veo 3 fast
+    (липсинк, полная бабушка, все персонажи в кадре, крупный план, смена ракурса).
+
+    Контентные правила вроде cartoon grandma/cartoon cat и kitchen physics должны попадать в
+    композицию prompt на этапе LLM-генерации, а не насильно приклеиваться к каждому готовому
+    ``video_prompt`` на пост-обработке. ``CHARACTERS SPEAKS`` задаёт только модель.
     """
     vp = _append_romantic_drama_to_video_prompt(str(video_prompt_en).strip(), scene)
     vp = _enforce_voice_lock_if_needed(vp, scene)
@@ -1403,6 +1401,8 @@ async def generate_full_production(
                     "strictly non-photorealistic/non-realistic cartoon visuals; "
                     "grandmother must be a cartoon grandmother and the cat must be a cartoon cat; "
                     "include the exact phrase cartoon cat; "
+                    "obey kitchen physics: cookware and appliances must be functional and physically plausible; "
+                    "do not invent extra characters, extra animals, extra hands, or unrelated parallel actions; "
                     "close-up with full grandma + all characters visible, lip sync, camera angle evolves "
                     "(not a single fixed static angle for the whole clip)"
                 ),
@@ -1451,6 +1451,9 @@ async def generate_full_production(
             "VIDEO PROMPT must include clip duration, reference style, no on-screen text or subtitles, and no background music/soundtrack. "
             "Visual style must be non-photorealistic/non-realistic cartoon (no realism). "
             "Grandmother must be a cartoon grandmother and the cat must be a cartoon cat; include the exact phrase cartoon cat. "
+            "Kitchen physics must stay plausible: cookware belongs on a visible burner or hob when cooking; "
+            "blenders must have jar, base, and lid; mixers need beaters, bowl, and motor body. "
+            "Do not invent extra characters, duplicate animals, extra hands, or unrelated side actions. "
             "If scene has speech, require accurate lip sync with the Russian line. "
             "For scene 1, the spoken phrase in CHARACTERS SPEAKS must happen at the start of the clip and explicitly "
             "name the dish from the scenario; the viewer must hear the dish name in the first scene. "
@@ -1465,12 +1468,8 @@ async def generate_full_production(
             "Also include this exact framing block verbatim: "
             + VEO3_FAST_VIDEO_FRAMING_RULE
             + "\n"
-            "Also include this exact cartoon character block verbatim: "
-            + VEO3_CARTOON_CHARACTER_RULE
-            + "\n"
-            "Also include this exact kitchen physics block verbatim: "
-            + VIDEO_KITCHEN_PHYSICS_RULE
-            + "\n"
+            "Use the cartoon-character and kitchen-physics rules when composing the prompt, but do not append bulky "
+            "meta-rule labels like veo3_cartoon_character_rule or kitchen_physics_rule unless they naturally belong in the prompt.\n"
             "Do not mention location names or location references; preserve continuity through recurring props and food state.\n"
             "Respect the Viral Concept Brief and scene retention fields. First frame must not be boring preparation; "
             "final scene must deliver the visual payoff. If sponsored_content is true, integrate the brand naturally "
@@ -1526,6 +1525,8 @@ async def generate_full_production(
                 "strictly non-photorealistic/non-realistic cartoon visuals; "
                 "grandmother must be a cartoon grandmother and the cat must be a cartoon cat; "
                 "include the exact phrase cartoon cat; "
+                "obey kitchen physics: cookware and appliances must be functional and physically plausible; "
+                "do not invent extra characters, extra animals, extra hands, or unrelated parallel actions; "
                 "close-up with full grandma + all characters visible, lip sync, camera angle evolves "
                 "(not a single fixed static angle for the whole clip)"
             ),
@@ -1566,6 +1567,9 @@ async def generate_full_production(
         "no on-screen text or subtitles, and no background music/soundtrack. "
         "Visual style must be non-photorealistic/non-realistic cartoon (no realism). "
         "Grandmother must be a cartoon grandmother and the cat must be a cartoon cat; include the exact phrase cartoon cat. "
+        "Kitchen physics must stay plausible: cookware belongs on a visible burner or hob when cooking; "
+        "blenders must have jar, base, and lid; mixers need beaters, bowl, and motor body. "
+        "Do not invent extra characters, duplicate animals, extra hands, or unrelated side actions. "
         "If scene has speech, require accurate lip sync with the Russian line. "
         "For scene 1, the spoken phrase in CHARACTERS SPEAKS must happen at the start of the clip and explicitly "
         "name the dish from the scenario; the viewer must hear the dish name in the first scene. "
@@ -1580,12 +1584,8 @@ async def generate_full_production(
         "Also include this exact framing block verbatim: "
         + VEO3_FAST_VIDEO_FRAMING_RULE
         + "\n"
-        "Also include this exact cartoon character block verbatim: "
-        + VEO3_CARTOON_CHARACTER_RULE
-        + "\n"
-        "Also include this exact kitchen physics block verbatim: "
-        + VIDEO_KITCHEN_PHYSICS_RULE
-        + "\n"
+        "Use the cartoon-character and kitchen-physics rules when composing the prompt, but do not append bulky "
+        "meta-rule labels like veo3_cartoon_character_rule or kitchen_physics_rule unless they naturally belong in the prompt.\n"
         "Do not mention location names or location references; preserve continuity through recurring props and food state.\n"
         "Respect the Viral Concept Brief and scene retention fields. First frame must not be boring preparation; "
         "final scene must deliver the visual payoff. If sponsored_content is true, integrate the brand naturally "

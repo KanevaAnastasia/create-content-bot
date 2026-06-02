@@ -252,6 +252,17 @@ def scenes_plan_requirements() -> dict[str, Any]:
             "and keep unaffected scenes as close as possible to previous_scenes. Do not replace the user's concrete "
             "wording with generic equivalents."
         ),
+        "no_extra_characters_or_actions_rule": (
+            "Do not invent extra characters, duplicate animals, background people, extra hands, or helper figures "
+            "beyond scene.characters. Do not add parallel cooking actions that are not required for the current "
+            "recipe step. Each scene should have one clear main cooking action plus only small supporting reactions "
+            "from the listed characters."
+        ),
+        "video_prompt_composition_rule": (
+            "Project-level rules like cartoon grandma/cartoon cat and kitchen physics must shape how you compose "
+            "video_prompt_en and scene actions, but do not dump them into the result as bulky meta-rule labels "
+            "unless explicitly requested."
+        ),
         "final_scene_cta_rule": (
             "The LAST scene text must end with a subscribe call after the main food phrase. Required wording for the "
             f"viewer-facing phrase: {FINAL_SCENE_SUBSCRIBE_CTA}. For veo3/veo3_fast use the TTS-ready equivalent "
@@ -378,6 +389,11 @@ def build_scenes_plan_prompt(payload: dict[str, Any]) -> str:
         "Если одно действие может длиться слишком долго, укажи retention_suggestion: монтажное ускорение, нарезка или замена.\n"
         "Для sponsored_content=true встрои бренд только нативно в одну подходящую сцену; не делай отдельный рекламный блок.\n"
         "При нарезке — явно стиль нарезки (кубик соломка ломтики и т.д.).\n"
+        "Не добавляй лишних персонажей, дубли котов, фоновых людей, лишние руки или параллельные действия, "
+        "которых нет в текущем шаге рецепта. На сцену — одно главное кулинарное действие, остальное только "
+        "как короткие поддерживающие реакции персонажей.\n"
+        "Правила cartoon grandma/cartoon cat и кухонной физики должны влиять на формулировки scene/action/video_prompt, "
+        "но не вставляй в результат громоздкие служебные метки или списки правил.\n"
         "ЗАПРЕЩЕН ракурс снизу (low-angle/from-below).\n"
         "КАДРИРОВАНИЕ: в каждой сцене крупный или средне-крупный план; бабушка целиком видна (не только лицо), все персонажи сцены полностью в кадре, действие с едой читаемо; без дальних планов.\n"
         "Для veo3_fast: в video_prompt обязательны липсинк с репликой и смена ракурса/кадра в течение ролика (не один зафиксированный ракурс на всю длительность).\n"

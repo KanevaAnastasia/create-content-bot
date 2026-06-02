@@ -3260,7 +3260,7 @@ def test_enforce_video_prompt_voice_requirements_adds_lock_and_russian_rule():
     assert "voice_lock_full:" in out
     assert "all spoken phrases and voiceover are in Russian language only" in out
     assert "non-photorealistic" in out.lower()
-    assert "cartoon cat" in out
+    assert "cartoon cat" not in out
     assert "no on-screen text or subtitles" in out.lower()
     assert "no background music" in out.lower()
     assert "veo3_framing:" in out.lower()
@@ -3275,7 +3275,7 @@ def test_enforce_video_prompt_voice_requirements_for_en_uses_english_constraints
     assert "all spoken phrases and voiceover are in English language only" in out
     assert "Russian language" not in out
     assert "non-photorealistic" in out.lower()
-    assert "cartoon cat" in out
+    assert "cartoon cat" not in out
     assert "no on-screen text or subtitles" in out.lower()
     assert "no background music" in out.lower()
     assert "Russian line" not in out
@@ -3292,7 +3292,7 @@ def test_enforce_video_prompt_voice_requirements_keeps_existing_constraints():
     out = enforce_video_prompt_voice_requirements(src)
     assert out.count("voice_lock_full:") == 1
     assert out.lower().count("veo3_framing:") == 1
-    assert "cartoon cat" in out
+    assert "cartoon cat" not in out
 
 
 def test_enforce_video_prompt_voice_requirements_switches_voice_lock_language_token():
@@ -3357,7 +3357,7 @@ def test_build_video_prompt_rewrite_llm_prompt_includes_rejection_and_phrases():
     assert "filtered: policy X" in out
     assert "бабушка: здравствуйте" in out
     assert "ФРАЗЫ И РЕПЛИКИ" in out
-    assert "cartoon cat" in out
+    assert "мультяшные" in out
     assert "субтитры" in out.lower()
     assert "музыку" in out.lower()
 
