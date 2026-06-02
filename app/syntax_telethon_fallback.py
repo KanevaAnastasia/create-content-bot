@@ -5,18 +5,25 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import io
+import json
 import logging
 import os
 import sqlite3
 import re
+import threading
 import time
+from dataclasses import dataclass
 from typing import Any
 from uuid import uuid4
 
 from .syntax_getvideo_download import fetch_mp4_bytes_from_getvideo_page
 from .syntax_image_prepare import prepare_syntax_frame_bytes
+from .llm_utils import extract_json_object, gemini_generate_sync
 
 logger = logging.getLogger(__name__)
+
+SYNTAX_PROMPT_DEFAULT_MAX_CHARS = 2000
+SYNTAX_PROMPT_HARD_MAX_CHARS = 2000
 
 try:
     from telethon import TelegramClient
@@ -26,11 +33,95 @@ except Exception:  # pragma: no cover - optional dependency handling
     StringSession = None  # type: ignore[assignment]
 
 
+@dataclass(frozen=True, slots=True)
+class _SessionCandidate:
+    kind: str
+    value: str
+
+
+_SESSION_POOL_CONDITION = threading.Condition()
+_SESSION_POOL_IN_USE: set[_SessionCandidate] = set()
+
+
 def _normalize_username(raw: str) -> str:
     clean = (raw or "").strip()
     if not clean:
         return "syntxaibot"
     return clean[1:] if clean.startswith("@") else clean
+
+
+def _split_env_list(raw: str | None) -> list[str]:
+    if not raw:
+        return []
+    normalized = raw.replace("\n", ",")
+    return [item.strip() for item in normalized.split(",") if item.strip()]
+
+
+def _syntax_session_candidates() -> list[_SessionCandidate]:
+    candidates: list[_SessionCandidate] = []
+    seen: set[_SessionCandidate] = set()
+    for value in _split_env_list(os.getenv("TELETHON_STRING_SESSIONS")):
+        candidate = _SessionCandidate("string", value)
+        if candidate not in seen:
+            candidates.append(candidate)
+            seen.add(candidate)
+    single_string = (os.getenv("TELETHON_STRING_SESSION") or "").strip()
+    if single_string:
+        candidate = _SessionCandidate("string", single_string)
+        if candidate not in seen:
+            candidates.append(candidate)
+            seen.add(candidate)
+    for value in _split_env_list(os.getenv("TELETHON_SESSION_PATHS")):
+        candidate = _SessionCandidate("path", value)
+        if candidate not in seen:
+            candidates.append(candidate)
+            seen.add(candidate)
+    single_path = (os.getenv("TELETHON_SESSION_PATH") or "").strip()
+    if single_path:
+        candidate = _SessionCandidate("path", single_path)
+        if candidate not in seen:
+            candidates.append(candidate)
+            seen.add(candidate)
+    return candidates
+
+
+def _acquire_syntax_session_candidate(timeout_sec: int | None) -> _SessionCandidate | None:
+    candidates = _syntax_session_candidates()
+    if not candidates:
+        return None
+    deadline = time.monotonic() + timeout_sec if timeout_sec is not None and timeout_sec > 0 else None
+    with _SESSION_POOL_CONDITION:
+        while True:
+            for candidate in candidates:
+                if candidate not in _SESSION_POOL_IN_USE:
+                    _SESSION_POOL_IN_USE.add(candidate)
+                    return candidate
+            if deadline is not None:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    return None
+                _SESSION_POOL_CONDITION.wait(timeout=remaining)
+            else:
+                _SESSION_POOL_CONDITION.wait()
+
+
+def _release_syntax_session_candidate(candidate: _SessionCandidate | None) -> None:
+    if candidate is None:
+        return
+    with _SESSION_POOL_CONDITION:
+        _SESSION_POOL_IN_USE.discard(candidate)
+        _SESSION_POOL_CONDITION.notify()
+
+
+@dataclass(frozen=True, slots=True)
+class _BatchRequestState:
+    key: str
+    attempt_id: str
+    prompt_text: str
+    prompt_shortened: bool
+    expected_lang_token: str | None
+    start_image: bytes
+    end_image: bytes | None
 
 
 def _result(
@@ -139,6 +230,26 @@ def _syntax_bot_message_is_hard_reject(text: str, _urls: list[str]) -> bool:
     """
     raw = text or ""
     low = raw.lower()
+    if re.search(r"veo(?:\s*3)?\W{0,12}на\s+обнов", low, flags=re.IGNORECASE):
+        return True
+    veo_update_markers = (
+        "veo на обнов",
+        "veo3 на обнов",
+        "veo 3 на обнов",
+        "veo обнов",
+        "veo3 обнов",
+        "veo is updating",
+        "veo3 is updating",
+        "veo 3 is updating",
+        "veo maintenance",
+        "veo3 maintenance",
+        "veo 3 maintenance",
+        "veo temporarily unavailable",
+        "veo3 temporarily unavailable",
+        "veo 3 temporarily unavailable",
+    )
+    if any(m in low for m in veo_update_markers):
+        return True
     if "произошла ошибка" in low and ("попробуйте" in low or "еще раз" in low or "ещё раз" in low):
         return True
     if "\u274c" in raw and ("ошибк" in low or "фильтр" in low or "filter" in low):
@@ -172,96 +283,68 @@ def _text_looks_like_syntax_pending_status(text: str) -> bool:
     return any(m in low for m in markers)
 
 
-def _cap_prompt(text: str, *, max_len: int = 2000) -> tuple[str, bool]:
-    clean = (text or "").strip()
-    if len(clean) <= max_len:
-        return clean, False
-    return clean[:max_len], True
-
-
 def _syntax_prompt_max_chars() -> int:
-    raw = (os.getenv("SYNTAX_PROMPT_MAX_CHARS") or "3900").strip()
+    raw = (os.getenv("SYNTAX_PROMPT_MAX_CHARS") or str(SYNTAX_PROMPT_DEFAULT_MAX_CHARS)).strip()
     try:
         value = int(raw)
     except ValueError:
-        return 3900
-    return max(1000, min(4096, value))
+        return SYNTAX_PROMPT_DEFAULT_MAX_CHARS
+    return max(1000, min(SYNTAX_PROMPT_HARD_MAX_CHARS, value))
 
 
-def _strip_visual_context_for_syntax(prompt: str) -> str:
-    """
-    Remove verbose image-only continuity blocks before sending to Syntax.
-
-    Syntax accepts a much shorter Telegram text than Vertex. The attached start/end
-    frames already carry visual constants, so the text should prioritize action,
-    style, safety constraints and the exact speech phrase.
-    """
-    text = (prompt or "").strip()
-    if not text:
+def _shorten_prompt_for_syntax_with_gemini_sync(prompt: str, *, max_len: int) -> str | None:
+    original = (prompt or "").strip()
+    if not original:
         return ""
-    # text = re.sub(
-    #     r"\n+Визуальные константы предметов:.*?(?=(?:\n(?:voice_lock_full:|veo3_|kitchen_physics_rule:|CHARACTERS SPEAKS:|lang:|$)))",
-    #     "\n",
-    #     text,
-    #     flags=re.IGNORECASE | re.DOTALL,
-    # )
-    text = re.sub(
-        r"\bAll visual elements,\s*including:.*?(?=(?:\s(?:voice_lock_full:|veo3_|kitchen_physics_rule:|CHARACTERS SPEAKS:|lang:|$)))",
-        " ",
-        text,
-        flags=re.IGNORECASE | re.DOTALL,
-    )
-    # text = re.sub(
-    #     r"Для стартового кадра обязательно подробно опиши:.*?состояние обработки\.?",
-    #     " ",
-    #     text,
-    #     flags=re.IGNORECASE | re.DOTALL,
-    # )
-    replacements = {
-        r"veo3_framing:.*?(?=\s(?:veo3_|kitchen_physics_rule:|voice_lock_full:|CHARACTERS SPEAKS:|$))": (
-            "veo3_framing: close/medium-close cartoon shot; grandma and all characters fully visible; "
-            "accurate lip sync; gentle camera movement."
-        ),
-        r"veo3_cartoon_character_rule:.*?(?=\s(?:veo3_|kitchen_physics_rule:|voice_lock_full:|CHARACTERS SPEAKS:|$))": (
-            "veo3_cartoon_character_rule: cartoon grandmother and cartoon cat; no realism or photorealism."
-        ),
-        r"kitchen_physics_rule:.*?(?=\s(?:veo3_|voice_lock_full:|CHARACTERS SPEAKS:|$))": (
-            "kitchen_physics_rule: cookware/appliances are functional and physically plausible; "
-            "pots on burners, blender on base with lid."
-        ),
-        r"voice_lock_full:.*?(?=\s(?:CHARACTERS SPEAKS:|$))": (
-            "voice_lock_full: warm elderly grandmother voice, clear soft articulation."
-        ),
+    payload = {
+        "max_chars": max_len,
+        "current_prompt": original,
+        "requirements": [
+            "Return a complete Syntax video prompt, not a summary.",
+            "Keep the core action, camera/motion, style, safety/physics constraints and voice/lip-sync instructions.",
+            "If CHARACTERS SPEAKS is present, preserve that marker and the spoken phrase as accurately as possible.",
+            "The returned prompt must be at most max_chars characters.",
+        ],
     }
-    for pattern, replacement in replacements.items():
-        text = re.sub(pattern, replacement, text, flags=re.IGNORECASE | re.DOTALL)
-    return re.sub(r"\s+", " ", text).strip()
+    instruction = (
+        "You rewrite video-generation prompts for Syntax, which has a strict text limit.\n"
+        'Return ONLY a JSON object: {"prompt":"..."} without markdown.\n'
+        "The prompt value must be a complete ready-to-send video prompt and must not exceed max_chars.\n\n"
+        "INPUT:\n"
+        + json.dumps(payload, ensure_ascii=False, indent=2)
+    )
+    for attempt in (1, 2):
+        extra = "" if attempt == 1 else "\n\nYour previous answer was too long or invalid. Compress more aggressively."
+        try:
+            raw = gemini_generate_sync(instruction + extra)
+            obj = extract_json_object(raw)
+        except Exception as exc:
+            logger.warning("syntax_prompt_shorten.gemini failed attempt=%s err=%s", attempt, exc)
+            continue
+        shortened = obj.get("prompt")
+        if not isinstance(shortened, str):
+            continue
+        shortened = shortened.strip()
+        if shortened and len(shortened) <= max_len:
+            return shortened
+        logger.warning(
+            "syntax_prompt_shorten.invalid_length attempt=%s chars=%s limit=%s",
+            attempt,
+            len(shortened),
+            max_len,
+        )
+    return None
 
 
-def _tail_characters_speaks(prompt: str) -> str:
-    match = re.search(r"CHARACTERS SPEAKS:\s*.*$", prompt or "", flags=re.IGNORECASE | re.DOTALL)
-    return re.sub(r"\s+", " ", match.group(0)).strip() if match else ""
-
-
-def _prepare_prompt_for_syntax(prompt: str, *, max_len: int | None = None) -> tuple[str, bool]:
+def _prepare_prompt_for_syntax(prompt: str, *, max_len: int | None = None) -> tuple[str, bool] | None:
     limit = max_len if max_len is not None else _syntax_prompt_max_chars()
     original = (prompt or "").strip()
-    compact = _strip_visual_context_for_syntax(original)
-    if len(compact) <= limit:
-        return compact, compact != original
-
-    speech_tail = _tail_characters_speaks(compact)
-    head = compact
-    if speech_tail:
-        idx = compact.lower().rfind("characters speaks:")
-        head = compact[:idx].strip()
-    room_for_head = limit - len(speech_tail) - (2 if speech_tail else 0)
-    if room_for_head < 200:
-        speech_tail = speech_tail[: max(0, limit - 3)].rstrip() + "..."
-        return speech_tail, True
-    head = head[:room_for_head].rstrip(" ,.;")
-    prepared = f"{head}\n{speech_tail}".strip() if speech_tail else head
-    return prepared[:limit], True
+    if len(original) <= limit:
+        return original, False
+    shortened = _shorten_prompt_for_syntax_with_gemini_sync(original, max_len=limit)
+    if shortened is None:
+        return None
+    return shortened, True
 
 
 def _syntax_allow_loose_correlation() -> bool:
@@ -560,6 +643,7 @@ async def _run_fallback_async(
     start_image: bytes,
     end_image: bytes | None,
     timeout_sec: int | None,
+    acquire_timeout_sec: int | None,
 ) -> Any:
     _ = model, duration_sec
     if TelegramClient is None:
@@ -582,25 +666,55 @@ async def _run_fallback_async(
             attempt_id=attempt_id,
         )
 
-    session_path = (os.getenv("TELETHON_SESSION_PATH") or "").strip()
-    session_string = (os.getenv("TELETHON_STRING_SESSION") or "").strip()
-    if not session_path and not session_string:
+    session_candidate = _acquire_syntax_session_candidate(acquire_timeout_sec)
+    if session_candidate is None:
+        candidates = _syntax_session_candidates()
+        if not candidates:
+            return _result(
+                success=False,
+                video_bytes=None,
+                video_uri=None,
+                provider_message=(
+                    "Missing Telethon session: set TELETHON_SESSION_PATH / TELETHON_STRING_SESSION "
+                    "or multi-session TELETHON_SESSION_PATHS / TELETHON_STRING_SESSIONS."
+                ),
+                attempt_id=attempt_id,
+            )
         return _result(
             success=False,
             video_bytes=None,
             video_uri=None,
-            provider_message="Missing Telethon session: set TELETHON_SESSION_PATH or TELETHON_STRING_SESSION.",
+            provider_message=(
+                "No free Telethon session became available before timeout. "
+                "Add more sessions or increase SYNTAX_FALLBACK_LOCK_TIMEOUT_SEC."
+            ),
             attempt_id=attempt_id,
         )
-
-    if timeout_sec is not None and int(timeout_sec) > 0:
-        timeout = int(timeout_sec)
+    if session_candidate.kind == "string":
+        if StringSession is None:
+            _release_syntax_session_candidate(session_candidate)
+            return _result(
+                success=False,
+                video_bytes=None,
+                video_uri=None,
+                provider_message="Telethon StringSession is unavailable in this environment.",
+                attempt_id=attempt_id,
+            )
+        session_obj: Any = StringSession(session_candidate.value)
     else:
-        env_raw = (os.getenv("SYNTAX_FALLBACK_TIMEOUT_SEC") or "").strip()
-        timeout = int(env_raw) if env_raw.isdigit() and int(env_raw) > 0 else 25 * 60
-    poll = _poll_interval_sec()
-    bot_username = _normalize_username(os.getenv("SYNTAX_BOT_USERNAME", "syntxaibot"))
-    session_obj: Any = StringSession(session_string) if session_string and StringSession else session_path
+        session_obj = session_candidate.value
+
+    try:
+        if timeout_sec is not None and int(timeout_sec) > 0:
+            timeout = int(timeout_sec)
+        else:
+            env_raw = (os.getenv("SYNTAX_FALLBACK_TIMEOUT_SEC") or "").strip()
+            timeout = int(env_raw) if env_raw.isdigit() and int(env_raw) > 0 else 15 * 60
+        poll = _poll_interval_sec()
+        bot_username = _normalize_username(os.getenv("SYNTAX_BOT_USERNAME", "syntxaibot"))
+    except Exception:
+        _release_syntax_session_candidate(session_candidate)
+        raise
 
     try:
         start_image = prepare_syntax_frame_bytes(start_image)
@@ -615,7 +729,19 @@ async def _run_fallback_async(
             attempt_id=attempt_id,
         )
 
-    prompt_text, prompt_truncated = _prepare_prompt_for_syntax(prompt)
+    prepared_prompt = await asyncio.to_thread(_prepare_prompt_for_syntax, prompt)
+    if prepared_prompt is None:
+        return _result(
+            success=False,
+            video_bytes=None,
+            video_uri=None,
+            provider_message=(
+                f"Syntax prompt is longer than {_syntax_prompt_max_chars()} chars, "
+                "and Gemini could not shorten it to the Syntax limit."
+            ),
+            attempt_id=attempt_id,
+        )
+    prompt_text, prompt_shortened = prepared_prompt
     expected_lang_token = _expected_lang_token_from_prompt(prompt_text)
     sent_ids: set[int] = set()
     last_info = ""
@@ -653,8 +779,11 @@ async def _run_fallback_async(
 
                 request_message = await client.send_message(target, prompt_text, reply_to=reply_anchor)
                 sent_ids.add(int(request_message.id))
-                if prompt_truncated:
-                    last_info = "Prompt exceeded 2000 chars and was truncated before send."
+                if prompt_shortened:
+                    last_info = (
+                        f"Prompt exceeded Syntax limit ({_syntax_prompt_max_chars()} chars) "
+                        "and was shortened with Gemini before send."
+                    )
 
                 deadline = time.monotonic() + timeout
                 return await _poll_syntax_bot_until_video(
@@ -680,7 +809,9 @@ async def _run_fallback_async(
         finally:
             with contextlib.suppress(Exception):
                 await client.disconnect()
+            _release_syntax_session_candidate(session_candidate)
     except sqlite3.OperationalError as exc:
+        _release_syntax_session_candidate(session_candidate)
         if "locked" in str(exc).lower():
             return _result(
                 success=False,
@@ -688,7 +819,7 @@ async def _run_fallback_async(
                 video_uri=None,
                 provider_message=(
                     "Сессия Telethon занята другим процессом (database is locked). "
-                    "Остановите другие процессы с тем же TELETHON_SESSION_PATH и повторите."
+                    "Остановите другие процессы с тем же TELETHON_SESSION_PATH/TELETHON_SESSION_PATHS и повторите."
                 ),
                 attempt_id=attempt_id,
             )
@@ -699,6 +830,323 @@ async def _run_fallback_async(
             provider_message=f"Syntax Telethon SQLite error: {exc}",
             attempt_id=attempt_id,
         )
+    except Exception as exc:
+        _release_syntax_session_candidate(session_candidate)
+        return _result(
+            success=False,
+            video_bytes=None,
+            video_uri=None,
+            provider_message=f"Syntax fallback transport error: {exc}",
+            attempt_id=attempt_id,
+        )
+
+
+async def _run_batch_fallback_async(
+    *,
+    requests: list[Any],
+    model: str,
+    duration_sec: int,
+    timeout_sec: int | None,
+    acquire_timeout_sec: int | None,
+) -> dict[str, Any]:
+    _ = model, duration_sec
+    results: dict[str, Any] = {}
+    if not requests:
+        return results
+    if TelegramClient is None:
+        for request in requests:
+            results[str(request.key)] = _result(
+                success=False,
+                video_bytes=None,
+                video_uri=None,
+                provider_message="Telethon is not installed; Syntax fallback transport is unavailable.",
+                attempt_id=uuid4().hex,
+            )
+        return results
+
+    api_id_raw = (os.getenv("TELEGRAM_API_ID") or "").strip()
+    api_hash = (os.getenv("TELEGRAM_API_HASH") or "").strip()
+    if not api_id_raw.isdigit() or not api_hash:
+        for request in requests:
+            results[str(request.key)] = _result(
+                success=False,
+                video_bytes=None,
+                video_uri=None,
+                provider_message="Missing TELEGRAM_API_ID/TELEGRAM_API_HASH for Syntax Telethon fallback.",
+                attempt_id=uuid4().hex,
+            )
+        return results
+
+    session_candidate = _acquire_syntax_session_candidate(acquire_timeout_sec)
+    if session_candidate is None:
+        provider_message = (
+            "Missing Telethon session: set TELETHON_SESSION_PATH / TELETHON_STRING_SESSION "
+            "or multi-session TELETHON_SESSION_PATHS / TELETHON_STRING_SESSIONS."
+            if not _syntax_session_candidates()
+            else "No free Telethon session became available before timeout. "
+            "Add more sessions or increase SYNTAX_FALLBACK_LOCK_TIMEOUT_SEC."
+        )
+        for request in requests:
+            results[str(request.key)] = _result(
+                success=False,
+                video_bytes=None,
+                video_uri=None,
+                provider_message=provider_message,
+                attempt_id=uuid4().hex,
+            )
+        return results
+
+    if session_candidate.kind == "string":
+        if StringSession is None:
+            _release_syntax_session_candidate(session_candidate)
+            for request in requests:
+                results[str(request.key)] = _result(
+                    success=False,
+                    video_bytes=None,
+                    video_uri=None,
+                    provider_message="Telethon StringSession is unavailable in this environment.",
+                    attempt_id=uuid4().hex,
+                )
+            return results
+        session_obj: Any = StringSession(session_candidate.value)
+    else:
+        session_obj = session_candidate.value
+
+    if timeout_sec is not None and int(timeout_sec) > 0:
+        timeout = int(timeout_sec)
+    else:
+        env_raw = (os.getenv("SYNTAX_FALLBACK_TIMEOUT_SEC") or "").strip()
+        timeout = int(env_raw) if env_raw.isdigit() and int(env_raw) > 0 else 15 * 60
+    poll = _poll_interval_sec()
+    bot_username = _normalize_username(os.getenv("SYNTAX_BOT_USERNAME", "syntxaibot"))
+
+    ready: list[_BatchRequestState] = []
+    for request in requests:
+        key = str(request.key)
+        attempt_id = uuid4().hex
+        try:
+            start_image = prepare_syntax_frame_bytes(request.start_image)
+            end_image = prepare_syntax_frame_bytes(request.end_image) if request.end_image else None
+        except Exception as prep_err:
+            results[key] = _result(
+                success=False,
+                video_bytes=None,
+                video_uri=None,
+                provider_message=f"Syntax frame prepare failed: {prep_err}",
+                attempt_id=attempt_id,
+            )
+            continue
+        prepared_prompt = await asyncio.to_thread(_prepare_prompt_for_syntax, request.prompt)
+        if prepared_prompt is None:
+            results[key] = _result(
+                success=False,
+                video_bytes=None,
+                video_uri=None,
+                provider_message=(
+                    f"Syntax prompt is longer than {_syntax_prompt_max_chars()} chars, "
+                    "and Gemini could not shorten it to the Syntax limit."
+                ),
+                attempt_id=attempt_id,
+            )
+            continue
+        prompt_text, prompt_shortened = prepared_prompt
+        ready.append(
+            _BatchRequestState(
+                key=key,
+                attempt_id=attempt_id,
+                prompt_text=prompt_text,
+                prompt_shortened=prompt_shortened,
+                expected_lang_token=_expected_lang_token_from_prompt(prompt_text),
+                start_image=start_image,
+                end_image=end_image,
+            )
+        )
+
+    if not ready:
+        _release_syntax_session_candidate(session_candidate)
+        return results
+
+    client = TelegramClient(session_obj, int(api_id_raw), api_hash)
+    try:
+        await client.connect()
+        is_authorized = getattr(client, "is_user_authorized", None)
+        if callable(is_authorized) and not await is_authorized():
+            for request in ready:
+                results[request.key] = _result(
+                    success=False,
+                    video_bytes=None,
+                    video_uri=None,
+                    provider_message=(
+                        "Telethon session is not authorized. "
+                        "Run tools/telethon_login.py once to create an authorized session."
+                    ),
+                    attempt_id=request.attempt_id,
+                )
+            return results
+
+        target = await client.get_entity(bot_username)
+        request_runtime: list[tuple[_BatchRequestState, int, set[int], str]] = []
+        for request in ready:
+            sent_ids: set[int] = set()
+            start_file = io.BytesIO(request.start_image)
+            start_file.name = f"start_frame.{_image_ext(request.start_image)}"
+            start_msg = await client.send_file(target, file=start_file, force_document=False)
+            sent_ids.add(int(start_msg.id))
+            reply_anchor = int(start_msg.id)
+            if request.end_image:
+                end_file = io.BytesIO(request.end_image)
+                end_file.name = f"end_frame.{_image_ext(request.end_image)}"
+                end_msg = await client.send_file(target, file=end_file, force_document=False)
+                sent_ids.add(int(end_msg.id))
+                reply_anchor = int(end_msg.id)
+            request_message = await client.send_message(target, request.prompt_text, reply_to=reply_anchor)
+            sent_ids.add(int(request_message.id))
+            last_info = ""
+            if request.prompt_shortened:
+                last_info = (
+                    f"Prompt exceeded Syntax limit ({_syntax_prompt_max_chars()} chars) "
+                    "and was shortened with Gemini before send."
+                )
+            request_runtime.append((request, reply_anchor, sent_ids, last_info))
+
+        deadline = time.monotonic() + timeout
+        pending_states = {
+            request.key: {
+                "request": request,
+                "reply_anchor": reply_anchor,
+                "sent_ids": sent_ids,
+                "processed": set(sent_ids),
+                "pending_refetch": set(),
+                "last_holder": [last_info],
+            }
+            for request, reply_anchor, sent_ids, last_info in request_runtime
+        }
+
+        async def _consume_for_batch_message(message: Any) -> None:
+            if message is None or getattr(message, "out", False):
+                return
+            for key in list(pending_states.keys()):
+                state = pending_states.get(key)
+                if state is None:
+                    continue
+                mid = int(getattr(message, "id", 0) or 0)
+                if mid <= state["reply_anchor"] or mid in state["processed"]:
+                    continue
+                out = await _process_bot_message(
+                    client,
+                    message=message,
+                    sent_ids=state["sent_ids"],
+                    expected_lang_token=state["request"].expected_lang_token,
+                )
+                if out is None:
+                    continue
+                vbytes, vuri, pmsg, retry_later, hard_reject = out
+                if hard_reject:
+                    state["processed"].add(mid)
+                    state["pending_refetch"].discard(mid)
+                    combined = (
+                        f"{pmsg}\n\n"
+                        "Syntax не вернул видео. Можно повторить с другим промптом или использовать основной пайплайн (Vertex)."
+                    ).strip()
+                    results[key] = _result(
+                        success=False,
+                        video_bytes=None,
+                        video_uri=None,
+                        provider_message=combined[:8000],
+                        attempt_id=state["request"].attempt_id,
+                    )
+                    pending_states.pop(key, None)
+                    return
+                if vbytes or vuri:
+                    state["processed"].add(mid)
+                    state["pending_refetch"].discard(mid)
+                    msg_out = " ".join(x for x in (pmsg, state["last_holder"][0]) if x).strip()
+                    results[key] = _result(
+                        success=True,
+                        video_bytes=vbytes,
+                        video_uri=vuri,
+                        provider_message=msg_out or (pmsg or "Syntax fallback ok."),
+                        attempt_id=state["request"].attempt_id,
+                    )
+                    pending_states.pop(key, None)
+                    return
+                if retry_later:
+                    state["pending_refetch"].add(mid)
+                    if pmsg:
+                        state["last_holder"][0] = pmsg
+                    return
+                state["processed"].add(mid)
+                state["pending_refetch"].discard(mid)
+                if pmsg:
+                    state["last_holder"][0] = pmsg
+                return
+
+        while pending_states and time.monotonic() < deadline:
+            latest_raw = await client.get_messages(target, limit=1)
+            latest = _first_message_from_get_messages(latest_raw)
+            await _consume_for_batch_message(latest)
+            async for msg in client.iter_messages(target, limit=40):
+                await _consume_for_batch_message(msg)
+                if not pending_states:
+                    break
+            for key in list(pending_states.keys()):
+                state = pending_states.get(key)
+                if state is None:
+                    continue
+                for mid in list(state["pending_refetch"]):
+                    if mid in state["processed"]:
+                        state["pending_refetch"].discard(mid)
+                        continue
+                    batch = await client.get_messages(target, ids=mid)
+                    fresh = _first_message_from_get_messages(batch)
+                    await _consume_for_batch_message(fresh)
+                    if key not in pending_states:
+                        break
+            if pending_states:
+                await asyncio.sleep(poll)
+
+        for key, state in pending_states.items():
+            tail = state["last_holder"][0]
+            results[key] = _result(
+                success=False,
+                video_bytes=None,
+                video_uri=None,
+                provider_message=(
+                    f"Syntax fallback timed out after {timeout}s (poll={poll}s). Last: {tail}".strip()
+                ),
+                attempt_id=state["request"].attempt_id,
+            )
+        return results
+    except sqlite3.OperationalError as exc:
+        provider_message = (
+            "Сессия Telethon занята другим процессом (database is locked). "
+            "Остановите другие процессы с тем же TELETHON_SESSION_PATH/TELETHON_SESSION_PATHS и повторите."
+            if "locked" in str(exc).lower()
+            else f"Syntax Telethon SQLite error: {exc}"
+        )
+        for request in ready:
+            results[request.key] = _result(
+                success=False,
+                video_bytes=None,
+                video_uri=None,
+                provider_message=provider_message,
+                attempt_id=request.attempt_id,
+            )
+        return results
+    except Exception as exc:
+        for request in ready:
+            results[request.key] = _result(
+                success=False,
+                video_bytes=None,
+                video_uri=None,
+                provider_message=f"Syntax fallback transport error: {exc}",
+                attempt_id=request.attempt_id,
+            )
+        return results
+    finally:
+        with contextlib.suppress(Exception):
+            await client.disconnect()
+        _release_syntax_session_candidate(session_candidate)
 
 
 def run_syntax_telethon_fallback(
@@ -709,6 +1157,7 @@ def run_syntax_telethon_fallback(
     start_image: bytes,
     end_image: bytes | None = None,
     timeout_sec: int | None = None,
+    acquire_timeout_sec: int | None = None,
 ) -> Any:
     """Run Syntax fallback transport and return unified fallback result."""
     attempt_id = uuid4().hex
@@ -721,5 +1170,26 @@ def run_syntax_telethon_fallback(
             start_image=start_image,
             end_image=end_image,
             timeout_sec=timeout_sec,
+            acquire_timeout_sec=acquire_timeout_sec,
+        )
+    )
+
+
+def run_syntax_telethon_fallback_batch(
+    *,
+    requests: list[Any],
+    model: str,
+    duration_sec: int,
+    timeout_sec: int | None = None,
+    acquire_timeout_sec: int | None = None,
+) -> dict[str, Any]:
+    """Run one Telethon session that sends multiple Syntax requests before waiting for replies."""
+    return asyncio.run(
+        _run_batch_fallback_async(
+            requests=requests,
+            model=model,
+            duration_sec=duration_sec,
+            timeout_sec=timeout_sec,
+            acquire_timeout_sec=acquire_timeout_sec,
         )
     )

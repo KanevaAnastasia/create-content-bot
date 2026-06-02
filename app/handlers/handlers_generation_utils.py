@@ -44,6 +44,21 @@ _RECIPE_STRONG_MARKERS = (
     "приготовление",
     "способ приготовления",
 )
+_JS_BLOCK_PAGE_MARKERS = (
+    "enable javascript",
+    "javascript is required",
+    "javascript disabled",
+    "turn on javascript",
+    "please enable js",
+    "включите js",
+    "включить js",
+    "необходимо включить js",
+    "поддержку js",
+    "включите javascript",
+    "включить javascript",
+    "необходимо включить javascript",
+    "поддержку javascript",
+)
 
 
 def extract_recipe_from_command_text(raw_text: str) -> str:
@@ -78,10 +93,13 @@ def _decode_response_text(response: Any) -> str:
     """Возвращает HTML с fallback для сайтов в cp1251/windows-1251."""
     content = getattr(response, "content", None)
     if isinstance(content, bytes) and content:
+        head = content[:2048].decode("ascii", errors="ignore")
+        meta_match = re.search(r'(?is)<meta[^>]+charset=["\']?\s*([a-zA-Z0-9._-]+)', head)
+        meta_enc = meta_match.group(1).strip() if meta_match else ""
         enc = str(getattr(response, "encoding", "") or "").strip()
-        candidates = [enc] if enc else []
+        candidates = [meta_enc] if meta_enc else []
         apparent = str(getattr(response, "apparent_encoding", "") or "").strip()
-        candidates.extend([apparent, "utf-8", "cp1251", "windows-1251"])
+        candidates.extend([apparent, enc, "utf-8", "cp1251", "windows-1251"])
         seen: set[str] = set()
         for candidate in candidates:
             c = candidate.lower()
@@ -226,38 +244,84 @@ def _recipe_text_has_core_sections(text: str) -> bool:
     return has_ingredients and has_cooking
 
 
+def _looks_like_js_block_page(text: str) -> bool:
+    """Detects browser/anti-bot placeholders that contain no recipe content."""
+    low = " ".join((text or "").lower().split())
+    if not low:
+        return False
+    marker_count = sum(1 for marker in _JS_BLOCK_PAGE_MARKERS if marker in low)
+    if marker_count == 0:
+        return False
+    return not _recipe_text_has_core_sections(low)
+
+
+def _reader_url_for(url: str) -> str:
+    """Builds a Jina Reader URL for pages that hide content from plain requests."""
+    return "https://" + "r.jina.ai/" + url.strip()
+
+
+def _fetch_url_text(
+    url: str,
+    *,
+    timeout_sec: int,
+    http_get: Any,
+    headers: dict[str, str],
+) -> str:
+    response = http_get(url, timeout=timeout_sec, headers=headers)
+    response.raise_for_status()
+    return _decode_response_text(response)
+
+
 def fetch_recipe_text_from_url(
     url: str,
     *,
     timeout_sec: int = 20,
-    max_chars: int = 3500,
+    max_chars: int = 10000,
     http_get: Any = requests.get,
 ) -> str:
     """Скачивает страницу рецепта и возвращает очищенный текст для согласования с пользователем."""
     if not (url or "").strip():
         raise ValueError("Пустая ссылка.")
-    try:
-        response = http_get(
-            url.strip(),
-            timeout=timeout_sec,
-            headers={
-                "User-Agent": (
-                    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
-                    "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0 Safari/537.36"
-                )
-            },
+    headers = {
+        "User-Agent": (
+            "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+            "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0 Safari/537.36"
         )
-        response.raise_for_status()
+    }
+    used_reader_fallback = False
+    try:
+        html_text = _fetch_url_text(
+            url.strip(),
+            timeout_sec=timeout_sec,
+            http_get=http_get,
+            headers=headers,
+        )
     except requests.RequestException as exc:
         raise RuntimeError("Не удалось загрузить страницу рецепта.") from exc
-    html_text = _decode_response_text(response)
+    if _looks_like_js_block_page(_html_to_plain_text(html_text)):
+        try:
+            html_text = _fetch_url_text(
+                _reader_url_for(url),
+                timeout_sec=timeout_sec,
+                http_get=http_get,
+                headers={**headers, "Accept": "text/plain"},
+            )
+            used_reader_fallback = True
+        except requests.RequestException as exc:
+            raise RuntimeError(
+                "Сайт не отдал текст рецепта без JavaScript. Откройте страницу в браузере и пришлите текст рецепта."
+            ) from exc
     json_ld_recipe = _extract_recipe_from_json_ld(html_text)
     if len(json_ld_recipe) >= 80 and _recipe_text_has_core_sections(json_ld_recipe):
         return unquote(json_ld_recipe[:max_chars]).strip()
     plain = _html_to_plain_text(html_text)
     if not plain.strip():
         raise RuntimeError("По ссылке не найден текст рецепта.")
-    recipe_text = _best_recipe_window(plain, max_chars=max_chars).strip()
+    if _looks_like_js_block_page(plain):
+        raise RuntimeError(
+            "Сайт не отдал текст рецепта без JavaScript. Откройте страницу в браузере и пришлите текст рецепта."
+        )
+    recipe_text = plain[:max_chars].strip() if used_reader_fallback else _best_recipe_window(plain, max_chars=max_chars).strip()
     recipe_text = unquote(recipe_text)
     if len(recipe_text) < 80:
         raise RuntimeError("По ссылке найдено слишком мало текста рецепта.")

@@ -22,6 +22,9 @@ from typing import Any
 
 _VIDEO_RESULT_META = threading.local()
 logger = logging.getLogger("bot.video")
+_DEFAULT_VIDEO_OPERATION_TIMEOUT_SEC = 15 * 60
+_MIN_VIDEO_OPERATION_TIMEOUT_SEC = 60
+_MAX_VIDEO_OPERATION_TIMEOUT_SEC = 60 * 60
 
 
 def _read_file_bytes(path: str) -> bytes:
@@ -45,7 +48,7 @@ def _normalize_quality(quality: str) -> str:
         return "1080p"
     if q in {"720", "720p"}:
         return "720p"
-    return "1080p"
+    return "720p"
 
 
 def _bool_from_text(value: str) -> bool:
@@ -70,6 +73,18 @@ def _required_env(name: str) -> str:
     if not value:
         raise RuntimeError(f"Missing required env variable: {name}")
     return value
+
+
+def _resolve_video_operation_timeout_sec() -> int:
+    """Resolve the maximum wait for one Vertex video operation."""
+    raw = (os.getenv("VERTEX_VIDEO_OPERATION_TIMEOUT_SEC") or "").strip()
+    if not raw:
+        return _DEFAULT_VIDEO_OPERATION_TIMEOUT_SEC
+    try:
+        value = int(raw)
+    except ValueError:
+        return _DEFAULT_VIDEO_OPERATION_TIMEOUT_SEC
+    return max(_MIN_VIDEO_OPERATION_TIMEOUT_SEC, min(value, _MAX_VIDEO_OPERATION_TIMEOUT_SEC))
 
 
 def _resolve_model(model: str) -> str:
@@ -502,7 +517,7 @@ def generate_video_via_vertex(
     duration_sec: int,
     start_image: bytes,
     end_image: bytes | None = None,
-    quality: str = "1080",
+    quality: str = "720",
     aspect_ratio: str = "9:16",
     audio_enabled: bool = True,
     location: str | None = None,
@@ -547,7 +562,7 @@ def generate_video_via_vertex(
     )
 
     predict_url = _build_predict_url(project=project, location=location, model=model_id)
-    predict_resp = _post_predict_long_running(url=predict_url, payload=payload)
+    predict_resp = _post_predict_long_running(url=predict_url, payload=payload, request_id=request_id)
     op_name = str(predict_resp.get("name", "")).strip()
     if not op_name:
         raise RuntimeError(f"Vertex did not return operation name. Response: {_to_compact_json(predict_resp)}")
@@ -557,6 +572,8 @@ def generate_video_via_vertex(
         project=project,
         location=location,
         model=model_id,
+        timeout_sec=_resolve_video_operation_timeout_sec(),
+        request_id=request_id,
     )
     result = _extract_video_bytes_from_response(final_response)
     logger.info(
@@ -580,7 +597,7 @@ def main() -> int:
     parser.add_argument("--end", default="", help="Path to optional end frame PNG/JPG")
     parser.add_argument("--model", default="veo-3.1-fast-generate-001", help="Model ID")
     parser.add_argument("--duration", required=True, type=int, help="Duration in seconds")
-    parser.add_argument("--quality", default="1080")
+    parser.add_argument("--quality", default="720")
     parser.add_argument("--aspect", dest="aspect_ratio", default="9:16")
     parser.add_argument("--audio", default="true", help="true/false")
     parser.add_argument("--out", required=True, help="Path to resulting MP4")

@@ -15,6 +15,7 @@
 
 import logging
 import os
+import re
 from logging.handlers import RotatingFileHandler
 
 from app.bot_app import build_application
@@ -22,6 +23,41 @@ from app.constants import TOKEN_ENV_NAME
 from app.db import DATABASE_URL_ENV_NAME, health_check
 from app.env_utils import load_env_file
 from app.llm_logging import get_llm_io_logger
+
+import fcntl
+import sys
+from pathlib import Path
+
+_LOCK_FILE = Path("/tmp/content_fabric_bot.lock")
+_LOCK_FD = _LOCK_FILE.open("w")
+
+try:
+    fcntl.flock(_LOCK_FD, fcntl.LOCK_EX | fcntl.LOCK_NB)
+except BlockingIOError:
+    print("Bot is already running. Exiting.")
+    sys.exit(1)
+
+
+_TELEGRAM_BOT_TOKEN_RE = re.compile(r"/bot\d+:[^/\s\"']+")
+
+
+class _SecretRedactionFilter(logging.Filter):
+    """Redacts secrets that can appear inside third-party log messages."""
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        message = record.getMessage()
+        redacted = _TELEGRAM_BOT_TOKEN_RE.sub("/bot<redacted>", message)
+        if redacted != message:
+            record.msg = redacted
+            record.args = ()
+        return True
+
+
+class _RedactingFormatter(logging.Formatter):
+    """Formatter-level redaction, so handler output is scrubbed even after formatting."""
+
+    def format(self, record: logging.LogRecord) -> str:
+        return _TELEGRAM_BOT_TOKEN_RE.sub("/bot<redacted>", super().format(record))
 
 
 def _configure_logging() -> None:
@@ -36,12 +72,15 @@ def _configure_logging() -> None:
     root = logging.getLogger()
     root.setLevel(logging.INFO)
     root.handlers.clear()
+    redaction_filter = _SecretRedactionFilter()
+    root.addFilter(redaction_filter)
 
-    fmt = logging.Formatter("%(asctime)s | %(levelname)s | %(name)s | %(message)s")
+    fmt = _RedactingFormatter("%(asctime)s | %(levelname)s | %(name)s | %(message)s")
 
     console = logging.StreamHandler()
     console.setLevel(logging.INFO)
     console.setFormatter(fmt)
+    console.addFilter(redaction_filter)
     root.addHandler(console)
 
     logs_dir = os.getenv("BOT_LOG_DIR", "logs").strip() or "logs"
@@ -55,6 +94,7 @@ def _configure_logging() -> None:
     )
     all_file.setLevel(logging.INFO)
     all_file.setFormatter(fmt)
+    all_file.addFilter(redaction_filter)
     root.addHandler(all_file)
 
     err_file = RotatingFileHandler(
@@ -65,6 +105,7 @@ def _configure_logging() -> None:
     )
     err_file.setLevel(logging.ERROR)
     err_file.setFormatter(fmt)
+    err_file.addFilter(redaction_filter)
     root.addHandler(err_file)
 
     media_file = RotatingFileHandler(
@@ -75,6 +116,7 @@ def _configure_logging() -> None:
     )
     media_file.setLevel(logging.INFO)
     media_file.setFormatter(fmt)
+    media_file.addFilter(redaction_filter)
     media_file.addFilter(
         lambda record: record.name.startswith("bot.image") or record.name.startswith("bot.video")
     )
@@ -92,6 +134,7 @@ def _configure_logging() -> None:
     )
     llm_file.setLevel(logging.INFO)
     llm_file.setFormatter(fmt)
+    llm_file.addFilter(redaction_filter)
     llm_logger.addHandler(llm_file)
 
 

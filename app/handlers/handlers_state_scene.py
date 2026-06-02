@@ -71,6 +71,7 @@ from .handlers_state_commands import (
     PROJECT_BUTTON_BACK,
     PROJECT_KEY_GRANDMA_CAT_COOKING,
     PROJECT_KEY_SESSION,
+    PROJECT_LEGACY_LABEL_GRANDMA_CAT_COOKING,
     PROJECT_LABEL_GRANDMA_CAT_COOKING,
     first_step_menu_markup,
     project_choice_markup,
@@ -90,6 +91,7 @@ from .handlers_state_media import (
     _handle_waiting_scene_media_state,
     _handle_waiting_social_descriptions_approval_state,
 )
+from ..character_catalog import format_character_short_descriptions
 
 
 async def _reply_text_with_optional_markup(update: Update, text: str, reply_markup=None) -> None:
@@ -285,7 +287,8 @@ def project_image_character_markup(selected: list[str]):
 
 
 def _project_image_character_summary(characters: list[str]) -> str:
-    return ", ".join(characters) if characters else ", ".join(_PROJECT_IMAGE_BASE_CHARACTERS)
+    source = characters if characters else list(_PROJECT_IMAGE_BASE_CHARACTERS)
+    return format_character_short_descriptions([str(x) for x in source]) or ", ".join(source)
 
 
 async def _generate_project_image(
@@ -335,6 +338,21 @@ def _reset_first_step_session(chat_id: int, session: dict) -> None:
         "state": "",
         "target_languages": target_languages,
     }
+
+
+def _is_first_step_menu_button(text: str) -> bool:
+    """Проверяет, что текст пришёл из меню первого шага."""
+    low = (text or "").strip().lower()
+    project_image_button = FIRST_STEP_BUTTON_PROJECT_IMAGE.lower()
+    return low in {
+        FIRST_STEP_BUTTON_GENERATE.lower(),
+        FIRST_STEP_BUTTON_DESCRIPTION.lower(),
+        FIRST_STEP_BUTTON_IMAGE.lower(),
+        FIRST_STEP_BUTTON_SOUND.lower(),
+        FIRST_STEP_BUTTON_VIDEO.lower(),
+        FIRST_STEP_BUTTON_PROJECT.lower(),
+        project_image_button,
+    } or low.startswith(f"{project_image_button} ")
 
 
 def _drop_step_outputs_from(session: dict, step: str) -> None:
@@ -877,6 +895,7 @@ async def _handle_scene_approval_refine(update: Update, context: ContextTypes.DE
                 sponsored_content=bool(session.get("sponsored_content")),
                 brand_context=session.get("brand_context"),
                 analytics_feedback=session.get("analytics_feedback"),
+                romantic_drama_subplot=session.get("romantic_drama_subplot"),
             ),
         )
     except ServiceUnavailableRetriesExhaustedError as e:
@@ -885,6 +904,7 @@ async def _handle_scene_approval_refine(update: Update, context: ContextTypes.DE
         logger.exception("scene regeneration failed"); await update.message.reply_text(f"Ошибка перегенерации сцен: {_user_error_message(e)}"); session["state"] = STATE_WAITING_SCENE_APPROVAL; return True
     session["state"] = STATE_WAITING_SCENE_APPROVAL
     session["viral_concept_brief"] = scenes.get("viral_concept_brief") or session.get("viral_concept_brief") or {}
+    session["romantic_drama_subplot"] = scenes.get("romantic_drama_subplot") or {}
     session["retention_review"] = scenes.get("retention_review") or {}
     session["scenes_plan"] = scenes["json_plan"]
     session["scenes_text"] = scenes["text_plan"]
@@ -1012,7 +1032,7 @@ async def on_photo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             duration_sec=duration_sec,
             start_image=source_image,
             end_image=None,
-            quality="1080",
+            quality="720",
             aspect_ratio="9:16",
             audio_enabled=True,
         )
@@ -1022,7 +1042,7 @@ async def on_photo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         return
     vb = io.BytesIO(video_bytes)
     vb.name = "video.mp4"
-    await update.message.reply_video(video=vb, caption=f"Видео готово ({duration_sec} сек, 9:16, 1080, audio).")
+    await update.message.reply_video(video=vb, caption=f"Видео готово ({duration_sec} сек, 9:16, 720, audio).")
     if get_last_video_result_source() == "uri":
         uri = get_last_video_result_uri() or "gs://..."
         await update.message.reply_text(f"Источник результата: video URI ({uri}).")
@@ -1044,6 +1064,10 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         return
     state = str(session.get("state") or "")
     low = text.lower().strip()
+    if state == STATE_READY_FOR_PRODUCTION and _is_first_step_menu_button(text):
+        _reset_first_step_session(chat_id, session)
+        session = SESSIONS.get(chat_id) or {}
+        state = str(session.get("state") or "")
 
     first_step_states = {
         "",
@@ -1248,7 +1272,7 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             )
             return
         if state == _STATE_WAITING_FIRST_STEP_PROJECT_SELECTION:
-            if text.strip() == PROJECT_LABEL_GRANDMA_CAT_COOKING:
+            if text.strip() in {PROJECT_LABEL_GRANDMA_CAT_COOKING, PROJECT_LEGACY_LABEL_GRANDMA_CAT_COOKING}:
                 session[PROJECT_KEY_SESSION] = PROJECT_KEY_GRANDMA_CAT_COOKING
                 session["state"] = ""
                 SESSIONS[chat_id] = session

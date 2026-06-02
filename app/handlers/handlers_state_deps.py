@@ -60,6 +60,7 @@ from .handlers_generation_utils import (
 )
 
 from .handlers_media_core import (
+    _attempt_syntax_video_fallback_batch,
     ServiceUnavailableRetriesExhaustedError,
     SyntaxFallbackPendingConfirmation,
     _bump_debounce_generation,
@@ -101,13 +102,16 @@ from .handlers_media_scene import (
     SCENE_MEDIA_SUBSTEP_START,
     SCENE_MEDIA_SUBSTEP_START_IMAGE_APPROVAL,
     SCENE_MEDIA_SUBSTEP_VIDEO,
+    SCENE_MEDIA_UPGRADE_IMAGE_MODEL_BUTTON,
     _append_reference_style_to_image_prompt,
     _append_scene_identity_to_image_prompt,
     _end_frame_delta_instruction,
     _extract_format_or_feedback,
     _extract_prompt_override,
     _generate_image_with_lenient_fallback,
+    _generate_image_with_lenient_fallback_result,
     _load_scene_reference_images,
+    _next_image_quality_model,
     _regenerate_end_frame_prompt_from_feedback,
     _rewrite_video_prompt_by_format_instruction,
     _scene_needs_end_frame_step,

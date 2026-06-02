@@ -1,8 +1,10 @@
 import asyncio
 import re
+from types import SimpleNamespace
 from telegram import ReplyKeyboardMarkup, ReplyKeyboardRemove
 from telegram.error import NetworkError, RetryAfter, TimedOut
 
+from ..character_catalog import sanitize_character_names_and_keys
 from .handlers_state_deps import (
     ContextTypes,
     SESSIONS,
@@ -18,11 +20,13 @@ from .handlers_state_deps import (
     SCENE_MEDIA_SUBSTEP_START,
     SCENE_MEDIA_SUBSTEP_START_IMAGE_APPROVAL,
     SCENE_MEDIA_SUBSTEP_VIDEO,
+    SCENE_MEDIA_UPGRADE_IMAGE_MODEL_BUTTON,
     STATE_READY_FOR_PRODUCTION,
     SyntaxFallbackPendingConfirmation,
     Update,
     _append_reference_style_to_image_prompt,
     _append_scene_identity_to_image_prompt,
+    _attempt_syntax_video_fallback_batch,
     _call_with_503_retries,
     _decode_b64,
     _encode_b64,
@@ -32,6 +36,7 @@ from .handlers_state_deps import (
     enforce_video_prompt_voice_requirements,
     encode_syntax_fallback_pending_for_session,
     _generate_image_with_lenient_fallback,
+    _generate_image_with_lenient_fallback_result,
     _generate_video_bytes_with_high_load_retry,
     _image_end_scene_prompt,
     _image_scene_prompt,
@@ -39,6 +44,7 @@ from .handlers_state_deps import (
     _is_video_prompt_filtered_error,
     _is_video_safety_error,
     _load_scene_reference_images,
+    _next_image_quality_model,
     _regenerate_end_frame_prompt_from_feedback,
     _regenerate_video_prompt_from_error,
     _rewrite_video_prompt_by_format_instruction,
@@ -69,6 +75,7 @@ from ..ai_approval_service import (
     AI_APPROVAL_STATUS_REGENERATE_IMAGE,
     AI_APPROVAL_STATUS_REGENERATE_VIDEO,
     ai_approval_history_entry,
+    check_scene_prompts,
     check_start_frame,
     check_video,
     format_ai_approval_summary,
@@ -80,6 +87,7 @@ from ..llm_utils import extract_json_object
 from ..multilingual import normalize_language_code
 from ..scene_speech_budget import max_speech_chars_for_duration, speech_chars_excluding_pauses
 from ..scene_speech_shorten import shorten_scene_speech_and_sync_video_prompt_sync
+from ..syntax_video_fallback import BatchFallbackRequest
 
 SCENE_SPEECH_WAIT_TIMEOUT_SEC = 600
 SCENE_SPEECH_OPTION_RETRY = "Перегенерировать ещё раз"
@@ -94,7 +102,11 @@ STATE_WAITING_SOCIAL_DESCRIPTIONS_APPROVAL = "waiting_social_descriptions_approv
 STATE_REFINING_SOCIAL_DESCRIPTIONS = "refining_social_descriptions"
 SOCIAL_DESCRIPTIONS_PENDING_KEY = "social_descriptions_pending"
 SCENE_IMAGE_EDIT_PENDING_KEY = "scene_image_edit_pending"
+SCENE_VIDEO_FEEDBACK_PENDING_KEY = "scene_video_feedback_pending"
 SCENE_MEDIA_AI_HUMAN_REVIEW_SESSION_KEY = "scene_media_ai_human_review"
+START_IMAGE_MODEL_KEY = "start_frame_image_model"
+END_IMAGE_MODEL_KEY = "end_frame_image_model"
+EDITED_IMAGE_MODEL_KEY = "edited_image_model"
 SOCIAL_FIXED_HASHTAGS_RU = ["#убабушкивкуснее", "#бабушкинырецепты", "#рецепты"]
 SOCIAL_FIXED_HASHTAGS_EN = ["#grandmatastesbetter", "#grandmasrecipes", "#recipes"]
 _SCENE_SPEECH_TIMEOUT_TASKS: dict[int, asyncio.Task[None]] = {}
@@ -102,6 +114,74 @@ NAV_BUTTON_PREVIOUS_STEP = "Предыдущий шаг"
 NAV_BUTTON_START_OVER = "В начало"
 _SEND_RETRY_ATTEMPTS = 3
 _SEND_RETRY_BASE_DELAY_SEC = 1.0
+
+
+def _scene_image_model_key(target: str) -> str:
+    return END_IMAGE_MODEL_KEY if target == "end" else START_IMAGE_MODEL_KEY
+
+
+def _scene_image_model_for_generation(scene: dict, target: str) -> str | None:
+    return str(scene.get(_scene_image_model_key(target)) or "").strip() or None
+
+
+def _store_scene_image_model(scene: dict, target: str, model: str | None) -> None:
+    if model:
+        scene[_scene_image_model_key(target)] = str(model).strip()
+
+
+def _escalate_scene_image_model(scene: dict, target: str) -> str | None:
+    key = _scene_image_model_key(target)
+    current = str(scene.get(key) or "").strip() or None
+    if not current:
+        return None
+    upgraded = _next_image_quality_model(current)
+    if upgraded and upgraded != current:
+        scene[key] = upgraded
+        return upgraded
+    return None
+
+
+def _can_escalate_scene_image_model(scene: dict, target: str) -> bool:
+    current = _scene_image_model_for_generation(scene, target)
+    upgraded = _next_image_quality_model(current)
+    return bool(current and upgraded and upgraded != current)
+
+
+def _prepare_ai_image_retry_model_message(scene: dict, target: str) -> str:
+    upgraded_model = _escalate_scene_image_model(scene, target)
+    if upgraded_model:
+        return f" Повышаю модель до `{upgraded_model}` и перегенерирую."
+    current = _scene_image_model_for_generation(scene, target)
+    if current:
+        return f" Следующая попытка на той же модели `{current}`."
+    return " Следующая попытка на текущем профиле генерации."
+
+
+async def _generate_scene_image_result(
+    prompt: str,
+    *,
+    reference_images: list[bytes] | None,
+    model: str | None,
+):
+    # Tests and a few legacy imports monkeypatch the bytes-only helper. Keep that
+    # hook alive while production uses the richer result API.
+    if getattr(_generate_image_with_lenient_fallback, "__module__", "") != "app.handlers.handlers_media_scene":
+        try:
+            data = await _generate_image_with_lenient_fallback(
+                prompt,
+                reference_images=reference_images,
+                model=model,
+            )
+        except TypeError as e:
+            if "model" not in str(e):
+                raise
+            data = await _generate_image_with_lenient_fallback(prompt, reference_images=reference_images)
+        return SimpleNamespace(data=data, model=model)
+    return await _generate_image_with_lenient_fallback_result(
+        prompt,
+        reference_images=reference_images,
+        model=model,
+    )
 _PROMPT_PREVIEW_MAX_LEN = 3500
 
 
@@ -289,16 +369,17 @@ def _scene_description(scene: dict) -> str:
         str(scene.get("action") or "").strip(),
         str(scene.get("recipe_step") or "").strip(),
         str(scene.get("text") or "").strip(),
+        str(scene.get("romantic_drama_beat") or "").strip(),
     ]
     generic_fragments = (
         "выполняет следующий кулинарный шаг",
         "кот активно взаимодействует с едой",
     )
-    return "\n".join(
+    return sanitize_character_names_and_keys("\n".join(
         p
         for p in parts
         if p and not any(fragment in p.lower() for fragment in generic_fragments)
-    )
+    ))
 
 
 async def _send_ai_approval_summary(update: Update, result) -> None:
@@ -328,6 +409,63 @@ async def _run_ai_start_frame_check(
         config=cfg,
     )
     _append_ai_approval_history(scene, result, stage="image")
+    await _send_ai_approval_summary(update, result)
+    return result.status
+
+
+async def _run_ai_prompt_check(
+    update: Update,
+    *,
+    session: dict,
+    scene: dict,
+    idx: int,
+    start_frame_prompt: str,
+) -> str:
+    cfg = get_ai_approval_config()
+    language = str(scene.get("video_prompt_current_language") or "ru").strip() or "ru"
+    result = await asyncio.to_thread(
+        check_scene_prompts,
+        start_frame_prompt=start_frame_prompt,
+        end_frame_prompt=_image_end_scene_prompt(scene),
+        video_prompt=_scene_video_prompt_for_language(scene, language),
+        scene_description=_scene_description(scene),
+        recipe_text=_scene_recipe_text(session, scene),
+        scene_number=scene.get("scene") or idx + 1,
+        expected_characters=[str(x) for x in (scene.get("characters") or [])],
+        config=cfg,
+    )
+    _append_ai_approval_history(scene, result, stage="prompt")
+    await _send_ai_approval_summary(update, result)
+    return result.status
+
+
+async def _run_ai_end_frame_check(
+    update: Update,
+    *,
+    session: dict,
+    scene: dict,
+    idx: int,
+    image_bytes: bytes,
+    start_bytes: bytes,
+) -> str:
+    cfg = get_ai_approval_config()
+    references = [start_bytes]
+    references.extend(_load_scene_reference_images(scene, include_location=False))
+    result = await asyncio.to_thread(
+        check_start_frame,
+        image_bytes=image_bytes,
+        scene_prompt=str(scene.get("end_frame_prompt") or scene.get("end_frame_prompt_ru") or "").strip(),
+        scene_description=_scene_description(scene),
+        recipe_text=_scene_recipe_text(session, scene),
+        scene_number=scene.get("scene") or idx + 1,
+        previous_reference_images=references,
+        expected_characters=[str(x) for x in (scene.get("characters") or [])],
+        expected_objects=[],
+        style_requirements="colorful cartoon style, soft stylized shading, non realistic rendering, warm cozy lighting",
+        frame_kind="end",
+        config=cfg,
+    )
+    _append_ai_approval_history(scene, result, stage="end_image")
     await _send_ai_approval_summary(update, result)
     return result.status
 
@@ -372,6 +510,16 @@ def _extract_image_edit_instruction(text: str) -> str | None:
     return None
 
 
+def _is_empty_feedback_command(text: str) -> bool:
+    return str(text or "").strip().lower().rstrip(":").strip() in {"фидбек", "feedback", "формат", "format"}
+
+
+async def _ask_for_feedback_text(update: Update, target: str = "шаге") -> None:
+    await update.message.reply_text(
+        f"Напишите, что исправить на этом {target} (можно `ФИДБЕК: ...`)."
+    )
+
+
 def _set_scene_image_edit_pending(session: dict, *, scene_idx: int, target: str) -> None:
     session[SCENE_IMAGE_EDIT_PENDING_KEY] = {"scene_idx": scene_idx, "target": target}
 
@@ -390,8 +538,29 @@ def _pop_scene_image_edit_pending(session: dict, *, scene_idx: int) -> dict | No
     return pending
 
 
+def _set_scene_video_feedback_pending(session: dict, *, scene_idx: int, language: str | None = None) -> None:
+    session[SCENE_VIDEO_FEEDBACK_PENDING_KEY] = {
+        "scene_idx": int(scene_idx),
+        "language": normalize_language_code(str(language or "")) or "",
+    }
+
+
+def _pop_scene_video_feedback_pending(session: dict, *, scene_idx: int) -> dict | None:
+    pending = session.get(SCENE_VIDEO_FEEDBACK_PENDING_KEY)
+    if not isinstance(pending, dict):
+        return None
+    try:
+        pending_idx = int(pending.get("scene_idx", -1))
+    except Exception:
+        pending_idx = -1
+    if pending_idx != int(scene_idx):
+        return None
+    session.pop(SCENE_VIDEO_FEEDBACK_PENDING_KEY, None)
+    return pending
+
+
 def _clean_social_copy_message(text: str) -> str:
-    clean = str(text or "").strip()
+    clean = sanitize_character_names_and_keys(text).strip()
     clean = clean.replace("—", ", ").replace("–", ", ")
     clean = clean.replace('"', "").replace("«", "").replace("»", "")
     clean = clean.replace("```", "'''")
@@ -995,6 +1164,19 @@ def _set_scene_video_prompt_for_language(scene: dict, language: str, prompt: str
         scene["video_prompt"] = prompt
 
 
+def _set_scene_video_prompt_for_all_languages(session: dict, scene: dict, prompt: str) -> list[str]:
+    """Apply one base video prompt to every scene language, preserving each language phrase."""
+    languages = _scene_target_languages(session, scene)
+    for lang in languages:
+        _set_scene_video_prompt_for_language(
+            scene,
+            lang,
+            _compose_locked_video_prompt(scene, lang, prompt),
+        )
+        _invalidate_scene_language_video(scene, lang)
+    return languages
+
+
 def _set_scene_speech_for_language(scene: dict, language: str, text: str) -> None:
     """Store phrase in multilingual map and legacy text field."""
     speech_map = scene.get("speech_by_lang")
@@ -1022,9 +1204,9 @@ def _compose_locked_video_prompt(scene: dict, language: str, prompt: str) -> str
     """
     Build final prompt while locking phrase in CHARACTERS SPEAKS.
 
-    Prompt edits (`ПРОМПТ`/`ИСПРАВЬ`/`ФИДБЕК`) must not alter spoken phrase.
+    Prompt edits (`ПРОМПТ`/`ФИДБЕК`) must not alter spoken phrase.
     """
-    out = enforce_video_prompt_voice_requirements(prompt, scene, target_language=language)
+    out = enforce_video_prompt_voice_requirements(sanitize_character_names_and_keys(prompt), scene, target_language=language)
     speech = _scene_speech_for_language(scene, language)
     if speech:
         out = _sync_scene_text_into_video_prompt(out, speech)
@@ -1127,18 +1309,34 @@ def _apply_scene_phrase_update_to_scene(
     return phrase
 
 
-async def _translate_scene_phrase_adaptive(source_text: str, target_language: str) -> str:
+async def _translate_scene_phrase_adaptive(
+    source_text: str,
+    target_language: str,
+    *,
+    feedback: str = "",
+    previous_translation: str = "",
+) -> str:
     """Adaptive phrase translation via LLM for dubbing line."""
     target = normalize_language_code(target_language) or "en"
     if target == "ru":
         return source_text.strip()
+    feedback_block = ""
+    if previous_translation.strip() or feedback.strip():
+        feedback_block = (
+            "\nPREVIOUS TRANSLATION CANDIDATE:\n"
+            f"{previous_translation.strip() or '(none)'}\n\n"
+            "USER FEEDBACK FOR NEW ATTEMPT:\n"
+            f"{feedback.strip() or '(none)'}\n"
+        )
     prompt = (
         "Translate phrase for short cooking video dubbing.\n"
         f"Target language code: {target}.\n"
         "Translation must be adaptive and natural for spoken voiceover.\n"
         "Keep pauses and emotional accents if present.\n"
+        "If user feedback is provided, revise the translation according to that feedback.\n"
         "Return only translated phrase.\n\n"
         f"SOURCE:\n{source_text.strip()}\n"
+        f"{feedback_block}"
     )
     raw = await asyncio.to_thread(gemini_generate_sync, prompt)
     out = (raw or "").strip()
@@ -1340,7 +1538,7 @@ def _set_scene_policy_candidate(scene: dict, language: str, prompt: str) -> None
 
 
 def _parse_lang_payload_command(text: str, keyword: str) -> tuple[str, str] | None:
-    """Parse commands like 'ПРОМПТ en: ...' or 'ИСПРАВЬ en: ...'."""
+    """Parse commands like 'ПРОМПТ en: ...' or legacy language-specific feedback."""
     raw = (text or "").strip()
     lower = raw.lower()
     if not lower.startswith(keyword):
@@ -1389,6 +1587,54 @@ def _prefix_video_prompt_with_language(prompt: str, language: str) -> str:
     if first_low.startswith("lang:") or first_low.startswith("lang="):
         return f"lang:{code} {body}".strip()
     return f"lang:{code} {clean}".strip()
+
+
+async def _apply_scene_video_feedback(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+    *,
+    chat_id: int,
+    session: dict,
+    scene: dict,
+    idx: int,
+    feedback: str,
+    language: str | None = None,
+) -> bool:
+    feedback_text = str(feedback or "").strip()
+    if not feedback_text:
+        await update.message.reply_text('После "ФИДБЕК:" пришлите комментарий, что изменить.')
+        return True
+    languages = _scene_target_languages(session, scene)
+    lang = normalize_language_code(str(language or "")) or _scene_current_language(session, scene)
+    if lang not in languages:
+        lang = languages[0] if languages else "ru"
+    current = _scene_video_prompt_for_language(scene, lang)
+    try:
+        rewritten = await _call_with_503_retries(
+            update,
+            context,
+            chat_id,
+            "rewrite_video_prompt_feedback",
+            lambda: _rewrite_video_prompt_by_format_instruction(current, feedback_text),
+        )
+    except ServiceUnavailableRetriesExhaustedError as e:
+        await update.message.reply_text(str(e))
+        return True
+    except Exception as e:
+        logger.exception("video prompt feedback rewrite failed")
+        await update.message.reply_text(f"Ошибка переформатирования video prompt: {_user_error_message(e)}")
+        return True
+    applied_languages = _set_scene_video_prompt_for_all_languages(session, scene, rewritten)
+    session["scene_media_language_index"] = applied_languages.index(lang) if lang in applied_languages else 0
+    has_generated_videos = _all_scene_languages_have_video(scene, languages)
+    await update.message.reply_text(
+        "Подготовила обновлённый video prompt по фидбэку для языков: "
+        f"{', '.join(applied_languages)}. "
+        + ("Перегенерируйте нужные языки." if has_generated_videos else "Нажмите «ОК», чтобы сгенерировать видео.")
+    )
+    if not has_generated_videos:
+        await _send_next_scene_media_step(update, session)
+    return True
 
 
 async def _handle_scene_media_common_restarts(update: Update, session: dict, scene: dict, text: str) -> bool:
@@ -1454,7 +1700,12 @@ async def _scene_media_start_not_ok(
         await update.message.reply_text("Обновила стартовый промпт вручную.")
         await _send_next_scene_media_step(update, session)
         return True
-    feedback = _extract_format_or_feedback(text) or text
+    if _is_empty_feedback_command(text):
+        await _ask_for_feedback_text(update, "стартовом промпте")
+        return True
+    feedback = _extract_format_or_feedback(text)
+    if feedback is None:
+        feedback = str(text or "").strip()
     if not feedback:
         await update.message.reply_text('После "ФИДБЕК:" пришлите комментарий, что изменить.')
         return True
@@ -1518,7 +1769,13 @@ async def _scene_media_start_ok(
     if not auto_approve:
         await reply_text_without_keyboard(update.message, "Генерируем стартовый кадр, ждите.")
     try:
-        image_bytes = await _generate_image_with_lenient_fallback(prompt, reference_images=scene_refs if scene_refs else None)
+        image_result = await _generate_scene_image_result(
+            prompt,
+            reference_images=scene_refs if scene_refs else None,
+            model=_scene_image_model_for_generation(scene, "start"),
+        )
+        image_bytes = image_result.data
+        _store_scene_image_model(scene, "start", image_result.model)
     except Exception as e:
         logger.exception("vertex image generation failed")
         await update.message.reply_text(f"Ошибка генерации изображения: {e}")
@@ -1553,15 +1810,20 @@ async def _scene_media_start_ok(
         if image_status == AI_APPROVAL_STATUS_REGENERATE_IMAGE:
             if _ai_attempt_count(scene, "image") <= get_ai_approval_config().max_regenerate_attempts:
                 scene.pop("start_frame_image_b64", None)
+                retry_model_message = _prepare_ai_image_retry_model_message(scene, "start")
                 session["scene_media_substep"] = SCENE_MEDIA_SUBSTEP_START
-                await update.message.reply_text("🤖 ИИ апрув просит перегенерировать стартовый фрейм.")
+                await update.message.reply_text(
+                    f"🤖 ИИ апрув просит перегенерировать стартовый фрейм.{retry_model_message}"
+                )
                 return True
         _set_ai_human_review_pending(session, stage="image", reason="image QA requires manual review")
         await update.message.reply_text("ИИ апрув не смог уверенно принять стартовый фрейм, нужна ручная проверка.")
         await _reply_text_with_optional_markup(
             update,
             "Проверьте стартовый кадр вручную.",
-            reply_markup=scene_generated_image_approval_markup(),
+            reply_markup=scene_generated_image_approval_markup(
+                include_model_upgrade=_can_escalate_scene_image_model(scene, "start")
+            ),
         )
         return True
     if auto_approve:
@@ -1572,8 +1834,11 @@ async def _scene_media_start_ok(
         "«ОК» — перейти дальше к видео/конечному кадру.\n"
         "«ИЗМЕНИТЬ» — поправить текущее изображение по вашему описанию.\n"
         "«ФИДБЕК» — пришлите, что исправить, и перегенерирую промпт + изображение.\n"
-        "«ПЕРЕГЕНЕРИРОВАТЬ» — запущу снова с тем же промптом и теми же входными данными.",
-        reply_markup=scene_generated_image_approval_markup(),
+        "«ПЕРЕГЕНЕРИРОВАТЬ» — запущу снова с тем же промптом, входными данными и моделью.\n"
+        "«ПОВЫСИТЬ МОДЕЛЬ» — если доступно, сразу перегенерировать на следующей модели.",
+        reply_markup=scene_generated_image_approval_markup(
+            include_model_upgrade=_can_escalate_scene_image_model(scene, "start")
+        ),
     )
     return True
 
@@ -1596,7 +1861,12 @@ async def _scene_media_end_not_ok(
         await update.message.reply_text("Обновила текст конечного кадра вручную.")
         await _send_next_scene_media_step(update, session)
         return True
-    feedback = _extract_format_or_feedback(text) or text
+    if _is_empty_feedback_command(text):
+        await _ask_for_feedback_text(update, "конечном кадре")
+        return True
+    feedback = _extract_format_or_feedback(text)
+    if feedback is None:
+        feedback = str(text or "").strip()
     if not feedback:
         await update.message.reply_text('После "ФИДБЕК:" пришлите комментарий.')
         return True
@@ -1694,7 +1964,9 @@ async def _scene_media_edit_generated_image(
         "«ИЗМЕНИТЬ» — снова поправить текущее изображение.\n"
         "«ФИДБЕК» — переписать prompt и сгенерировать заново.\n"
         "«ПЕРЕГЕНЕРИРОВАТЬ» — запустить заново с тем же prompt.",
-        reply_markup=scene_generated_image_approval_markup(),
+        reply_markup=scene_generated_image_approval_markup(
+            include_model_upgrade=_can_escalate_scene_image_model(scene, target)
+        ),
     )
     return True
 
@@ -1712,7 +1984,6 @@ async def _scene_media_end_ok(update: Update, *, session: dict, scene: dict, idx
         session["scene_media_substep"] = SCENE_MEDIA_SUBSTEP_START
         await _send_next_scene_media_step(update, session)
         return True
-    scene_refs = _load_scene_reference_images(scene, include_location=False)
     end_full = _append_scene_identity_to_image_prompt(
         _append_reference_style_to_image_prompt(end_prompt, True),
         scene,
@@ -1721,10 +1992,13 @@ async def _scene_media_end_ok(update: Update, *, session: dict, scene: dict, idx
     if not auto_approve:
         await reply_text_without_keyboard(update.message, "Генерируем конечный кадр (референс — стартовый), ждите.")
     try:
-        end_bytes = await _generate_image_with_lenient_fallback(
+        end_result = await _generate_scene_image_result(
             f"{end_full}\n\n{_end_frame_delta_instruction(scene)}",
-            reference_images=[start_bytes, *scene_refs] if scene_refs else [start_bytes],
+            reference_images=[start_bytes],
+            model=_scene_image_model_for_generation(scene, "end"),
         )
+        end_bytes = end_result.data
+        _store_scene_image_model(scene, "end", end_result.model)
     except Exception as e:
         logger.exception("vertex end-frame generation failed")
         await update.message.reply_text(f"Ошибка генерации конечного кадра: {e}")
@@ -1741,6 +2015,37 @@ async def _scene_media_end_ok(update: Update, *, session: dict, scene: dict, idx
     _set_all_scene_languages_approval(scene, _scene_target_languages(session, scene), False)
     session["scene_media_language_index"] = 0
     session["scene_media_substep"] = SCENE_MEDIA_SUBSTEP_END_IMAGE_APPROVAL
+    if _is_scene_media_ai_approve_enabled(session):
+        image_status = await _run_ai_end_frame_check(
+            update,
+            session=session,
+            scene=scene,
+            idx=idx,
+            image_bytes=end_bytes,
+            start_bytes=start_bytes,
+        )
+        if image_status == AI_APPROVAL_STATUS_APPROVE:
+            session["scene_media_substep"] = SCENE_MEDIA_SUBSTEP_VIDEO
+            return True
+        if image_status == AI_APPROVAL_STATUS_REGENERATE_IMAGE:
+            if _ai_attempt_count(scene, "end_image") <= get_ai_approval_config().max_regenerate_attempts:
+                scene.pop("end_frame_image_b64", None)
+                retry_model_message = _prepare_ai_image_retry_model_message(scene, "end")
+                session["scene_media_substep"] = SCENE_MEDIA_SUBSTEP_END
+                await update.message.reply_text(
+                    f"🤖 ИИ апрув просит перегенерировать конечный фрейм.{retry_model_message}"
+                )
+                return True
+        _set_ai_human_review_pending(session, stage="end_image", reason="end image QA requires manual review")
+        await update.message.reply_text("ИИ апрув не смог уверенно принять конечный фрейм, нужна ручная проверка.")
+        await _reply_text_with_optional_markup(
+            update,
+            "Проверьте конечный кадр вручную.",
+            reply_markup=scene_generated_image_approval_markup(
+                include_model_upgrade=_can_escalate_scene_image_model(scene, "end")
+            ),
+        )
+        return True
     if auto_approve:
         return True
     await _reply_text_with_optional_markup(
@@ -1749,8 +2054,11 @@ async def _scene_media_end_ok(update: Update, *, session: dict, scene: dict, idx
         "«ОК» — перейти к видео.\n"
         "«ИЗМЕНИТЬ» — поправить текущее изображение по вашему описанию.\n"
         "«ФИДБЕК» — пришлите, что исправить, и перегенерирую промпт + изображение.\n"
-        "«ПЕРЕГЕНЕРИРОВАТЬ» — запущу снова с тем же промптом и теми же входными данными.",
-        reply_markup=scene_generated_image_approval_markup(),
+        "«ПЕРЕГЕНЕРИРОВАТЬ» — запущу снова с тем же промптом, входными данными и моделью.\n"
+        "«ПОВЫСИТЬ МОДЕЛЬ» — если доступно, сразу перегенерировать на следующей модели.",
+        reply_markup=scene_generated_image_approval_markup(
+            include_model_upgrade=_can_escalate_scene_image_model(scene, "end")
+        ),
     )
     return True
 
@@ -1776,6 +2084,14 @@ async def _scene_media_start_image_approval_step(
     if low in {"перегенерировать", "regen", "regenerate"}:
         session["scene_media_substep"] = SCENE_MEDIA_SUBSTEP_START
         return await _scene_media_start_ok(update, context=context, chat_id=chat_id, session=session, scene=scene, idx=idx)
+    if low in {SCENE_MEDIA_UPGRADE_IMAGE_MODEL_BUTTON.lower(), "upgrade", "upgrade model", "повысить качество"}:
+        upgraded_model = _escalate_scene_image_model(scene, "start")
+        if not upgraded_model:
+            await update.message.reply_text("Модель уже максимальная для текущего профиля. Могу перегенерировать на ней же.")
+            return True
+        await update.message.reply_text(f"Повышаю модель до `{upgraded_model}` и сразу перегенерирую стартовый кадр.")
+        session["scene_media_substep"] = SCENE_MEDIA_SUBSTEP_START
+        return await _scene_media_start_ok(update, context=context, chat_id=chat_id, session=session, scene=scene, idx=idx)
     edit_instruction = _extract_image_edit_instruction(text)
     if edit_instruction is not None:
         return await _scene_media_edit_generated_image(
@@ -1786,10 +2102,12 @@ async def _scene_media_start_image_approval_step(
             target="start",
             instruction=edit_instruction,
         )
-    feedback = _extract_format_or_feedback(text) or text
-    if low in {"фидбек", "feedback"}:
-        await update.message.reply_text("Напишите, что исправить в изображении (можно `ФИДБЕК: ...`).")
+    if _is_empty_feedback_command(text):
+        await _ask_for_feedback_text(update, "изображении")
         return True
+    feedback = _extract_format_or_feedback(text)
+    if feedback is None:
+        feedback = str(text or "").strip()
     if not feedback:
         await update.message.reply_text("Пришлите комментарий, что изменить в изображении.")
         return True
@@ -1834,6 +2152,14 @@ async def _scene_media_end_image_approval_step(
     if low in {"перегенерировать", "regen", "regenerate"}:
         session["scene_media_substep"] = SCENE_MEDIA_SUBSTEP_END
         return await _scene_media_end_ok(update, session=session, scene=scene, idx=idx)
+    if low in {SCENE_MEDIA_UPGRADE_IMAGE_MODEL_BUTTON.lower(), "upgrade", "upgrade model", "повысить качество"}:
+        upgraded_model = _escalate_scene_image_model(scene, "end")
+        if not upgraded_model:
+            await update.message.reply_text("Модель уже максимальная для текущего профиля. Могу перегенерировать на ней же.")
+            return True
+        await update.message.reply_text(f"Повышаю модель до `{upgraded_model}` и сразу перегенерирую конечный кадр.")
+        session["scene_media_substep"] = SCENE_MEDIA_SUBSTEP_END
+        return await _scene_media_end_ok(update, session=session, scene=scene, idx=idx)
     edit_instruction = _extract_image_edit_instruction(text)
     if edit_instruction is not None:
         return await _scene_media_edit_generated_image(
@@ -1844,10 +2170,12 @@ async def _scene_media_end_image_approval_step(
             target="end",
             instruction=edit_instruction,
         )
-    feedback = _extract_format_or_feedback(text) or text
-    if low in {"фидбек", "feedback"}:
-        await update.message.reply_text("Напишите, что исправить в конечном кадре (можно `ФИДБЕК: ...`).")
+    if _is_empty_feedback_command(text):
+        await _ask_for_feedback_text(update, "конечном кадре")
         return True
+    feedback = _extract_format_or_feedback(text)
+    if feedback is None:
+        feedback = str(text or "").strip()
     if not feedback:
         await update.message.reply_text("Пришлите комментарий, что изменить в конечном кадре.")
         return True
@@ -1874,6 +2202,8 @@ async def _scene_media_end_image_approval_step(
 async def _scene_media_video_not_ok(
     update: Update,
     *,
+    context: ContextTypes.DEFAULT_TYPE,
+    chat_id: int,
     session: dict,
     scene: dict,
     text: str,
@@ -1920,13 +2250,28 @@ async def _scene_media_video_not_ok(
         if lang in languages and not payload:
             await update.message.reply_text(f'После "ПРОМПТ {lang}:" пришлите новый video prompt.')
             return True
-    fix_cmd = _parse_lang_payload_command(text, "исправь")
-    if fix_cmd:
-        lang, payload = fix_cmd
+    if _parse_lang_payload_command(text, "фидбек"):
+        lang, _payload = _parse_lang_payload_command(text, "фидбек") or ("", "")
+        if lang in languages:
+            session["scene_media_language_index"] = languages.index(lang)
+            await update.message.reply_text('Используйте общий формат без языка: "ФИДБЕК: комментарий".')
+            return True
+    feedback_cmd = _parse_lang_payload_command(text, "фидбек") or _parse_lang_payload_command(text, "исправь")
+    if feedback_cmd:
+        lang, payload = feedback_cmd
         if lang in languages and payload:
             current = _scene_video_prompt_for_language(scene, lang)
             try:
-                rewritten = await _rewrite_video_prompt_by_format_instruction(current, payload)
+                rewritten = await _call_with_503_retries(
+                    update,
+                    context,
+                    chat_id,
+                    "rewrite_video_prompt_language_feedback",
+                    lambda: _rewrite_video_prompt_by_format_instruction(current, payload),
+                )
+            except ServiceUnavailableRetriesExhaustedError as e:
+                await update.message.reply_text(str(e))
+                return True
             except Exception as e:
                 logger.exception("video prompt language-specific rewrite failed")
                 await update.message.reply_text(
@@ -1939,11 +2284,12 @@ async def _scene_media_video_not_ok(
                 _compose_locked_video_prompt(scene, lang, rewritten),
             )
             session["scene_media_language_index"] = languages.index(lang)
-            await update.message.reply_text(f"Обновила video prompt для {lang} по команде ИСПРАВЬ.")
+            await update.message.reply_text(f"Обновила video prompt для {lang} по фидбеку.")
             await _send_next_scene_media_step(update, session)
             return True
         if lang in languages and not payload:
-            await update.message.reply_text(f'После "ИСПРАВЬ {lang}:" пришлите комментарий.')
+            session["scene_media_language_index"] = languages.index(lang)
+            await update.message.reply_text('Используйте общий формат без языка: "ФИДБЕК: комментарий".')
             return True
     phrase_cmd = _parse_lang_payload_command(text, "фраза")
     if phrase_cmd:
@@ -1997,26 +2343,43 @@ async def _scene_media_video_not_ok(
                 ),
             )
             return True
-        _set_scene_video_prompt_for_language(
-            scene,
-            language,
-            _compose_locked_video_prompt(scene, language, manual),
+        applied_languages = _set_scene_video_prompt_for_all_languages(session, scene, manual)
+        await update.message.reply_text(
+            f"Обновила video prompt вручную для всех языков: {', '.join(applied_languages)}."
         )
-        await update.message.reply_text("Обновила video prompt вручную.")
         await _send_next_scene_media_step(update, session)
         return True
-    feedback = _extract_format_or_feedback(text) or text
+    if _is_empty_feedback_command(text):
+        _set_scene_video_feedback_pending(
+            session,
+            scene_idx=int(session.get("image_scene_index", 0) or 0),
+            language=language,
+        )
+        await _ask_for_feedback_text(update, "video prompt")
+        return True
+    feedback = _extract_format_or_feedback(text)
+    if feedback is None:
+        feedback = str(text or "").strip()
     if not feedback:
         await update.message.reply_text('После "ФИДБЕК:" пришлите комментарий, что изменить.')
         return True
     if pending and _extract_format_or_feedback(text) is not None:
         try:
-            rewritten = await _rewrite_video_prompt_by_format_instruction(pending, feedback)
+            rewritten = await _call_with_503_retries(
+                update,
+                context,
+                chat_id,
+                "rewrite_video_prompt_policy_candidate",
+                lambda: _rewrite_video_prompt_by_format_instruction(pending, feedback),
+            )
             _set_scene_policy_candidate(
                 scene,
                 language,
                 _compose_locked_video_prompt(scene, language, rewritten),
             )
+        except ServiceUnavailableRetriesExhaustedError as e:
+            await update.message.reply_text(str(e))
+            return True
         except Exception as e:
             logger.exception("video prompt format rewrite failed")
             await update.message.reply_text(f"Ошибка переформатирования video prompt: {_user_error_message(e)}")
@@ -2030,17 +2393,24 @@ async def _scene_media_video_not_ok(
         )
         return True
     try:
-        regenerated = await _regenerate_video_prompt_from_error(scene, feedback)
-        _set_scene_video_prompt_for_language(
-            scene,
-            language,
-            _compose_locked_video_prompt(scene, language, regenerated),
+        regenerated = await _call_with_503_retries(
+            update,
+            context,
+            chat_id,
+            "regenerate_video_prompt_from_feedback",
+            lambda: _regenerate_video_prompt_from_error(scene, feedback),
         )
+        applied_languages = _set_scene_video_prompt_for_all_languages(session, scene, regenerated)
+    except ServiceUnavailableRetriesExhaustedError as e:
+        await update.message.reply_text(str(e))
+        return True
     except Exception as e:
         logger.exception("video prompt regeneration failed")
         await update.message.reply_text(f"Ошибка перегенерации video prompt: {_user_error_message(e)}")
         return True
-    await update.message.reply_text("Обновила video prompt по фидбеку (нейросеть).")
+    await update.message.reply_text(
+        f"Обновила video prompt по фидбеку для всех языков: {', '.join(applied_languages)}."
+    )
     await _send_next_scene_media_step(update, session)
     return True
 
@@ -2067,13 +2437,17 @@ async def _maybe_shorten_scene_speech_for_video_budget(
         return False
     spoken_len = speech_chars_excluding_pauses(speech_text)
     if duration_sec < 8:
+        scene["duration_sec"] = 8
+        duration_sec = 8
         max_chars_for_8 = max_speech_chars_for_duration(8)
         if spoken_len <= max_chars_for_8:
-            scene["duration_sec"] = 8
             await update.message.reply_text(
                 "Реплика длиннее лимита для текущей длительности — увеличила видео до 8 сек вместо сокращения фразы."
             )
             return False
+        await update.message.reply_text(
+            "Реплика не помещается в текущую длительность — сначала увеличила видео до 8 сек, затем сокращаю фразу под новый лимит."
+        )
     max_chars = max_speech_chars_for_duration(duration_sec)
     if spoken_len <= max_chars:
         return False
@@ -2204,7 +2578,8 @@ async def _scene_media_video_ok(
     if not pending_languages:
         pending_languages = [normalize_language_code(_scene_current_language(session, scene)) or "ru"]
 
-    async def _generate_for_language(language: str) -> tuple[str, bytes | None, Exception | None]:
+    prompts_by_language: dict[str, str] = {}
+    for language in pending_languages:
         scene["video_prompt_current_language"] = language
         pending = _get_scene_policy_candidate(scene, language)
         if pending:
@@ -2220,12 +2595,25 @@ async def _scene_media_video_ok(
             _scene_video_prompt_for_language(scene, language),
         )
         _set_scene_video_prompt_for_language(scene, language, prompt_local)
+        prompts_by_language[language] = prompt_local
+
+    async def _generate_for_language(
+        language: str,
+        *,
+        syntax_video: bytes | None = None,
+        skip_initial_syntax: bool = False,
+        disable_syntax_fallback: bool = False,
+    ) -> tuple[str, bytes | None, Exception | None]:
+        scene["video_prompt_current_language"] = language
+        prompt_local = prompts_by_language.get(language, "")
         if not prompt_local:
             return language, None, RuntimeError("empty video prompt")
         await update.message.reply_text(
             f"Промпт перед генерацией видео — сцена {idx + 1}/{total}, язык {language}:\n"
             f"{_prompt_preview(prompt_local)}"
         )
+        if syntax_video is not None:
+            return language, syntax_video, None
         try:
             video = await _generate_video_bytes_with_high_load_retry(
                 update,
@@ -2234,9 +2622,11 @@ async def _scene_media_video_ok(
                 duration_sec=duration_sec,
                 start_image=start_bytes,
                 end_image=end_bytes,
-                quality="1080",
+                quality="720",
                 aspect_ratio="9:16",
                 audio_enabled=True,
+                skip_initial_syntax=skip_initial_syntax,
+                disable_syntax_fallback=disable_syntax_fallback,
             )
             return language, video, None
         except Exception as e:
@@ -2246,7 +2636,45 @@ async def _scene_media_video_ok(
         update.message,
         "Генерируем видео параллельно для языков: " + ", ".join(pending_languages),
     )
-    generated = await asyncio.gather(*[_generate_for_language(lang) for lang in pending_languages])
+    syntax_batch_results: dict[str, bytes] = {}
+    if len(pending_languages) > 1:
+        batch_requests = [
+            BatchFallbackRequest(
+                key=language,
+                prompt=prompts_by_language.get(language, ""),
+                start_image=start_bytes,
+                end_image=end_bytes,
+            )
+            for language in pending_languages
+            if prompts_by_language.get(language, "")
+        ]
+        if batch_requests:
+            await reply_text_without_keyboard(
+                update.message,
+                "Сначала отправляю все языки в Syntax одним обработчиком: " + ", ".join(req.key for req in batch_requests),
+            )
+            syntax_batch_results = await _attempt_syntax_video_fallback_batch(
+                requests=batch_requests,
+                model=model,
+                duration_sec=duration_sec,
+            )
+            if syntax_batch_results:
+                await reply_text_without_keyboard(
+                    update.message,
+                    "Syntax already returned: " + ", ".join(sorted(syntax_batch_results)),
+                )
+
+    generated = await asyncio.gather(
+        *[
+            _generate_for_language(
+                lang,
+                syntax_video=syntax_batch_results.get(lang),
+                skip_initial_syntax=bool(syntax_batch_results or len(pending_languages) > 1),
+                disable_syntax_fallback=len(pending_languages) > 1,
+            )
+            for lang in pending_languages
+        ]
+    )
 
     for language, video_bytes, err in generated:
         if video_bytes is not None:
@@ -2266,7 +2694,13 @@ async def _scene_media_video_ok(
         logger.exception("scene video generation failed for language=%s", language, exc_info=err)
         if _is_video_prompt_filtered_error(err) or _is_video_policy_error(err) or _is_video_safety_error(err):
             try:
-                candidate = await _regenerate_video_prompt_from_error(scene, str(err))
+                candidate = await _call_with_503_retries(
+                    update,
+                    context,
+                    chat_id,
+                    "regenerate_video_prompt_policy_error",
+                    lambda: _regenerate_video_prompt_from_error(scene, str(err)),
+                )
                 _set_scene_policy_candidate(
                     scene,
                     language,
@@ -2283,6 +2717,10 @@ async def _scene_media_video_ok(
                     reply_markup=video_policy_retry_markup(
                         include_restart_hint=_should_suggest_regenerate_start_frame_after_video_prompt_fails(scene),
                     ),
+                )
+            except ServiceUnavailableRetriesExhaustedError as rewrite_err:
+                await update.message.reply_text(
+                    f"Видео ({language}) отклонено политиками, а AI временно не смог переписать prompt: {rewrite_err}"
                 )
             except Exception as rewrite_err:
                 logger.exception("video prompt policy rewrite failed")
@@ -2338,7 +2776,7 @@ async def _scene_media_video_ok(
         update,
         "Видео по всем языкам для сцены готовы.\n"
         "Доступные команды: `ОК все`, `ОК <lang>`, `ПРОМПТ <lang>: ...`, "
-        "`ИСПРАВЬ <lang>: ...`, `ФРАЗА <lang>: ...`, `ПЕРЕГЕНЕРИРОВАТЬ <lang>`.\n"
+        "`ФИДБЕК: ...`, `ФРАЗА <lang>: ...`, `ПЕРЕГЕНЕРИРОВАТЬ <lang>`.\n"
         "Переход к следующей сцене произойдёт после апрува всех языков.",
         reply_markup=scene_language_approval_markup(languages),
     )
@@ -2507,15 +2945,20 @@ async def _run_scene_media_ai_approve(
                     )
                 elif image_status == AI_APPROVAL_STATUS_REGENERATE_IMAGE and _ai_attempt_count(scene, "image") <= get_ai_approval_config().max_regenerate_attempts:
                     scene.pop("start_frame_image_b64", None)
+                    retry_model_message = _prepare_ai_image_retry_model_message(scene, "start")
                     session["scene_media_substep"] = SCENE_MEDIA_SUBSTEP_START
-                    await update.message.reply_text("🤖 ИИ апрув просит перегенерировать стартовый фрейм.")
+                    await update.message.reply_text(
+                        f"🤖 ИИ апрув просит перегенерировать стартовый фрейм.{retry_model_message}"
+                    )
                 else:
                     _set_ai_human_review_pending(session, stage="image", reason="image QA requires manual review")
                     await update.message.reply_text("ИИ апрув отправил стартовый фрейм на ручную проверку.")
                     await _reply_text_with_optional_markup(
                         update,
                         "Проверьте стартовый кадр вручную.",
-                        reply_markup=scene_generated_image_approval_markup(),
+                        reply_markup=scene_generated_image_approval_markup(
+                            include_model_upgrade=_can_escalate_scene_image_model(scene, "start")
+                        ),
                     )
                     return True
         elif sub == SCENE_MEDIA_SUBSTEP_END:
@@ -2589,7 +3032,6 @@ async def _handle_scene_syntax_fallback_pending(
     """
     Подтверждение human-in-the-loop для Syntax fallback на шаге video в пошаговых сценах.
     """
-    _ = context, chat_id
     scenes, idx = _scene_media_context(session)
     if not scenes or idx >= len(scenes):
         return False
@@ -2620,7 +3062,13 @@ async def _handle_scene_syntax_fallback_pending(
 
     async def _offer_policy_rewrite_after_syntax_skip() -> None:
         try:
-            candidate = await _regenerate_video_prompt_from_error(scene, err_text)
+            candidate = await _call_with_503_retries(
+                update,
+                context,
+                chat_id,
+                "regenerate_video_prompt_after_syntax_skip",
+                lambda: _regenerate_video_prompt_from_error(scene, err_text),
+            )
             _set_scene_policy_candidate(
                 scene,
                 language,
@@ -2638,6 +3086,8 @@ async def _handle_scene_syntax_fallback_pending(
                     include_restart_hint=_should_suggest_regenerate_start_frame_after_video_prompt_fails(scene),
                 ),
             )
+        except ServiceUnavailableRetriesExhaustedError as rewrite_err:
+            await update.message.reply_text(f"AI временно не смог переписать video prompt: {rewrite_err}")
         except Exception as rewrite_err:
             logger.exception("scene policy rewrite after syntax path failed")
             await update.message.reply_text(
@@ -2791,12 +3241,126 @@ async def _handle_waiting_scene_media_state(
             target="end" if target == "end" else "start",
             instruction=text,
         )
+    video_feedback_pending = _pop_scene_video_feedback_pending(session, scene_idx=idx)
+    if video_feedback_pending is not None:
+        low_pending = (text or "").strip().lower()
+        if low_pending in {"отмена", "cancel", NAV_BUTTON_PREVIOUS_STEP.lower(), NAV_BUTTON_START_OVER.lower()}:
+            await update.message.reply_text("Ок, отменяю ввод фидбэка для video prompt.")
+            await _send_next_scene_media_step(update, session)
+            return True
+        feedback_text = _extract_format_or_feedback(text)
+        if feedback_text is None:
+            feedback_text = str(text or "").strip()
+        return await _apply_scene_video_feedback(
+            update,
+            context,
+            chat_id=chat_id,
+            session=session,
+            scene=scene,
+            idx=idx,
+            feedback=feedback_text,
+            language=str(video_feedback_pending.get("language") or ""),
+        )
     phrase_translation_pending = _get_scene_phrase_translation_pending(session, scene_idx=idx)
     if phrase_translation_pending is not None:
-        choice = syntax_fallback_parse_user_confirmation(text)
         stage = str(phrase_translation_pending.get("stage") or "confirm")
         target_lang = normalize_language_code(str(phrase_translation_pending.get("target_language") or "en")) or "en"
+        source_lang = normalize_language_code(str(phrase_translation_pending.get("source_language") or "ru")) or "ru"
         source_text = str(phrase_translation_pending.get("source_text") or "").strip()
+        if stage == "revision":
+            raw_revision = (text or "").strip()
+            if raw_revision.lower() in {"отмена", "cancel", NAV_BUTTON_PREVIOUS_STEP.lower(), NAV_BUTTON_START_OVER.lower()}:
+                _pop_scene_phrase_translation_pending(session)
+                await update.message.reply_text("Ок, оставляю старую английскую фразу.")
+                await _send_next_scene_media_step(update, session)
+                return True
+            if raw_revision.lower() in {"фидбек", "фидбек:", "формат", "формат:", "фраза", "фраза:"}:
+                await update.message.reply_text(
+                    "Пришлите текст после команды: `ФИДБЕК: что изменить` или `ФРАЗА: новая исходная фраза`."
+                )
+                return True
+            feedback = _extract_format_or_feedback(raw_revision)
+            if feedback is None:
+                feedback = ""
+            new_source_text = ""
+            if raw_revision.lower().startswith("фраза:"):
+                new_source_text = raw_revision.split(":", 1)[1].strip()
+            phrase_cmd = _parse_lang_payload_command(raw_revision, "фраза")
+            if phrase_cmd:
+                lang, payload = phrase_cmd
+                if lang == source_lang:
+                    new_source_text = payload.strip()
+                elif lang == target_lang and payload.strip():
+                    _apply_scene_phrase_update_to_scene(
+                        session,
+                        scene,
+                        scene_idx=idx,
+                        language=target_lang,
+                        phrase_text=payload.strip(),
+                    )
+                    _pop_scene_phrase_translation_pending(session)
+                    await update.message.reply_text(
+                        f"Фразу для {target_lang} обновила вручную. Нажмите «ПЕРЕГЕНЕРИРОВАТЬ {target_lang}»."
+                    )
+                    await _send_next_scene_media_step(update, session)
+                    return True
+            if new_source_text:
+                source_text = new_source_text
+                phrase_translation_pending["source_text"] = source_text
+                _apply_scene_phrase_update_to_scene(
+                    session,
+                    scene,
+                    scene_idx=idx,
+                    language=source_lang,
+                    phrase_text=source_text,
+                )
+            elif not feedback:
+                feedback = raw_revision
+            if not source_text.strip() and not feedback.strip():
+                await update.message.reply_text(
+                    "Пришлите фидбэк к переводу или новую исходную фразу в формате `ФРАЗА: ...`."
+                )
+                return True
+            try:
+                translated = await _call_with_503_retries(
+                    update,
+                    context,
+                    chat_id,
+                    "translate_scene_phrase_adaptive",
+                    lambda: _translate_scene_phrase_adaptive(
+                        source_text,
+                        target_lang,
+                        feedback=feedback,
+                        previous_translation=str(phrase_translation_pending.get("candidate_text") or ""),
+                    ),
+                )
+            except ServiceUnavailableRetriesExhaustedError as e:
+                _pop_scene_phrase_translation_pending(session)
+                await update.message.reply_text(str(e))
+                return True
+            except Exception as e:
+                _pop_scene_phrase_translation_pending(session)
+                logger.exception("adaptive phrase translation retry failed")
+                await update.message.reply_text(
+                    f"Не удалось перевести фразу адаптивно: {_user_error_message(e)}"
+                )
+                return True
+            phrase_translation_pending["candidate_text"] = translated.strip()
+            phrase_translation_pending["stage"] = "approval"
+            session[SCENE_PHRASE_TRANSLATION_PENDING_KEY] = phrase_translation_pending
+            await _reply_text_with_optional_markup(
+                update,
+                "Обновлённый адаптивный перевод на английский:\n"
+                f"{translated}\n\n"
+                "Применить этот перевод?",
+                reply_markup=ReplyKeyboardMarkup(
+                    [["да"], ["нет"], [NAV_BUTTON_PREVIOUS_STEP], [NAV_BUTTON_START_OVER]],
+                    resize_keyboard=True,
+                    one_time_keyboard=False,
+                ),
+            )
+            return True
+        choice = syntax_fallback_parse_user_confirmation(text)
         if choice is None:
             await _reply_text_with_optional_markup(
                 update,
@@ -2849,9 +3413,19 @@ async def _handle_waiting_scene_media_state(
             )
             return True
         if choice is False:
-            _pop_scene_phrase_translation_pending(session)
-            await update.message.reply_text("Ок, оставляю старую английскую фразу.")
-            await _send_next_scene_media_step(update, session)
+            phrase_translation_pending["stage"] = "revision"
+            session[SCENE_PHRASE_TRANSLATION_PENDING_KEY] = phrase_translation_pending
+            await _reply_text_with_optional_markup(
+                update,
+                "Ок, не применяю этот перевод.\n"
+                "Пришлите фидбэк к переводу или новую исходную фразу в формате `ФРАЗА: ...` — "
+                "после этого снова запущу адаптивный перевод.",
+                reply_markup=ReplyKeyboardMarkup(
+                    [["ФИДБЕК:"], ["ФРАЗА:"], [NAV_BUTTON_PREVIOUS_STEP], [NAV_BUTTON_START_OVER]],
+                    resize_keyboard=True,
+                    one_time_keyboard=False,
+                ),
+            )
             return True
         candidate = str(phrase_translation_pending.get("candidate_text") or "").strip()
         if not candidate:
@@ -3097,7 +3671,8 @@ async def _handle_waiting_scene_media_state(
                             total=len(scenes),
                         )
                     prompt_cmd = _parse_lang_payload_command(text, "промпт")
-                    fix_cmd = _parse_lang_payload_command(text, "исправь")
+                    lang_feedback_cmd = _parse_lang_payload_command(text, "фидбек")
+                    feedback_cmd = lang_feedback_cmd or _parse_lang_payload_command(text, "исправь")
                     phrase_cmd = _parse_lang_payload_command(text, "фраза")
                     if prompt_cmd:
                         lang, payload = prompt_cmd
@@ -3112,11 +3687,52 @@ async def _handle_waiting_scene_media_state(
                                 f"Обновила prompt для {lang}. Нажмите «ПЕРЕГЕНЕРИРОВАТЬ {lang}»."
                             )
                             return True
-                    if fix_cmd:
-                        lang, payload = fix_cmd
+                    if _is_empty_feedback_command(text):
+                        _set_scene_video_feedback_pending(
+                            session,
+                            scene_idx=idx,
+                            language=_scene_current_language(session, scene),
+                        )
+                        await _ask_for_feedback_text(update, "video prompt")
+                        return True
+                    generic_feedback = _extract_format_or_feedback(text)
+                    if generic_feedback is not None:
+                        if not generic_feedback:
+                            await update.message.reply_text('После "ФИДБЕК:" пришлите комментарий.')
+                            return True
+                        return await _apply_scene_video_feedback(
+                            update,
+                            context,
+                            chat_id=chat_id,
+                            session=session,
+                            scene=scene,
+                            idx=idx,
+                            feedback=generic_feedback,
+                            language=_scene_current_language(session, scene),
+                        )
+                    if feedback_cmd:
+                        lang, payload = feedback_cmd
+                        if lang_feedback_cmd and lang in languages:
+                            session["scene_media_language_index"] = languages.index(lang)
+                            await update.message.reply_text('Используйте общий формат без языка: "ФИДБЕК: комментарий".')
+                            return True
+                        if lang in languages and not payload:
+                            session["scene_media_language_index"] = languages.index(lang)
+                            await update.message.reply_text('Используйте общий формат без языка: "ФИДБЕК: комментарий".')
+                            return True
                         if lang in languages and payload:
                             current = _scene_video_prompt_for_language(scene, lang)
-                            rewritten = await _rewrite_video_prompt_by_format_instruction(current, payload)
+                            try:
+                                rewritten = await _call_with_503_retries(
+                                    update,
+                                    context,
+                                    chat_id,
+                                    "rewrite_video_prompt_generated_language_feedback",
+                                    lambda: _rewrite_video_prompt_by_format_instruction(current, payload),
+                                )
+                            except ServiceUnavailableRetriesExhaustedError as e:
+                                await update.message.reply_text(str(e))
+                                return True
                             _set_scene_video_prompt_for_language(
                                 scene,
                                 lang,
@@ -3125,6 +3741,12 @@ async def _handle_waiting_scene_media_state(
                             session["scene_media_language_index"] = languages.index(lang)
                             await update.message.reply_text(
                                 f"Подготовила обновлённый prompt для {lang}. Нажмите «ПЕРЕГЕНЕРИРОВАТЬ {lang}»."
+                            )
+                            return True
+                        if lang in languages and not payload:
+                            session["scene_media_language_index"] = languages.index(lang)
+                            await update.message.reply_text(
+                                'Используйте общий формат без языка: "ФИДБЕК: комментарий".'
                             )
                             return True
                     if phrase_cmd:
@@ -3154,7 +3776,7 @@ async def _handle_waiting_scene_media_state(
                     await _reply_text_with_optional_markup(
                         update,
                         "Ожидаю апрув языков: используйте `ОК все`, `ОК <lang>`, "
-                        "`ПРОМПТ <lang>: ...`, `ИСПРАВЬ <lang>: ...`, `ФРАЗА <lang>: ...` "
+                        "`ПРОМПТ <lang>: ...`, `ФИДБЕК: ...`, `ФРАЗА <lang>: ...` "
                         "или `ПЕРЕГЕНЕРИРОВАТЬ <lang>`.",
                         reply_markup=scene_language_approval_markup(languages),
                     )
@@ -3204,6 +3826,8 @@ async def _handle_waiting_scene_media_state(
     if not is_ok:
         return await _scene_media_video_not_ok(
             update,
+            context=context,
+            chat_id=chat_id,
             session=session,
             scene=scene,
             text=text,

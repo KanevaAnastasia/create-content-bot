@@ -15,6 +15,7 @@ def _load_gen_video_module():
 def test_quality_and_mime_helpers():
     mod = _load_gen_video_module()
     assert mod._normalize_quality("1080") == "1080p"
+    assert mod._normalize_quality("") == "720p"
     assert mod._guess_image_mime_type(b"\x89PNG\r\n\x1a\nabc") == "image/png"
     assert mod._guess_image_mime_type(b"\xff\xd8\xff\xe0rest") == "image/jpeg"
 
@@ -34,6 +35,16 @@ def test_video_location_uses_video_specific_env_and_never_global(monkeypatch):
     assert mod._resolve_video_location() == "us-central1"
     monkeypatch.setenv("VERTEX_VIDEO_LOCATION", "us-east5")
     assert mod._resolve_video_location() == "us-east5"
+
+
+def test_video_operation_timeout_is_configurable_and_clamped(monkeypatch):
+    mod = _load_gen_video_module()
+    monkeypatch.delenv("VERTEX_VIDEO_OPERATION_TIMEOUT_SEC", raising=False)
+    assert mod._resolve_video_operation_timeout_sec() == 900
+    monkeypatch.setenv("VERTEX_VIDEO_OPERATION_TIMEOUT_SEC", "12")
+    assert mod._resolve_video_operation_timeout_sec() == 60
+    monkeypatch.setenv("VERTEX_VIDEO_OPERATION_TIMEOUT_SEC", "7200")
+    assert mod._resolve_video_operation_timeout_sec() == 3600
 
 
 def test_build_predict_payload_contains_image_and_params():
@@ -164,16 +175,19 @@ def test_generate_video_via_vertex_uses_sdk_operation_polling(monkeypatch):
 
     called = {}
 
-    def fake_post_predict_long_running(*, url, payload):
+    def fake_post_predict_long_running(*, url, payload, request_id="-"):
         called["url"] = url
         called["payload"] = payload
+        called["predict_request_id"] = request_id
         return {"name": "projects/p/locations/us-central1/operations/123"}
 
-    def fake_poll_operation(*, operation_name, project, location, model, timeout_sec=900):
+    def fake_poll_operation(*, operation_name, project, location, model, timeout_sec=900, request_id="-"):
         called["operation_name"] = operation_name
         called["project"] = project
         called["location"] = location
         called["model"] = model
+        called["timeout_sec"] = timeout_sec
+        called["poll_request_id"] = request_id
         return {"video": mod.base64.b64encode(b"\x00\x00\x00\x18ftypisom").decode("utf-8")}
 
     monkeypatch.setattr(mod, "_post_predict_long_running", fake_post_predict_long_running)
@@ -197,6 +211,8 @@ def test_generate_video_via_vertex_uses_sdk_operation_polling(monkeypatch):
     assert called["project"] == "proj"
     assert called["location"] == "us-central1"
     assert called["model"] == "veo-3.1-fast-generate-001"
+    assert called["timeout_sec"] == 900
+    assert called["predict_request_id"] == called["poll_request_id"]
     assert "us-central1-aiplatform.googleapis.com" in called["url"]
 
 
@@ -210,7 +226,7 @@ def test_generate_video_via_vertex_maps_global_to_us_central1(monkeypatch):
     monkeypatch.setattr(
         mod,
         "_post_predict_long_running",
-        lambda *, url, payload: called.setdefault("url", url)
+        lambda *, url, payload, request_id="-": called.setdefault("url", url)
         and {"name": "projects/p/locations/us-central1/operations/123"},
     )
     monkeypatch.setattr(

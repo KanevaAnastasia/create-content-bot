@@ -1,5 +1,6 @@
 from ..constants import GEMINI_GENERATE_TIMEOUT_SEC_ENV_NAME
 from ..constants import STATE_WAITING_SCENE_MEDIA
+from ..character_catalog import GRANDMA_KITCHEN_PROJECT_SLUG, GRANDMA_KITCHEN_PROJECT_TITLE
 
 from .handlers_state_deps import (
     Any,
@@ -64,14 +65,16 @@ NAV_BUTTON_PREVIOUS_STEP = "Предыдущий шаг"
 NAV_BUTTON_START_OVER = "В начало"
 
 PROJECT_KEY_SESSION = "selected_project_key"
-PROJECT_KEY_GRANDMA_CAT_COOKING = "grandma_cat_cooking"
-PROJECT_LABEL_GRANDMA_CAT_COOKING = "Бабушка + кот (кулинарный Shorts)"
+PROJECT_KEY_GRANDMA_CAT_COOKING = GRANDMA_KITCHEN_PROJECT_SLUG
+PROJECT_LABEL_GRANDMA_CAT_COOKING = GRANDMA_KITCHEN_PROJECT_TITLE
+PROJECT_LEGACY_KEY_GRANDMA_CAT_COOKING = "grandma_cat_cooking"
+PROJECT_LEGACY_LABEL_GRANDMA_CAT_COOKING = "Бабушка + кот (кулинарный Shorts)"
 PROJECT_BUTTON_BACK = "Назад"
 
 
 def _project_label_by_key(project_key: str | None) -> str:
     """Человекочитаемое имя проекта по ключу."""
-    if (project_key or "").strip() == PROJECT_KEY_GRANDMA_CAT_COOKING:
+    if (project_key or "").strip() in {PROJECT_KEY_GRANDMA_CAT_COOKING, PROJECT_LEGACY_KEY_GRANDMA_CAT_COOKING}:
         return PROJECT_LABEL_GRANDMA_CAT_COOKING
     return PROJECT_LABEL_GRANDMA_CAT_COOKING
 
@@ -209,7 +212,9 @@ async def check_env(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         "TELEGRAM_API_ID",
         "TELEGRAM_API_HASH",
         "TELETHON_SESSION_PATH",
+        "TELETHON_SESSION_PATHS",
         "TELETHON_STRING_SESSION",
+        "TELETHON_STRING_SESSIONS",
         "AI_APPROVAL_ENABLED",
         "AI_APPROVAL_MODEL",
         "AI_APPROVAL_STRICTNESS",
@@ -349,7 +354,7 @@ async def generate_video_command(update: Update, context: ContextTypes.DEFAULT_T
             duration_sec=duration_sec,
             start_image=source_image,
             end_image=None,
-            quality="1080",
+            quality="720",
             aspect_ratio="9:16",
             audio_enabled=True,
         )
@@ -396,7 +401,7 @@ async def generate_video_command(update: Update, context: ContextTypes.DEFAULT_T
         return
     vb = io.BytesIO(video_bytes)
     vb.name = "video.mp4"
-    await update.message.reply_video(video=vb, caption=f"Видео готово ({duration_sec} сек, 9:16, 1080, audio).")
+    await update.message.reply_video(video=vb, caption=f"Видео готово ({duration_sec} сек, 9:16, 720, audio).")
     if get_last_video_result_source() == "uri":
         uri = get_last_video_result_uri() or "gs://..."
         await update.message.reply_text(f"Источник результата: video URI ({uri}).")
@@ -491,7 +496,7 @@ async def _handle_syntax_fallback_pending_video_command(
     vb.name = "video.mp4"
     await update.message.reply_video(
         video=vb,
-        caption=f"Видео готово ({duration_sec} сек, 9:16, 1080, audio). Источник: Syntax fallback.",
+        caption=f"Видео готово ({duration_sec} сек, 9:16, 720, audio). Источник: Syntax fallback.",
     )
     return True
 

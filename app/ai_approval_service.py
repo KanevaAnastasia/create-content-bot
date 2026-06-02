@@ -15,6 +15,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Literal
 
+from .character_catalog import character_prompt_catalog, format_character_short_descriptions, sanitize_character_names_and_keys
 from .llm_utils import extract_json_object, safe_llm_call
 
 logger = logging.getLogger("bot")
@@ -154,12 +155,39 @@ def _clamp01(value: Any, default: float = 0.0) -> float:
     return max(0.0, min(1.0, number))
 
 
+def _character_descriptions_for_approval(keys: list[str] | None) -> dict[str, dict[str, str]]:
+    """Expose only sanitized appearance data to QA prompts, without names or canonical keys."""
+    catalog = character_prompt_catalog(keys or None)
+    out: dict[str, dict[str, str]] = {}
+    for key, item in catalog.items():
+        label = str(item.get("short_description") or key).strip() or key
+        out[label] = {
+            "short_description": label,
+            "description": sanitize_character_names_and_keys(str(item.get("description") or "")),
+        }
+    return out
+
+
 def _string_list(value: Any) -> list[str]:
     if isinstance(value, list):
         return [str(x).strip() for x in value if str(x).strip()]
     if isinstance(value, str) and value.strip():
         return [value.strip()]
     return []
+
+
+def _bool_value(value: Any, default: bool = False) -> bool:
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        return bool(value)
+    if isinstance(value, str):
+        low = value.strip().lower()
+        if low in {"1", "true", "yes", "y", "on"}:
+            return True
+        if low in {"0", "false", "no", "n", "off"}:
+            return False
+    return default
 
 
 def _stage_failure_status(stage: str) -> str:
@@ -181,6 +209,70 @@ def threshold_for_stage(stage: str, config: AIApprovalConfig | None = None) -> f
     return max(cfg.image_threshold, cfg.video_threshold)
 
 
+SEVERE_AI_APPROVAL_REASON_PATTERNS: tuple[str, ...] = (
+    "significant deviation",
+    "major deviation",
+    "major mismatch",
+    "does not match",
+    "do not match",
+    "not match",
+    "mismatch with the prompt",
+    "wrong character",
+    "wrong cat",
+    "wrong color",
+    "wrong coat",
+    "wrong food",
+    "missing required",
+    "missing grandmother",
+    "missing grandma",
+    "missing cat",
+    "extra character",
+    "not described in the prompt",
+    "not described in prompt",
+    "not in expected characters",
+    "not on a chair",
+    "not directly visible",
+    "hands are not visible",
+    "instead, other hands",
+    "giant cat",
+    "tiny grandma",
+    "strongly distorted",
+    "visible subtitles",
+    "visible text",
+    "watermark",
+    "photorealistic",
+    "значительное отклонение",
+    "сильно отличается",
+    "не соответствует",
+    "не совпадает",
+    "не описан",
+    "не описана",
+    "не указано",
+    "лишний персонаж",
+    "лишняя кошка",
+    "лишний кот",
+    "нет бабушки",
+    "нет кота",
+    "не видно бабушку",
+    "не видно кота",
+    "не видны руки",
+    "гигантский кот",
+    "крошечная бабушка",
+    "неправильный цвет",
+    "неправильный окрас",
+    "субтитры",
+    "водяной знак",
+    "фотореализм",
+)
+
+
+def _looks_like_severe_ai_approval_reason(text: str) -> bool:
+    low = " ".join(str(text or "").strip().lower().split())
+    if not low:
+        return False
+    return any(pattern in low for pattern in SEVERE_AI_APPROVAL_REASON_PATTERNS)
+
+
 def normalize_ai_approval_result(
     data: dict[str, Any],
     *,
@@ -192,6 +284,15 @@ def normalize_ai_approval_result(
     cfg = config or get_ai_approval_config()
     score = _clamp01(data.get("overall_score"), 0.0)
     critical = _string_list(data.get("critical_issues"))
+    warnings = _string_list(data.get("warnings"))
+    positive_notes = _string_list(data.get("positive_notes"))
+    recommended_action = str(data.get("recommended_action") or "").strip()
+    severe_reasons = [item for item in [*warnings, recommended_action] if _looks_like_severe_ai_approval_reason(item)]
+    for reason in severe_reasons:
+        if reason not in critical:
+            critical.append(reason)
+    if severe_reasons:
+        score = min(score, max(0.0, cfg.human_review_threshold - 0.01))
     status = str(data.get("status") or "").strip().upper()
     if status not in ALLOWED_STATUSES:
         status = AI_APPROVAL_STATUS_HUMAN_REVIEW
@@ -224,9 +325,9 @@ def normalize_ai_approval_result(
             None if data.get("speech_completion_score") is None else _clamp01(data.get("speech_completion_score"), 0.0)
         ),
         critical_issues=critical,
-        warnings=_string_list(data.get("warnings")),
-        positive_notes=_string_list(data.get("positive_notes")),
-        recommended_action=str(data.get("recommended_action") or "").strip(),
+        warnings=warnings,
+        positive_notes=positive_notes,
+        recommended_action=recommended_action,
         raw_model_response=raw_model_response,
         model_name=model_name,
     )
@@ -418,6 +519,81 @@ def _json_schema_text(stage: str, statuses: str) -> str:
         "}"
     )
 
+
+def check_scene_prompts(
+    *,
+    start_frame_prompt: str,
+    video_prompt: str,
+    end_frame_prompt: str | None = None,
+    scene_description: str = "",
+    recipe_text: str = "",
+    scene_number: int | str = "",
+    expected_characters: list[str] | None = None,
+    config: AIApprovalConfig | None = None,
+) -> AIApprovalResult:
+    cfg = config or get_ai_approval_config()
+    if not cfg.enabled:
+        return human_review_result(stage="prompt", reason="AI approval is disabled", model_name=cfg.model)
+    try:
+        expected_keys = [str(x).strip().lower() for x in (expected_characters or []) if str(x).strip()]
+        character_descriptions = _character_descriptions_for_approval(expected_keys or None)
+        expected_character_labels = format_character_short_descriptions(expected_keys) if expected_keys else ""
+        prompt = (
+            "You are a strict QA agent for prompts before generating Grandma Kitchen cartoon media.\n\n"
+            "Evaluate the START FRAME PROMPT, optional END FRAME PROMPT, and VIDEO PROMPT together.\n\n"
+            "Hard prompt requirements:\n"
+            "- If grandma is expected or mentioned, the prompts must clearly preserve her face, kind expression, "
+            "normal cartoon proportions, and canonical outfit from CHARACTER DESCRIPTIONS.\n"
+            "- If a cat is expected or mentioned, the prompts must name/preserve the correct cat identity and coat color. "
+            "Do not approve if the orange cat becomes gray/brown/black, the white cat gains dark spots/stripes, or the black-and-white cat loses the "
+            "black-and-white pattern described in CHARACTER DESCRIPTIONS.\n"
+            "- Any expected character must keep normal relative scale: no giant cat, no tiny grandma, no character "
+            "that becomes toy-sized or oversized unless explicitly intended.\n"
+            "- If VIDEO PROMPT mentions tableware, tools, cookware, props, or ingredients, the START FRAME PROMPT must "
+            "also include those visible items so the video has a coherent first frame.\n"
+            "- For SCENE NUMBER 1, the VIDEO PROMPT must make the spoken line name the dish explicitly in the "
+            "`CHARACTERS SPEAKS:` phrase. Check the actual spoken words, not only START FRAME, action, "
+            "scene description, recipe text, or dish visuals. The viewer must hear what dish is being cooked "
+            "in the first scene.\n"
+            "- The end frame prompt, when present, must preserve the same characters, identities, food, props, and scale "
+            "while changing only the intended final state/action.\n"
+            "- Prompts must forbid visible text, captions, subtitles, watermarks, logos, and photorealism.\n\n"
+            "Critical issues:\n"
+            "- missing grandma face when grandma is expected\n"
+            "- missing required cat when a cat is expected\n"
+            "- wrong cat color or wrong cat identity versus CHARACTER DESCRIPTIONS\n"
+            "- scene 1 VIDEO PROMPT speech does not explicitly say the dish name after CHARACTERS SPEAKS\n"
+            "- video prompt uses ingredients/tableware/props absent from the start frame prompt\n"
+            "- start/end frame prompts do not preserve character identity from references\n"
+            "- abnormal character scale such as a giant cat or tiny grandma\n"
+            "- prompts allow text, captions, watermarks, or photorealism\n\n"
+            "Scoring rule: if you mention any significant deviation, mismatch, missing required character, wrong cat "
+            "identity/color, or extra character, you must put it in critical_issues, set status to FIX_PROMPT, and keep "
+            "overall_score below the approval threshold. Never return APPROVE for a negative finding.\n\n"
+            "Return only valid JSON:\n"
+            f"{_json_schema_text('prompt', 'APPROVE | FIX_PROMPT | HUMAN_REVIEW')}\n\n"
+            f"RECIPE:\n{recipe_text or '-'}\n\n"
+            f"SCENE NUMBER: {scene_number}\n"
+            f"SCENE DESCRIPTION:\n{sanitize_character_names_and_keys(scene_description) or '-'}\n"
+            f"EXPECTED CHARACTERS: {expected_character_labels or '-'}\n"
+            f"CHARACTER DESCRIPTIONS:\n{json.dumps(character_descriptions, ensure_ascii=False, indent=2)}\n\n"
+            f"START FRAME PROMPT:\n{sanitize_character_names_and_keys(start_frame_prompt) or '-'}\n\n"
+            f"END FRAME PROMPT:\n{sanitize_character_names_and_keys(end_frame_prompt or '') or '-'}\n\n"
+            f"VIDEO PROMPT:\n{sanitize_character_names_and_keys(video_prompt) or '-'}\n"
+        )
+        data = call_ai_approval_model(prompt, images=None, config=cfg)
+        return normalize_ai_approval_result(
+            data,
+            stage="prompt",
+            raw_model_response=data.get("_raw_model_response"),
+            model_name=cfg.model,
+            config=cfg,
+        )
+    except Exception as e:
+        logger.exception("ai_approval.prompt_check_failed")
+        return human_review_result(stage="prompt", reason=f"ИИ апрув не смог проверить промпты: {e}", model_name=cfg.model)
+
+
 def check_start_frame(
     *,
     image_bytes: bytes | None = None,
@@ -430,6 +606,7 @@ def check_start_frame(
     expected_characters: list[str] | None = None,
     expected_objects: list[str] | None = None,
     style_requirements: str | None = None,
+    frame_kind: Literal["start", "end"] = "start",
     config: AIApprovalConfig | None = None,
 ) -> AIApprovalResult:
     cfg = config or get_ai_approval_config()
@@ -440,9 +617,12 @@ def check_start_frame(
             image_bytes = Path(image_path).read_bytes()
         if not image_bytes:
             return human_review_result(stage="image", reason="start frame file is empty or missing", model_name=cfg.model)
+        expected_keys = [str(x).strip().lower() for x in (expected_characters or []) if str(x).strip()]
+        character_descriptions = _character_descriptions_for_approval(expected_keys or None)
+        expected_character_labels = format_character_short_descriptions(expected_keys) if expected_keys else ""
         prompt = (
             "You are a strict QA agent for AI-generated cartoon cooking videos.\n\n"
-            "Your task is to compare the expected scene prompt with the provided image.\n\n"
+            f"Your task is to compare the expected scene prompt with the provided {frame_kind} frame image.\n\n"
             "The video style must be:\n"
             "- colorful cartoon style\n"
             "- soft stylized shading\n"
@@ -465,6 +645,8 @@ def check_start_frame(
             "- cozy grandma/cat style is preserved\n"
             "- grandmother looks kind and friendly\n"
             "- cat looks cute, not scary\n"
+            "- grandma and every cat/character match their reference identity and CHARACTER DESCRIPTIONS\n"
+            "- character scale is normal: no giant cat, no tiny grandma, no toy-sized people unless explicitly intended\n"
             "- no text covers faces or food\n\n"
             "Be strict. Do not approve if there are visible deformations, wrong characters, wrong food, "
             "text on screen, photorealism, or major mismatch with the prompt.\n\n"
@@ -478,15 +660,23 @@ def check_start_frame(
             "- strongly distorted face\n"
             "- strongly distorted hands\n"
             "- missing required cat\n"
+            "- wrong cat coat color or wrong cat identity versus CHARACTER DESCRIPTIONS\n"
             "- character style changed heavily\n"
+            "- any prompt-mentioned character does not match its description in CHARACTER DESCRIPTIONS\n"
+            "- abnormal character scale such as a giant cat, tiny grandma, or oversized secondary character\n"
             "- image does not match the scene\n\n"
+            "Scoring rule: if you mention any significant deviation, mismatch, missing required character, wrong cat "
+            "identity/color, extra character, or abnormal scale, you must put it in critical_issues, set status to "
+            "REGENERATE_IMAGE, and keep overall_score below the approval threshold. Never return APPROVE for a negative "
+            "finding.\n\n"
             "Return only valid JSON:\n"
             f"{_json_schema_text('image', 'APPROVE | REGENERATE_IMAGE | HUMAN_REVIEW')}\n\n"
             f"RECIPE:\n{recipe_text or '-'}\n\n"
             f"SCENE NUMBER: {scene_number}\n"
-            f"SCENE DESCRIPTION:\n{scene_description or '-'}\n\n"
-            f"SCENE PROMPT:\n{scene_prompt or '-'}\n"
-            f"EXPECTED CHARACTERS: {', '.join(expected_characters or []) or '-'}\n"
+            f"SCENE DESCRIPTION:\n{sanitize_character_names_and_keys(scene_description) or '-'}\n\n"
+            f"SCENE PROMPT:\n{sanitize_character_names_and_keys(scene_prompt) or '-'}\n"
+            f"EXPECTED CHARACTERS: {expected_character_labels or '-'}\n"
+            f"CHARACTER DESCRIPTIONS:\n{json.dumps(character_descriptions, ensure_ascii=False, indent=2)}\n"
             f"EXPECTED OBJECTS: {', '.join(expected_objects or []) or '-'}\n"
             f"STYLE REQUIREMENTS:\n{style_requirements or '-'}\n"
         )
@@ -524,8 +714,7 @@ def _video_duration_seconds(video_path: str | os.PathLike[str]) -> float | None:
             return None
         cmd = [
             ffmpeg,
-            "-v",
-            "error",
+            "-hide_banner",
             "-i",
             str(video_path),
             "-f",
@@ -577,11 +766,7 @@ def extract_video_frames(
             raise RuntimeError("video file is empty or missing")
         duration = _video_duration_seconds(source) or 0.0
         if duration > 0:
-            if frame_count <= 1:
-                points = [max(0.0, duration / 2)]
-            else:
-                points = [duration * i / (frame_count - 1) for i in range(frame_count)]
-                points[-1] = max(0.0, duration - 0.05)
+            points = [duration * (i + 1) / (frame_count + 1) for i in range(frame_count)]
         else:
             points = [0.0]
         frames: list[bytes] = []
@@ -620,8 +805,7 @@ def transcribe_video_audio(
     duration: int | float | None = None,
     config: AIApprovalConfig | None = None,
 ) -> SpeechTranscriptionResult:
-    """Placeholder for future STT-backed audio QA."""
-    _ = video_bytes, video_path, expected_speech_text, duration
+    """Transcribe and compare video speech through the configured multimodal approval model."""
     cfg = config or get_ai_approval_config()
     if not cfg.audio_transcription_enabled:
         return SpeechTranscriptionResult(
@@ -629,11 +813,75 @@ def transcribe_video_audio(
             speech_speed="unknown",
             recognized_text="",
         )
-    # TODO: подключить STT, сравнить recognized_text с expected_speech_text и выставить match_score/cut_off_detected.
+    video_input = _video_bytes_for_ai_input(video_bytes=video_bytes, video_path=video_path)
+    if not video_input:
+        return SpeechTranscriptionResult(
+            status=AI_APPROVAL_STATUS_HUMAN_REVIEW,
+            speech_speed="unknown",
+            recognized_text="",
+        )
+    prompt = (
+        "You are a speech recognition QA agent for short AI-generated cooking videos.\n\n"
+        "Listen to the attached MP4 and transcribe the spoken Russian speech. Ignore background noise and do not "
+        "describe visuals. If no intelligible speech is present, return an empty recognized_text.\n\n"
+        "Compare the recognized speech to EXPECTED SPEECH. Treat Veo stress markers as pronunciation hints: uppercase "
+        "Russian vowels indicate intended word stress, and [пауза] indicates a pause. The recognized_text should be "
+        "plain text without stress capitalization unless the audio clearly spells letters.\n\n"
+        "Evaluate:\n"
+        "1. Whether the expected phrase is completed before the video ends.\n"
+        "2. Approximate semantic/word match score from 0 to 1.\n"
+        "3. Missing and extra words.\n"
+        "4. Whether speech cuts off mid-word or mid-phrase.\n"
+        "5. Whether pauses are too long for a short cooking clip.\n"
+        "6. Speech speed: slow, normal, fast, too_fast, or unknown.\n"
+        "7. Whether Russian word stress and pronunciation sound natural.\n\n"
+        "Return only valid JSON:\n"
+        "{\n"
+        '  "phrase_completed": false,\n'
+        '  "match_score": 0.0,\n'
+        '  "missing_words": [],\n'
+        '  "extra_words": [],\n'
+        '  "cut_off_detected": false,\n'
+        '  "long_pauses_detected": false,\n'
+        '  "speech_speed": "unknown",\n'
+        '  "recognized_text": "",\n'
+        '  "status": "HUMAN_REVIEW"\n'
+        "}\n\n"
+        f"EXPECTED SPEECH:\n{expected_speech_text or '-'}\n"
+        f"EXPECTED DURATION: {duration if duration is not None else '-'}\n"
+    )
+    try:
+        data = call_ai_approval_model(prompt, images=[video_input], config=cfg)
+    except Exception:
+        logger.exception("ai_approval.video_audio_transcription_failed")
+        return SpeechTranscriptionResult(
+            status=AI_APPROVAL_STATUS_HUMAN_REVIEW,
+            speech_speed="unknown",
+            recognized_text="",
+        )
+    phrase_completed = _bool_value(data.get("phrase_completed"), False)
+    match_score = _clamp01(data.get("match_score"), 0.0)
+    cut_off = _bool_value(data.get("cut_off_detected"), False)
+    long_pauses = _bool_value(data.get("long_pauses_detected"), False)
+    status = str(data.get("status") or "").strip().upper()
+    if status not in ALLOWED_STATUSES:
+        status = AI_APPROVAL_STATUS_HUMAN_REVIEW
+    if phrase_completed and match_score >= 0.85 and not cut_off:
+        status = AI_APPROVAL_STATUS_APPROVE
+    elif cut_off or match_score < 0.70:
+        status = AI_APPROVAL_STATUS_REGENERATE_VIDEO
+    else:
+        status = AI_APPROVAL_STATUS_HUMAN_REVIEW
     return SpeechTranscriptionResult(
-        status=AI_APPROVAL_STATUS_HUMAN_REVIEW,
-        speech_speed="unknown",
-        recognized_text="",
+        phrase_completed=phrase_completed,
+        match_score=match_score,
+        missing_words=_string_list(data.get("missing_words")),
+        extra_words=_string_list(data.get("extra_words")),
+        cut_off_detected=cut_off,
+        long_pauses_detected=long_pauses,
+        speech_speed=str(data.get("speech_speed") or "unknown").strip() or "unknown",
+        recognized_text=str(data.get("recognized_text") or "").strip(),
+        status=status,
     )
 
 
@@ -669,6 +917,12 @@ def check_video(
             frames.insert(0, generated_start_frame)
         if previous_reference_images:
             frames.extend(previous_reference_images)
+        attached_original_video_for_speech = False
+        if expected_speech_text:
+            video_input = _video_bytes_for_ai_input(video_bytes=video_bytes, video_path=video_path)
+            if video_input:
+                frames.append(video_input)
+                attached_original_video_for_speech = True
         if cfg.extract_video_frames and not frames:
             video_input = _video_bytes_for_ai_input(video_bytes=video_bytes, video_path=video_path)
             if video_input:
@@ -698,6 +952,8 @@ def check_video(
             "The attached media includes the original MP4 video because local frame extraction is unavailable. "
             "This is a valid analysis input. Do not fail the scene merely because local frame extraction failed."
             if attached_original_video
+            else "The attached media contains sampled video frames plus the original MP4 for speech/pronunciation review."
+            if attached_original_video_for_speech
             else "The attached media contains sampled video frames and optional reference/start frames."
         )
         prompt = (
@@ -716,9 +972,13 @@ def check_video(
             "- No photorealism\n"
             "- Grandma must stay consistent\n"
             "- Cat must stay consistent if present\n"
+            "- Grandma, cat, and any other recurring characters must match the provided reference/start images and canonical identities\n"
+            "- Character scale must remain normal: no giant cat, tiny grandma, or accidental oversized/undersized character\n"
             "- Food must match the recipe step\n"
             "- Major hand, face, mouth, or object deformation is a critical issue\n"
             "- If the scene includes lipsync, grandmother's mouth should appear naturally active during speech frames\n"
+            "- If the original video/audio is attached and speech is present, Russian pronunciation and word stress must sound natural. "
+            "Wrong stress, robotic intonation, swallowed syllables, or unnatural emphasis are content defects.\n"
             "- The action should be simple and match the prompt\n"
             "- The video should be suitable for a cozy short-form cooking video\n\n"
             "Viral retention checks:\n"
@@ -729,17 +989,23 @@ def check_video(
             "- cozy cartoon food-blog tone is preserved\n"
             "- grandma looks friendly, cat looks cute, food looks appetizing\n"
             "- lip sync matches the expected phrase closely enough for the clip duration\n"
+            "- spoken words have natural stress/accent and do not sound mispronounced\n"
             "- the spoken phrase appears feasible within the expected duration\n\n"
             "Technical limitations are not content defects:\n"
             "- If speech transcription is disabled, do not mark it as a critical issue.\n"
+            "- If the original MP4 is not attached, do not invent pronunciation defects; mention pronunciation as uncertain in warnings.\n"
             "- If local frame extraction failed but an MP4 video or reference/start frame is attached, review the attached media.\n\n"
+            "Scoring rule: if you mention any significant deviation, mismatch, missing required character, wrong cat "
+            "identity/color, extra character, abnormal scale, or unnatural word stress/pronunciation, you must put it "
+            "in critical_issues, set status to REGENERATE_VIDEO, and keep overall_score below the approval threshold. "
+            "Never return APPROVE for a negative finding.\n\n"
             "Return only valid JSON:\n"
             f"{_json_schema_text('video', 'APPROVE | REGENERATE_VIDEO | HUMAN_REVIEW')}\n\n"
             f"MEDIA INPUT NOTE:\n{media_note}\n"
             f"SPEECH INPUT NOTE:\n{speech_note}\n\n"
             f"RECIPE:\n{recipe_text or '-'}\n\n"
             f"SCENE NUMBER: {scene_number}\n"
-            f"SCENE PROMPT:\n{scene_prompt or '-'}\n"
+            f"SCENE PROMPT:\n{sanitize_character_names_and_keys(scene_prompt) or '-'}\n"
             f"EXPECTED SPEECH TEXT:\n{expected_speech_text or '-'}\n"
             f"EXPECTED DURATION: {duration if duration is not None else '-'}\n"
             f"SPEECH QA RESULT:\n{json.dumps(speech.to_dict(), ensure_ascii=False)}\n"
@@ -760,10 +1026,11 @@ def check_video(
             data["warnings"].extend(warnings)
         if cfg.audio_transcription_enabled:
             data["speech_completion_score"] = speech.match_score
-            if speech.cut_off_detected:
+            if speech.cut_off_detected or speech.status == AI_APPROVAL_STATUS_REGENERATE_VIDEO:
                 data.setdefault("critical_issues", [])
                 if isinstance(data["critical_issues"], list):
-                    data["critical_issues"].append("audio cut off detected")
+                    issue = "audio cut off detected" if speech.cut_off_detected else "speech transcription does not match expected phrase"
+                    data["critical_issues"].append(issue)
         return normalize_ai_approval_result(
             data,
             stage="video",

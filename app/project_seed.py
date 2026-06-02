@@ -15,13 +15,14 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.assets import ASSETS
+from app.character_catalog import CHARACTER_CATALOG, GRANDMA_KITCHEN_PROJECT_SLUG, GRANDMA_KITCHEN_PROJECT_TITLE
 from app.constants import DEFAULT_GEMINI_MODEL, GEMINI_MODEL_ENV_NAME, TEXT_PIPELINE_STEPS
 from app.models import Character, Location, Project, ProjectCharacter, ProjectLocation, TextStep
 from app.visual_props import seed_visual_props_for_project
 
 
-DEFAULT_PROJECT_SLUG = "grandma_cat_cooking"
-DEFAULT_PROJECT_TITLE = "Бабушка + кот (кулинарный Shorts)"
+DEFAULT_PROJECT_SLUG = GRANDMA_KITCHEN_PROJECT_SLUG
+DEFAULT_PROJECT_TITLE = GRANDMA_KITCHEN_PROJECT_TITLE
 
 
 @dataclass(frozen=True, slots=True)
@@ -61,10 +62,15 @@ def _asset_meta(item: Any) -> dict[str, Any]:
 def _get_or_create_project(session: Session) -> Project:
     project = session.scalar(select(Project).where(Project.slug == DEFAULT_PROJECT_SLUG))
     if project is None:
+        legacy = session.scalar(select(Project).where(Project.slug == "grandma_cat_cooking"))
+        if legacy is not None:
+            legacy.slug = DEFAULT_PROJECT_SLUG
+            project = legacy
+    if project is None:
         project = Project(
             slug=DEFAULT_PROJECT_SLUG,
             title=DEFAULT_PROJECT_TITLE,
-            description="Default cooking Shorts project seeded from current code assets.",
+            description="Cozy cartoon cooking Shorts project with grandmother, orange cat, white cat, black-and-white cat, and family characters.",
             is_default=True,
             is_active=True,
             hashtags_fixed_ru=["#убабушкивкуснее", "#бабушкинырецепты", "#рецепты"],
@@ -79,6 +85,7 @@ def _get_or_create_project(session: Session) -> Project:
     project.is_active = True
     project.hashtags_fixed_ru = ["#убабушкивкуснее", "#бабушкинырецепты", "#рецепты"]
     project.hashtags_fixed_en = ["#grandmatastesbetter", "#grandmasrecipes", "#recipes"]
+    project.description = "Cozy cartoon cooking Shorts project with grandmother, orange cat, white cat, black-and-white cat, and family characters."
     if project.default_video_provider is None:
         project.default_video_provider = "vertex"
     return project
@@ -94,21 +101,44 @@ def _seed_characters(session: Session, project: Project, assets: dict[str, Any])
         if not canonical_key:
             continue
         asset_uri = _asset_base_uri(item)
+        character_meta = CHARACTER_CATALOG.get(canonical_key, {})
+        character_name = str(character_meta.get("name") or _display_name_from_key(canonical_key))
+        character_short_description = (
+            str(character_meta.get("short_description") or _display_name_from_key(canonical_key)).strip()
+            or canonical_key
+        )
+        character_role = str(character_meta.get("role") or "").strip() or None
+        character_description = str(character_meta.get("description") or "").strip() or None
         character = session.scalar(select(Character).where(Character.canonical_key == canonical_key))
         if character is None:
             character = Character(
                 canonical_key=canonical_key,
-                name=_display_name_from_key(canonical_key),
+                name=character_name,
+                role=character_role,
+                description=character_description,
                 default_asset_uri=asset_uri,
-                meta_json={},
+                meta_json={"short_description": character_short_description},
                 is_active=True,
             )
             session.add(character)
             session.flush()
         else:
+            character.name = character_name
+            character.role = character_role
+            character.description = character_description
             character.default_asset_uri = asset_uri or character.default_asset_uri
+            character.meta_json = {
+                **(character.meta_json or {}),
+                "short_description": character_short_description,
+            }
             character.is_active = True
 
+        link_meta = {
+            "name": character.name,
+            "short_description": character_short_description,
+            "role": character.role,
+            "description": character.description,
+        }
         link = session.get(ProjectCharacter, {"project_id": project.id, "character_id": character.id})
         if link is None:
             session.add(
@@ -118,12 +148,14 @@ def _seed_characters(session: Session, project: Project, assets: dict[str, Any])
                     display_name=character.name,
                     asset_uri=asset_uri,
                     sort_order=idx,
-                    meta_json={},
+                    meta_json=link_meta,
                 )
             )
         else:
+            link.display_name = character.name
             link.asset_uri = asset_uri or link.asset_uri
             link.sort_order = idx
+            link.meta_json = {**(link.meta_json or {}), **link_meta}
         count += 1
     return count
 

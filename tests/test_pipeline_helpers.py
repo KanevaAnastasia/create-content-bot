@@ -8,6 +8,7 @@ from app import pipeline_llm_steps
 from app.pipeline import (
     START_FRAME_RECIPE_VISUAL_DETAIL_RULE,
     _bind_recipe_steps,
+    _extract_production_prompts,
     _normalize_production_prompts,
     _normalize_frame_prompts,
     _ensure_scene_block_len,
@@ -132,7 +133,10 @@ def test_append_veo3_video_framing_constraints_adds_cooking_cast_rule_by_default
     monkeypatch.delenv("CONTENT_FABRIC_PROJECT_SCOPE", raising=False)
     out = append_veo3_video_framing_constraints("close-up kitchen", {"model": "veo3_fast"})
     assert "veo3_cast_rule:" in out.lower()
-    assert "grandmother and cat" in out.lower()
+    assert "grandmother and the orange cat" in out.lower()
+    assert "character_identity_rule:" not in out.lower()
+    assert "Зая" not in out
+    assert "Маркиз" not in out
     assert "cartoon grandmother" in out
     assert "cartoon cat" in out
     assert "stovetop burner" in out
@@ -177,8 +181,145 @@ def test_pipeline_llm_steps_scenes_payload_carries_feedback_and_previous():
     assert "Готовка по рецепту" in prompt
     assert "начинается строго со СЦЕНЫ 2" in prompt
     assert "режим РЕДАКТИРОВАНИЯ" in prompt
+    assert "romantic_drama_subplot" in prompt
+    assert "CHARACTER KEYS AND SHORT DESCRIPTIONS" in prompt
+    assert "payload.character_short_descriptions" in prompt
+    assert "черно-белый кот может быть ТОЛЬКО ЗА ОКНОМ" in prompt
+    assert "белая кошка преимущественно находится ЗА ОКНОМ" in prompt
+    assert "CAT COUNT RULE" in prompt
+    assert "Не создавай дополнительных котов" in prompt
+    assert "подробные описания внешности" in prompt
+    assert "ВЕСЬ ролик" in prompt
+    assert "ТЫ САМ придумываешь" in prompt
+    assert "ОСМЫСЛЕННОЙ" in prompt
+    assert "хэппи-энд" in prompt
+    assert "happy_end" in prompt
+    assert "romantic_drama_episode" in prompt
     assert pipeline_llm_steps.FINAL_SCENE_SUBSCRIBE_CTA in prompt
     assert pipeline_llm_steps.FINAL_SCENE_SUBSCRIBE_CTA_VEO3 in prompt
+
+
+def test_scenes_payload_can_enable_romantic_drama(monkeypatch):
+    monkeypatch.setattr(
+        pipeline_llm_steps,
+        "maybe_choose_romantic_subplot",
+        lambda: {
+            "enabled": True,
+            "characters": ["zaya", "markiz"],
+            "brief": "",
+            "zaya_timosha_arc": "",
+            "markiz_arc": "",
+        },
+    )
+    payload = pipeline_llm_steps.build_scenes_plan_payload("пирог", "замесить и испечь", "", [])
+
+    assert payload["romantic_drama_subplot"]["enabled"] is True
+    assert payload["romantic_drama_subplot"]["characters"] == ["zaya", "markiz"]
+    assert "character_descriptions" not in payload
+    assert payload["character_short_descriptions"]["cat"] == "рыжий кот"
+
+
+def test_generate_scenes_plan_text_reports_romantic_drama(monkeypatch):
+    scenes_payload = [
+        {
+            "scene": i + 1,
+            "shot_type": "closeup",
+            "characters": ["grandma", "cat", "zaya", "markiz"],
+            "action": f"действие {i+1} с едой",
+            "text": "я мешАю [пауза] аккурАтно",
+            "duration_sec": 6,
+            "model": "veo3_fast",
+            "voice_needed": True,
+            "has_lipsync": True,
+            "romantic_drama_episode": {
+                "brief": "Маркиз ревнует к ложке, которую Зая похвалила у Тимоши.",
+                "zaya_timosha_arc": "Тимоша старается показать Зае, что он аккуратный помощник у миски.",
+                "markiz_arc": "Маркиз весь ролик пытается встать ближе к Зае и миске.",
+                "happy_end": "Зая и Тимоша радуются у окна, а Маркиз спокойно улыбается снаружи.",
+            },
+            "romantic_drama_beat": f"beat {i+1}",
+        }
+        for i in range(4)
+    ]
+
+    monkeypatch.setattr(
+        pipeline_llm_steps,
+        "maybe_choose_romantic_subplot",
+        lambda: {
+            "enabled": True,
+            "characters": ["zaya", "markiz"],
+            "brief": "",
+            "zaya_timosha_arc": "",
+            "markiz_arc": "",
+            "episode_rule": "whole episode",
+        },
+    )
+    monkeypatch.setattr(pipeline, "get_scenes_plan", lambda *a, **k: None)
+    monkeypatch.setattr(pipeline, "set_scenes_plan", lambda *a, **k: None)
+    async def _fake_gemini_text(_prompt: str) -> str:
+        return json.dumps(scenes_payload, ensure_ascii=False)
+
+    monkeypatch.setattr("app.pipeline_llm_steps.gemini_text", _fake_gemini_text)
+
+    out = asyncio.run(pipeline.generate_scenes_plan("пирог", full_recipe_text="замесить и испечь"))
+
+    assert out["romantic_drama_subplot"]["enabled"] is True
+    assert out["romantic_drama_subplot"]["brief"] == "черно-белый кот ревнует к ложке, которую белая кошка похвалила у рыжего кота."
+    assert "Драма с персонажем: белая кошка - да" in out["text_plan"]
+    assert "Дополнительный соседский кот: черно-белый кот - да" in out["text_plan"]
+    assert "черно-белый кот ревнует к ложке" in out["text_plan"]
+    assert "рыжий кот + белая кошка" in out["text_plan"]
+    assert out["romantic_drama_subplot"]["happy_end"] == "белая кошка и рыжий кот радуются у окна, а черно-белый кот спокойно улыбается снаружи."
+    assert "Хэппи-энд: белая кошка и рыжий кот радуются у окна" in out["text_plan"]
+    assert "Зая" not in out["text_plan"]
+    assert "Маркиз" not in out["text_plan"]
+    assert "Сквозное правило" in out["text_plan"]
+
+
+def test_generate_scenes_plan_infers_and_keeps_zaya_drama_from_refine(monkeypatch):
+    scenes_payload = [
+        {
+            "scene": i + 1,
+            "shot_type": "closeup",
+            "characters": ["grandma", "cat"] if i == 0 else ["grandma", "cat", "zaya"],
+            "action": f"действие {i+1} с едой",
+            "text": "я мешАю [пауза] аккурАтно",
+            "duration_sec": 6,
+            "model": "veo3_fast",
+            "voice_needed": True,
+            "has_lipsync": True,
+            "romantic_drama_episode": {
+                "brief": "Зая ждёт знак внимания от Тимоши у окна.",
+                "zaya_timosha_arc": "Тимоша старается впечатлить Заю аккуратной готовкой.",
+                "markiz_arc": "",
+                "happy_end": "Зая и Тимоша радуются вместе у окна.",
+            },
+        }
+        for i in range(4)
+    ]
+
+    monkeypatch.setattr(pipeline, "get_scenes_plan", lambda *a, **k: None)
+    monkeypatch.setattr(pipeline, "set_scenes_plan", lambda *a, **k: None)
+
+    async def _fake_gemini_text(_prompt: str) -> str:
+        return json.dumps(scenes_payload, ensure_ascii=False)
+
+    monkeypatch.setattr("app.pipeline_llm_steps.gemini_text", _fake_gemini_text)
+
+    out = asyncio.run(
+        pipeline.generate_scenes_plan(
+            "пирог",
+            full_recipe_text="замесить и испечь",
+            user_feedback="добавь драму с Заей",
+            previous_scenes=[{"scene": 1}],
+            romantic_drama_subplot={"enabled": False, "characters": []},
+        )
+    )
+
+    assert out["romantic_drama_subplot"]["enabled"] is True
+    assert out["romantic_drama_subplot"]["characters"] == ["zaya"]
+    assert all("zaya" in scene["characters"] for scene in out["json_plan"])
+    assert all(scene.get("romantic_drama_beat") for scene in out["json_plan"])
 
 
 def test_viral_concept_brief_prompt_contract():
@@ -239,6 +380,27 @@ def test_generate_recipe_from_source_text_mocked(monkeypatch):
     assert "ТЕКСТ ИСТОЧНИКА" in captured[0]
 
 
+def test_generate_recipe_from_source_text_rejects_model_extraction_failure(monkeypatch):
+    def fake_gemini(_prompt: str) -> str:
+        return (
+            "К сожалению, я не могу извлечь рецепт из предоставленного текста, "
+            "так как это сообщение об ошибке, указывающее на необходимость включить поддержку JavaScript."
+        )
+
+    monkeypatch.setattr("app.pipeline_llm_steps.gemini_generate_sync", fake_gemini)
+    try:
+        asyncio.run(
+            generate_recipe_from_source_text(
+                "Для доступа к сайту необходимо включить поддержку JavaScript.",
+                source_url="https://example.com/recipe",
+            )
+        )
+    except RuntimeError as exc:
+        assert "не найден рецепт" in str(exc)
+    else:
+        raise AssertionError("Expected model extraction failure to be rejected")
+
+
 def test_parse_video_stages_from_llm_json_and_legacy():
     j = '["один два три четыре пять шесть", "семь восемь девять десять одиннадцать двенадцать"]'
     out = pipeline._parse_video_stages_from_llm(j)
@@ -260,11 +422,11 @@ def test_postprocess_scenes_output_sets_recipe_step_from_text():
             "shot_type": "closeup",
         }
     ]
-    out = pipeline._postprocess_scenes_output(scenes, "концепт")
+    out = pipeline._postprocess_scenes_output(scenes, "сырники")
     assert out[0]["recipe_step"].startswith("рЕплика [пауза] одна")
     assert out[0]["text"].startswith("рЕплика [пауза] одна")
-    assert out[0]["text"].endswith(pipeline.FINAL_SCENE_SUBSCRIBE_CTA_VEO3)
-    assert out[0]["duration_sec"] == 8
+    assert not out[0]["text"].endswith(pipeline.FINAL_SCENE_SUBSCRIBE_CTA_VEO3)
+    assert out[0]["duration_sec"] == 4
     assert out[0]["action"] == "English action only"
 
 
@@ -363,6 +525,7 @@ def test_generate_scenes_plan_caps_steps_to_six(monkeypatch):
     assert "duration_sec * 14" in captured_prompt["text"]
     assert "full_recipe_text" in captured_prompt["text"]
     assert "frame_framing_rule" in captured_prompt["text"]
+    assert "обязательным названием блюда в `text`" in captured_prompt["text"]
 
 
 def test_normalize_production_prompts_accepts_string_items():
@@ -377,6 +540,27 @@ def test_normalize_production_prompts_fills_empty_frames_when_required():
     out = _normalize_production_prompts(prompts, scenes_count=1, require_frames=True)
     assert out[0]["start_frame_prompt_ru"] == "пусто"
     assert out[0]["end_frame_prompt_ru"] == "пусто"
+
+
+def test_extract_production_prompts_accepts_nested_production_object():
+    raw = json.dumps(
+        {"production": {"prompts": [{"video_prompt_en": "nested video"}]}},
+        ensure_ascii=False,
+    )
+    out = _extract_production_prompts(raw)
+    assert out == [{"video_prompt_en": "nested video"}]
+
+
+def test_extract_production_prompts_accepts_top_level_array():
+    raw = json.dumps(
+        [
+            {"video_prompt_en": "video one"},
+            {"video_prompt_en": "video two"},
+        ],
+        ensure_ascii=False,
+    )
+    out = _extract_production_prompts(raw)
+    assert [item["video_prompt_en"] for item in out] == ["video one", "video two"]
 
 
 def test_ensure_image_prompt_framing_requirements_adds_closeup_only():
@@ -450,19 +634,32 @@ def test_normalize_frame_prompts_validates_shape_errors():
 
 
 def test_normalize_frame_prompts_adds_scene_metadata_and_framing():
-    scenes = [{"scene": 1, "location": "kitchen", "shot_type": "closeup", "model": "veo3_fast", "duration_sec": 4}]
+    scenes = [
+        {
+            "scene": 1,
+            "location": "kitchen",
+            "shot_type": "closeup",
+            "model": "veo3_fast",
+            "duration_sec": 4,
+            "characters": ["grandma", "cat", "zaya"],
+            "romantic_drama_beat": "Белая кошка машет рыжему коту за окном",
+        }
+    ]
     raw = [{"start_frame_prompt_ru": "Бабушка у стола", "end_frame_prompt_ru": ""}]
     out = _normalize_frame_prompts(scenes, raw)
     assert out[0]["scene"] == 1
     assert "location" not in out[0]
+    assert out[0]["characters"] == ["grandma", "cat", "zaya"]
+    assert out[0]["romantic_drama_beat"] == "Белая кошка машет рыжему коту за окном"
     assert "Крупный план" in out[0]["start_frame_prompt_ru"]
+    assert "Фоновая драма этой сцены: Белая кошка машет рыжему коту за окном" in out[0]["start_frame_prompt_ru"]
     assert "Бабушка и кот должны быть видны полностью в кадре." in out[0]["start_frame_prompt_ru"]
     assert START_FRAME_RECIPE_VISUAL_DETAIL_RULE not in out[0]["start_frame_prompt_ru"]
     assert out[0]["end_frame_prompt_ru"] == "пусто"
 
 
 def test_generate_frame_prompts_for_approval_builds_plan(monkeypatch):
-    scene = {"scene": 1, "location": "kitchen", "shot_type": "closeup", "model": "veo3_fast", "duration_sec": 4}
+    scene = {"scene": 1, "location": "kitchen", "shot_type": "closeup", "model": "veo3_fast", "duration_sec": 4, "romantic_drama_beat": "Белая кошка улыбается за окном"}
     captured_prompt = {"text": ""}
     model_answer = json.dumps(
         [{"start_frame_prompt_ru": "Бабушка у плиты", "end_frame_prompt_ru": "пусто"}],
@@ -480,12 +677,14 @@ def test_generate_frame_prompts_for_approval_builds_plan(monkeypatch):
     assert "способ нарезки" in captured_prompt["text"]
     assert "описание блюда" in captured_prompt["text"]
     assert "подробные описания ингредиентов" in captured_prompt["text"]
+    assert "romantic_drama_beat" in captured_prompt["text"]
+    assert "include it visibly and clearly" in captured_prompt["text"]
     assert "text_plan" in out
     assert '"location"' not in captured_prompt["text"]
 
 
 def test_generate_full_production_with_approved_frames(monkeypatch):
-    prompts_obj = {"prompts": [{"video_prompt_en": "cinematic shot"}]}
+    prompts_obj = {"prompts": [{"video_prompt_en": "cinematic shot with Zaya watching Timosha while Markiz waits"}]}
     captured_prompt = {"text": ""}
 
     def _fake_gemini(prompt: str) -> str:
@@ -497,7 +696,7 @@ def test_generate_full_production_with_approved_frames(monkeypatch):
     async def _fake_translate(text: str, target_language: str) -> str:
         return f"{target_language}:{text}"
     monkeypatch.setattr("app.pipeline._translate_scene_text", _fake_translate)
-    scenes = [{"scene": 1, "location": "kitchen", "model": "veo3_fast", "text": "реплика"}]
+    scenes = [{"scene": 1, "location": "kitchen", "model": "veo3_fast", "text": "реплика", "romantic_drama_beat": "Zaya машет Timosha за окном"}]
     approved = [{"start_frame_prompt_ru": "Бабушка у стола", "end_frame_prompt_ru": "пусто"}]
     out = asyncio.run(
         generate_full_production(
@@ -511,7 +710,12 @@ def test_generate_full_production_with_approved_frames(monkeypatch):
     assert scene["model"] == "veo3_fast"
     assert scene["voice_provider"] == "none"
     assert scene["start_frame_prompt"]
+    assert "Фоновая драма этой сцены: белая кошка машет рыжий кот за окном" in scene["start_frame_prompt"]
     assert "voice_lock_full:" in scene["video_prompt"]
+    assert "background romantic drama beat: белая кошка машет рыжий кот за окном" in scene["video_prompt"]
+    assert "Zaya" not in scene["video_prompt"]
+    assert "Timosha" not in scene["video_prompt"]
+    assert "Markiz" not in scene["video_prompt"]
     assert "cartoon cat" in scene["video_prompt"]
     assert set(scene["speech_by_lang"].keys()) == {"ru", "en"}
     assert set(scene["video_prompt_by_lang"].keys()) == {"ru", "en"}
@@ -520,6 +724,12 @@ def test_generate_full_production_with_approved_frames(monkeypatch):
     assert "no background music" in captured_prompt["text"].lower()
     assert "kitchen_physics_rule" in captured_prompt["text"]
     assert "blender" in captured_prompt["text"]
+    assert "scene1_spoken_dish_name_rule" in captured_prompt["text"]
+    assert "viewer must hear the dish name in the first scene" in captured_prompt["text"]
+    assert "romantic_drama_rule" in captured_prompt["text"]
+    assert "character_identity_rule:" not in scene["video_prompt"]
+    assert "character_descriptions" not in captured_prompt["text"]
+    assert "Описание персонажей" not in scene["video_prompt"]
     assert START_FRAME_RECIPE_VISUAL_DETAIL_RULE not in scene["start_frame_prompt"]
     assert "Визуальные константы предметов:" not in scene["video_prompt"]
     assert '"location"' not in captured_prompt["text"]

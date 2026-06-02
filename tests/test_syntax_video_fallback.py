@@ -1,19 +1,24 @@
-import io
+import base64
+import threading
 
-from app.syntax_video_fallback import FallbackResult, try_generate_via_syntax
+import pytest
+from app.syntax_video_fallback import BatchFallbackRequest, FallbackResult, try_generate_via_syntax, try_generate_via_syntax_batch
 
-try:
-    from PIL import Image
-except Exception:  # pragma: no cover - optional in some dev shells
-    Image = None
+_ONE_PIXEL_PNG = base64.b64decode(
+    "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAIAAACQd1PeAAAADElEQVR4nGMQBAAAAAQAAVD4F2kAAAAASUVORK5CYII="
+)
+
+
+@pytest.fixture(autouse=True)
+def _skip_syntax_frame_resize(monkeypatch):
+    """Keep Telethon transport tests independent from optional Pillow."""
+    import app.syntax_telethon_fallback as telethon_fallback
+
+    monkeypatch.setattr(telethon_fallback, "prepare_syntax_frame_bytes", lambda data: data)
 
 
 def _syntax_test_frame_bytes() -> bytes:
-    if Image is None:
-        raise RuntimeError("Pillow is required for Syntax Telethon tests")
-    buf = io.BytesIO()
-    Image.new("RGB", (320, 320), color=(10, 20, 30)).save(buf, format="PNG")
-    return buf.getvalue()
+    return _ONE_PIXEL_PNG
 
 
 def test_fallback_result_accepts_bytes_payload():
@@ -156,6 +161,96 @@ def test_try_generate_via_syntax_telethon_happy_path(monkeypatch):
     assert call_order[:3] == ["send_file", "send_file", "send_message"]
 
 
+def test_try_generate_via_syntax_stops_when_veo_is_updating(monkeypatch):
+    import app.syntax_telethon_fallback as telethon_fallback
+
+    class _ReplyTo:
+        def __init__(self, msg_id: int):
+            self.reply_to_msg_id = msg_id
+
+    class _IncomingMessage:
+        id = 200
+        out = False
+        reply_to = _ReplyTo(102)
+        raw_text = "Veo на обновлении, попробуйте позже"
+        message = raw_text
+        entities = []
+        video = None
+        document = None
+
+    class _SentMessage:
+        def __init__(self, msg_id):
+            self.id = msg_id
+
+    class _Entity:
+        id = 999
+
+    class _FakeClient:
+        def __init__(self, *_args, **_kwargs):
+            pass
+
+        async def connect(self):
+            return None
+
+        async def disconnect(self):
+            return None
+
+        async def is_user_authorized(self):
+            return True
+
+        async def get_entity(self, _username):
+            return _Entity()
+
+        async def send_file(self, _target, file, caption=None, force_document=False):
+            del file, caption, force_document
+            return _SentMessage(101)
+
+        async def send_message(self, _target, _text, reply_to=None):
+            assert reply_to == 101
+            return _SentMessage(102)
+
+        async def get_messages(self, _target, limit=None, ids=None):
+            del limit, ids
+            return None
+
+        async def iter_messages(self, _target, limit=30):
+            del limit
+            yield _IncomingMessage()
+
+    async def _sleep_must_not_happen(_sec: float) -> None:
+        raise AssertionError("Veo update message should stop polling immediately")
+
+    monkeypatch.setattr(telethon_fallback, "TelegramClient", _FakeClient)
+    monkeypatch.setattr(telethon_fallback, "StringSession", lambda value: value)
+    monkeypatch.setattr(telethon_fallback, "uuid4", lambda: type("_UUID", (), {"hex": "veo-update"})())
+    monkeypatch.setattr(telethon_fallback.asyncio, "sleep", _sleep_must_not_happen)
+    monkeypatch.setenv("TELEGRAM_API_ID", "123")
+    monkeypatch.setenv("TELEGRAM_API_HASH", "hash")
+    monkeypatch.setenv("TELETHON_STRING_SESSION", "session")
+
+    result = try_generate_via_syntax(
+        prompt="video prompt",
+        model="veo3_fast",
+        duration_sec=6,
+        start_image=_syntax_test_frame_bytes(),
+        timeout_sec=30,
+    )
+    assert result.success is False
+    assert "Veo на обновлении" in result.provider_message
+    assert result.attempt_id == "veo-update"
+
+
+def test_syntax_hard_reject_detects_veo_update_message_with_decorations():
+    import app.syntax_telethon_fallback as telethon_fallback
+
+    text = (
+        '🔔 В данный момент "⭕ Veo" на обновлении. Пожалуйста, попробуйте еще раз немного позже.\n'
+        "Следите за новостями в нашем сообществе 👇"
+    )
+
+    assert telethon_fallback._syntax_bot_message_is_hard_reject(text, []) is True
+
+
 def test_try_generate_via_syntax_caps_long_prompt_to_2000(monkeypatch):
     import app.syntax_telethon_fallback as telethon_fallback
 
@@ -198,7 +293,8 @@ def test_try_generate_via_syntax_caps_long_prompt_to_2000(monkeypatch):
             return _Entity()
 
         async def send_message(self, _target, text, reply_to=None):
-            assert len(text) <= 3900
+            assert text == "short Gemini prompt"
+            assert len(text) <= 2000
             assert reply_to is not None
             return _SentMessage(103)
 
@@ -230,6 +326,11 @@ def test_try_generate_via_syntax_caps_long_prompt_to_2000(monkeypatch):
     monkeypatch.setattr(telethon_fallback, "StringSession", lambda value: value)
     monkeypatch.setattr(telethon_fallback, "uuid4", lambda: type("_UUID", (), {"hex": "fixed-attempt"})())
     monkeypatch.setattr(telethon_fallback.asyncio, "sleep", _noop_sleep2)
+    monkeypatch.setattr(
+        telethon_fallback,
+        "gemini_generate_sync",
+        lambda _prompt: '{"prompt":"short Gemini prompt"}',
+    )
     monkeypatch.setenv("TELEGRAM_API_ID", "123")
     monkeypatch.setenv("TELEGRAM_API_HASH", "hash")
     monkeypatch.setenv("TELETHON_STRING_SESSION", "session")
@@ -246,30 +347,56 @@ def test_try_generate_via_syntax_caps_long_prompt_to_2000(monkeypatch):
     assert result.video_bytes == b"mp4-content"
 
 
-def test_syntax_prompt_compaction_removes_visual_blocks_and_keeps_speech():
+def test_syntax_prompt_shortens_long_prompt_with_gemini(monkeypatch):
     import app.syntax_telethon_fallback as telethon_fallback
 
-    prompt = (
-        'lang:ru A 6-second clip with cartoon grandmother and cartoon cat. '
-        'All visual elements, including: Stove: long description. Pot: long description. '
-        'Cauldron: long description. '
-        'veo3_framing: close-up to medium-close shot; grandmother full figure always visible; '
-        'every other character in frame; accurate lip sync; camera angle evolves. '
-        'veo3_cartoon_character_rule: visual style is explicitly cartoon; grandmother is a cartoon grandmother, '
-        'the cat is a cartoon cat; never realistic. '
-        'kitchen_physics_rule: cookware and electric appliances must be physically plausible and functional. '
-        'If a pot is cooking, it must sit on a visible stovetop burner. '
-        'voice_lock_full: female voice Russian language elderly grandmother age approximately seventy. '
-        'CHARACTERS SPEAKS: точная реплика [пауза] не терять'
+    seen_prompt = {}
+
+    def _fake_gemini(prompt: str) -> str:
+        seen_prompt["prompt"] = prompt
+        return '{"prompt":"Gemini kept CHARACTERS SPEAKS: точная реплика"}'
+
+    monkeypatch.setattr(telethon_fallback, "gemini_generate_sync", _fake_gemini)
+
+    prepared = telethon_fallback._prepare_prompt_for_syntax(
+        "A" * 430 + " CHARACTERS SPEAKS: точная реплика",
+        max_len=120,
     )
 
-    compact, changed = telethon_fallback._prepare_prompt_for_syntax(prompt, max_len=420)
-
+    assert prepared is not None
+    compact, changed = prepared
     assert changed is True
-    assert len(compact) <= 420
-    assert "All visual elements" not in compact
-    assert "Cauldron: long description" not in compact
-    assert "CHARACTERS SPEAKS: точная реплика [пауза] не терять" in compact
+    assert compact == "Gemini kept CHARACTERS SPEAKS: точная реплика"
+    assert len(compact) <= 120
+    assert '"max_chars": 120' in seen_prompt["prompt"]
+
+
+def test_syntax_prompt_does_not_cut_when_gemini_returns_too_long(monkeypatch):
+    import app.syntax_telethon_fallback as telethon_fallback
+
+    monkeypatch.setattr(
+        telethon_fallback,
+        "gemini_generate_sync",
+        lambda _prompt: '{"prompt":"' + ("x" * 121) + '"}',
+    )
+
+    assert telethon_fallback._prepare_prompt_for_syntax("y" * 200, max_len=120) is None
+
+
+def test_syntax_prompt_limit_defaults_to_2000(monkeypatch):
+    import app.syntax_telethon_fallback as telethon_fallback
+
+    monkeypatch.delenv("SYNTAX_PROMPT_MAX_CHARS", raising=False)
+
+    assert telethon_fallback._syntax_prompt_max_chars() == 2000
+
+
+def test_syntax_prompt_limit_clamps_env_to_hard_2000(monkeypatch):
+    import app.syntax_telethon_fallback as telethon_fallback
+
+    monkeypatch.setenv("SYNTAX_PROMPT_MAX_CHARS", "3900")
+
+    assert telethon_fallback._syntax_prompt_max_chars() == 2000
 
 
 def test_try_generate_via_syntax_requires_authorized_session(monkeypatch):
@@ -304,3 +431,214 @@ def test_try_generate_via_syntax_requires_authorized_session(monkeypatch):
     )
     assert result.success is False
     assert "not authorized" in result.provider_message.lower()
+
+
+def test_syntax_session_candidates_include_multi_and_single_envs(monkeypatch):
+    import app.syntax_telethon_fallback as telethon_fallback
+
+    monkeypatch.setenv("TELETHON_STRING_SESSIONS", "s1,s2")
+    monkeypatch.setenv("TELETHON_STRING_SESSION", "s2")
+    monkeypatch.setenv("TELETHON_SESSION_PATHS", "/tmp/a.session,/tmp/b.session")
+    monkeypatch.setenv("TELETHON_SESSION_PATH", "/tmp/b.session")
+
+    candidates = telethon_fallback._syntax_session_candidates()
+
+    assert candidates == [
+        telethon_fallback._SessionCandidate("string", "s1"),
+        telethon_fallback._SessionCandidate("string", "s2"),
+        telethon_fallback._SessionCandidate("path", "/tmp/a.session"),
+        telethon_fallback._SessionCandidate("path", "/tmp/b.session"),
+    ]
+
+
+def test_try_generate_via_syntax_parallel_uses_distinct_sessions(monkeypatch):
+    import app.syntax_telethon_fallback as telethon_fallback
+
+    class _ReplyTo:
+        def __init__(self, msg_id: int):
+            self.reply_to_msg_id = msg_id
+
+    class _IncomingMessage:
+        def __init__(self, msg_id: int, reply_to: int):
+            self.id = msg_id
+            self.out = False
+            self.reply_to = _ReplyTo(reply_to)
+            self.raw_text = "done"
+            self.message = self.raw_text
+            self.entities = []
+            self.video = object()
+            self.document = None
+
+    class _SentMessage:
+        def __init__(self, msg_id: int):
+            self.id = msg_id
+
+    class _Entity:
+        id = 999
+
+    barrier = threading.Barrier(2)
+    seen_sessions: list[str] = []
+    seen_lock = threading.Lock()
+
+    class _FakeClient:
+        def __init__(self, session_obj, *_args, **_kwargs):
+            self._iter_once = False
+            with seen_lock:
+                seen_sessions.append(str(session_obj))
+
+        async def connect(self):
+            barrier.wait(timeout=1)
+            return None
+
+        async def disconnect(self):
+            return None
+
+        async def is_user_authorized(self):
+            return True
+
+        async def get_entity(self, _username):
+            return _Entity()
+
+        async def send_message(self, _target, _text, reply_to=None):
+            assert reply_to is not None
+            return _SentMessage(103)
+
+        async def send_file(self, _target, file, caption=None, force_document=False):
+            del file, caption, force_document
+            return _SentMessage(101)
+
+        async def download_media(self, _message, file):
+            assert file is bytes
+            return b"mp4-content"
+
+        async def get_messages(self, _target, limit=None, ids=None):
+            del limit, ids
+            return None
+
+        async def iter_messages(self, _target, limit=30):
+            del limit
+            if self._iter_once:
+                return
+            self._iter_once = True
+            yield _IncomingMessage(200, reply_to=103)
+
+    monkeypatch.setattr(telethon_fallback, "TelegramClient", _FakeClient)
+    monkeypatch.setattr(telethon_fallback, "StringSession", lambda value: value)
+    monkeypatch.setenv("TELEGRAM_API_ID", "123")
+    monkeypatch.setenv("TELEGRAM_API_HASH", "hash")
+    monkeypatch.delenv("TELETHON_STRING_SESSION", raising=False)
+    monkeypatch.setenv("TELETHON_STRING_SESSIONS", "session-a,session-b")
+
+    results: list[FallbackResult | None] = [None, None]
+
+    def _run(idx: int) -> None:
+        results[idx] = try_generate_via_syntax(
+            prompt=f"lang:ru prompt {idx}",
+            model="veo3_fast",
+            duration_sec=6,
+            start_image=_syntax_test_frame_bytes(),
+            timeout_sec=5,
+            acquire_timeout_sec=5,
+        )
+
+    threads = [threading.Thread(target=_run, args=(idx,)) for idx in range(2)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(timeout=2)
+
+    assert all(result is not None and result.success for result in results)
+    assert set(seen_sessions) == {"session-a", "session-b"}
+
+
+def test_try_generate_via_syntax_batch_sends_all_requests_before_waiting(monkeypatch):
+    import app.syntax_telethon_fallback as telethon_fallback
+
+    class _ReplyTo:
+        def __init__(self, msg_id: int):
+            self.reply_to_msg_id = msg_id
+
+    class _IncomingMessage:
+        def __init__(self, msg_id: int, reply_to: int, text: str):
+            self.id = msg_id
+            self.out = False
+            self.reply_to = _ReplyTo(reply_to)
+            self.raw_text = text
+            self.message = text
+            self.entities = []
+            self.video = object()
+            self.document = None
+
+    class _SentMessage:
+        def __init__(self, msg_id: int):
+            self.id = msg_id
+
+    class _Entity:
+        id = 999
+
+    events: list[str] = []
+
+    class _FakeClient:
+        def __init__(self, *_args, **_kwargs):
+            pass
+
+        async def connect(self):
+            return None
+
+        async def disconnect(self):
+            return None
+
+        async def is_user_authorized(self):
+            return True
+
+        async def get_entity(self, _username):
+            return _Entity()
+
+        async def send_file(self, _target, file, caption=None, force_document=False):
+            del caption, force_document
+            events.append(f"send_file:{getattr(file, 'name', '')}")
+            return _SentMessage(101 if len(events) == 1 else 103)
+
+        async def send_message(self, _target, text, reply_to=None):
+            events.append(f"send_message:{text}")
+            return _SentMessage(102 if "lang:ru" in text else 104)
+
+        async def get_messages(self, _target, limit=None, ids=None):
+            del limit, ids
+            return None
+
+        async def iter_messages(self, _target, limit=40):
+            del limit
+            events.append("iter_messages")
+            yield _IncomingMessage(201, reply_to=102, text="lang:ru ready")
+            yield _IncomingMessage(202, reply_to=104, text="lang:en ready")
+
+        async def download_media(self, _message, file):
+            assert file is bytes
+            return b"mp4-content"
+
+    monkeypatch.setattr(telethon_fallback, "TelegramClient", _FakeClient)
+    monkeypatch.setattr(telethon_fallback, "StringSession", lambda value: value)
+    monkeypatch.setenv("TELEGRAM_API_ID", "123")
+    monkeypatch.setenv("TELEGRAM_API_HASH", "hash")
+    monkeypatch.setenv("TELETHON_STRING_SESSION", "session")
+
+    results = try_generate_via_syntax_batch(
+        requests=[
+            BatchFallbackRequest(key="ru", prompt="lang:ru prompt", start_image=_syntax_test_frame_bytes()),
+            BatchFallbackRequest(key="en", prompt="lang:en prompt", start_image=_syntax_test_frame_bytes()),
+        ],
+        model="veo3_fast",
+        duration_sec=6,
+        timeout_sec=5,
+        acquire_timeout_sec=5,
+    )
+
+    assert results["ru"].success is True
+    assert results["en"].success is True
+    assert events[:4] == [
+        "send_file:start_frame.png",
+        "send_message:lang:ru prompt",
+        "send_file:start_frame.png",
+        "send_message:lang:en prompt",
+    ]

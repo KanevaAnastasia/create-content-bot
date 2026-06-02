@@ -19,13 +19,13 @@ def _video_render_defaults(model: str) -> tuple[str, str, bool]:
     Возвращает дефолтные параметры рендера по модели.
 
     Для ``veo3_fast`` фиксируем профиль:
-    - качество: ``1080``;
+    - качество: ``720``;
     - аспект: ``9:16``;
     - аудио: ``True``.
     """
     m = (model or "").strip().lower()
     if m == "veo3_fast":
-        return ("1080", "9:16", True)
+        return ("720", "9:16", True)
     return ("720", "9:16", False)
 
 
@@ -84,4 +84,3 @@ def get_last_video_result_source() -> str | None:
 def get_last_video_result_uri() -> str | None:
     """Returns URI used for last video payload fetch, if available."""
     return _get_last_video_result_uri()
-

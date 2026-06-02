@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from .syntax_telethon_fallback import run_syntax_telethon_fallback
+from .syntax_telethon_fallback import run_syntax_telethon_fallback, run_syntax_telethon_fallback_batch
 
 
 @dataclass(frozen=True, slots=True)
@@ -27,6 +27,14 @@ class FallbackResult:
     attempt_id: str
 
 
+@dataclass(frozen=True, slots=True)
+class BatchFallbackRequest:
+    key: str
+    prompt: str
+    start_image: bytes
+    end_image: bytes | None = None
+
+
 def try_generate_via_syntax(
     *,
     prompt: str,
@@ -35,6 +43,7 @@ def try_generate_via_syntax(
     start_image: bytes,
     end_image: bytes | None = None,
     timeout_sec: int | None = None,
+    acquire_timeout_sec: int | None = None,
 ) -> FallbackResult:
     """Try generating video via Syntax Telegram fallback channel."""
     return run_syntax_telethon_fallback(
@@ -44,4 +53,23 @@ def try_generate_via_syntax(
         start_image=start_image,
         end_image=end_image,
         timeout_sec=timeout_sec,
+        acquire_timeout_sec=acquire_timeout_sec,
+    )
+
+
+def try_generate_via_syntax_batch(
+    *,
+    requests: list[BatchFallbackRequest],
+    model: str,
+    duration_sec: int,
+    timeout_sec: int | None = None,
+    acquire_timeout_sec: int | None = None,
+) -> dict[str, FallbackResult]:
+    """Try generating multiple videos via one Syntax Telegram session."""
+    return run_syntax_telethon_fallback_batch(
+        requests=requests,
+        model=model,
+        duration_sec=duration_sec,
+        timeout_sec=timeout_sec,
+        acquire_timeout_sec=acquire_timeout_sec,
     )

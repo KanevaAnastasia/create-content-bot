@@ -12,6 +12,7 @@ from typing import Any
 from telegram import ReplyKeyboardMarkup, Update
 
 from ..assets import ASSETS
+from ..character_catalog import character_identity_lines, format_character_short_descriptions, sanitize_character_names_and_keys
 from ..constants import STATE_READY_FOR_PRODUCTION
 from .handlers_media_core import (
     _decode_b64,
@@ -20,7 +21,7 @@ from .handlers_media_core import (
     _normalize_character_key,
 )
 from ..llm_utils import gemini_generate_sync
-from ..vertex_images import generate_image_vertex
+from ..vertex_images import generate_image_vertex, generate_image_vertex_result, next_image_generation_model
 from ..visual_props import append_visual_prop_descriptions
 
 logger = logging.getLogger("bot")
@@ -41,6 +42,7 @@ SCENE_MEDIA_APPROVE_MODE_AI = "ai"
 NAV_BUTTON_PREVIOUS_STEP = "Предыдущий шаг"
 NAV_BUTTON_START_OVER = "В начало"
 PIXAR_REFERENCE_STYLE_PHRASE = "Пиксаровский стиль референса"
+SCENE_MEDIA_UPGRADE_IMAGE_MODEL_BUTTON = "ПОВЫСИТЬ МОДЕЛЬ"
 
 
 def _reply_markup_with_rows(*rows: list[str]) -> ReplyKeyboardMarkup:
@@ -95,8 +97,6 @@ def scene_video_approval_markup(
         for lang in langs:
             rows.append([f"ПРОМПТ {lang}:"])
         for lang in langs:
-            rows.append([f"ИСПРАВЬ {lang}:"])
-        for lang in langs:
             rows.append([f"ФРАЗА {lang}:"])
     rows.append(["старт заново"])
     if include_restart_end:
@@ -104,15 +104,18 @@ def scene_video_approval_markup(
     return _reply_markup_with_rows(*rows)
 
 
-def scene_generated_image_approval_markup() -> ReplyKeyboardMarkup:
+def scene_generated_image_approval_markup(*, include_model_upgrade: bool = False) -> ReplyKeyboardMarkup:
     """Кнопки апрува уже сгенерированного изображения перед следующим шагом."""
-    return _reply_markup_with_rows(
+    rows = [
         ["ОК"],
         [SCENE_MEDIA_AUTO_APPROVE_BUTTON, SCENE_MEDIA_AI_APPROVE_BUTTON],
         ["ИЗМЕНИТЬ"],
         ["ФИДБЕК"],
         ["ПЕРЕГЕНЕРИРОВАТЬ"],
-    )
+    ]
+    if include_model_upgrade:
+        rows.append([SCENE_MEDIA_UPGRADE_IMAGE_MODEL_BUTTON])
+    return _reply_markup_with_rows(*rows)
 
 
 def scene_language_approval_markup(languages: list[str]) -> ReplyKeyboardMarkup:
@@ -121,10 +124,9 @@ def scene_language_approval_markup(languages: list[str]) -> ReplyKeyboardMarkup:
     rows: list[list[str]] = [["ОК все"], [SCENE_MEDIA_AUTO_APPROVE_BUTTON, SCENE_MEDIA_AI_APPROVE_BUTTON]]
     for lang in langs:
         rows.append([f"ОК {lang}"])
+    rows.append(["ФИДБЕК:"])
     for lang in langs:
         rows.append([f"ПРОМПТ {lang}:"])
-    for lang in langs:
-        rows.append([f"ИСПРАВЬ {lang}:"])
     for lang in langs:
         rows.append([f"ФРАЗА {lang}:"])
     for lang in langs:
@@ -220,7 +222,8 @@ def _video_approval_text(scene: dict, scene_index: int, total: int) -> str:
         '• «ПРОМПТ: ...» — вручную заменить video prompt.\n'
         '• «ФИДБЕК: ...» — перегенерировать video prompt по фидбеку.\n'
         '• «ФРАЗА: ...» — отдельно обновить фразу для озвучки.\n'
-        '• «ПРОМПТ <lang>: ...» / «ИСПРАВЬ <lang>: ...» — правка prompt конкретного языка.\n'
+        '• «ПРОМПТ <lang>: ...» — вручную заменить prompt конкретного языка.\n'
+        '• «ФИДБЕК: ...» — правка текущего video prompt через нейросеть.\n'
         '• «ФРАЗА <lang>: ...» — обновить фразу конкретного языка до генерации.\n'
         "• «старт заново» — вернуться к стартовому промпту: правь текст или «ФИДБЕК», затем «ОК» снова сгенерирует стартовый кадр "
         "(конечный кадр сбросится, если был)."
@@ -230,7 +233,8 @@ def _video_approval_text(scene: dict, scene_index: int, total: int) -> str:
 
 def _scene_needs_end_frame_step(scene: dict) -> bool:
     """Нужен ли отдельный шаг конечного кадра (дельта + референс старта)."""
-    return _image_end_scene_prompt(scene) is not None
+    _ = scene
+    return False
 
 
 def _raw_end_frame_text(scene: dict) -> str:
@@ -312,11 +316,12 @@ async def _rewrite_video_prompt_by_format_instruction(current_prompt: str, forma
     Возвращает только один готовый prompt на английском.
     """
     prompt = (
-        "Перепиши video prompt по требованиям формата пользователя.\n"
-        "Верни только один готовый prompt на английском, без пояснений.\n"
-        "Сохрани смысл сцены, действие и предметную непрерывность, но приведи под требуемый формат.\n\n"
-        f"ТЕКУЩИЙ VIDEO PROMPT:\n{current_prompt.strip()}\n\n"
-        f"ТРЕБОВАНИЯ ФОРМАТА:\n{format_instruction.strip()}\n"
+        "Перепиши video prompt по фидбеку пользователя.\n"
+        "Верни только один готовый prompt на английском, без пояснений, заголовков и служебных меток.\n"
+        "Не копируй в ответ строки `ФИДБЕК ПОЛЬЗОВАТЕЛЯ`, `ТЕКУЩИЙ VIDEO PROMPT` или похожую разметку.\n"
+        "Сохрани смысл сцены, действие и предметную непрерывность.\n\n"
+        f"ФИДБЕК ПОЛЬЗОВАТЕЛЯ:\n{format_instruction.strip()}\n\n"
+        f"ТЕКУЩИЙ VIDEO PROMPT:\n{current_prompt.strip()}\n"
     )
     raw = await asyncio.to_thread(gemini_generate_sync, prompt)
     return raw.strip()
@@ -504,7 +509,24 @@ async def _generate_image_with_lenient_fallback(
     reference_image: bytes | None = None,
     *,
     reference_images: list[bytes] | None = None,
+    model: str | None = None,
 ) -> bytes:
+    result = await _generate_image_with_lenient_fallback_result(
+        prompt,
+        reference_image=reference_image,
+        reference_images=reference_images,
+        model=model,
+    )
+    return result.data
+
+
+async def _generate_image_with_lenient_fallback_result(
+    prompt: str,
+    reference_image: bytes | None = None,
+    *,
+    reference_images: list[bytes] | None = None,
+    model: str | None = None,
+):
     """
     Сначала пробует исходный промпт, затем 1 фолбэк со смягчённой формулировкой.
     """
@@ -517,12 +539,16 @@ async def _generate_image_with_lenient_fallback(
     ref_kw = imgs if imgs else None
     prompt = _append_pixar_reference_style_phrase(prompt)
     try:
-        return await asyncio.to_thread(generate_image_vertex, prompt, reference_images=ref_kw)
+        return await asyncio.to_thread(generate_image_vertex_result, prompt, reference_images=ref_kw, model=model)
     except Exception as e:
         if not _should_soften_image_prompt_after_error(e):
             raise
         soft_prompt = _soften_generation_prompt(prompt)
-        return await asyncio.to_thread(generate_image_vertex, soft_prompt, reference_images=ref_kw)
+        return await asyncio.to_thread(generate_image_vertex_result, soft_prompt, reference_images=ref_kw, model=model)
+
+
+def _next_image_quality_model(current_model: str | None) -> str | None:
+    return next_image_generation_model(current_model)
 
 
 _IMAGE_REFERENCE_STYLE_BLOCK = (
@@ -538,7 +564,7 @@ _IMAGE_REFERENCE_STYLE_BLOCK = (
 
 
 def _append_reference_style_to_image_prompt(base_prompt: str, attach_style_instruction: bool) -> str:
-    text = (base_prompt or "").strip()
+    text = sanitize_character_names_and_keys(base_prompt).strip()
     if not attach_style_instruction:
         return text
     if not text:
@@ -555,7 +581,7 @@ def _append_scene_identity_to_image_prompt(
     """
     Фиксирует персонажей в промпте image generation.
     """
-    text = (base_prompt or "").strip()
+    text = sanitize_character_names_and_keys(base_prompt).strip()
     chars = scene.get("characters")
     if isinstance(chars, list):
         char_list = [str(c).strip() for c in chars if str(c).strip()]
@@ -565,9 +591,20 @@ def _append_scene_identity_to_image_prompt(
         char_list.insert(0, "grandma")
     if "cat" not in [c.lower() for c in char_list]:
         char_list.append("cat")
-    chars_text = ", ".join(char_list)
+    chars_text = format_character_short_descriptions(char_list) or ", ".join(char_list)
     _ = include_location
-    identity_block = f"Персонажи в кадре: {chars_text}. Состав персонажей не менять."
+    normalized_keys = [_normalize_character_key(c) for c in char_list]
+    character_lines = character_identity_lines(normalized_keys)
+    descriptions = "\n".join(character_lines)
+    drama_beat = sanitize_character_names_and_keys(scene.get("romantic_drama_beat") or "").strip()
+    identity_block = (
+        f"Персонажи в кадре: {chars_text}. Состав персонажей не менять.\n"
+        "Описание персонажей обязательно соблюдать; если персонаж есть в prompt, он должен выглядеть согласно описанию."
+    )
+    if drama_beat:
+        identity_block = f"{identity_block}\nФоновая драма этой сцены должна быть видна в кадре: {drama_beat}"
+    if descriptions:
+        identity_block = f"{identity_block}\n{descriptions}"
     if not text:
         return append_visual_prop_descriptions(identity_block)
     return append_visual_prop_descriptions(f"{text}\n\n{identity_block}")
@@ -605,6 +642,10 @@ def _reference_keys_for_scene(
             mention = mention or ("бабушк" in prompt_blob)
         if ch_norm == "cat":
             mention = mention or ("кот" in prompt_blob)
+        if ch_norm == "zaya":
+            mention = mention or any(x in prompt_blob for x in ("зая", "заю", "заи", "белая кошка", "белая кошечка"))
+        if ch_norm == "markiz":
+            mention = mention or any(x in prompt_blob for x in ("маркиз", "маркиза", "черно-белый кот", "чёрно-белый кот"))
         if mention and ch_norm not in ch_list:
             ch_list.append(ch_norm)
     # Базовый минимум по продуктовым требованиям.
@@ -653,6 +694,10 @@ def _resolve_scene_references(scene: dict) -> dict[str, str]:
         if k == "grandma" and "бабушк" in prompt_blob and k not in ch_list:
             ch_list.append(k)
         if k == "cat" and "кот" in prompt_blob and k not in ch_list:
+            ch_list.append(k)
+        if k == "zaya" and any(x in prompt_blob for x in ("зая", "заю", "заи", "белая кошка", "белая кошечка")) and k not in ch_list:
+            ch_list.append(k)
+        if k == "markiz" and any(x in prompt_blob for x in ("маркиз", "маркиза", "черно-белый кот", "чёрно-белый кот")) and k not in ch_list:
             ch_list.append(k)
         if k in ch_list and isinstance(cfg, dict):
             base = cfg.get("base")
@@ -748,7 +793,7 @@ def _planned_reference_summary(scene: dict, *, include_location: bool = False) -
         sent_paths.append(candidate)
         if key not in sent_chars:
             sent_chars.append(key)
-    chars_text = ", ".join(sent_chars) if sent_chars else "—"
+    chars_text = format_character_short_descriptions(sent_chars) if sent_chars else "—"
     return chars_text, "—", sent_paths
 
 
@@ -762,7 +807,7 @@ def _end_frame_delta_instruction(scene: dict) -> str:
         ch_list.insert(0, "grandma")
     if "cat" not in [c.lower() for c in ch_list]:
         ch_list.append("cat")
-    chars_text = ", ".join(ch_list) if ch_list else "grandma, cat"
+    chars_text = format_character_short_descriptions(ch_list) if ch_list else "бабушка, рыжий кот"
     return (
         "Start-frame (изображение-референс) — полная база: не перерисовывай сцену с нуля. "
         "Покажи только изменения к финалу: кто из персонажей впервые входит в кадр (если это в тексте дельты), "

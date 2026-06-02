@@ -457,6 +457,7 @@ async def _handle_waiting_recipe_approval_state(
         ]
         session["state"] = STATE_WAITING_SCENE_APPROVAL
         session["viral_concept_brief"] = scenes.get("viral_concept_brief") or viral_brief
+        session["romantic_drama_subplot"] = scenes.get("romantic_drama_subplot") or {}
         session["retention_review"] = scenes.get("retention_review") or {}
         session["scenes_plan"] = scenes["json_plan"]
         session["scenes_text"] = scenes["text_plan"]

@@ -34,6 +34,7 @@ def test_seed_default_project_creates_project_assets_and_text_steps():
 
         project = session.scalar(select(Project).where(Project.slug == DEFAULT_PROJECT_SLUG))
         assert project is not None
+        assert project.title == "Grandma Kitchen"
         assert project.is_default is True
         assert project.default_video_provider == "vertex"
         assert project.hashtags_fixed_ru == ["#убабушкивкуснее", "#бабушкинырецепты", "#рецепты"]
@@ -48,6 +49,21 @@ def test_seed_default_project_creates_project_assets_and_text_steps():
         assert session.query(ProjectLocation).count() == 2
         assert session.query(VisualProp).count() == stats.visual_props
         assert session.query(TextStep).count() == 3
+        grandma = session.scalar(select(Character).where(Character.canonical_key == "grandma"))
+        assert grandma is not None
+        assert grandma.name == "Бабушка"
+        assert grandma.description and "платком с красными розами" in grandma.description
+        cat = session.scalar(select(Character).where(Character.canonical_key == "cat"))
+        assert cat is not None
+        assert cat.name == "Тимоша"
+        assert cat.meta_json["short_description"] == "рыжий кот"
+        cat_link = session.scalar(
+            select(ProjectCharacter)
+            .join(Character, Character.id == ProjectCharacter.character_id)
+            .where(Character.canonical_key == "cat")
+        )
+        assert cat_link is not None
+        assert cat_link.meta_json["short_description"] == "рыжий кот"
     engine.dispose()
 
 

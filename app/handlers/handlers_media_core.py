@@ -5,7 +5,6 @@ import base64
 import io
 import os
 import re
-import weakref
 from typing import Any, Awaitable, Callable, TypeVar
 
 from telegram import Update
@@ -33,7 +32,7 @@ from .handlers_media_core_recipe import (
 
 from ..state import SESSIONS
 from ..syntax_fallback_output import video_bytes_from_fallback_result
-from ..syntax_video_fallback import try_generate_via_syntax
+from ..syntax_video_fallback import BatchFallbackRequest, try_generate_via_syntax, try_generate_via_syntax_batch
 from ..vertex_images import generate_image_vertex
 from ..video_generation import generate_video_bytes
 
@@ -41,25 +40,37 @@ logger = __import__('logging').getLogger("bot")
 PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))
 VIDEO_HIGH_LOAD_RETRY_DELAY_SEC = 15
 VIDEO_HIGH_LOAD_MAX_ATTEMPTS = 3
+SYNTAX_FALLBACK_DEFAULT_TIMEOUT_SEC = 15 * 60
+SYNTAX_FALLBACK_TIMEOUT_GRACE_SEC = 30
+SYNTAX_FALLBACK_DOWNLOAD_TIMEOUT_SEC = 300
 SERVICE_UNAVAILABLE_RETRY_COUNT = 20
 SERVICE_UNAVAILABLE_RETRY_DELAY_SEC = 15
+AI_RATE_LIMIT_RETRY_COUNT = 3
+AI_RATE_LIMIT_RETRY_DELAY_SEC = 60
 SCENE_MEDIA_SUBSTEP_START = "start_prompt"
 SCENE_MEDIA_SUBSTEP_END = "end_prompt"
 SCENE_MEDIA_SUBSTEP_VIDEO = "video_prompt"
 _DEBOUNCE_SEQ: dict[int, int] = {}
 T = TypeVar("T")
-_SYNTAX_FALLBACK_LOCKS: weakref.WeakKeyDictionary[
-    asyncio.AbstractEventLoop,
-    asyncio.Lock,
-] = weakref.WeakKeyDictionary()
-
 _CHARACTER_ALIASES: dict[str, str] = {
     "grandma": "grandma",
     "бабушка": "grandma",
     "babushka": "grandma",
     "cat": "cat",
     "кот": "cat",
+    "тимоша": "cat",
+    "тимофей": "cat",
     "koshka": "cat",
+    "zaya": "zaya",
+    "зая": "zaya",
+    "заю": "zaya",
+    "заи": "zaya",
+    "белая кошечка": "zaya",
+    "markiz": "markiz",
+    "маркиз": "markiz",
+    "маркиза": "markiz",
+    "черно-белый кот": "markiz",
+    "чёрно-белый кот": "markiz",
     "granddaughter": "granddaughter",
     "внучка": "granddaughter",
     "daughter": "daughter",
@@ -252,8 +263,23 @@ def _is_service_unavailable_retryable(e: Exception) -> bool:
     return "503" in text or "unavailable" in text or "high demand" in text
 
 
+def _is_ai_rate_limit_retryable(e: Exception) -> bool:
+    if isinstance(e, GeminiQuotaError):
+        return True
+    text = str(e)
+    low = text.lower()
+    return (
+        "429" in text
+        or "resource_exhausted" in low
+        or "quota" in low
+        or "rate limit" in low
+        or "too many requests" in low
+        or "слишком много запросов" in low
+    )
+
+
 class ServiceUnavailableRetriesExhaustedError(RuntimeError):
-    """Все retry 503/UNAVAILABLE исчерпаны."""
+    """Все retry временных ошибок модели исчерпаны."""
 
 
 async def _send_chat_action_safely(
@@ -277,11 +303,15 @@ async def _call_with_503_retries(
     op: Callable[[], Awaitable[T]],
 ) -> T:
     """
-    Выполняет LLM-операцию с retry на 503/UNAVAILABLE: 20 повторов с паузой 15 секунд.
+    Выполняет LLM-операцию с retry на временные сбои:
+    - 503/UNAVAILABLE/high demand: короткие повторы;
+    - 429/quota/rate limit: редкие повторы с минутной паузой.
     """
     session = SESSIONS.get(chat_id) or {}
     prefer_vertex = bool(session.get("prefer_vertex_api"))
-    for attempt in range(SERVICE_UNAVAILABLE_RETRY_COUNT + 1):
+    service_attempt = 0
+    rate_attempt = 0
+    while True:
         try:
             await _send_chat_action_safely(context, chat_id=chat_id, action_name=action_name)
             token = set_prefer_vertex_api(prefer_vertex)
@@ -294,12 +324,12 @@ async def _call_with_503_retries(
                     await update.message.reply_text(note)
             return result
         except Exception as e:
-            if _is_service_unavailable_retryable(e) and attempt < SERVICE_UNAVAILABLE_RETRY_COUNT:
-                retry_no = attempt + 1
+            if _is_service_unavailable_retryable(e) and service_attempt < SERVICE_UNAVAILABLE_RETRY_COUNT:
+                service_attempt += 1
                 logger.warning(
                     "%s got 503/unavailable, retry %s/%s after %ss: %s",
                     action_name,
-                    retry_no,
+                    service_attempt,
                     SERVICE_UNAVAILABLE_RETRY_COUNT,
                     SERVICE_UNAVAILABLE_RETRY_DELAY_SEC,
                     e,
@@ -309,7 +339,7 @@ async def _call_with_503_retries(
                         (
                             "Сервис модели сейчас перегружен. "
                             f"Повторяю через {SERVICE_UNAVAILABLE_RETRY_DELAY_SEC} секунд "
-                            f"(попытка {retry_no}/{SERVICE_UNAVAILABLE_RETRY_COUNT})."
+                            f"(попытка {service_attempt}/{SERVICE_UNAVAILABLE_RETRY_COUNT})."
                         )
                     )
                 await asyncio.sleep(SERVICE_UNAVAILABLE_RETRY_DELAY_SEC)
@@ -318,8 +348,31 @@ async def _call_with_503_retries(
                 raise ServiceUnavailableRetriesExhaustedError(
                     "Сервис модели перегружен слишком долго. Попробуйте позже."
                 ) from e
+            if _is_ai_rate_limit_retryable(e) and rate_attempt < AI_RATE_LIMIT_RETRY_COUNT:
+                rate_attempt += 1
+                logger.warning(
+                    "%s got AI rate limit, retry %s/%s after %ss: %s",
+                    action_name,
+                    rate_attempt,
+                    AI_RATE_LIMIT_RETRY_COUNT,
+                    AI_RATE_LIMIT_RETRY_DELAY_SEC,
+                    e,
+                )
+                if update.message is not None:
+                    await update.message.reply_text(
+                        (
+                            "Уперлась в лимит AI: слишком много запросов подряд. "
+                            f"Подожду {AI_RATE_LIMIT_RETRY_DELAY_SEC} секунд и попробую сама "
+                            f"(попытка {rate_attempt}/{AI_RATE_LIMIT_RETRY_COUNT})."
+                        )
+                    )
+                await asyncio.sleep(AI_RATE_LIMIT_RETRY_DELAY_SEC)
+                continue
+            if _is_ai_rate_limit_retryable(e):
+                raise ServiceUnavailableRetriesExhaustedError(
+                    "Лимит AI держится слишком долго. Я уже попробовала несколько раз; повторите позже."
+                ) from e
             raise
-    raise ServiceUnavailableRetriesExhaustedError("Сервис модели перегружен слишком долго. Попробуйте позже.")
 
 
 def _elevenlabs_voice_warning() -> str | None:
@@ -357,6 +410,10 @@ def _character_mentions_in_prompt(prompt: str) -> set[str]:
         found.add("husband")
     if "dog" in low or "собак" in low:
         found.add("dog")
+    if any(token in low for token in ("zaya", "зая", "заю", "заи", "зайка", "белая кошка", "белая кошечка")):
+        found.add("zaya")
+    if any(token in low for token in ("markiz", "маркиз", "маркиза", "черно-белый кот", "чёрно-белый кот")):
+        found.add("markiz")
     return found
 
 
@@ -526,14 +583,10 @@ def _syntax_fallback_mode() -> str:
     return "auto" if raw == "auto" else "manual"
 
 
-def _syntax_fallback_lock() -> asyncio.Lock:
-    """Return per-event-loop lock to serialize Telethon fallback access."""
-    loop = asyncio.get_running_loop()
-    lock = _SYNTAX_FALLBACK_LOCKS.get(loop)
-    if lock is None:
-        lock = asyncio.Lock()
-        _SYNTAX_FALLBACK_LOCKS[loop] = lock
-    return lock
+def _positive_int_env(name: str, default: int) -> int:
+    """Read a positive integer env value, falling back to ``default``."""
+    raw = (os.getenv(name) or "").strip()
+    return int(raw) if raw.isdigit() and int(raw) > 0 else default
 
 
 class SyntaxFallbackPendingConfirmation(Exception):
@@ -618,21 +671,29 @@ async def _attempt_syntax_video_fallback_bytes(
     """Runs Syntax adapter in a worker thread; returns bytes or None."""
     if not _syntax_fallback_env_enabled():
         return None
-    timeout_raw = (os.getenv("SYNTAX_FALLBACK_TIMEOUT_SEC") or "").strip()
-    timeout_sec: int | None = int(timeout_raw) if timeout_raw.isdigit() else None
-    lock = _syntax_fallback_lock()
-    if lock.locked():
-        logger.info("video.syntax_fallback wait_for_lock")
-    async with lock:
-        result = await asyncio.to_thread(
-            try_generate_via_syntax,
-            prompt=prompt,
-            model=model,
-            duration_sec=duration_sec,
-            start_image=start_image,
-            end_image=end_image,
-            timeout_sec=timeout_sec,
+    timeout_sec = _positive_int_env("SYNTAX_FALLBACK_TIMEOUT_SEC", SYNTAX_FALLBACK_DEFAULT_TIMEOUT_SEC)
+    lock_timeout_sec = _positive_int_env("SYNTAX_FALLBACK_LOCK_TIMEOUT_SEC", timeout_sec)
+    try:
+        result = await asyncio.wait_for(
+            asyncio.to_thread(
+                try_generate_via_syntax,
+                prompt=prompt,
+                model=model,
+                duration_sec=duration_sec,
+                start_image=start_image,
+                end_image=end_image,
+                timeout_sec=timeout_sec,
+                acquire_timeout_sec=lock_timeout_sec,
+            ),
+            timeout=lock_timeout_sec + timeout_sec + SYNTAX_FALLBACK_TIMEOUT_GRACE_SEC,
         )
+    except TimeoutError:
+        logger.warning(
+            "video.syntax_fallback call_timeout acquire_timeout_sec=%s timeout_sec=%s",
+            lock_timeout_sec,
+            timeout_sec,
+        )
+        return None
     if not result.success:
         logger.warning(
             "video.syntax_fallback not_used attempt_id=%s msg=%s",
@@ -641,7 +702,17 @@ async def _attempt_syntax_video_fallback_bytes(
         )
         return None
     try:
-        payload = await asyncio.to_thread(video_bytes_from_fallback_result, result)
+        payload = await asyncio.wait_for(
+            asyncio.to_thread(video_bytes_from_fallback_result, result),
+            timeout=SYNTAX_FALLBACK_DOWNLOAD_TIMEOUT_SEC + SYNTAX_FALLBACK_TIMEOUT_GRACE_SEC,
+        )
+    except TimeoutError:
+        logger.warning(
+            "video.syntax_fallback download_timeout attempt_id=%s timeout_sec=%s",
+            result.attempt_id,
+            SYNTAX_FALLBACK_DOWNLOAD_TIMEOUT_SEC,
+        )
+        return None
     except Exception as e:
         logger.warning(
             "video.syntax_fallback download_failed attempt_id=%s err=%s",
@@ -655,6 +726,65 @@ async def _attempt_syntax_video_fallback_bytes(
         len(payload),
     )
     return payload
+
+
+async def _attempt_syntax_video_fallback_batch(
+    *,
+    requests: list[BatchFallbackRequest],
+    model: str,
+    duration_sec: int,
+) -> dict[str, bytes]:
+    """Runs one batched Syntax session and returns only successful mp4 payloads by request key."""
+    if not _syntax_fallback_env_enabled() or not requests:
+        return {}
+    timeout_sec = _positive_int_env("SYNTAX_FALLBACK_TIMEOUT_SEC", SYNTAX_FALLBACK_DEFAULT_TIMEOUT_SEC)
+    lock_timeout_sec = _positive_int_env("SYNTAX_FALLBACK_LOCK_TIMEOUT_SEC", timeout_sec)
+    try:
+        results = await asyncio.wait_for(
+            asyncio.to_thread(
+                try_generate_via_syntax_batch,
+                requests=requests,
+                model=model,
+                duration_sec=duration_sec,
+                timeout_sec=timeout_sec,
+                acquire_timeout_sec=lock_timeout_sec,
+            ),
+            timeout=lock_timeout_sec + timeout_sec + SYNTAX_FALLBACK_TIMEOUT_GRACE_SEC,
+        )
+    except TimeoutError:
+        logger.warning(
+            "video.syntax_batch call_timeout acquire_timeout_sec=%s timeout_sec=%s requests=%s",
+            lock_timeout_sec,
+            timeout_sec,
+            len(requests),
+        )
+        return {}
+
+    output: dict[str, bytes] = {}
+    for key, result in results.items():
+        if not getattr(result, "success", False):
+            logger.warning(
+                "video.syntax_batch not_used key=%s attempt_id=%s msg=%s",
+                key,
+                getattr(result, "attempt_id", ""),
+                str(getattr(result, "provider_message", ""))[:400],
+            )
+            continue
+        try:
+            payload = await asyncio.wait_for(
+                asyncio.to_thread(video_bytes_from_fallback_result, result),
+                timeout=SYNTAX_FALLBACK_DOWNLOAD_TIMEOUT_SEC + SYNTAX_FALLBACK_TIMEOUT_GRACE_SEC,
+            )
+        except Exception as e:
+            logger.warning(
+                "video.syntax_batch download_failed key=%s attempt_id=%s err=%s",
+                key,
+                getattr(result, "attempt_id", ""),
+                str(e)[:400],
+            )
+            continue
+        output[str(key)] = payload
+    return output
 
 
 def _video_region_candidates() -> list[str]:
@@ -686,12 +816,36 @@ async def _generate_video_bytes_with_high_load_retry(
     quality: str,
     aspect_ratio: str,
     audio_enabled: bool,
+    skip_initial_syntax: bool = False,
+    disable_syntax_fallback: bool = False,
 ) -> bytes:
-    """Generate video with regional retries; if enabled, Syntax fallback can run immediately."""
+    """Generate video through Syntax first, then Vertex with regional retries."""
+
+    syntax_attempted = False
+    syntax_disabled = disable_syntax_fallback
+    if _syntax_fallback_env_enabled() and not skip_initial_syntax:
+        syntax_attempted = True
+        if update.message is not None:
+            await update.message.reply_text(
+                "Сначала пробую генерацию через Syntax. Если он не вернёт видео, перейду к Vertex."
+            )
+        syntax_bytes = await _attempt_syntax_video_fallback_bytes(
+            prompt=prompt,
+            model=model,
+            duration_sec=duration_sec,
+            start_image=start_image,
+            end_image=end_image,
+        )
+        if syntax_bytes is not None:
+            if update.message is not None:
+                await update.message.reply_text("Видео получено через Syntax.")
+            return syntax_bytes
+        if update.message is not None:
+            await update.message.reply_text("Syntax не вернул видео. Перехожу к Vertex.")
 
     async def _run_or_request_syntax_fallback(error: Exception) -> bytes | None:
         """Runs Syntax fallback immediately when enabled."""
-        if not _syntax_fallback_env_enabled():
+        if syntax_attempted or syntax_disabled or not _syntax_fallback_env_enabled():
             return None
         if update.message is not None:
             await update.message.reply_text(
@@ -752,7 +906,7 @@ async def _generate_video_bytes_with_high_load_retry(
                 if immediate_syntax_result is not None:
                     return immediate_syntax_result
                 if global_attempt >= total_attempts:
-                    if _is_syntax_fallback_trigger_error(e) and _syntax_fallback_env_enabled():
+                    if _is_syntax_fallback_trigger_error(e) and _syntax_fallback_env_enabled() and not syntax_disabled:
                         if update.message is not None:
                             await update.message.reply_text(
                                 "Vertex отклонил генерацию по политике/безопасности после всех попыток в регионах. "
@@ -826,7 +980,8 @@ async def _regenerate_video_prompt_from_error(scene: dict, error_text: str) -> s
     )
     prompt = (
         "Перепиши video prompt для генерации ролика так, чтобы пройти модерацию политики.\n"
-        "Верни только один готовый prompt, без пояснений.\n"
+        "Верни только один готовый prompt, без пояснений, заголовков и служебных меток.\n"
+        "Не копируй в ответ строки `ТЕКУЩИЙ VIDEO PROMPT`, `ФИДБЕК ПОЛЬЗОВАТЕЛЯ` или `ТЕКСТ ОШИБКИ ПРОВАЙДЕРА`.\n"
         "Сохрани действие сцены, персонажей, стиль референсов и предметную непрерывность кадра.\n"
         "Стиль кадра должен быть не-реалистичным: без реализма и без фотореализма.\n"
         "Бабушка и кот обязательно мультяшные; кот обязательно описан точной фразой cartoon cat.\n"
@@ -839,9 +994,9 @@ async def _regenerate_video_prompt_from_error(scene: dict, error_text: str) -> s
         f"{VEO3_CARTOON_CHARACTER_RULE}\n"
         "Обязательно явно укажи язык озвучки в соответствии с целевым языком сцены.\n"
         "Убери потенциально рискованные/запрещенные формулировки.\n\n"
-        f"ТЕКУЩИЙ VIDEO PROMPT:\n{current}\n"
-        f"{speech_hint}\n"
         f"ТЕКСТ ОШИБКИ ПРОВАЙДЕРА:\n{error_text}\n"
+        f"{speech_hint}\n"
+        f"\nТЕКУЩИЙ VIDEO PROMPT:\n{current}\n"
     )
     raw = await asyncio.to_thread(gemini_generate_sync, prompt)
     target_language = normalize_language_code(str(scene.get("video_prompt_current_language", "ru"))) or "ru"

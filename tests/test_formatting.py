@@ -9,6 +9,7 @@ from app.formatting import (
     format_production_cards,
     format_recipe_step_scene_draft,
     format_recipe_steps,
+    format_romantic_drama_status,
     format_viral_application_summary,
 )
 
@@ -25,11 +26,15 @@ def test_cost_label_known_and_unknown():
 
 
 def test_build_human_readable_plan_includes_defaults():
-    scenes = [{"scene": 1, "text": "привет"}]
+    scenes = [{"scene": 1, "text": "привет", "characters": ["grandma", "cat", "zaya"], "action": "Zaya смотрит на Timosha", "romantic_drama_beat": "Zaya машет Timosha за окном"}]
     out = build_human_readable_plan(scenes)
     assert "СЦЕНА 1" in out
     assert "Нужна ли озвучка: да" in out
     assert "Вид/ракурс: medium" in out
+    assert "Персонажи: бабушка, рыжий кот, белая кошка" in out
+    assert "Драма в сцене: белая кошка машет рыжий кот за окном" in out
+    assert "Zaya" not in out
+    assert "Timosha" not in out
     assert "Примерная стоимость" in out
 
 
@@ -48,6 +53,34 @@ def test_build_human_readable_plan_supports_raw_scene_aliases():
     assert "СЦЕНА 3" in out
     assert "Нейросеть: veo3_fast" in out
     assert "Lip sync: да" in out
+
+
+def test_format_romantic_drama_status_explicitly_reports_decision():
+    off = format_romantic_drama_status({"enabled": False, "characters": [], "brief": ""})
+    assert "Драма с персонажем: белая кошка - нет" in off
+    assert "Дополнительный соседский кот: черно-белый кот - нет" in off
+
+    on = format_romantic_drama_status(
+        {
+            "enabled": True,
+            "characters": ["zaya", "markiz"],
+            "brief": "Маркиз ревнует у миски.",
+            "zaya_timosha_arc": "Тимоша волнуется, Зая выбирает стоять рядом с ним.",
+            "markiz_arc": "Маркиз пытается понравиться Зае весь ролик.",
+            "happy_end": "Зая и Тимоша улыбаются друг другу у окна, Маркиз спокойно получает кусочек.",
+            "episode_rule": "whole episode",
+        }
+    )
+    assert "Решение уровня ролика" in on
+    assert "Драма с персонажем: белая кошка - да" in on
+    assert "Дополнительный соседский кот: черно-белый кот - да" in on
+    assert "черно-белый кот ревнует у миски" in on
+    assert "рыжий кот + белая кошка" in on
+    assert "Хэппи-энд: белая кошка и рыжий кот улыбаются друг другу у окна" in on
+    assert "понятным хэппи-эндом" in on
+    assert "Тимош" not in on
+    assert "Зая" not in on
+    assert "Маркиз" not in on
 
 
 def test_format_viral_application_summary_explains_usage():

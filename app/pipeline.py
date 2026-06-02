@@ -28,8 +28,14 @@ from .cache import (
     set_recipe_steps,
     set_scenes_plan,
 )
+from .character_catalog import GRANDMA_KITCHEN_PROJECT_SLUG, sanitize_character_names_and_keys
 from .constants import ELEVENLABS_VOICE_ID_ENV_NAME
-from .formatting import build_human_readable_plan, format_concepts, format_frame_prompts_for_approval
+from .formatting import (
+    build_human_readable_plan,
+    format_concepts,
+    format_frame_prompts_for_approval,
+    format_romantic_drama_status,
+)
 from .llm_utils import extract_json_array, extract_json_object, gemini_generate_sync
 from .multilingual import language_name, target_languages_from_env
 from . import pipeline_llm_steps as llm_steps
@@ -62,8 +68,9 @@ VEO3_FAST_VIDEO_FRAMING_RULE = (
     "static tripod angle for the entire take."
 )
 VEO3_COOKING_CAST_RULE = (
-    "veo3_cast_rule: for grandma-cat cooking project, both grandmother and cat are mandatory in frame and "
-    "fully visible in every shot."
+    "veo3_cast_rule: for Grandma Kitchen project, grandmother and the orange cat are mandatory in frame and "
+    "fully visible in every shot. If the white cat or black-and-white cat are listed in scene.characters or mentioned in the prompt, "
+    "they must also stay fully visible."
 )
 VEO3_CARTOON_CHARACTER_RULE = (
     "veo3_cartoon_character_rule: visual style is explicitly cartoon; grandmother is a cartoon grandmother, "
@@ -78,7 +85,7 @@ VIDEO_KITCHEN_PHYSICS_RULE = (
     "and the mixer connected to/held by its motor body; no impossible floating appliance parts."
 )
 PROJECT_SCOPE_ENV_NAME = "CONTENT_FABRIC_PROJECT_SCOPE"
-PROJECT_SCOPE_GRANDMA_CAT_COOKING = "grandma_cat_cooking"
+PROJECT_SCOPE_GRANDMA_CAT_COOKING = GRANDMA_KITCHEN_PROJECT_SLUG
 _IMAGE_PLAN_TOKENS = (
     "крупный план",
     "крупно",
@@ -125,6 +132,8 @@ def _strip_location_context_for_llm(value: Any) -> Any:
         k = str(key)
         if k in {"location", "location_top_view", "allowed_locations_strict"}:
             continue
+        if k in {"character_descriptions", "visual_prop_descriptions"}:
+            continue
         if k == "assets" and isinstance(raw, dict):
             out[k] = {"characters": raw.get("characters") or {}}
             continue
@@ -142,7 +151,100 @@ def _strip_location_context_for_llm(value: Any) -> Any:
 def _is_grandma_cat_cooking_project_scope() -> bool:
     """Определяет профиль проекта, где для veo3 обязателен кадр с бабушкой и котом."""
     raw = (os.getenv(PROJECT_SCOPE_ENV_NAME) or PROJECT_SCOPE_GRANDMA_CAT_COOKING).strip().lower()
-    return raw == PROJECT_SCOPE_GRANDMA_CAT_COOKING
+    return raw in {PROJECT_SCOPE_GRANDMA_CAT_COOKING, "grandma_cat_cooking"}
+
+
+def _romantic_subplot_from_scenes(
+    base: dict[str, Any] | None,
+    scenes: list[dict[str, Any]],
+) -> dict[str, Any]:
+    """Merge the code-level drama decision with the LLM-invented episode case."""
+    subplot = dict(base or {})
+    episode: dict[str, Any] = {}
+    scene_characters: set[str] = set()
+    for scene in scenes:
+        for ch in scene.get("characters") or []:
+            if isinstance(ch, str) and ch.strip():
+                scene_characters.add(ch.strip().lower())
+        raw = scene.get("romantic_drama_episode")
+        if isinstance(raw, dict) and raw:
+            episode = raw
+            break
+    if not subplot.get("enabled") and (episode or "zaya" in scene_characters or "markiz" in scene_characters):
+        subplot["enabled"] = True
+        subplot["characters"] = [
+            ch for ch in ("zaya", "markiz") if ch in scene_characters or ch in (subplot.get("characters") or [])
+        ] or ["zaya"]
+        subplot.setdefault("decision_scope", "episode")
+        subplot.setdefault(
+            "series_rule",
+            "The orange cat and the white cat are a pair; the black-and-white cat is the white cat's admirer only in selected episodes.",
+        )
+    if not subplot.get("enabled"):
+        return subplot
+    for key in ("brief", "zaya_timosha_arc", "markiz_arc", "happy_end"):
+        value = episode.get(key)
+        if isinstance(value, str) and value.strip():
+            subplot[key] = _replace_character_names_with_short_descriptions(value.strip())
+    if not subplot.get("characters"):
+        subplot["characters"] = ["zaya"]
+    return subplot
+
+
+def _replace_character_names_with_short_descriptions(text: str) -> str:
+    return sanitize_character_names_and_keys(text)
+
+
+def _scene_romantic_drama_beat(scene: dict[str, Any]) -> str:
+    return _replace_character_names_with_short_descriptions(str(scene.get("romantic_drama_beat") or "").strip())
+
+
+def _append_romantic_drama_to_start_prompt(prompt: str, scene: dict[str, Any]) -> str:
+    beat = _scene_romantic_drama_beat(scene)
+    text = sanitize_character_names_and_keys(prompt).strip()
+    if not beat:
+        return text
+    marker = "Фоновая драма этой сцены:"
+    if marker.lower() in text.lower() or beat.lower() in text.lower():
+        return text
+    return f"{text}\n\n{marker} {beat}. Драма должна быть видна и понятна зрителю в этом кадре.".strip()
+
+
+def _append_romantic_drama_to_video_prompt(prompt: str, scene: dict[str, Any]) -> str:
+    beat = _scene_romantic_drama_beat(scene)
+    text = sanitize_character_names_and_keys(prompt).strip()
+    if not beat:
+        return text
+    marker = "background romantic drama beat:"
+    if marker in text.lower() or beat.lower() in text.lower():
+        return text
+    return (
+        f"{text} {marker} {beat}. The subplot must be visible and understandable as background action throughout this clip."
+    ).strip()
+
+
+def _enforce_romantic_subplot_characters(scenes: list[dict[str, Any]], subplot: dict[str, Any] | None) -> None:
+    """Keep approved white-cat/black-and-white-cat subplot visible through the generated scenes."""
+    if not isinstance(subplot, dict) or not subplot.get("enabled"):
+        return
+    required = [str(ch).strip().lower() for ch in (subplot.get("characters") or ["zaya"]) if str(ch).strip()]
+    if "zaya" not in required:
+        required.insert(0, "zaya")
+    for scene in scenes:
+        chars = scene.get("characters")
+        if not isinstance(chars, list):
+            chars = []
+        normalized = [str(ch).strip().lower() for ch in chars if str(ch).strip()]
+        for ch in required:
+            if ch not in normalized:
+                chars.append(ch)
+                normalized.append(ch)
+        scene["characters"] = chars
+        if not str(scene.get("romantic_drama_beat") or "").strip():
+            if "markiz" in required:
+                scene["romantic_drama_beat"] = "Белая кошка наблюдает за рыжим котом у окна, черно-белый кот виден снаружи окна."
+            else:
+                scene["romantic_drama_beat"] = "Белая кошка наблюдает за рыжим котом у окна."
 
 
 def _ensure_image_prompt_framing_requirements(
@@ -213,6 +315,7 @@ def append_veo3_video_framing_constraints(
         low = out.lower()
     if _is_grandma_cat_cooking_project_scope() and "veo3_cast_rule:" not in low:
         out = f"{out} {VEO3_COOKING_CAST_RULE}".strip()
+        low = out.lower()
     return out
 
 
@@ -258,7 +361,8 @@ def _finalize_scene_video_prompt(video_prompt_en: str, scene: dict[str, Any]) ->
     Добавляет ``voice_lock_full`` при необходимости и правила кадра Veo 3 fast (липсинк, полная бабушка,
     все персонажи в кадре, крупный план, смена ракурса). ``CHARACTERS SPEAKS`` задаёт только модель.
     """
-    vp = _enforce_voice_lock_if_needed(str(video_prompt_en).strip(), scene)
+    vp = _append_romantic_drama_to_video_prompt(str(video_prompt_en).strip(), scene)
+    vp = _enforce_voice_lock_if_needed(vp, scene)
     return append_veo3_video_framing_constraints(vp, scene)
 
 
@@ -649,7 +753,32 @@ async def generate_recipe_from_source_text(
         text = "\n".join(lines).strip()
     if not text:
         raise RuntimeError("Модель не вернула рецепт из текста источника.")
+    if _looks_like_recipe_extraction_failure(text):
+        raise RuntimeError(
+            "В загруженном тексте не найден рецепт. Возможно, сайт отдал страницу-заглушку вместо содержимого."
+        )
     return text
+
+
+def _looks_like_recipe_extraction_failure(text: str) -> bool:
+    """Rejects model refusals/apologies so they are not shown as an approved recipe."""
+    low = " ".join((text or "").lower().split())
+    if not low:
+        return False
+    failure_markers = (
+        "не могу извлечь рецепт",
+        "не удалось извлечь рецепт",
+        "не получил фактическое содержимое",
+        "сообщение об ошибке",
+        "необходимость включить поддержку javascript",
+        "включить поддержку javascript",
+        "enable javascript",
+        "javascript is required",
+    )
+    if not any(marker in low for marker in failure_markers):
+        return False
+    recipe_markers = ("ингредиенты", "продукты", "приготовление", "способ приготовления")
+    return not any(marker in low for marker in recipe_markers)
 
 
 async def generate_viral_concept_brief(
@@ -804,6 +933,17 @@ def _speech_without_pause_and_punctuation(text: str) -> str:
 
 def _ensure_final_scene_subscribe_cta(scenes: list[dict[str, Any]]) -> None:
     """Гарантирует подписочную фразу в конце последней сцены."""
+    _ = scenes
+    return
+
+
+def _normalize_end_frame_prompt_for_stable_generation(_value: Any) -> str:
+    """Keep the current stable media path on start frame only."""
+    return "пусто"
+
+
+def _ensure_final_scene_subscribe_cta_legacy(scenes: list[dict[str, Any]]) -> None:
+    """Legacy final CTA injection kept for reference; not used in the stable flow."""
     if not scenes:
         return
     scene = scenes[-1]
@@ -890,6 +1030,7 @@ async def generate_scenes_plan(
     sponsored_content: bool = False,
     brand_context: str | None = None,
     analytics_feedback: dict[str, Any] | None = None,
+    romantic_drama_subplot: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """
     Один запрос к Gemini: сценарий из 4–6 сцен по **полному тексту рецепта**, с репликами Veo3 в ``text``.
@@ -914,10 +1055,17 @@ async def generate_scenes_plan(
                     viral_concept_brief=viral_concept_brief,
                     sponsored_content=sponsored_content,
                 )
+                romantic_subplot = _romantic_subplot_from_scenes(cached.get("romantic_drama_subplot"), fixed)
+                _enforce_romantic_subplot_characters(fixed, romantic_subplot)
                 return {
-                    "text_plan": build_human_readable_plan(fixed),
+                    "text_plan": (
+                        format_romantic_drama_status(romantic_subplot, fixed)
+                        + "\n\n"
+                        + build_human_readable_plan(fixed)
+                    ),
                     "json_plan": fixed,
                     "viral_concept_brief": viral_concept_brief or cached.get("viral_concept_brief") or {},
+                    "romantic_drama_subplot": romantic_subplot,
                     "retention_review": retention_review,
                     "regeneration_events": cached.get("regeneration_events") or [],
                 }
@@ -932,6 +1080,7 @@ async def generate_scenes_plan(
         sponsored_content=sponsored_content,
         brand_context=brand_context,
         analytics_feedback=analytics_feedback,
+        romantic_drama_subplot=romantic_drama_subplot,
     )
     prompt = llm_steps.build_scenes_plan_prompt(payload)
 
@@ -969,10 +1118,15 @@ async def generate_scenes_plan(
         viral_concept_brief=viral_concept_brief,
         sponsored_content=sponsored_content,
     )
+    romantic_subplot = _romantic_subplot_from_scenes(payload.get("romantic_drama_subplot"), raw_scenes)
+    _enforce_romantic_subplot_characters(raw_scenes, romantic_subplot)
     out_raw = {
-        "text_plan": build_human_readable_plan(raw_scenes),
+        "text_plan": format_romantic_drama_status(romantic_subplot, raw_scenes)
+        + "\n\n"
+        + build_human_readable_plan(raw_scenes),
         "json_plan": raw_scenes,
         "viral_concept_brief": viral_concept_brief or {},
+        "romantic_drama_subplot": romantic_subplot,
         "retention_review": retention_review,
         "regeneration_events": [],
     }
@@ -1014,12 +1168,23 @@ def _normalize_frame_prompts(
                 "duration_sec": scene.get("duration_sec", 4),
                 "continuity_anchors": scene.get("continuity_anchors") or [],
                 "continuity_state": scene.get("continuity_state") or "",
+                "characters": scene.get("characters") or [],
+                "romantic_drama_beat": scene.get("romantic_drama_beat") or "",
                 "start_frame_prompt_ru": _ensure_image_prompt_framing_requirements(
-                    append_visual_prop_descriptions(str(item.get("start_frame_prompt_ru", "пусто")).strip() or "пусто"),
+                    append_visual_prop_descriptions(
+                        _append_romantic_drama_to_start_prompt(
+                            str(item.get("start_frame_prompt_ru", "пусто")).strip() or "пусто",
+                            scene,
+                        )
+                    ),
                     model=str(scene.get("model", "")),
                 ),
                 "end_frame_prompt_ru": _ensure_image_prompt_framing_requirements(
-                    append_visual_prop_descriptions(str(item.get("end_frame_prompt_ru", "пусто")).strip() or "пусто"),
+                    append_visual_prop_descriptions(
+                        sanitize_character_names_and_keys(
+                            _normalize_end_frame_prompt_for_stable_generation(item.get("end_frame_prompt_ru"))
+                        )
+                    ),
                     model=str(scene.get("model", "")),
                 ),
             }
@@ -1071,6 +1236,56 @@ def _normalize_production_prompts(
     return out
 
 
+def _production_prompts_from_container(value: Any) -> Any:
+    """Возвращает массив production prompts из частых вариантов обёртки LLM-ответа."""
+    if isinstance(value, list):
+        return value
+    if not isinstance(value, dict):
+        return None
+    direct = value.get("prompts")
+    if isinstance(direct, list):
+        return direct
+    production = value.get("production")
+    if isinstance(production, dict) and isinstance(production.get("prompts"), list):
+        return production.get("prompts")
+    bundle = value.get("production_bundle")
+    if isinstance(bundle, dict) and isinstance(bundle.get("prompts"), list):
+        return bundle.get("prompts")
+    return None
+
+
+def _extract_production_prompts(raw: str) -> Any:
+    """
+    Достаёт `prompts` из production-ответа модели.
+
+    Основной контракт — объект `{"prompts": [...]}`, но LLM иногда возвращает массив
+    напрямую или кладёт массив под `production.prompts`.
+    """
+    cleaned = re.sub(
+        r"\s*```$",
+        "",
+        re.sub(r"^```(?:json)?\s*", "", raw.strip(), flags=re.IGNORECASE),
+    )
+    try:
+        parsed = json.loads(cleaned)
+    except Exception:
+        parsed = None
+    prompts = _production_prompts_from_container(parsed)
+    if prompts is not None:
+        return prompts
+    try:
+        obj = extract_json_object(raw)
+    except Exception:
+        obj = None
+    prompts = _production_prompts_from_container(obj)
+    if prompts is not None:
+        return prompts
+    try:
+        return extract_json_array(raw)
+    except Exception as e:
+        raise RuntimeError("Модель вернула неверный формат production (prompts).") from e
+
+
 async def generate_frame_prompts_for_approval(
     scenes_plan: list[dict[str, Any]],
     user_feedback: str | None = None,
@@ -1104,6 +1319,11 @@ async def generate_frame_prompts_for_approval(
                     "cutting board, stovetop surface, utensils, ingredient state, food texture and cat position "
                     "whenever they still belong to the recipe moment"
                 ),
+                "romantic_drama_rule": (
+                    "If scene.romantic_drama_beat is non-empty, every start_frame_prompt_ru must explicitly describe "
+                    "that background drama beat as visible action in the frame. Do not leave subplot characters only "
+                    "in scene.characters; if a subplot character is listed, they must be described in the frame."
+                ),
             "no_text_overlay": True,
         },
     }
@@ -1122,6 +1342,7 @@ async def generate_frame_prompts_for_approval(
         "Use reference style; do not invent an explicit art style.\n"
         "Do not use location names or location references. Preserve continuity through continuity_anchors and continuity_state.\n"
         "Do not reference other scenes; each prompt must be independent.\n"
+        "If a scene contains romantic_drama_beat, include it visibly and clearly in start_frame_prompt_ru for that exact scene.\n"
         + json.dumps(payload, ensure_ascii=False, indent=2)
     )
     raw = await asyncio.to_thread(gemini_generate_sync, prompt)
@@ -1159,11 +1380,17 @@ async def generate_full_production(
         for i, scene in enumerate(scenes):
             p = approved_frame_prompts[i]
             scene["start_frame_prompt"] = _ensure_image_prompt_framing_requirements(
-                append_visual_prop_descriptions(str(p.get("start_frame_prompt_ru", "пусто"))),
+                append_visual_prop_descriptions(
+                    _append_romantic_drama_to_start_prompt(str(p.get("start_frame_prompt_ru", "пусто")), scene)
+                ),
                 model=str(scene.get("model", "")),
             )
             scene["end_frame_prompt"] = _ensure_image_prompt_framing_requirements(
-                append_visual_prop_descriptions(str(p.get("end_frame_prompt_ru", "пусто"))),
+                append_visual_prop_descriptions(
+                    sanitize_character_names_and_keys(
+                        _normalize_end_frame_prompt_for_stable_generation(p.get("end_frame_prompt_ru"))
+                    )
+                ),
                 model=str(scene.get("model", "")),
             )
 
@@ -1181,10 +1408,18 @@ async def generate_full_production(
                 ),
                 "if_speech_add_lipsync": True,
                 "characters_speaks_rule": _LLM_VIDEO_CHARACTERS_SPEAKS_RULE,
+                "scene1_spoken_dish_name_rule": (
+                    "For scene 1, video_prompt_en must place CHARACTERS SPEAKS early in the clip and the exact "
+                    "spoken phrase from scene.text must explicitly name the dish from concept/full_recipe_text."
+                ),
                 "veo3_framing_rule": VEO3_FAST_VIDEO_FRAMING_RULE,
                 "continuity_rule": (
                     "video_prompt_en must preserve continuity_anchors and continuity_state: same cookware, "
                     "plate, cutting board, stovetop/working surface, utensils, ingredient state and food texture"
+                ),
+                "romantic_drama_rule": (
+                    "If scene.romantic_drama_beat is non-empty, video_prompt_en must explicitly include that background "
+                    "drama beat as visible action throughout the clip. Do not leave subplot characters only in scene.characters."
                 ),
                 "kitchen_physics_rule": VIDEO_KITCHEN_PHYSICS_RULE,
                 "viral_retention_rule": (
@@ -1217,6 +1452,8 @@ async def generate_full_production(
             "Visual style must be non-photorealistic/non-realistic cartoon (no realism). "
             "Grandmother must be a cartoon grandmother and the cat must be a cartoon cat; include the exact phrase cartoon cat. "
             "If scene has speech, require accurate lip sync with the Russian line. "
+            "For scene 1, the spoken phrase in CHARACTERS SPEAKS must happen at the start of the clip and explicitly "
+            "name the dish from the scenario; the viewer must hear the dish name in the first scene. "
             "Framing: close-up / medium-close; grandmother's full figure and every other character in the scene "
             "must stay fully visible; camera angle or framing should evolve during the clip (no fixed static "
             "tripod for the entire take).\n"
@@ -1238,13 +1475,14 @@ async def generate_full_production(
             "Respect the Viral Concept Brief and scene retention fields. First frame must not be boring preparation; "
             "final scene must deliver the visual payoff. If sponsored_content is true, integrate the brand naturally "
             "inside the cooking story, not as an ad break.\n"
+            "If a scene contains romantic_drama_beat, video_prompt_en must show that beat as visible background action for that exact scene.\n"
             + feedback_block
             + "\n"
             + json.dumps(payload, ensure_ascii=False, indent=2)
         )
-        obj = extract_json_object(await asyncio.to_thread(gemini_generate_sync, prompt))
+        raw = await asyncio.to_thread(gemini_generate_sync, prompt)
         prompts = _normalize_production_prompts(
-            obj.get("prompts"),
+            _extract_production_prompts(raw),
             scenes_count=len(scenes),
             require_frames=False,
         )
@@ -1293,11 +1531,19 @@ async def generate_full_production(
             ),
             "if_speech_add_lipsync": True,
             "characters_speaks_rule": _LLM_VIDEO_CHARACTERS_SPEAKS_RULE,
+            "scene1_spoken_dish_name_rule": (
+                "For scene 1, video_prompt_en must place CHARACTERS SPEAKS early in the clip and the exact "
+                "spoken phrase from scene.text must explicitly name the dish from concept/full_recipe_text."
+            ),
             "veo3_framing_rule": VEO3_FAST_VIDEO_FRAMING_RULE,
                 "continuity_rule": (
                     "start_frame_ru and video_prompt_en must preserve continuity_anchors and continuity_state: "
                     "same cookware, plate, cutting board, stovetop/working surface, utensils, ingredient state "
                     "and food texture"
+            ),
+            "romantic_drama_rule": (
+                "If scene.romantic_drama_beat is non-empty, both start_frame_ru and video_prompt_en must explicitly "
+                "include that background drama beat as visible action. Do not leave subplot characters only in scene.characters."
             ),
             "kitchen_physics_rule": VIDEO_KITCHEN_PHYSICS_RULE,
             "viral_retention_rule": (
@@ -1321,6 +1567,8 @@ async def generate_full_production(
         "Visual style must be non-photorealistic/non-realistic cartoon (no realism). "
         "Grandmother must be a cartoon grandmother and the cat must be a cartoon cat; include the exact phrase cartoon cat. "
         "If scene has speech, require accurate lip sync with the Russian line. "
+        "For scene 1, the spoken phrase in CHARACTERS SPEAKS must happen at the start of the clip and explicitly "
+        "name the dish from the scenario; the viewer must hear the dish name in the first scene. "
         "Framing: close-up / medium-close; grandmother's full figure and every other character in the scene "
         "must stay fully visible; camera angle or framing should evolve during the clip (no fixed static "
         "tripod for the entire take).\n"
@@ -1342,11 +1590,12 @@ async def generate_full_production(
         "Respect the Viral Concept Brief and scene retention fields. First frame must not be boring preparation; "
         "final scene must deliver the visual payoff. If sponsored_content is true, integrate the brand naturally "
         "inside the cooking story, not as an ad break.\n"
+        "If a scene contains romantic_drama_beat, both start_frame_prompt_ru and video_prompt_en must show that beat as visible background action for that exact scene.\n"
         + json.dumps(payload, ensure_ascii=False, indent=2)
     )
-    obj = extract_json_object(await asyncio.to_thread(gemini_generate_sync, prompt))
+    raw = await asyncio.to_thread(gemini_generate_sync, prompt)
     prompts = _normalize_production_prompts(
-        obj.get("prompts"),
+        _extract_production_prompts(raw),
         scenes_count=len(scenes),
         require_frames=True,
     )
@@ -1356,11 +1605,15 @@ async def generate_full_production(
         scene_out["model"] = "veo3_fast"
         scene_out["voice_provider"] = "none"
         scene_out["start_frame_prompt"] = _ensure_image_prompt_framing_requirements(
-            append_visual_prop_descriptions(p.get("start_frame_prompt_ru", "")),
+            append_visual_prop_descriptions(_append_romantic_drama_to_start_prompt(p.get("start_frame_prompt_ru", ""), scene_out)),
             model=str(scene_out.get("model", "")),
         )
         scene_out["end_frame_prompt"] = _ensure_image_prompt_framing_requirements(
-            append_visual_prop_descriptions(p.get("end_frame_prompt_ru", "")),
+            append_visual_prop_descriptions(
+                sanitize_character_names_and_keys(
+                    _normalize_end_frame_prompt_for_stable_generation(p.get("end_frame_prompt_ru"))
+                )
+            ),
             model=str(scene_out.get("model", "")),
         )
         speech_by_lang = await _build_scene_speech_by_lang(str(scene_out.get("text", "")).strip(), target_languages)

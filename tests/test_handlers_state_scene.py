@@ -125,6 +125,30 @@ def test_on_text_first_step_generate_button_without_session():
     assert SESSIONS[1001]["state"] == "state_waiting_first_step_generate_text"
 
 
+def test_on_text_first_step_button_after_completed_production_starts_new_mode():
+    captured: list[tuple[str, object | None]] = []
+    SESSIONS[1024] = {
+        "state": "ready_for_production",
+        "production": {"json_plan": [{"scene": 1}]},
+        "selected_project_key": "grandma_kitchen",
+        "target_languages": ["ru", "en"],
+    }
+
+    class _Message:
+        text = "Генерировать"
+
+        async def reply_text(self, text, reply_markup=None):
+            captured.append((text, reply_markup))
+
+    update = SimpleNamespace(message=_Message(), effective_chat=SimpleNamespace(id=1024))
+    asyncio.run(on_text(update, context=None))
+    assert captured
+    assert "Production уже готов" not in captured[0][0]
+    assert "Пришлите идею или рецепт обычным текстом" in captured[0][0]
+    assert SESSIONS[1024]["state"] == "state_waiting_first_step_generate_text"
+    assert "production" not in SESSIONS[1024]
+
+
 def test_on_text_first_step_description_button_without_session():
     captured: list[tuple[str, object | None]] = []
     SESSIONS.pop(1021, None)
@@ -175,7 +199,7 @@ def test_on_text_first_step_project_image_button_opens_character_choice():
     asyncio.run(on_text(update, context=None))
     assert captured
     assert "Выберите персонажей" in captured[0][0]
-    assert "grandma, cat" in captured[0][0]
+    assert "бабушка, рыжий кот" in captured[0][0]
     assert captured[0][1] is not None
     assert SESSIONS[1012]["state"] == "state_waiting_first_step_project_image_characters"
     assert SESSIONS[1012]["first_step_project_image_characters"] == ["grandma", "cat"]
@@ -294,7 +318,7 @@ def test_on_text_first_step_image_text_generates_image(monkeypatch):
     assert sent["ok"] is True
     assert "Генерируем изображение" in captured[0][0]
     assert SESSIONS[1005]["state"] == ""
-    assert SESSIONS[1005]["selected_project_key"] == "grandma_cat_cooking"
+    assert SESSIONS[1005]["selected_project_key"] == "grandma_kitchen"
 
 
 def test_on_text_first_step_image_accepts_custom_references(monkeypatch):
@@ -364,7 +388,7 @@ def test_on_text_first_step_sound_text_generates_audio(monkeypatch):
     sent = {"ok": False}
     SESSIONS[1015] = {
         "state": "state_waiting_first_step_sound_text",
-        "selected_project_key": "grandma_cat_cooking",
+        "selected_project_key": "grandma_kitchen",
     }
 
     class _Message:
@@ -393,7 +417,7 @@ def test_on_text_first_step_sound_text_generates_audio(monkeypatch):
     assert sent["ok"] is True
     assert "Генерируем звук" in captured[0][0]
     assert SESSIONS[1015]["state"] == ""
-    assert SESSIONS[1015]["selected_project_key"] == "grandma_cat_cooking"
+    assert SESSIONS[1015]["selected_project_key"] == "grandma_kitchen"
 
 
 def test_on_text_project_image_adds_character_then_generates_with_references(monkeypatch):
@@ -414,7 +438,7 @@ def test_on_text_project_image_adds_character_then_generates_with_references(mon
         async def reply_photo(self, photo, caption):
             data = photo.getvalue() if hasattr(photo, "getvalue") else b""
             assert data == b"project-img"
-            assert "grandfather" in caption
+            assert "дедушка" in caption
             sent["ok"] = True
 
     update = SimpleNamespace(message=_Message(), effective_chat=SimpleNamespace(id=1013))
@@ -450,7 +474,7 @@ def test_on_text_project_image_adds_character_then_generates_with_references(mon
     update = SimpleNamespace(message=_PromptMessage(), effective_chat=SimpleNamespace(id=1013))
     asyncio.run(on_text(update, context=None))
     assert sent["ok"] is True
-    assert "grandfather" in str(seen["prompt"])
+    assert "дедушка" in str(seen["prompt"])
     assert seen["reference_images"] == [b"ref1", b"ref2"]
     assert SESSIONS[1013]["state"] == ""
 
@@ -524,7 +548,7 @@ def test_on_text_project_image_accepts_custom_references(monkeypatch):
     update = SimpleNamespace(message=_PromptMessage(), effective_chat=SimpleNamespace(id=1017))
     asyncio.run(on_text(update, context=None))
     assert sent["ok"] is True
-    assert "grandma, cat" in str(seen["prompt"])
+    assert "бабушка, рыжий кот" in str(seen["prompt"])
     assert seen["reference_images"] == [b"project-ref", b"custom-project-ref"]
     assert SESSIONS[1017]["state"] == ""
 
@@ -570,10 +594,11 @@ def test_generate_project_image_sends_prompt_and_character_references(monkeypatc
     refs = captured["reference_images"]
     assert prompt.splitlines()[0] in sent_prompt
     assert "Match art style" in sent_prompt
-    assert "Персонажи в кадре: grandma, cat" in sent_prompt
+    assert "Персонажи в кадре: бабушка, рыжий кот" in sent_prompt
     assert "Локация кадра" not in sent_prompt
     assert isinstance(refs, list)
-    assert [len(r) for r in refs] == [747562, 3260979]
+    assert len(refs) == 2
+    assert all(len(r) > 0 for r in refs)
     assert captured["photo_bytes"] == b"project-img"
     assert any("Генерируем изображение проекта" in r for r in replies)
 
@@ -646,7 +671,7 @@ def test_on_photo_first_step_video_image_generates_video(monkeypatch):
     assert sent["ok"] is True
     assert any("Генерируем видео" in t for t in captured_texts)
     assert SESSIONS[1007]["state"] == ""
-    assert SESSIONS[1007]["selected_project_key"] == "grandma_cat_cooking"
+    assert SESSIONS[1007]["selected_project_key"] == "grandma_kitchen"
 
 
 def test_on_text_first_step_project_button_opens_project_choice():
@@ -664,18 +689,18 @@ def test_on_text_first_step_project_button_opens_project_choice():
     assert captured
     assert "Выберите проект кнопкой" in captured[0][0]
     assert SESSIONS[1010]["state"] == "state_waiting_first_step_project_selection"
-    assert SESSIONS[1010]["selected_project_key"] == "grandma_cat_cooking"
+    assert SESSIONS[1010]["selected_project_key"] == "grandma_kitchen"
 
 
 def test_on_text_project_selection_saves_project_and_returns_menu():
     captured: list[tuple[str, object | None]] = []
     SESSIONS[1011] = {
         "state": "state_waiting_first_step_project_selection",
-        "selected_project_key": "grandma_cat_cooking",
+        "selected_project_key": "grandma_kitchen",
     }
 
     class _Message:
-        text = "Бабушка + кот (кулинарный Shorts)"
+        text = "Grandma Kitchen"
 
         async def reply_text(self, text, reply_markup=None):
             captured.append((text, reply_markup))
@@ -685,12 +710,12 @@ def test_on_text_project_selection_saves_project_and_returns_menu():
     assert captured
     assert "Проект выбран" in captured[0][0]
     assert SESSIONS[1011]["state"] == ""
-    assert SESSIONS[1011]["selected_project_key"] == "grandma_cat_cooking"
+    assert SESSIONS[1011]["selected_project_key"] == "grandma_kitchen"
 
 
 def test_on_text_navigation_start_over_resets_session():
     captured: list[tuple[str, object | None]] = []
-    SESSIONS[1020] = {"state": "waiting_recipe_approval", "selected_project_key": "grandma_cat_cooking"}
+    SESSIONS[1020] = {"state": "waiting_recipe_approval", "selected_project_key": "grandma_kitchen"}
 
     class _Message:
         text = NAV_BUTTON_START_OVER

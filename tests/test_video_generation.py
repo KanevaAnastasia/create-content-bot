@@ -31,7 +31,7 @@ from app.video_generation import _video_render_defaults
 
 def test_veo3_fast_render_defaults():
     quality, aspect_ratio, audio_enabled = _video_render_defaults("veo3_fast")
-    assert quality == "1080"
+    assert quality == "720"
     assert aspect_ratio == "9:16"
     assert audio_enabled is True
 
@@ -64,6 +64,6 @@ def test_generate_video_bytes_calls_vertex_function(monkeypatch):
     assert captured["duration_sec"] == 4
     assert captured["start_image"] == b"start"
     assert captured["end_image"] == b"end"
-    assert captured["quality"] == "1080"
+    assert captured["quality"] == "720"
     assert captured["aspect_ratio"] == "9:16"
     assert captured["audio_enabled"] is True

@@ -109,11 +109,193 @@ def test_gemini_generate_sync_handles_multipart_candidate_text(monkeypatch):
     assert "[{\"a\":1}]" in out
 
 
+def test_gemini_generate_sync_reads_candidate_text_from_to_dict(monkeypatch):
+    class _Resp:
+        @property
+        def text(self):
+            raise ValueError("Cannot get the response text.")
+
+        def to_dict(self):
+            return {"candidates": [{"content": {"parts": [{"text": "ok from dict"}]}}]}
+
+    class _Model:
+        def __init__(self, _model_name):
+            pass
+
+        def generate_content(self, _prompt, **_kwargs):
+            return _Resp()
+
+    monkeypatch.setenv("GOOGLE_CLOUD_PROJECT", "proj")
+    monkeypatch.setenv("GOOGLE_CLOUD_LOCATION", "us-central1")
+    monkeypatch.setenv("GEMINI_MODEL", "gemini-2.5-flash")
+    monkeypatch.setenv("GEMINI_MODEL_FALLBACKS", "")
+    monkeypatch.setattr(llm_utils, "submit_llm", lambda fn: fn())
+
+    import sys
+    import types
+
+    fake_vertexai = types.ModuleType("vertexai")
+    fake_vertexai.init = lambda **_kwargs: None
+    fake_vm = types.ModuleType("vertexai.generative_models")
+    fake_vm.GenerativeModel = _Model
+    fake_vm.SafetySetting = type("SafetySetting", (), {"__init__": lambda self, category, threshold: None})
+    fake_vm.HarmCategory = type(
+        "HarmCategory",
+        (),
+        {
+            "HARM_CATEGORY_HATE_SPEECH": "hs",
+            "HARM_CATEGORY_DANGEROUS_CONTENT": "dc",
+            "HARM_CATEGORY_SEXUALLY_EXPLICIT": "sx",
+            "HARM_CATEGORY_HARASSMENT": "hr",
+        },
+    )
+    fake_vm.HarmBlockThreshold = type("HarmBlockThreshold", (), {"BLOCK_ONLY_HIGH": "high"})
+    monkeypatch.setitem(sys.modules, "vertexai", fake_vertexai)
+    monkeypatch.setitem(sys.modules, "vertexai.generative_models", fake_vm)
+
+    assert llm_utils.gemini_generate_sync("hello") == "ok from dict"
+
+
+def test_gemini_generate_sync_reports_empty_response_reason_and_tries_fallback(monkeypatch):
+    calls = []
+
+    class _Content:
+        parts = []
+
+    class _SafetyRating:
+        category = "HARM_CATEGORY_DANGEROUS_CONTENT"
+        probability = "HIGH"
+        blocked = True
+
+    class _EmptyCandidate:
+        content = _Content()
+        finish_reason = "SAFETY"
+        safety_ratings = [_SafetyRating()]
+
+    class _EmptyResp:
+        candidates = [_EmptyCandidate()]
+
+        @property
+        def text(self):
+            raise ValueError("Cannot get the response text.")
+
+    class _OkResp:
+        text = "ok"
+
+    class _Model:
+        def __init__(self, model_name):
+            self.model_name = model_name
+
+        def generate_content(self, _prompt, **_kwargs):
+            calls.append(self.model_name)
+            if self.model_name == "gemini-2.5-flash":
+                return _EmptyResp()
+            return _OkResp()
+
+    monkeypatch.setenv("GOOGLE_CLOUD_PROJECT", "proj")
+    monkeypatch.setenv("GOOGLE_CLOUD_LOCATION", "us-central1")
+    monkeypatch.setenv("GEMINI_MODEL", "gemini-2.5-flash")
+    monkeypatch.setenv("GEMINI_MODEL_FALLBACKS", "gemini-2.5-pro")
+    monkeypatch.setattr(llm_utils, "submit_llm", lambda fn: fn())
+
+    import sys
+    import types
+
+    fake_vertexai = types.ModuleType("vertexai")
+    fake_vertexai.init = lambda **_kwargs: None
+    fake_vm = types.ModuleType("vertexai.generative_models")
+    fake_vm.GenerativeModel = _Model
+    fake_vm.SafetySetting = type("SafetySetting", (), {"__init__": lambda self, category, threshold: None})
+    fake_vm.HarmCategory = type(
+        "HarmCategory",
+        (),
+        {
+            "HARM_CATEGORY_HATE_SPEECH": "hs",
+            "HARM_CATEGORY_DANGEROUS_CONTENT": "dc",
+            "HARM_CATEGORY_SEXUALLY_EXPLICIT": "sx",
+            "HARM_CATEGORY_HARASSMENT": "hr",
+        },
+    )
+    fake_vm.HarmBlockThreshold = type("HarmBlockThreshold", (), {"BLOCK_ONLY_HIGH": "high"})
+    monkeypatch.setitem(sys.modules, "vertexai", fake_vertexai)
+    monkeypatch.setitem(sys.modules, "vertexai.generative_models", fake_vm)
+
+    assert llm_utils.gemini_generate_sync("hello") == "ok"
+    assert calls == ["gemini-2.5-flash", "gemini-2.5-pro"]
+
+
+def test_gemini_generate_sync_includes_empty_response_reason_when_all_models_fail(monkeypatch):
+    class _Content:
+        parts = []
+
+    class _Candidate:
+        content = _Content()
+        finish_reason = "MAX_TOKENS"
+        finish_message = "No text was produced."
+
+    class _Resp:
+        candidates = [_Candidate()]
+
+        @property
+        def text(self):
+            raise ValueError("Cannot get the response text.")
+
+    class _Model:
+        def __init__(self, _model_name):
+            pass
+
+        def generate_content(self, _prompt, **_kwargs):
+            return _Resp()
+
+    monkeypatch.setenv("GOOGLE_CLOUD_PROJECT", "proj")
+    monkeypatch.setenv("GOOGLE_CLOUD_LOCATION", "us-central1")
+    monkeypatch.setenv("GEMINI_MODEL", "gemini-2.5-flash")
+    monkeypatch.setenv("GEMINI_MODEL_FALLBACKS", "")
+    monkeypatch.setattr(llm_utils, "submit_llm", lambda fn: fn())
+
+    import sys
+    import types
+
+    fake_vertexai = types.ModuleType("vertexai")
+    fake_vertexai.init = lambda **_kwargs: None
+    fake_vm = types.ModuleType("vertexai.generative_models")
+    fake_vm.GenerativeModel = _Model
+    fake_vm.SafetySetting = type("SafetySetting", (), {"__init__": lambda self, category, threshold: None})
+    fake_vm.HarmCategory = type(
+        "HarmCategory",
+        (),
+        {
+            "HARM_CATEGORY_HATE_SPEECH": "hs",
+            "HARM_CATEGORY_DANGEROUS_CONTENT": "dc",
+            "HARM_CATEGORY_SEXUALLY_EXPLICIT": "sx",
+            "HARM_CATEGORY_HARASSMENT": "hr",
+        },
+    )
+    fake_vm.HarmBlockThreshold = type("HarmBlockThreshold", (), {"BLOCK_ONLY_HIGH": "high"})
+    monkeypatch.setitem(sys.modules, "vertexai", fake_vertexai)
+    monkeypatch.setitem(sys.modules, "vertexai.generative_models", fake_vm)
+
+    with pytest.raises(RuntimeError) as exc:
+        llm_utils.gemini_generate_sync("hello")
+    assert "finish_reason=MAX_TOKENS" in str(exc.value)
+    assert "finish_message=No text was produced." in str(exc.value)
+
+
 def test_extract_json_array_and_object():
     arr = llm_utils.extract_json_array("```json\n[{\"a\":1}]\n```")
     assert arr == [{"a": 1}]
     obj = llm_utils.extract_json_object("text {\"x\": 2} tail")
     assert obj == {"x": 2}
+
+
+def test_extract_json_array_uses_first_complete_array_when_model_returns_extra_json():
+    raw = '[{"scene": 1}]\n[{"scene": 2}]'
+    assert llm_utils.extract_json_array(raw) == [{"scene": 1}]
+
+
+def test_extract_json_object_uses_first_complete_object_when_model_returns_extra_json():
+    raw = '```json\n{"prompts": ["ok"]}\n```\n{"ignored": true}'
+    assert llm_utils.extract_json_object(raw) == {"prompts": ["ok"]}
 
 
 def test_backoff_delay_uses_hint(monkeypatch):

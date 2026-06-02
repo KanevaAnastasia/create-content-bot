@@ -9,6 +9,8 @@ import html
 import json
 from typing import Any
 
+from .character_catalog import character_prompt_catalog, format_character_short_descriptions, sanitize_character_names_and_keys
+
 
 def _safe_text(value: Any) -> str:
     """
@@ -29,6 +31,24 @@ def _safe_text(value: Any) -> str:
     if isinstance(value, list):
         return " ".join(_safe_text(v) for v in value)
     return str(value)
+
+
+def _display_text(value: Any) -> str:
+    return sanitize_character_names_and_keys(_safe_text(value))
+
+
+def _romantic_short_descriptions() -> dict[str, str]:
+    catalog = character_prompt_catalog(["cat", "zaya", "markiz"])
+    return {
+        key: str(item.get("short_description") or item.get("name") or key)
+        for key, item in catalog.items()
+        if isinstance(item, dict)
+    }
+
+
+def _replace_character_names_with_short_descriptions(text: str, shorts: dict[str, str]) -> str:
+    _ = shorts
+    return sanitize_character_names_and_keys(text)
 
 
 def format_json_for_telegram(data: Any) -> str:
@@ -91,26 +111,32 @@ def build_human_readable_plan(scenes: list[dict[str, Any]]) -> str:
         scene_no = scene.get("scene", scene.get("scene_id", "?"))
         shot = scene.get("shot_type", "medium")
         anchors = scene.get("continuity_anchors") if isinstance(scene.get("continuity_anchors"), list) else []
-        anchors_text = ", ".join(_safe_text(x) for x in anchors if _safe_text(x)) or "—"
+        anchors_text = ", ".join(_display_text(x) for x in anchors if _display_text(x)) or "—"
         duration = scene.get("duration_sec", 4)
         voice_needed = bool(scene.get("voice_needed")) or bool(_safe_text(scene.get("text")).strip())
         model = scene.get("model", "veo3_fast" if voice_needed else "kling")
         has_lipsync = bool(scene.get("has_lipsync")) or bool(scene.get("lip_sync"))
         voice_needed = bool(scene.get("voice_needed")) or bool(_safe_text(scene.get("text")).strip())
-        action = scene.get("action") or scene.get(
+        action = _display_text(scene.get("action") or scene.get(
             "recipe_step", "Бабушка выполняет конкретный шаг рецепта, кот активно взаимодействует с ингредиентом."
-        )
+        ))
+        chars = scene.get("characters") if isinstance(scene.get("characters"), list) else ["grandma", "cat"]
+        chars_text = format_character_short_descriptions([str(x) for x in chars]) or "бабушка, рыжий кот"
+        drama_beat = _replace_character_names_with_short_descriptions(
+            _safe_text(scene.get("romantic_drama_beat")),
+            _romantic_short_descriptions(),
+        ) or "—"
         text_line = _safe_text(scene.get("text")) or "—"
-        retention_function = _safe_text(scene.get("retention_function")) or "—"
+        retention_function = _display_text(scene.get("retention_function")) or "—"
         micro_events_raw = scene.get("micro_events") if isinstance(scene.get("micro_events"), list) else []
-        micro_events = ", ".join(_safe_text(x) for x in micro_events_raw if _safe_text(x)) or "—"
+        micro_events = ", ".join(_display_text(x) for x in micro_events_raw if _display_text(x)) or "—"
         risk = scene.get("boring_scene_risk", "—")
-        suggestion = _safe_text(scene.get("retention_suggestion")) or "—"
+        suggestion = _display_text(scene.get("retention_suggestion")) or "—"
         first_phrase_score = scene.get("first_phrase_score")
         first_phrase_review = scene.get("first_phrase_review") if isinstance(scene.get("first_phrase_review"), dict) else {}
         first_phrase_issues = first_phrase_review.get("issues") if isinstance(first_phrase_review.get("issues"), list) else []
-        first_phrase_issue_text = ", ".join(_safe_text(x) for x in first_phrase_issues if _safe_text(x)) or "—"
-        first_phrase_suggestion = _safe_text(scene.get("first_phrase_suggestion")) or _safe_text(first_phrase_review.get("suggestion")) or "—"
+        first_phrase_issue_text = ", ".join(_display_text(x) for x in first_phrase_issues if _display_text(x)) or "—"
+        first_phrase_suggestion = _display_text(scene.get("first_phrase_suggestion")) or _display_text(first_phrase_review.get("suggestion")) or "—"
         first_phrase_block = (
             "Проверка первой фразы:\n"
             f"Оценка: {first_phrase_score}/10\n"
@@ -126,7 +152,8 @@ def build_human_readable_plan(scenes: list[dict[str, Any]]) -> str:
             f"СЦЕНА {scene_no}\n"
             f"Вид/ракурс: {shot}\n"
             f"Опоры консистентности: {anchors_text}\n"
-            "Персонажи: бабушка, кот\n"
+            f"Персонажи: {chars_text}\n"
+            f"Драма в сцене: {drama_beat}\n"
             f"Длительность: {duration} сек\n"
             f"Нейросеть: {model}\n"
             f"Lip sync: {'да' if has_lipsync else 'нет'}\n\n"
@@ -147,6 +174,67 @@ def build_human_readable_plan(scenes: list[dict[str, Any]]) -> str:
             f"Примерная стоимость: {cost_label(model)}"
         )
     return "\n\n---\n\n".join(blocks)
+
+
+def format_romantic_drama_status(
+    subplot: dict[str, Any] | None,
+    scenes: list[dict[str, Any]] | None = None,
+) -> str:
+    """Formats the optional white-cat/black-and-white-cat subplot decision for user approval."""
+    data = subplot if isinstance(subplot, dict) else {}
+    chars = [str(x).strip().lower() for x in data.get("characters", [])] if isinstance(data.get("characters"), list) else []
+    enabled = bool(data.get("enabled"))
+    if not enabled and scenes:
+        for scene in scenes:
+            raw = scene.get("characters") if isinstance(scene, dict) else []
+            if not isinstance(raw, list):
+                continue
+            scene_chars = {str(x).strip().lower() for x in raw if str(x).strip()}
+            if "zaya" in scene_chars:
+                enabled = True
+                if "zaya" not in chars:
+                    chars.append("zaya")
+            if "markiz" in scene_chars and "markiz" not in chars:
+                chars.append("markiz")
+    has_zaya = enabled or "zaya" in chars
+    has_markiz = "markiz" in chars
+    shorts = _romantic_short_descriptions()
+    cat_short = shorts.get("cat", "рыжий кот")
+    zaya_short = shorts.get("zaya", "белая кошка")
+    markiz_short = shorts.get("markiz", "черно-белый кот")
+    brief = _replace_character_names_with_short_descriptions(_safe_text(data.get("brief")), shorts) if has_zaya else ""
+    zaya_timosha_arc = (
+        _replace_character_names_with_short_descriptions(_safe_text(data.get("zaya_timosha_arc")), shorts)
+        if has_zaya
+        else ""
+    )
+    markiz_arc = (
+        _replace_character_names_with_short_descriptions(_safe_text(data.get("markiz_arc")), shorts)
+        if has_markiz
+        else ""
+    )
+    happy_end = _replace_character_names_with_short_descriptions(_safe_text(data.get("happy_end")), shorts) if has_zaya else ""
+    episode_rule = _safe_text(data.get("episode_rule")) if has_zaya else ""
+    lines = [
+        "РОМАНТИЧЕСКАЯ ВЕТКА",
+        "Решение уровня ролика: апрувится вместе со сценарием",
+        f"Драма с персонажем: {zaya_short} - {'да' if has_zaya else 'нет'}",
+        f"Дополнительный соседский кот: {markiz_short} - {'да' if has_markiz else 'нет'}",
+    ]
+    if brief:
+        lines.append(f"Что будет: {brief}")
+    if zaya_timosha_arc:
+        lines.append(f"{cat_short} + {zaya_short}: {zaya_timosha_arc}")
+    if markiz_arc:
+        lines.append(f"{markiz_short}: {markiz_arc}")
+    if happy_end:
+        lines.append(f"Хэппи-энд: {happy_end}")
+    if episode_rule:
+        lines.append(
+            "Сквозное правило: линия идёт через весь ролик фоновыми beat-ами, рецепт остаётся главным; "
+            "в финале драма закрывается понятным хэппи-эндом."
+        )
+    return "\n".join(lines)
 
 
 def _hook_lines(hooks: dict[str, Any]) -> list[str]:
@@ -369,16 +457,25 @@ def format_frame_prompts_for_approval(frame_prompts: list[dict[str, Any]]) -> st
     for i, item in enumerate(frame_prompts, start=1):
         shot = item.get("shot_type", "medium")
         anchors = item.get("continuity_anchors") if isinstance(item.get("continuity_anchors"), list) else []
-        anchors_text = ", ".join(_safe_text(x) for x in anchors if _safe_text(x)) or "—"
+        anchors_text = ", ".join(_display_text(x) for x in anchors if _display_text(x)) or "—"
         model = item.get("model", "veo3_fast")
         duration = item.get("duration_sec", 4)
-        start_ru = item.get("start_frame_prompt_ru", "пусто")
-        end_ru = item.get("end_frame_prompt_ru", "пусто")
+        start_ru = _display_text(item.get("start_frame_prompt_ru", "пусто"))
+        end_ru = _display_text(item.get("end_frame_prompt_ru", "пусто"))
+        chars = item.get("characters") if isinstance(item.get("characters"), list) else []
+        chars_text = format_character_short_descriptions([str(x) for x in chars]) if chars else ""
+        drama_beat = _replace_character_names_with_short_descriptions(
+            _safe_text(item.get("romantic_drama_beat")),
+            _romantic_short_descriptions(),
+        )
         blocks.append(
             f"СЦЕНА {i}\n"
             f"Ракурс: {shot}\n"
             f"Опоры консистентности: {anchors_text}\n"
-            f"Модель: {model}, длительность: {duration} сек\n\n"
+            f"Модель: {model}, длительность: {duration} сек\n"
+            + (f"Персонажи: {chars_text}\n" if chars_text else "")
+            + (f"Драма в кадре: {drama_beat}\n" if drama_beat else "")
+            + "\n"
             "START FRAME (RU):\n"
             f"{start_ru}\n\n"
             "END FRAME (RU):\n"
@@ -396,27 +493,35 @@ def format_production_bundle_for_approval(scenes: list[dict[str, Any]]) -> str:
         if not isinstance(scene, dict):
             continue
         scene_no = scene.get("scene", i + 1)
-        start = _safe_text(scene.get("start_frame_prompt")) or "пусто"
-        end = _safe_text(scene.get("end_frame_prompt")) or "пусто"
+        start = _display_text(scene.get("start_frame_prompt")) or "пусто"
+        end = _display_text(scene.get("end_frame_prompt")) or "пусто"
         prompt_map = scene.get("video_prompt_by_lang") if isinstance(scene.get("video_prompt_by_lang"), dict) else {}
-        video = _safe_text(scene.get("video_prompt")) or "—"
+        video = _display_text(scene.get("video_prompt")) or "—"
         if prompt_map:
             video = "\n".join(
-                f"[{lang}] {_safe_text(prompt)}"
+                f"[{lang}] {_display_text(prompt)}"
                 for lang, prompt in prompt_map.items()
             )
         speech_map = scene.get("speech_by_lang") if isinstance(scene.get("speech_by_lang"), dict) else {}
         phrase = _safe_text(scene.get("text")) or "—"
         if speech_map:
             phrase = "\n".join(f"[{lang}] {_safe_text(text)}" for lang, text in speech_map.items())
-        action = _safe_text(scene.get("action")) or "—"
-        retention_function = _safe_text(scene.get("retention_function")) or "—"
+        action = _display_text(scene.get("action")) or "—"
+        chars = scene.get("characters") if isinstance(scene.get("characters"), list) else []
+        chars_text = format_character_short_descriptions([str(x) for x in chars]) if chars else "—"
+        drama_beat = _replace_character_names_with_short_descriptions(
+            _safe_text(scene.get("romantic_drama_beat")),
+            _romantic_short_descriptions(),
+        ) or "—"
+        retention_function = _display_text(scene.get("retention_function")) or "—"
         micro_events_raw = scene.get("micro_events") if isinstance(scene.get("micro_events"), list) else []
-        micro_events = ", ".join(_safe_text(x) for x in micro_events_raw if _safe_text(x)) or "—"
-        payoff = _safe_text(scene.get("payoff_type")) or "—"
+        micro_events = ", ".join(_display_text(x) for x in micro_events_raw if _display_text(x)) or "—"
+        payoff = _display_text(scene.get("payoff_type")) or "—"
         blocks.append(
             f"СЦЕНА {scene_no}\n"
             f"Что происходит: {action}\n"
+            f"Персонажи: {chars_text}\n"
+            f"Драма в сцене: {drama_beat}\n"
             f"Фраза: {phrase}\n"
             f"Retention function: {retention_function}\n"
             f"Микрособытия: {micro_events}\n"
@@ -452,10 +557,16 @@ def format_production_cards(scenes: list[dict[str, Any]]) -> str:
         model = scene.get("model", "veo3_fast")
         duration = scene.get("duration_sec", 4)
         anchors = scene.get("continuity_anchors") if isinstance(scene.get("continuity_anchors"), list) else []
-        anchors_text = ", ".join(_safe_text(x) for x in anchors if _safe_text(x)) or "—"
-        start_frame = _safe_text(scene.get("start_frame_prompt")) or "пусто"
-        end_frame = _safe_text(scene.get("end_frame_prompt")) or "пусто"
-        video_prompt = _safe_text(scene.get("video_prompt")) or "—"
+        anchors_text = ", ".join(_display_text(x) for x in anchors if _display_text(x)) or "—"
+        start_frame = _display_text(scene.get("start_frame_prompt")) or "пусто"
+        end_frame = _display_text(scene.get("end_frame_prompt")) or "пусто"
+        video_prompt = _display_text(scene.get("video_prompt")) or "—"
+        chars = scene.get("characters") if isinstance(scene.get("characters"), list) else []
+        chars_text = format_character_short_descriptions([str(x) for x in chars]) if chars else "—"
+        drama_beat = _replace_character_names_with_short_descriptions(
+            _safe_text(scene.get("romantic_drama_beat")),
+            _romantic_short_descriptions(),
+        ) or "—"
         tts = scene.get("tts") if isinstance(scene.get("tts"), dict) else {}
         tts_provider = _safe_text(tts.get("provider")) or "native"
         voice_profile = _safe_text(tts.get("voice_profile")) or "native_scene_voice"
@@ -474,6 +585,8 @@ def format_production_cards(scenes: list[dict[str, Any]]) -> str:
         cards.append(
             f"СЦЕНА {scene_no}\n"
             f"Опоры консистентности: {anchors_text}\n"
+            f"Персонажи: {chars_text}\n"
+            f"Драма в сцене: {drama_beat}\n"
             f"Модель: {model}, длительность: {duration} сек\n\n"
             "START FRAME (RU):\n"
             f"{start_frame}\n\n"

@@ -11,10 +11,11 @@ from typing import Any
 
 from sqlalchemy import select
 
+from app.character_catalog import GRANDMA_KITCHEN_PROJECT_SLUG
 from app.db import SessionLocal
 from app.models import Project, VisualProp
 
-DEFAULT_PROJECT_SLUG = "grandma_cat_cooking"
+DEFAULT_PROJECT_SLUG = GRANDMA_KITCHEN_PROJECT_SLUG
 
 logger = logging.getLogger("bot.visual_props")
 
@@ -258,9 +259,8 @@ def append_visual_prop_descriptions(prompt: str) -> str:
     props = matched_visual_props(base)
     if not props:
         return base
-    return base
-    # lines = ["Визуальные константы предметов:"]
-    # for prop in props:
-    #     lines.append(f"{prop.name_ru} выглядит так: {prop.description_ru}")
-    # lines.append("Если предмет появляется в нескольких кадрах, сохраняй его форму, материал, цвет и положение узнаваемыми.")
-    # return f"{base}\n\n" + "\n".join(lines)
+    lines = ["Визуальные константы предметов:"]
+    for prop in props:
+        lines.append(f"{prop.name_ru} выглядит так: {prop.description_ru}")
+    lines.append("Если предмет появляется в нескольких кадрах, сохраняй его форму, материал, цвет и положение узнаваемыми.")
+    return f"{base}\n\n" + "\n".join(lines)

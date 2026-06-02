@@ -272,6 +272,148 @@ def safe_llm_call(
     raise RuntimeError(f"LLM call failed after {max_attempts} attempts") from last_err
 
 
+def _vertex_attr(obj: Any, name: str) -> Any:
+    try:
+        return getattr(obj, name, None)
+    except Exception:
+        return None
+
+
+def _vertex_value(value: Any) -> str:
+    if value is None:
+        return ""
+    name = getattr(value, "name", None)
+    if isinstance(name, str) and name:
+        return name
+    return str(value)
+
+
+def _vertex_to_mapping(obj: Any) -> dict[str, Any] | None:
+    if isinstance(obj, dict):
+        return obj
+    to_dict = _vertex_attr(obj, "to_dict")
+    if callable(to_dict):
+        try:
+            data = to_dict()
+        except Exception:
+            return None
+        if isinstance(data, dict):
+            return data
+    return None
+
+
+def _extract_text_from_vertex_mapping(data: dict[str, Any]) -> str | None:
+    text = data.get("text")
+    if isinstance(text, str) and text.strip():
+        return text
+    chunks: list[str] = []
+    for candidate in data.get("candidates") or []:
+        if not isinstance(candidate, dict):
+            continue
+        content = candidate.get("content") or {}
+        if not isinstance(content, dict):
+            continue
+        for part in content.get("parts") or []:
+            if not isinstance(part, dict):
+                continue
+            t = part.get("text")
+            if isinstance(t, str) and t.strip():
+                chunks.append(t)
+        if chunks:
+            break
+    if chunks:
+        return "\n".join(chunks).strip()
+    return None
+
+
+def _summarize_vertex_safety_ratings(ratings: Any) -> str:
+    out: list[str] = []
+    for rating in ratings or []:
+        category = _vertex_value(_vertex_attr(rating, "category"))
+        probability = _vertex_value(_vertex_attr(rating, "probability"))
+        blocked = _vertex_attr(rating, "blocked")
+        bits = [bit for bit in (category, probability) if bit]
+        if blocked is not None:
+            bits.append(f"blocked={blocked}")
+        if bits:
+            out.append("/".join(bits))
+    return ", ".join(out[:8])
+
+
+def _summarize_empty_vertex_response(resp: Any) -> str:
+    """
+    Vertex SDK can return no text while still carrying a finish/block reason.
+    Make that reason visible so fallback failures are actionable.
+    """
+    details: list[str] = []
+    data = _vertex_to_mapping(resp)
+    if data is not None:
+        prompt_feedback_data = data.get("prompt_feedback") or data.get("promptFeedback") or {}
+        if isinstance(prompt_feedback_data, dict):
+            block_reason = _vertex_value(
+                prompt_feedback_data.get("block_reason") or prompt_feedback_data.get("blockReason")
+            )
+            block_message = _vertex_value(
+                prompt_feedback_data.get("block_reason_message") or prompt_feedback_data.get("blockReasonMessage")
+            )
+            if block_reason:
+                details.append(f"prompt_block_reason={block_reason}")
+            if block_message:
+                details.append(f"prompt_block_message={block_message}")
+        candidates_data = data.get("candidates") or []
+        details.append(f"candidates={len(candidates_data)}")
+        if candidates_data and isinstance(candidates_data[0], dict):
+            first_data = candidates_data[0]
+            finish_reason = _vertex_value(first_data.get("finish_reason") or first_data.get("finishReason"))
+            finish_message = _vertex_value(first_data.get("finish_message") or first_data.get("finishMessage"))
+            if finish_reason:
+                details.append(f"finish_reason={finish_reason}")
+            if finish_message:
+                details.append(f"finish_message={finish_message}")
+            content_data = first_data.get("content") or {}
+            parts_data = content_data.get("parts") if isinstance(content_data, dict) else []
+            details.append(f"parts={len(parts_data or [])}")
+        return "; ".join(details)
+
+    prompt_feedback = _vertex_attr(resp, "prompt_feedback")
+    if prompt_feedback is not None:
+        block_reason = _vertex_value(_vertex_attr(prompt_feedback, "block_reason"))
+        block_message = _vertex_value(_vertex_attr(prompt_feedback, "block_reason_message"))
+        if block_reason:
+            details.append(f"prompt_block_reason={block_reason}")
+        if block_message:
+            details.append(f"prompt_block_message={block_message}")
+        safety = _summarize_vertex_safety_ratings(_vertex_attr(prompt_feedback, "safety_ratings"))
+        if safety:
+            details.append(f"prompt_safety={safety}")
+
+    candidates = _vertex_attr(resp, "candidates") or []
+    details.append(f"candidates={len(candidates)}")
+    if candidates:
+        first = candidates[0]
+        finish_reason = _vertex_value(_vertex_attr(first, "finish_reason"))
+        finish_message = _vertex_value(_vertex_attr(first, "finish_message"))
+        if finish_reason:
+            details.append(f"finish_reason={finish_reason}")
+        if finish_message:
+            details.append(f"finish_message={finish_message}")
+        safety = _summarize_vertex_safety_ratings(_vertex_attr(first, "safety_ratings"))
+        if safety:
+            details.append(f"safety={safety}")
+        content = _vertex_attr(first, "content")
+        parts = _vertex_attr(content, "parts") or []
+        details.append(f"parts={len(parts)}")
+        non_text_parts = [
+            name
+            for part in parts
+            for name in ("inline_data", "file_data", "function_call", "function_response")
+            if _vertex_attr(part, name) is not None
+        ]
+        if non_text_parts:
+            details.append("non_text_parts=" + ",".join(non_text_parts[:8]))
+    return "; ".join(details)
+
+
 def _extract_text_from_vertex_response(resp: Any) -> str | None:
     """
     Извлекает текст из ответа Vertex SDK, включая multi-part candidates.
@@ -283,6 +425,11 @@ def _extract_text_from_vertex_response(resp: Any) -> str | None:
         text = None
     if isinstance(text, str) and text.strip():
         return text
+    data = _vertex_to_mapping(resp)
+    if data is not None:
+        mapped_text = _extract_text_from_vertex_mapping(data)
+        if mapped_text:
+            return mapped_text
 
     # Fallback: склеиваем text-части первого кандидата.
     candidates = getattr(resp, "candidates", None) or []
@@ -400,7 +547,9 @@ def gemini_generate_sync(prompt: str) -> str:
                 resp = model.generate_content(prompt_snapshot, safety_settings=safety_settings)
                 text = _extract_text_from_vertex_response(resp)
                 if not text:
-                    raise RuntimeError("Gemini returned empty response text.")
+                    details = _summarize_empty_vertex_response(resp)
+                    suffix = f" ({details})" if details else ""
+                    raise RuntimeError(f"Gemini returned empty response text{suffix}.")
                 _llm_io.info(
                     "[Gemini] model=%s transport=%s ctx=%s response_chars=%s\n---------- RESPONSE ----------\n%s\n---------- END RESPONSE ----------",
                     model_id,
@@ -463,6 +612,23 @@ def gemini_generate_sync(prompt: str) -> str:
     ) from last_non_quota_error
 
 
+def _strip_json_markdown_fence(text: str) -> str:
+    return re.sub(r"\s*```$", "", re.sub(r"^```(?:json)?\s*", "", text.strip(), flags=re.IGNORECASE))
+
+
+def _extract_first_json_value(cleaned: str, start_char: str, expected_type: type) -> Any:
+    decoder = json.JSONDecoder()
+    for match in re.finditer(re.escape(start_char), cleaned):
+        candidate = cleaned[match.start() :]
+        try:
+            value, _end = decoder.raw_decode(candidate)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(value, expected_type):
+            return value
+    raise ValueError(f"Model output doesn't contain a JSON {expected_type.__name__}.")
+
+
 def extract_json_array(text: str) -> list[dict[str, Any]]:
     """
     Извлекает из ответа модели **первый** JSON-массив (список объектов сцен и т.п.).
@@ -477,21 +643,16 @@ def extract_json_array(text: str) -> list[dict[str, Any]]:
     Алгоритм:
     1. Убирает обёртку ```json ... ``` если есть.
     2. Пытается ``json.loads`` всего текста.
-    3. Если не вышло — берёт подстроку от первой ``[`` до последней ``]`` и парсит её.
+    3. Если не вышло — декодирует первый завершённый JSON-массив из текста.
     """
-    cleaned = re.sub(r"\s*```$", "", re.sub(r"^```(?:json)?\s*", "", text.strip(), flags=re.IGNORECASE))
+    cleaned = _strip_json_markdown_fence(text)
     try:
         data = json.loads(cleaned)
         if isinstance(data, list):
             return data  # type: ignore[return-value]
     except Exception:
         pass
-    start, end = cleaned.find("["), cleaned.rfind("]")
-    if start == -1 or end == -1 or end <= start:
-        raise ValueError("Model output doesn't contain a JSON array.")
-    data = json.loads(cleaned[start : end + 1])
-    if not isinstance(data, list):
-        raise ValueError("Extracted JSON is not a list.")
+    data = _extract_first_json_value(cleaned, "[", list)
     return data  # type: ignore[return-value]
 
 
@@ -506,19 +667,14 @@ def extract_json_object(text: str) -> dict[str, Any]:
     Raises:
         ValueError: Если объект не найден/невалиден.
 
-    Логика аналогична ``extract_json_array``, но ищет пару ``{`` ... ``}``.
+    Логика аналогична ``extract_json_array``, но ищет первый завершённый объект.
     """
-    cleaned = re.sub(r"\s*```$", "", re.sub(r"^```(?:json)?\s*", "", text.strip(), flags=re.IGNORECASE))
+    cleaned = _strip_json_markdown_fence(text)
     try:
         obj = json.loads(cleaned)
         if isinstance(obj, dict):
             return obj
     except Exception:
         pass
-    start, end = cleaned.find("{"), cleaned.rfind("}")
-    if start == -1 or end == -1 or end <= start:
-        raise ValueError("Model output doesn't contain a JSON object.")
-    obj = json.loads(cleaned[start : end + 1])
-    if not isinstance(obj, dict):
-        raise ValueError("Extracted JSON is not an object.")
+    obj = _extract_first_json_value(cleaned, "{", dict)
     return obj

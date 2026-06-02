@@ -230,6 +230,26 @@ def _sanitize_scene(scene: dict[str, Any], idx: int, allowed_locations: set[str]
     for required in ("grandma", "cat"):
         if required not in chars:
             chars.append(required)
+    prompt_blob = " ".join(
+        _as_text(out.get(k))
+        for k in (
+            "action",
+            "visual_description",
+            "start_frame_prompt",
+            "start_frame_prompt_ru",
+            "end_frame_prompt",
+            "end_frame_prompt_ru",
+            "video_prompt",
+            "text",
+        )
+    ).lower()
+    mentioned_character_aliases = {
+        "zaya": ("zaya", "зая", "заю", "заи", "зайка", "белая кошка", "белая кошечка"),
+        "markiz": ("markiz", "маркиз", "маркиза", "черно-белый кот", "чёрно-белый кот"),
+    }
+    for key, aliases in mentioned_character_aliases.items():
+        if any(alias in prompt_blob for alias in aliases) and key not in chars:
+            chars.append(key)
     out["characters"] = chars
     action = _as_text(out.get("action")).strip()
     if not action:
@@ -675,7 +695,8 @@ def scenes_quality_errors(
         if starts_as_boring_prep and not has_payoff_first_frame:
             errors.append("scene_1: first_scene_boring_preparation")
         step_tokens = _step_tokens(canonical_step)
-        if step_tokens and not any(t in blob for t in step_tokens):
+        spoken_text = _as_text(scene.get("text")).lower()
+        if step_tokens and not any(t in spoken_text for t in step_tokens):
             errors.append("scene_1: first_scene_dish_name_missing")
 
     def _validate_last_scene_contract(scene: dict[str, Any], i: int, blob: str, total: int) -> None:

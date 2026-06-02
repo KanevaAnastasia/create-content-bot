@@ -122,6 +122,21 @@ def test_scenes_quality_errors_first_scene_requires_hook_and_dish_name():
     assert "scene_1: first_scene_dish_name_missing" in errs
 
 
+def test_scenes_quality_errors_first_scene_requires_dish_name_in_speech():
+    scene = {
+        "scene": 1,
+        "characters": ["grandma", "cat"],
+        "text": "сегОдня будет вкусно [пауза] смотрИте",
+        "action": "бабушка показывает готовые сырники с котом",
+        "goal": "хук",
+        "model": "veo3_fast",
+        "duration_sec": 6,
+        "shot_type": "closeup",
+    }
+    errs = scenes_quality_errors([scene], recipe_steps=["Сырники из творога с ванилью"])
+    assert "scene_1: first_scene_dish_name_missing" in errs
+
+
 def test_scenes_quality_errors_last_scene_requires_presentation():
     scenes = [
         {

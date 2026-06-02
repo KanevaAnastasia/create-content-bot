@@ -6,8 +6,10 @@ ASSETS = {
         'dog': {'base': 'assets/characters/dog/base.png'},
         'granddaughter': {'base': 'assets/characters/granddaughter/base.png'},
         'grandfather': {'base': 'assets/characters/grandfather/base.png'},
-        'grandma': {'base': 'assets/characters/grandma/base.png'},
-        'grandson': {'base': 'assets/characters/grandson/base.png'}
+        'grandma': {'base': 'assets/characters/grandma/base.jpeg'},
+        'grandson': {'base': 'assets/characters/grandson/base.png'},
+        'markiz': {'base': 'assets/characters/markiz/base.jpeg'},
+        'zaya': {'base': 'assets/characters/zaya/base.jpeg'}
     },
     'locations': {
         'cutting': {'base': 'assets/locations/cutting/base.png', 'top_view': 'assets/locations/cutting/top_view.png'},

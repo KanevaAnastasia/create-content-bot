@@ -150,7 +150,7 @@ VERTEX_IMAGE_MODEL_FALLBACKS="gemini-3.1-flash-image-preview,imagen-4.0-fast-gen
 Профиль проекта для prompt-политик (по умолчанию кулинарный проект с бабушкой и котом):
 
 ```env
-CONTENT_FABRIC_PROJECT_SCOPE="grandma_cat_cooking"
+CONTENT_FABRIC_PROJECT_SCOPE="grandma_kitchen"
 ```
 
 Для PostgreSQL (SQLAlchemy sync):
@@ -162,30 +162,38 @@ DATABASE_URL="postgresql+psycopg2://user:password@localhost:5432/content_fabric"
 Для video generation используется прямой вызов Python-функции `tools.gen_video.generate_video_via_vertex`
 (без внешней shell-команды и без `VIDEO_GEN_CMD_TEMPLATE`).
 
-Для `veo3_fast` в коде выставляются дефолты: `quality=1080`, `aspect_ratio=9:16`, `audio=true`.
+Для `veo3_fast` в коде выставляются дефолты: `quality=720`, `aspect_ratio=9:16`, `audio=true`.
 В модуле `tools/gen_video.py` для алиаса `veo3_fast` используется стабильная модель
 `veo-3.1-fast-generate-001` (можно переопределить через `VERTEX_VIDEO_MODEL_VEO3_FAST`).
 Генерация видео реализована через Vertex `predictLongRunning` API (LRO) без внешней shell-команды.
 
-Опциональный Syntax fallback (Telethon, для policy/safety отказов Vertex):
+Опциональная Syntax-генерация перед Vertex (Telethon):
 
 ```env
 SYNTAX_FALLBACK_ENABLED=1
 SYNTAX_FALLBACK_MODE=manual
-SYNTAX_FALLBACK_TIMEOUT_SEC=1800
+SYNTAX_FALLBACK_TIMEOUT_SEC=900
 SYNTAX_FALLBACK_POLL_SEC=10
+SYNTAX_PROMPT_MAX_CHARS=2000
 SYNTAX_BOT_USERNAME="@syntxaibot"
 TELEGRAM_API_ID="123456"
 TELEGRAM_API_HASH="your_api_hash"
 # один из вариантов хранения сессии:
 TELETHON_SESSION_PATH="/abs/path/to/telethon.session"
+# или несколько сессий для параллельного Syntax-first:
+TELETHON_SESSION_PATHS="/abs/path/to/one.session,/abs/path/to/two.session"
 # или:
 TELETHON_STRING_SESSION="your_string_session"
+# или несколько string-сессий:
+TELETHON_STRING_SESSIONS="string_session_one,string_session_two"
 ```
 
-В этом режиме бот отправляет кадр(ы) и **простой текстовый** video prompt в `@syntxaibot`, затем
-периодически читает входящие (интервал `SYNTAX_FALLBACK_POLL_SEC`, по умолчанию 30 с) и ожидает
+В этом режиме бот сначала отправляет кадр(ы) и **простой текстовый** video prompt в `@syntxaibot`.
+Если prompt длиннее лимита Syntax (максимум 2000 символов), он сначала сокращается через Gemini;
+механической обрезки строки перед отправкой нет. Затем бот
+периодически читает входящие (интервал `SYNTAX_FALLBACK_POLL_SEC`, по умолчанию 10 с) и ожидает
 mp4-документ/видео, прямую ссылку на `.mp4` или страницу `getvideo.syntxai.net` в пределах таймаута.
+Если Syntax не вернул видео или сообщает, что Veo находится на обновлении, бот сразу переходит к Vertex.
 
 Проверка цепочки Vertex still → Syntax без Telegram-бота:
 
@@ -212,7 +220,8 @@ mp4-документ/видео, прямую ссылку на `.mp4` или с
 Важно:
 - `api_id/api_hash` берутся из [my.telegram.org](https://my.telegram.org) (не из BotFather).
 - Session-файл/строку храните как секрет и не коммитьте в репозиторий.
-- При policy/safety блоках Vertex fallback идёт в Syntax; для non-policy ошибок (quota/timeout/403/503/404) fallback не запускается.
+- Для параллельного `Syntax-first` дайте несколько Telethon sessions через `TELETHON_SESSION_PATHS` или `TELETHON_STRING_SESSIONS`.
+- Если включён `SYNTAX_FALLBACK_ENABLED`, видео сначала пробуется через Syntax; при неуспехе или сообщении про обновление Veo бот переходит к Vertex.
 
 > Gemini text-запросы идут в key-mode; Gemini image-запросы выполняются только через Vertex API transport.
 
