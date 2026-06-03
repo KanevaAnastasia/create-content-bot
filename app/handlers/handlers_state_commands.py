@@ -19,9 +19,11 @@ from .handlers_state_deps import (
     TOKEN_ENV_NAME,
     Update,
     SyntaxFallbackPendingConfirmation,
+    VideoProviderChoiceRequired,
     _bump_debounce_generation,
     _call_with_503_retries,
     _elevenlabs_voice_warning,
+    encode_video_provider_choice_for_session,
     encode_syntax_fallback_pending_for_session,
     _generate_image_with_lenient_fallback,
     _generate_video_bytes_with_high_load_retry,
@@ -31,7 +33,9 @@ from .handlers_state_deps import (
     _parse_video_command_args,
     _regenerate_video_prompt_from_text,
     run_syntax_fallback_from_session_payload,
+    run_vertex_fallback_from_session_payload,
     syntax_fallback_parse_user_confirmation,
+    video_provider_choice_parse_user_selection,
     _user_error_message,
     _wants_restart_end_frame,
     _wants_restart_start_frame,
@@ -358,6 +362,23 @@ async def generate_video_command(update: Update, context: ContextTypes.DEFAULT_T
             aspect_ratio="9:16",
             audio_enabled=True,
         )
+    except VideoProviderChoiceRequired as pending_choice:
+        if update.effective_chat is None:
+            return
+        chat_id = update.effective_chat.id
+        sess = SESSIONS.setdefault(chat_id, {})
+        payload = encode_video_provider_choice_for_session(pending_choice)
+        payload["source"] = "video_command"
+        payload["original_prompt"] = prompt
+        payload["duration_for_caption"] = duration_sec
+        sess["video_provider_choice_pending"] = payload
+        await update.message.reply_text(
+            "Syntax не вернул видео.\n\n"
+            "Можно:\n"
+            "1. написать `Syntax` и запустить эту же генерацию ещё раз;\n"
+            "2. написать `Vertex` и попробовать резервный канал Vertex/Veo."
+        )
+        return
     except SyntaxFallbackPendingConfirmation as pending_exc:
         if update.effective_chat is None:
             return
@@ -497,6 +518,73 @@ async def _handle_syntax_fallback_pending_video_command(
     await update.message.reply_video(
         video=vb,
         caption=f"Видео готово ({duration_sec} сек, 9:16, 720, audio). Источник: Syntax fallback.",
+    )
+    return True
+
+
+async def _handle_video_provider_choice_pending_video_command(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+    *,
+    chat_id: int,
+    session: dict,
+    text: str,
+) -> bool:
+    """
+    Handles user choice after automatic Syntax attempt failed in `/video`.
+    """
+    pending = session.get("video_provider_choice_pending")
+    if not isinstance(pending, dict) or pending.get("source") != "video_command":
+        return False
+    if update.message is None:
+        return True
+    choice = video_provider_choice_parse_user_selection(text)
+    if choice is None:
+        await update.message.reply_text(
+            "Не поняла ответ. Напишите `Syntax`, чтобы повторить через Syntax, или `Vertex`, чтобы попробовать резервный Vertex."
+        )
+        return True
+    duration_sec = int(pending.get("duration_for_caption") or pending.get("duration_sec") or 6)
+    if choice == "syntax":
+        await update.message.reply_text("Повторяю генерацию через Syntax…")
+        try:
+            video_bytes = await run_syntax_fallback_from_session_payload(pending)
+        except Exception as fb_err:
+            logger.exception("syntax retry execution failed (/video)")
+            await update.message.reply_text(
+                f"Ошибка при повторе Syntax: {_user_error_message(fb_err, domain='video')}"
+            )
+            return True
+        if not video_bytes:
+            await update.message.reply_text(
+                "Syntax снова не вернул видео. Можно написать `Syntax` для ещё одной попытки или `Vertex` для резервного канала."
+            )
+            return True
+        session.pop("video_provider_choice_pending", None)
+        vb = io.BytesIO(video_bytes)
+        vb.name = "video.mp4"
+        await update.message.reply_video(
+            video=vb,
+            caption=f"Видео готово ({duration_sec} сек, 9:16, 720, audio). Источник: Syntax.",
+        )
+        return True
+
+    await update.message.reply_text("Пробую резервный канал Vertex/Veo…")
+    try:
+        video_bytes = await run_vertex_fallback_from_session_payload(pending)
+    except Exception as err:
+        logger.exception("vertex fallback execution failed (/video)")
+        await update.message.reply_text(
+            f"Ошибка резервного Vertex: {_user_error_message(err, domain='video')}"
+        )
+        return True
+    session.pop("video_provider_choice_pending", None)
+    vertex_duration_sec = int(pending.get("vertex_duration_sec") or pending.get("duration_sec") or duration_sec)
+    vb = io.BytesIO(video_bytes)
+    vb.name = "video.mp4"
+    await update.message.reply_video(
+        video=vb,
+        caption=f"Видео готово ({vertex_duration_sec} сек, 9:16, 720, audio). Источник: Vertex fallback.",
     )
     return True
 

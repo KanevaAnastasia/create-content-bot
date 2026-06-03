@@ -39,6 +39,14 @@ from ..formatting import (
     format_viral_concept_brief,
 )
 from ..llm_utils import gemini_generate_sync
+from ..media_costs import (
+    add_scene_language_cost,
+    add_scene_shared_cost,
+    estimate_gemini_text_cost_usd,
+    estimate_image_generation_cost_usd,
+    estimated_scene_video_cost,
+    estimated_session_total_media_cost,
+)
 from ..pipeline import (
     generate_frame_prompts_for_approval,
     generate_full_production,
@@ -51,6 +59,7 @@ from ..pipeline import (
 from ..scene_utils import apply_veo3_lowercase_format
 from ..state import SESSIONS
 from ..video_generation import get_last_video_result_source, get_last_video_result_uri
+from ..generation_store import save_video_result_estimate
 from .handlers_generation_utils import (
     build_concepts_session as _build_concepts_session,
     build_direct_recipe_session as _build_direct_recipe_session,
@@ -63,14 +72,17 @@ from .handlers_media_core import (
     _attempt_syntax_video_fallback_batch,
     ServiceUnavailableRetriesExhaustedError,
     SyntaxFallbackPendingConfirmation,
+    VideoProviderChoiceRequired,
     _bump_debounce_generation,
     _call_with_503_retries,
     _decode_b64,
     _elevenlabs_voice_warning,
+    encode_video_provider_choice_for_session,
     enforce_video_prompt_voice_requirements,
     encode_syntax_fallback_pending_for_session,
     _encode_b64,
     _generate_video_bytes_with_high_load_retry,
+    get_last_video_provider,
     _image_end_scene_prompt,
     _image_scene_prompt,
     _is_video_invalid_image_error,
@@ -83,7 +95,9 @@ from .handlers_media_core import (
     _regenerate_image_prompt_from_video_error,
     _regenerate_video_prompt_from_error,
     _regenerate_video_prompt_from_text,
+    run_vertex_fallback_from_session_payload,
     run_syntax_fallback_from_session_payload,
+    video_provider_choice_parse_user_selection,
     syntax_fallback_parse_user_confirmation,
     _user_error_message,
 )

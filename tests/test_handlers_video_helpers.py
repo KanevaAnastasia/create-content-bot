@@ -37,6 +37,7 @@ import logging
 import app.handlers.handlers_generation_utils as handlers_generation_utils
 
 from app.handlers.handlers_media_core import (
+    VideoProviderChoiceRequired,
     _generate_video_bytes_with_high_load_retry,
     _is_syntax_fallback_trigger_error,
     _video_region_candidates,
@@ -786,24 +787,24 @@ def test_video_high_load_retry_succeeds(monkeypatch):
     update = SimpleNamespace(message=_Message())
     monkeypatch.setattr("app.handlers.handlers_media_core.asyncio.to_thread", fake_to_thread)
     monkeypatch.setattr("app.handlers.handlers_media_core.asyncio.sleep", lambda *_: real_sleep(0))
-    out = asyncio.run(
-        _generate_video_bytes_with_high_load_retry(
-            update,
-            prompt="p",
-            model="veo-3.1-fast-generate-001",
-            duration_sec=4,
-            start_image=b"x",
-            end_image=None,
-            quality="1080",
-            aspect_ratio="9:16",
-            audio_enabled=True,
+    try:
+        asyncio.run(
+            _generate_video_bytes_with_high_load_retry(
+                update,
+                prompt="p",
+                model="veo-3.1-fast-generate-001",
+                duration_sec=4,
+                start_image=b"x",
+                end_image=None,
+                quality="1080",
+                aspect_ratio="9:16",
+                audio_enabled=True,
+            )
         )
-    )
-    assert out == b"ok-video"
-    assert calls["n"] == 3
-    assert len(messages) == 2
-    assert regions_used[:3] == ["us-central1", "us-central1", "us-central1"]
-    assert "в этом же регионе" in messages[0]
+        assert False, "expected VideoProviderChoiceRequired"
+    except VideoProviderChoiceRequired:
+        pass
+    assert calls["n"] == 0
 
 
 def test_video_region_candidates_primary_and_fallbacks(monkeypatch):
@@ -851,22 +852,24 @@ def test_video_high_load_switches_region_after_local_retries(monkeypatch):
     monkeypatch.setattr("app.handlers.handlers_media_core.asyncio.to_thread", fake_to_thread)
     monkeypatch.setattr("app.handlers.handlers_media_core.asyncio.sleep", lambda *_: real_sleep(0))
 
-    out = asyncio.run(
-        _generate_video_bytes_with_high_load_retry(
-            update,
-            prompt="p",
-            model="veo-3.1-fast-generate-001",
-            duration_sec=4,
-            start_image=b"x",
-            end_image=None,
-            quality="1080",
-            aspect_ratio="9:16",
-            audio_enabled=True,
+    try:
+        asyncio.run(
+            _generate_video_bytes_with_high_load_retry(
+                update,
+                prompt="p",
+                model="veo-3.1-fast-generate-001",
+                duration_sec=4,
+                start_image=b"x",
+                end_image=None,
+                quality="1080",
+                aspect_ratio="9:16",
+                audio_enabled=True,
+            )
         )
-    )
-    assert out == b"ok-video"
-    assert regions_used[:4] == ["us-central1", "us-central1", "us-central1", "europe-west4"]
-    assert any("переключаюсь на регион europe-west4" in m for m in messages)
+        assert False, "expected VideoProviderChoiceRequired"
+    except VideoProviderChoiceRequired:
+        pass
+    assert regions_used == []
 
 
 def test_video_404_switches_region_immediately(monkeypatch):
@@ -895,22 +898,24 @@ def test_video_404_switches_region_immediately(monkeypatch):
     monkeypatch.setenv("VERTEX_VIDEO_LOCATION_FALLBACKS", "us-central1")
     monkeypatch.setattr("app.handlers.handlers_media_core.asyncio.to_thread", fake_to_thread)
 
-    out = asyncio.run(
-        _generate_video_bytes_with_high_load_retry(
-            update,
-            prompt="p",
-            model="veo-3.1-fast-generate-001",
-            duration_sec=4,
-            start_image=b"x",
-            end_image=None,
-            quality="1080",
-            aspect_ratio="9:16",
-            audio_enabled=True,
+    try:
+        asyncio.run(
+            _generate_video_bytes_with_high_load_retry(
+                update,
+                prompt="p",
+                model="veo-3.1-fast-generate-001",
+                duration_sec=4,
+                start_image=b"x",
+                end_image=None,
+                quality="1080",
+                aspect_ratio="9:16",
+                audio_enabled=True,
+            )
         )
-    )
-    assert out == b"ok-video"
-    assert regions_used[:2] == ["europe-west4", "us-central1"]
-    assert any("Модель видео недоступна в регионе europe-west4" in m for m in messages)
+        assert False, "expected VideoProviderChoiceRequired"
+    except VideoProviderChoiceRequired:
+        pass
+    assert regions_used == []
 
 
 def test_prompt_filtered_error_classifier():
@@ -1069,9 +1074,9 @@ def test_video_policy_exhaustion_no_syntax_when_disabled(monkeypatch):
                 audio_enabled=True,
             )
         )
-        assert False, "expected RuntimeError"
-    except RuntimeError as e:
-        assert "policy" in str(e).lower()
+        assert False, "expected VideoProviderChoiceRequired"
+    except VideoProviderChoiceRequired as e:
+        assert "syntax" in str(e).lower()
     assert calls["syntax"] == 0
 
 
@@ -1119,14 +1124,14 @@ def test_video_high_load_uses_vertex_after_syntax_failure(monkeypatch):
                 audio_enabled=True,
             )
         )
-        assert False, "expected high-load RuntimeError"
-    except RuntimeError as e:
-        assert "high load" in str(e).lower()
+        assert False, "expected VideoProviderChoiceRequired"
+    except VideoProviderChoiceRequired as e:
+        assert "syntax" in str(e).lower()
     assert calls["syntax"] == 1
-    assert calls["n"] == 3
+    assert calls["n"] == 0
 
 
-def test_syntax_failure_falls_back_to_vertex_success(monkeypatch):
+def test_explicit_vertex_fallback_runs_vertex_success(monkeypatch):
     calls = {"vertex": 0, "syntax": 0}
 
     async def fake_to_thread(fn, *args, **kwargs):
@@ -1164,10 +1169,11 @@ def test_syntax_failure_falls_back_to_vertex_success(monkeypatch):
             quality="1080",
             aspect_ratio="9:16",
             audio_enabled=True,
+            force_vertex_fallback=True,
         )
     )
     assert out == b"vertex-mp4"
-    assert calls == {"vertex": 1, "syntax": 1}
+    assert calls == {"vertex": 1, "syntax": 0}
 
 
 def test_syntax_fallback_calls_are_serialized(monkeypatch):

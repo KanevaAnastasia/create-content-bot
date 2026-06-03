@@ -12,6 +12,7 @@ import re
 from typing import Any
 
 from .llm_utils import extract_json_object, gemini_generate_sync
+from .media_costs import estimate_gemini_text_cost_usd
 from .pipeline_llm_steps import FINAL_SCENE_SUBSCRIBE_CTA, FINAL_SCENE_SUBSCRIBE_CTA_VEO3
 from .scene_speech_budget import PAUSE_TOKEN, max_speech_chars_for_duration, speech_chars_excluding_pauses
 
@@ -102,7 +103,8 @@ def shorten_scene_speech_and_sync_video_prompt_sync(scene: dict[str, Any], durat
     )
     for attempt in (1, 2):
         extra = "" if attempt == 1 else "\n\nПредыдущий ответ нарушил лимит или формат. Сократи агрессивнее."
-        raw = gemini_generate_sync(prompt + extra)
+        full_prompt = prompt + extra
+        raw = gemini_generate_sync(full_prompt)
         try:
             obj = extract_json_object(raw)
         except Exception as e:
@@ -132,5 +134,10 @@ def shorten_scene_speech_and_sync_video_prompt_sync(scene: dict[str, Any], durat
                 vp = merged
             if not _video_prompt_has_exact_speech_after_marker(vp, t):
                 continue
-        return {"text": t, "video_prompt": vp}
+        cost = estimate_gemini_text_cost_usd(
+            model="gemini-2.5-flash",
+            prompt_text=full_prompt,
+            response_text=raw,
+        )
+        return {"text": t, "video_prompt": vp, "estimated_gemini_cost_usd": cost["cost_usd"], "cost_event": cost}
     return None

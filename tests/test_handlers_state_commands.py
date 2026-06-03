@@ -7,6 +7,7 @@ from app.handlers.handlers_state_commands import (
     FIRST_STEP_BUTTON_IMAGE,
     FIRST_STEP_BUTTON_PROJECT,
     FIRST_STEP_BUTTON_VIDEO,
+    _handle_video_provider_choice_pending_video_command,
     _regenerate_image_prompt_from_feedback,
     _handle_syntax_fallback_pending_video_command,
     check_env,
@@ -130,6 +131,73 @@ def test_pending_video_command_yes_runs_syntax_fallback(monkeypatch):
     assert out is True
     assert sent_video["ok"] is True
     assert "syntax_fallback_pending" not in session
+
+
+def test_pending_video_provider_choice_waits_for_clear_choice():
+    captured: list[str] = []
+
+    class _Message:
+        async def reply_text(self, text):
+            captured.append(text)
+
+    update = SimpleNamespace(message=_Message())
+    session = {"video_provider_choice_pending": {"source": "video_command"}}
+    out = asyncio.run(
+        _handle_video_provider_choice_pending_video_command(
+            update,
+            context=None,
+            chat_id=1,
+            session=session,
+            text="может быть",
+        )
+    )
+    assert out is True
+    assert "Syntax" in captured[0]
+    assert "Vertex" in captured[0]
+
+
+def test_pending_video_provider_choice_vertex_runs_vertex(monkeypatch):
+    captured: list[str] = []
+    sent_video = {"ok": False}
+
+    class _Message:
+        async def reply_text(self, text):
+            captured.append(text)
+
+        async def reply_video(self, video, caption):
+            assert video is not None
+            assert "Vertex fallback" in caption
+            sent_video["ok"] = True
+
+    async def _fake_run(_payload):
+        return b"mp4"
+
+    monkeypatch.setattr(
+        "app.handlers.handlers_state_commands.run_vertex_fallback_from_session_payload",
+        _fake_run,
+    )
+    update = SimpleNamespace(message=_Message())
+    session = {
+        "video_provider_choice_pending": {
+            "source": "video_command",
+            "duration_for_caption": 6,
+            "vertex_duration_sec": 8,
+            "prompt": "x",
+            "start_image_b64": "eA==",
+        }
+    }
+    out = asyncio.run(
+        _handle_video_provider_choice_pending_video_command(
+            update,
+            context=None,
+            chat_id=1,
+            session=session,
+            text="Vertex",
+        )
+    )
+    assert out is True
+    assert sent_video["ok"] is True
+    assert "video_provider_choice_pending" not in session
 
 
 def test_regenerate_image_prompt_from_feedback_uses_gemini(monkeypatch):

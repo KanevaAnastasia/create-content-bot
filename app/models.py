@@ -311,6 +311,9 @@ class VideoResult(Base):
     )
     video_path: Mapped[str | None] = mapped_column(Text, nullable=True)
     score: Mapped[float | None] = mapped_column(Float, nullable=True)
+    language: Mapped[str | None] = mapped_column(String(8), nullable=True)
+    estimated_cost_usd: Mapped[float | None] = mapped_column(Float, nullable=True)
+    cost_breakdown_json: Mapped[dict | None] = mapped_column(JSON, nullable=True)
 
     run: Mapped["GenerationRun"] = relationship(back_populates="video_results")
     scene: Mapped["Scene"] = relationship(back_populates="video_results")

@@ -2,6 +2,7 @@
 
 import asyncio
 import base64
+import contextvars
 import io
 import os
 import re
@@ -111,6 +112,10 @@ _VOICE_LOCK_LANGUAGE_TOKEN_BY_LANG = {
     "ru": "Russian language",
     "en": "English language",
 }
+_LAST_VIDEO_PROVIDER: contextvars.ContextVar[str | None] = contextvars.ContextVar(
+    "last_video_provider",
+    default=None,
+)
 
 
 def _voice_lock_for_language(target_language: str) -> str:
@@ -119,6 +124,10 @@ def _voice_lock_for_language(target_language: str) -> str:
     token = _VOICE_LOCK_LANGUAGE_TOKEN_BY_LANG.get(lang, _VOICE_LOCK_LANGUAGE_TOKEN_BY_LANG["en"])
     accent = "neutral Russian accent" if lang == "ru" else f"neutral {language_name(lang)} accent"
     return GRANDMA_VOICE_LOCK_FULL.replace("Russian language", token).replace("neutral Russian accent", accent)
+
+
+def get_last_video_provider() -> str | None:
+    return _LAST_VIDEO_PROVIDER.get()
 
 
 def _sanitize_video_prompt_language_references(video_prompt: str, target_language: str) -> str:
@@ -617,6 +626,38 @@ class SyntaxFallbackPendingConfirmation(Exception):
         self.vertex_error_message = vertex_error_message
 
 
+class VideoProviderChoiceRequired(Exception):
+    """
+    Syntax was the only automatic path and did not return a video.
+
+    The caller must ask the user whether to retry Syntax or try the reserve Vertex path.
+    """
+
+    def __init__(
+        self,
+        *,
+        prompt: str,
+        model: str,
+        duration_sec: int,
+        start_image: bytes,
+        end_image: bytes | None,
+        quality: str,
+        aspect_ratio: str,
+        audio_enabled: bool,
+        syntax_error_message: str,
+    ) -> None:
+        super().__init__(syntax_error_message)
+        self.prompt = prompt
+        self.model = model
+        self.duration_sec = duration_sec
+        self.start_image = start_image
+        self.end_image = end_image
+        self.quality = quality
+        self.aspect_ratio = aspect_ratio
+        self.audio_enabled = audio_enabled
+        self.syntax_error_message = syntax_error_message
+
+
 def encode_syntax_fallback_pending_for_session(exc: SyntaxFallbackPendingConfirmation) -> dict[str, Any]:
     """Serializes a pending Syntax attempt for ``SESSIONS`` / scene JSON (base64 images)."""
     end = exc.end_image
@@ -634,6 +675,60 @@ def encode_syntax_fallback_pending_for_session(exc: SyntaxFallbackPendingConfirm
     }
 
 
+def _vertex_fallback_duration_sec(model: str, duration_sec: int) -> int:
+    """
+    Reserve Vertex path for Veo uses 8 seconds, which is the safe image-to-video duration.
+    """
+    raw_model = (model or "").strip().lower()
+    if raw_model.startswith("veo"):
+        return 8
+    return int(duration_sec)
+
+
+def encode_video_provider_choice_for_session(exc: VideoProviderChoiceRequired) -> dict[str, Any]:
+    """Serializes a pending provider-choice prompt for session/scene state."""
+    end = exc.end_image
+    vertex_duration_sec = _vertex_fallback_duration_sec(exc.model, exc.duration_sec)
+    return {
+        "schema": 1,
+        "prompt": exc.prompt,
+        "model": exc.model,
+        "duration_sec": exc.duration_sec,
+        "vertex_duration_sec": vertex_duration_sec,
+        "quality": exc.quality,
+        "aspect_ratio": exc.aspect_ratio,
+        "audio_enabled": exc.audio_enabled,
+        "start_image_b64": base64.b64encode(exc.start_image).decode("ascii"),
+        "end_image_b64": base64.b64encode(end).decode("ascii") if end else "",
+        "syntax_error_message": (exc.syntax_error_message or "")[:8000],
+    }
+
+
+def video_provider_choice_parse_user_selection(text: str) -> str | None:
+    """Parses explicit user choice after Syntax failed: retry Syntax or try Vertex."""
+    low = (text or "").strip().lower()
+    if low in {
+        "syntax",
+        "syntx",
+        "synthx",
+        "ещё раз syntax",
+        "еще раз syntax",
+        "повторить syntax",
+        "retry syntax",
+        "syntax retry",
+    }:
+        return "syntax"
+    if low in {
+        "vertex",
+        "veo",
+        "try vertex",
+        "резервный vertex",
+        "vertex fallback",
+    }:
+        return "vertex"
+    return None
+
+
 async def run_syntax_fallback_from_session_payload(payload: dict[str, Any]) -> bytes | None:
     """Runs Syntax fallback using a dict from :func:`encode_syntax_fallback_pending_for_session`."""
     end_raw = (payload.get("end_image_b64") or "").strip()
@@ -644,6 +739,23 @@ async def run_syntax_fallback_from_session_payload(payload: dict[str, Any]) -> b
         duration_sec=int(payload["duration_sec"]),
         start_image=base64.b64decode(str(payload["start_image_b64"])),
         end_image=end_im,
+    )
+
+
+async def run_vertex_fallback_from_session_payload(payload: dict[str, Any]) -> bytes:
+    """Runs the reserve Vertex path from a serialized pending payload."""
+    end_raw = (payload.get("end_image_b64") or "").strip()
+    end_im: bytes | None = base64.b64decode(end_raw) if end_raw else None
+    return await asyncio.to_thread(
+        generate_video_bytes,
+        prompt=str(payload["prompt"]),
+        model=str(payload["model"]),
+        duration_sec=int(payload.get("vertex_duration_sec") or payload["duration_sec"]),
+        start_image=base64.b64decode(str(payload["start_image_b64"])),
+        end_image=end_im,
+        quality=str(payload.get("quality") or "720"),
+        aspect_ratio=str(payload.get("aspect_ratio") or "9:16"),
+        audio_enabled=bool(payload.get("audio_enabled", True)),
     )
 
 
@@ -815,16 +927,17 @@ async def _generate_video_bytes_with_high_load_retry(
     audio_enabled: bool,
     skip_initial_syntax: bool = False,
     disable_syntax_fallback: bool = False,
+    force_vertex_fallback: bool = False,
 ) -> bytes:
-    """Generate video through Syntax first, then Vertex with regional retries."""
+    """Generate video through the current policy: auto Syntax, manual Vertex fallback."""
 
     syntax_attempted = False
     syntax_disabled = disable_syntax_fallback
-    if _syntax_fallback_env_enabled() and not skip_initial_syntax:
+    if not force_vertex_fallback and _syntax_fallback_env_enabled() and not skip_initial_syntax:
         syntax_attempted = True
         if update.message is not None:
             await update.message.reply_text(
-                "Сначала пробую генерацию через Syntax. Если он не вернёт видео, перейду к Vertex."
+                "Сначала пробую генерацию через Syntax. В Vertex автоматически не ухожу."
             )
         syntax_bytes = await _attempt_syntax_video_fallback_bytes(
             prompt=prompt,
@@ -834,36 +947,49 @@ async def _generate_video_bytes_with_high_load_retry(
             end_image=end_image,
         )
         if syntax_bytes is not None:
+            _LAST_VIDEO_PROVIDER.set("telegram")
             if update.message is not None:
                 await update.message.reply_text("Видео получено через Syntax.")
             return syntax_bytes
-        if update.message is not None:
-            await update.message.reply_text("Syntax не вернул видео. Перехожу к Vertex.")
-
-    async def _run_or_request_syntax_fallback(error: Exception) -> bytes | None:
-        """Runs Syntax fallback immediately when enabled."""
-        if syntax_attempted or syntax_disabled or not _syntax_fallback_env_enabled():
-            return None
-        if update.message is not None:
-            await update.message.reply_text(
-                "Vertex отклонил генерацию в регионе. Сразу запускаю резервный канал Syntax…"
-            )
-        fallback_bytes = await _attempt_syntax_video_fallback_bytes(
+        raise VideoProviderChoiceRequired(
             prompt=prompt,
             model=model,
             duration_sec=duration_sec,
             start_image=start_image,
             end_image=end_image,
+            quality=quality,
+            aspect_ratio=aspect_ratio,
+            audio_enabled=audio_enabled,
+            syntax_error_message="Syntax не вернул видео.",
         )
-        if fallback_bytes is None:
-            if update.message is not None:
-                await update.message.reply_text(
-                    "Резервный канал Syntax не вернул видео. Продолжаю стандартный retry по регионам."
-                )
-            return None
-        if update.message is not None:
-            await update.message.reply_text("Видео получено через Syntax fallback.")
-        return fallback_bytes
+    if not force_vertex_fallback and _syntax_fallback_env_enabled() and skip_initial_syntax:
+        raise VideoProviderChoiceRequired(
+            prompt=prompt,
+            model=model,
+            duration_sec=duration_sec,
+            start_image=start_image,
+            end_image=end_image,
+            quality=quality,
+            aspect_ratio=aspect_ratio,
+            audio_enabled=audio_enabled,
+            syntax_error_message="Syntax уже был запущен для этой сцены, но видео не вернул.",
+        )
+    if not force_vertex_fallback and not _syntax_fallback_env_enabled():
+        raise VideoProviderChoiceRequired(
+            prompt=prompt,
+            model=model,
+            duration_sec=duration_sec,
+            start_image=start_image,
+            end_image=end_image,
+            quality=quality,
+            aspect_ratio=aspect_ratio,
+            audio_enabled=audio_enabled,
+            syntax_error_message="Syntax сейчас недоступен, поэтому нужен явный выбор: повторить Syntax позже или запустить Vertex вручную.",
+        )
+    if force_vertex_fallback and model.strip().lower().startswith("veo") and update.message is not None:
+        await update.message.reply_text(
+            f"Запускаю резервный Vertex/Veo путь на {_vertex_fallback_duration_sec(model, duration_sec)} сек."
+        )
 
     last_err: Exception | None = None
     regions = _video_region_candidates()
@@ -873,11 +999,11 @@ async def _generate_video_bytes_with_high_load_retry(
         for region_attempt in range(VIDEO_HIGH_LOAD_MAX_ATTEMPTS):
             global_attempt += 1
             try:
-                return await asyncio.to_thread(
+                out = await asyncio.to_thread(
                     generate_video_bytes,
                     prompt=prompt,
                     model=model,
-                    duration_sec=duration_sec,
+                    duration_sec=_vertex_fallback_duration_sec(model, duration_sec),
                     start_image=start_image,
                     end_image=end_image,
                     quality=quality,
@@ -885,6 +1011,8 @@ async def _generate_video_bytes_with_high_load_retry(
                     audio_enabled=audio_enabled,
                     location=region,
                 )
+                _LAST_VIDEO_PROVIDER.set("veo")
+                return out
             except Exception as e:
                 last_err = e
                 model_unavailable = _is_video_model_unavailable_error(e)
@@ -897,33 +1025,7 @@ async def _generate_video_bytes_with_high_load_retry(
                 )
                 if not should_retry_by_region:
                     raise
-                immediate_syntax_result = None
-                if _is_syntax_fallback_trigger_error(e):
-                    immediate_syntax_result = await _run_or_request_syntax_fallback(e)
-                if immediate_syntax_result is not None:
-                    return immediate_syntax_result
                 if global_attempt >= total_attempts:
-                    if _is_syntax_fallback_trigger_error(e) and _syntax_fallback_env_enabled() and not syntax_disabled:
-                        if update.message is not None:
-                            await update.message.reply_text(
-                                "Vertex отклонил генерацию по политике/безопасности после всех попыток в регионах. "
-                                "Запускаю резервный канал Syntax…"
-                            )
-                        fb = await _attempt_syntax_video_fallback_bytes(
-                            prompt=prompt,
-                            model=model,
-                            duration_sec=duration_sec,
-                            start_image=start_image,
-                            end_image=end_image,
-                        )
-                        if fb is not None:
-                            if update.message is not None:
-                                await update.message.reply_text("Видео получено через Syntax fallback.")
-                            return fb
-                        if update.message is not None:
-                            await update.message.reply_text(
-                                "Резервный канал Syntax не вернул видео. Дальше — обычное восстановление (переписывание промпта), если применимо."
-                            )
                     raise
                 wait_sec = 0 if model_unavailable else VIDEO_HIGH_LOAD_RETRY_DELAY_SEC * (region_attempt + 1)
                 same_region_retry_left = (region_attempt < VIDEO_HIGH_LOAD_MAX_ATTEMPTS - 1) and not model_unavailable

@@ -8,6 +8,8 @@ from ..character_catalog import sanitize_character_names_and_keys
 from .handlers_state_deps import (
     ContextTypes,
     SESSIONS,
+    add_scene_language_cost,
+    add_scene_shared_cost,
     SCENE_MEDIA_AI_APPROVE_BUTTON,
     SCENE_MEDIA_APPROVE_MODE_AI,
     SCENE_MEDIA_APPROVE_MODE_AUTO,
@@ -23,6 +25,7 @@ from .handlers_state_deps import (
     SCENE_MEDIA_UPGRADE_IMAGE_MODEL_BUTTON,
     STATE_READY_FOR_PRODUCTION,
     SyntaxFallbackPendingConfirmation,
+    VideoProviderChoiceRequired,
     Update,
     _append_reference_style_to_image_prompt,
     _append_scene_identity_to_image_prompt,
@@ -34,6 +37,7 @@ from .handlers_state_deps import (
     _extract_format_or_feedback,
     _extract_prompt_override,
     enforce_video_prompt_voice_requirements,
+    encode_video_provider_choice_for_session,
     encode_syntax_fallback_pending_for_session,
     _generate_image_with_lenient_fallback,
     _generate_image_with_lenient_fallback_result,
@@ -48,11 +52,14 @@ from .handlers_state_deps import (
     _regenerate_end_frame_prompt_from_feedback,
     _regenerate_video_prompt_from_error,
     _rewrite_video_prompt_by_format_instruction,
+    run_vertex_fallback_from_session_payload,
     run_syntax_fallback_from_session_payload,
+    get_last_video_provider,
     _scene_needs_end_frame_step,
     _send_next_scene_media_step,
     _set_end_frame_text,
     syntax_fallback_parse_user_confirmation,
+    video_provider_choice_parse_user_selection,
     _user_error_message,
     _should_suggest_regenerate_start_frame_after_video_prompt_fails,
     scene_end_approval_markup,
@@ -64,6 +71,10 @@ from .handlers_state_deps import (
     _video_policy_prompt_approval_text,
     _wants_restart_end_frame,
     _wants_restart_start_frame,
+    estimated_scene_video_cost,
+    estimated_session_total_media_cost,
+    estimate_image_generation_cost_usd,
+    save_video_result_estimate,
     io,
     gemini_generate_sync,
     logger,
@@ -886,7 +897,12 @@ async def send_social_descriptions_for_recipe(update: Update, recipe: str) -> No
 
 async def _finish_scene_media_production(update: Update, session: dict, *, message: str = "Все сцены обработаны. Production завершён.") -> bool:
     session.pop(SCENE_MEDIA_AUTO_APPROVE_SESSION_KEY, None)
-    await update.message.reply_text(f"{message}\n\nГотовлю описания для апрува.")
+    total_media_cost = estimated_session_total_media_cost(session)
+    await update.message.reply_text(
+        f"{message}\n"
+        f"Оценка суммарной media-side себестоимости: ~${total_media_cost:.4f}.\n\n"
+        "Готовлю описания для апрува."
+    )
     started = await _send_final_social_descriptions(update, session)
     if not started:
         session["state"] = STATE_READY_FOR_PRODUCTION
@@ -1388,12 +1404,28 @@ async def _apply_scene_phrase_update(
     return False
 
 
-def _store_scene_video_result(scene: dict, language: str, payload: bytes) -> None:
+def _store_scene_video_result(
+    scene: dict,
+    language: str,
+    payload: bytes,
+    *,
+    session: dict | None = None,
+    scene_idx: int | None = None,
+    provider: str | None = None,
+) -> dict[str, object]:
     """Persist generated video bytes and reset approval for language."""
+    languages_count = 1
+    if isinstance(scene.get("video_prompt_by_lang"), dict):
+        languages_count = max(1, len(scene.get("video_prompt_by_lang") or {}))
+    cost_summary = estimated_scene_video_cost(scene, language, languages_count)
     results = scene.get("video_results_by_lang")
     if not isinstance(results, dict):
         results = {}
-    results[language] = {"video_b64": _encode_b64(payload)}
+    results[language] = {
+        "video_b64": _encode_b64(payload),
+        "estimated_cost_usd": cost_summary["estimated_total_cost_usd"],
+        "estimated_cost_breakdown": cost_summary,
+    }
     scene["video_results_by_lang"] = results
     approvals = scene.get("video_approvals_by_lang")
     if not isinstance(approvals, dict):
@@ -1401,6 +1433,21 @@ def _store_scene_video_result(scene: dict, language: str, payload: bytes) -> Non
     approvals[language] = False
     scene["video_approvals_by_lang"] = approvals
     _clear_ai_video_approval(scene, language)
+    if session is not None and scene_idx is not None:
+        try:
+            save_video_result_estimate(
+                session,
+                scene_idx=scene_idx,
+                language=language,
+                provider=provider or "telegram",
+                status="success",
+                video_path=None,
+                cost_usd=float(cost_summary["estimated_total_cost_usd"]),
+                cost_breakdown=cost_summary,
+            )
+        except Exception:
+            logger.exception("video result cost persistence failed")
+    return cost_summary
 
 
 def _all_scene_languages_have_video(scene: dict, languages: list[str]) -> bool:
@@ -1776,6 +1823,7 @@ async def _scene_media_start_ok(
         )
         image_bytes = image_result.data
         _store_scene_image_model(scene, "start", image_result.model)
+        add_scene_shared_cost(scene, estimate_image_generation_cost_usd(image_result.model))
     except Exception as e:
         logger.exception("vertex image generation failed")
         await update.message.reply_text(f"Ошибка генерации изображения: {e}")
@@ -1999,6 +2047,7 @@ async def _scene_media_end_ok(update: Update, *, session: dict, scene: dict, idx
         )
         end_bytes = end_result.data
         _store_scene_image_model(scene, "end", end_result.model)
+        add_scene_shared_cost(scene, estimate_image_generation_cost_usd(end_result.model))
     except Exception as e:
         logger.exception("vertex end-frame generation failed")
         await update.message.reply_text(f"Ошибка генерации конечного кадра: {e}")
@@ -2482,6 +2531,9 @@ async def _maybe_shorten_scene_speech_for_video_budget(
         "ru",
         shortened["video_prompt"],
     )
+    cost_event = shortened.get("cost_event")
+    if isinstance(cost_event, dict):
+        add_scene_language_cost(scene, "ru", cost_event)
     _set_scene_video_prompt_for_language(scene, "ru", prompt)
     _apply_scene_phrase_update_to_scene(
         session,
@@ -2629,6 +2681,8 @@ async def _scene_media_video_ok(
                 disable_syntax_fallback=disable_syntax_fallback,
             )
             return language, video, None
+        except VideoProviderChoiceRequired as e:
+            return language, None, e
         except Exception as e:
             return language, None, e
 
@@ -2685,13 +2739,44 @@ async def _scene_media_video_ok(
                 video=vb,
                 caption=f"Сцена {idx + 1}/{total}, язык {language}: видео готово.",
             )
-            _store_scene_video_result(scene, language, video_bytes)
+            provider = get_last_video_provider() or ("telegram" if syntax_batch_results.get(language) is not None else "veo")
+            cost_summary = _store_scene_video_result(
+                scene,
+                language,
+                video_bytes,
+                session=session,
+                scene_idx=idx,
+                provider=provider,
+            )
             _set_scene_policy_candidate(scene, language, "")
             _reset_video_prompt_policy_failure_count(scene)
+            await update.message.reply_text(
+                f"Оценка себестоимости видео ({language}): ~${float(cost_summary['estimated_total_cost_usd']):.4f} "
+                f"(Gemini/media-side + image generation estimate)."
+            )
             continue
         if err is None:
             continue
         logger.exception("scene video generation failed for language=%s", language, exc_info=err)
+        if isinstance(err, VideoProviderChoiceRequired):
+            payload = encode_video_provider_choice_for_session(err)
+            payload["source"] = "scene"
+            payload["language"] = language
+            scene["video_provider_choice_pending"] = payload
+            await _reply_text_with_optional_markup(
+                update,
+                (
+                    f"Сцена {idx + 1}/{total}, язык {language}: Syntax не вернул видео.\n\n"
+                    "Напишите `Syntax`, чтобы запустить эту сцену ещё раз через Syntax, "
+                    "или `Vertex`, чтобы попробовать резервный канал Vertex/Veo."
+                ),
+                reply_markup=ReplyKeyboardMarkup(
+                    [["Syntax"], ["Vertex"], [NAV_BUTTON_PREVIOUS_STEP], [NAV_BUTTON_START_OVER]],
+                    resize_keyboard=True,
+                    one_time_keyboard=False,
+                ),
+            )
+            continue
         if _is_video_prompt_filtered_error(err) or _is_video_policy_error(err) or _is_video_safety_error(err):
             try:
                 candidate = await _call_with_503_retries(
@@ -3127,9 +3212,19 @@ async def _handle_scene_syntax_fallback_pending(
             "Источник: Syntax fallback."
         ),
     )
-    _store_scene_video_result(scene, language, video_bytes)
+    cost_summary = _store_scene_video_result(
+        scene,
+        language,
+        video_bytes,
+        session=session,
+        scene_idx=idx,
+        provider="telegram",
+    )
     _set_scene_policy_candidate(scene, language, "")
     _reset_video_prompt_policy_failure_count(scene)
+    await update.message.reply_text(
+        f"Оценка себестоимости видео ({language}): ~${float(cost_summary['estimated_total_cost_usd']):.4f}."
+    )
     requires_multilingual_approval = (
         len(languages) > 1 or isinstance(scene.get("video_prompt_by_lang"), dict)
     )
@@ -3151,6 +3246,135 @@ async def _handle_scene_syntax_fallback_pending(
             chat_id=chat_id,
             session=session,
         )
+    return True
+
+
+async def _handle_scene_video_provider_choice_pending(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+    *,
+    chat_id: int,
+    session: dict,
+    text: str,
+) -> bool:
+    """
+    Human-in-the-loop choice after automatic Syntax attempt failed for a scene video.
+    """
+    scenes, idx = _scene_media_context(session)
+    if not scenes or idx >= len(scenes):
+        return False
+    scene = scenes[idx]
+    pending = scene.get("video_provider_choice_pending")
+    if not isinstance(pending, dict) or pending.get("source") != "scene":
+        return False
+    if session.get("scene_media_substep") != SCENE_MEDIA_SUBSTEP_VIDEO:
+        return False
+    if update.message is None:
+        return True
+    choice = video_provider_choice_parse_user_selection(text)
+    if choice is None:
+        await _reply_text_with_optional_markup(
+            update,
+            "Нажмите `Syntax` для повтора через Syntax или `Vertex` для резервного Vertex/Veo.",
+            reply_markup=ReplyKeyboardMarkup(
+                [["Syntax"], ["Vertex"], [NAV_BUTTON_PREVIOUS_STEP], [NAV_BUTTON_START_OVER]],
+                resize_keyboard=True,
+                one_time_keyboard=False,
+            ),
+        )
+        return True
+
+    total = len(scenes)
+    language = normalize_language_code(
+        str(pending.get("language") or _scene_current_language(session, scene))
+    ) or _scene_current_language(session, scene)
+    languages = _scene_target_languages(session, scene)
+    if choice == "syntax":
+        await update.message.reply_text("Повторяю эту сцену через Syntax…")
+        try:
+            video_bytes = await run_syntax_fallback_from_session_payload(pending)
+        except Exception as fb_err:
+            logger.exception("scene Syntax retry execution failed")
+            await update.message.reply_text(
+                f"Ошибка Syntax: {_user_error_message(fb_err, domain='video')}"
+            )
+            return True
+        if not video_bytes:
+            await update.message.reply_text(
+                "Syntax снова не вернул видео. Можно ещё раз написать `Syntax` или переключиться на `Vertex`."
+            )
+            return True
+        scene.pop("video_provider_choice_pending", None)
+        vb = io.BytesIO(video_bytes)
+        vb.name = f"scene_{idx + 1}_{language}.mp4"
+        await _safe_reply_video(
+            update.message,
+            video=vb,
+            caption=f"Сцена {idx + 1}/{total}, язык {language}: видео готово. Источник: Syntax.",
+        )
+        cost_summary = _store_scene_video_result(
+            scene,
+            language,
+            video_bytes,
+            session=session,
+            scene_idx=idx,
+            provider="telegram",
+        )
+        _set_scene_policy_candidate(scene, language, "")
+        _reset_video_prompt_policy_failure_count(scene)
+        await update.message.reply_text(
+            f"Оценка себестоимости видео ({language}): ~${float(cost_summary['estimated_total_cost_usd']):.4f}."
+        )
+    else:
+        await update.message.reply_text("Пробую резервный канал Vertex/Veo…")
+        try:
+            video_bytes = await run_vertex_fallback_from_session_payload(pending)
+        except Exception as err:
+            logger.exception("scene Vertex fallback execution failed")
+            await update.message.reply_text(
+                f"Ошибка резервного Vertex: {_user_error_message(err, domain='video')}"
+            )
+            return True
+        scene.pop("video_provider_choice_pending", None)
+        vertex_duration_sec = int(pending.get("vertex_duration_sec") or pending.get("duration_sec") or 6)
+        vb = io.BytesIO(video_bytes)
+        vb.name = f"scene_{idx + 1}_{language}.mp4"
+        await _safe_reply_video(
+            update.message,
+            video=vb,
+            caption=(
+                f"Сцена {idx + 1}/{total}, язык {language}: видео готово "
+                f"({vertex_duration_sec} сек). Источник: Vertex fallback."
+            ),
+        )
+        cost_summary = _store_scene_video_result(
+            scene,
+            language,
+            video_bytes,
+            session=session,
+            scene_idx=idx,
+            provider="veo",
+        )
+        _set_scene_policy_candidate(scene, language, "")
+        _reset_video_prompt_policy_failure_count(scene)
+        await update.message.reply_text(
+            f"Оценка себестоимости видео ({language}): ~${float(cost_summary['estimated_total_cost_usd']):.4f}."
+        )
+
+    requires_multilingual_approval = (
+        len(languages) > 1 or isinstance(scene.get("video_prompt_by_lang"), dict)
+    )
+    current_idx = int(session.get("scene_media_language_index", 0) or 0)
+    if current_idx + 1 < len(languages):
+        session["scene_media_language_index"] = current_idx + 1
+    else:
+        session["scene_media_language_index"] = 0
+    if not requires_multilingual_approval and session["scene_media_language_index"] == 0:
+        session["image_scene_index"] = idx + 1
+        if session["image_scene_index"] >= total:
+            return await _finish_scene_media_production(update, session)
+        session["scene_media_substep"] = SCENE_MEDIA_SUBSTEP_START
+    await _send_next_scene_media_step(update, session)
     return True
 
 
@@ -3188,11 +3412,14 @@ async def _handle_waiting_scene_media_state(
         if (
             scenes_for_pending
             and idx_for_pending < len(scenes_for_pending)
-            and isinstance(scenes_for_pending[idx_for_pending].get("syntax_fallback_pending"), dict)
+            and (
+                isinstance(scenes_for_pending[idx_for_pending].get("syntax_fallback_pending"), dict)
+                or isinstance(scenes_for_pending[idx_for_pending].get("video_provider_choice_pending"), dict)
+            )
         ):
             await update.message.reply_text(
-                "Автоапрув включён, но текущий Syntax fallback требует отдельного решения. "
-                "Ответьте «да» или «нет», после этого продолжу без апрувов."
+                "Автоапрув включён, но текущий шаг видео требует отдельного решения по провайдеру. "
+                "Сначала выберите `Syntax` или `Vertex`, после этого продолжу без апрувов."
             )
             return True
         await update.message.reply_text("Автоапрув включён: дальше генерирую кадры и видео без подтверждений.")
@@ -3202,6 +3429,10 @@ async def _handle_waiting_scene_media_state(
             chat_id=chat_id,
             session=session,
         )
+    if await _handle_scene_video_provider_choice_pending(
+        update, context, chat_id=chat_id, session=session, text=text
+    ):
+        return True
     if await _handle_scene_syntax_fallback_pending(
         update, context, chat_id=chat_id, session=session, text=text
     ):

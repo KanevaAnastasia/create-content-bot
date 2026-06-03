@@ -52,9 +52,12 @@ from .handlers_state_deps import (
     _load_scene_reference_images,
     _normalize_character_key,
     ok_only_markup,
+    VideoProviderChoiceRequired,
+    encode_video_provider_choice_for_session,
 )
 from .handlers_state_commands import (
     _extract_video_source_image,
+    _handle_video_provider_choice_pending_video_command,
     _handle_syntax_fallback_pending_video_command,
     _reply_text_chunked,
 )
@@ -1036,6 +1039,17 @@ async def on_photo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             aspect_ratio="9:16",
             audio_enabled=True,
         )
+    except VideoProviderChoiceRequired as pending_choice:
+        payload = encode_video_provider_choice_for_session(pending_choice)
+        payload["source"] = "video_command"
+        payload["duration_for_caption"] = duration_sec
+        payload["original_prompt"] = prompt
+        session["video_provider_choice_pending"] = payload
+        await update.message.reply_text(
+            "Syntax не вернул видео.\n\n"
+            "Напишите `Syntax`, чтобы повторить через Syntax, или `Vertex`, чтобы попробовать резервный Vertex/Veo."
+        )
+        return
     except Exception as e:
         logger.exception("first-step video generation failed")
         await update.message.reply_text(f"Ошибка генерации видео: {_user_error_message(e, domain='video')}")
@@ -1461,6 +1475,10 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             "пришлите новую строку формата: 6 ваш prompt.",
             reply_markup=first_step_menu_markup(),
         )
+        return
+    if await _handle_video_provider_choice_pending_video_command(
+        update, context, chat_id=chat_id, session=session, text=text
+    ):
         return
     if await _handle_syntax_fallback_pending_video_command(
         update, context, chat_id=chat_id, session=session, text=text
