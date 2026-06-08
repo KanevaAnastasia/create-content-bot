@@ -4,7 +4,10 @@ from __future__ import annotations
 
 from app.scene_speech_budget import (
     PAUSE_TOKEN,
+    build_default_speech_plan,
+    build_speech_cues_from_plan,
     max_speech_chars_for_duration,
+    speech_budget_for_duration,
     speech_chars_excluding_pauses,
 )
 
@@ -18,3 +21,21 @@ def test_speech_chars_excluding_pauses_strips_token() -> None:
 def test_max_speech_chars_for_duration() -> None:
     assert max_speech_chars_for_duration(8) == 112
     assert max_speech_chars_for_duration(6) == 84
+    assert max_speech_chars_for_duration(6, "en") == 66
+
+
+def test_speech_budget_and_default_plan_are_language_aware() -> None:
+    budget = speech_budget_for_duration(6, "en")
+    assert budget["language"] == "en"
+    assert budget["chars_per_second"] == 11
+    plan = build_default_speech_plan(f"Look here {PAUSE_TOKEN} this stays warm", "en")
+    assert [item["text"] for item in plan] == ["Look here", "this stays warm"]
+
+
+def test_build_speech_cues_from_plan_distributes_real_duration() -> None:
+    plan = build_default_speech_plan("First chunk [пауза] second chunk", "en")
+    cues = build_speech_cues_from_plan(plan, duration_sec=5.0)
+    assert len(cues) == 2
+    assert cues[0]["start_sec"] == 0.0
+    assert 0.0 < cues[0]["end_sec"] < 5.0
+    assert cues[-1]["end_sec"] == 5.0

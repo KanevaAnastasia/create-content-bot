@@ -93,6 +93,8 @@ class SpeechTranscriptionResult:
     long_pauses_detected: bool = False
     speech_speed: str = "unknown"
     recognized_text: str = ""
+    phrase_overflow_detected: bool = False
+    unfinished_line_detected: bool = False
     status: str = AI_APPROVAL_STATUS_HUMAN_REVIEW
 
     def to_dict(self) -> dict[str, Any]:
@@ -822,10 +824,9 @@ def transcribe_video_audio(
         )
     prompt = (
         "You are a speech recognition QA agent for short AI-generated cooking videos.\n\n"
-        "Listen to the attached MP4 and transcribe the spoken Russian speech. Ignore background noise and do not "
+        "Listen to the attached MP4 and transcribe the spoken speech. Ignore background noise and do not "
         "describe visuals. If no intelligible speech is present, return an empty recognized_text.\n\n"
-        "Compare the recognized speech to EXPECTED SPEECH. Treat Veo stress markers as pronunciation hints: uppercase "
-        "Russian vowels indicate intended word stress, and [пауза] indicates a pause. The recognized_text should be "
+        "Compare the recognized speech to EXPECTED SPEECH. Treat [пауза] as a pause marker. The recognized_text should be "
         "plain text without stress capitalization unless the audio clearly spells letters.\n\n"
         "Evaluate:\n"
         "1. Whether the expected phrase is completed before the video ends.\n"
@@ -834,7 +835,9 @@ def transcribe_video_audio(
         "4. Whether speech cuts off mid-word or mid-phrase.\n"
         "5. Whether pauses are too long for a short cooking clip.\n"
         "6. Speech speed: slow, normal, fast, too_fast, or unknown.\n"
-        "7. Whether Russian word stress and pronunciation sound natural.\n\n"
+        "7. Whether pronunciation sounds natural for the language of EXPECTED SPEECH. For Russian, Russian word stress should sound natural.\n"
+        "8. Whether the line appears to overflow the clip timing.\n"
+        "9. Whether the line sounds unfinished at the end.\n\n"
         "Return only valid JSON:\n"
         "{\n"
         '  "phrase_completed": false,\n'
@@ -845,6 +848,8 @@ def transcribe_video_audio(
         '  "long_pauses_detected": false,\n'
         '  "speech_speed": "unknown",\n'
         '  "recognized_text": "",\n'
+        '  "phrase_overflow_detected": false,\n'
+        '  "unfinished_line_detected": false,\n'
         '  "status": "HUMAN_REVIEW"\n'
         "}\n\n"
         f"EXPECTED SPEECH:\n{expected_speech_text or '-'}\n"
@@ -863,12 +868,14 @@ def transcribe_video_audio(
     match_score = _clamp01(data.get("match_score"), 0.0)
     cut_off = _bool_value(data.get("cut_off_detected"), False)
     long_pauses = _bool_value(data.get("long_pauses_detected"), False)
+    phrase_overflow = _bool_value(data.get("phrase_overflow_detected"), False)
+    unfinished_line = _bool_value(data.get("unfinished_line_detected"), False)
     status = str(data.get("status") or "").strip().upper()
     if status not in ALLOWED_STATUSES:
         status = AI_APPROVAL_STATUS_HUMAN_REVIEW
-    if phrase_completed and match_score >= 0.85 and not cut_off:
+    if phrase_completed and match_score >= 0.85 and not cut_off and not phrase_overflow and not unfinished_line:
         status = AI_APPROVAL_STATUS_APPROVE
-    elif cut_off or match_score < 0.70:
+    elif cut_off or phrase_overflow or unfinished_line or match_score < 0.70:
         status = AI_APPROVAL_STATUS_REGENERATE_VIDEO
     else:
         status = AI_APPROVAL_STATUS_HUMAN_REVIEW
@@ -881,6 +888,8 @@ def transcribe_video_audio(
         long_pauses_detected=long_pauses,
         speech_speed=str(data.get("speech_speed") or "unknown").strip() or "unknown",
         recognized_text=str(data.get("recognized_text") or "").strip(),
+        phrase_overflow_detected=phrase_overflow,
+        unfinished_line_detected=unfinished_line,
         status=status,
     )
 
@@ -977,8 +986,8 @@ def check_video(
             "- Food must match the recipe step\n"
             "- Major hand, face, mouth, or object deformation is a critical issue\n"
             "- If the scene includes lipsync, grandmother's mouth should appear naturally active during speech frames\n"
-            "- If the original video/audio is attached and speech is present, Russian pronunciation and word stress must sound natural. "
-            "Wrong stress, robotic intonation, swallowed syllables, or unnatural emphasis are content defects.\n"
+            "- If the original video/audio is attached and speech is present, pronunciation must sound natural for the spoken language. "
+            "Wrong stress, robotic intonation, swallowed syllables, clipped endings, or unnatural emphasis are content defects.\n"
             "- The action should be simple and match the prompt\n"
             "- The video should be suitable for a cozy short-form cooking video\n\n"
             "Viral retention checks:\n"
@@ -989,7 +998,7 @@ def check_video(
             "- cozy cartoon food-blog tone is preserved\n"
             "- grandma looks friendly, cat looks cute, food looks appetizing\n"
             "- lip sync matches the expected phrase closely enough for the clip duration\n"
-            "- spoken words have natural stress/accent and do not sound mispronounced\n"
+            "- spoken words have natural accent/stress and do not sound mispronounced\n"
             "- the spoken phrase appears feasible within the expected duration\n\n"
             "Technical limitations are not content defects:\n"
             "- If speech transcription is disabled, do not mark it as a critical issue.\n"
@@ -1026,11 +1035,21 @@ def check_video(
             data["warnings"].extend(warnings)
         if cfg.audio_transcription_enabled:
             data["speech_completion_score"] = speech.match_score
-            if speech.cut_off_detected or speech.status == AI_APPROVAL_STATUS_REGENERATE_VIDEO:
+            if speech.cut_off_detected or speech.phrase_overflow_detected or speech.unfinished_line_detected or speech.speech_speed == "too_fast" or speech.status == AI_APPROVAL_STATUS_REGENERATE_VIDEO:
                 data.setdefault("critical_issues", [])
                 if isinstance(data["critical_issues"], list):
-                    issue = "audio cut off detected" if speech.cut_off_detected else "speech transcription does not match expected phrase"
-                    data["critical_issues"].append(issue)
+                    issues: list[str] = []
+                    if speech.cut_off_detected:
+                        issues.append("audio cut off detected")
+                    if speech.phrase_overflow_detected:
+                        issues.append("phrase overflow detected")
+                    if speech.unfinished_line_detected:
+                        issues.append("unfinished line detected")
+                    if speech.speech_speed == "too_fast":
+                        issues.append("speech delivered too fast")
+                    if speech.status == AI_APPROVAL_STATUS_REGENERATE_VIDEO and not issues:
+                        issues.append("speech transcription does not match expected phrase")
+                    data["critical_issues"].extend(issues)
         return normalize_ai_approval_result(
             data,
             stage="video",

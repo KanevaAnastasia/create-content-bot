@@ -6,6 +6,8 @@ import json
 import uuid
 from typing import Any
 
+import sqlalchemy as sa
+
 from .db import SessionLocal
 from .models import GenerationRun, Scene, VideoResult
 
@@ -81,17 +83,24 @@ def save_video_result_estimate(
         return None
 
     with SessionLocal() as db:
-        row = VideoResult(
-            run_id=uuid.UUID(run_id_str),
-            scene_id=uuid.UUID(scene_id_str),
-            provider=provider,
-            status=status,
-            video_path=video_path,
-            score=None,
-            language=str(language or "ru"),
-            estimated_cost_usd=(round(float(cost_usd), 6) if cost_usd is not None else None),
-            cost_breakdown_json=cost_breakdown or {},
-        )
+        bind = db.get_bind()
+        inspector = sa.inspect(bind)
+        cols = {col["name"] for col in inspector.get_columns("video_results")} if inspector.has_table("video_results") else set()
+        row_kwargs: dict[str, Any] = {
+            "run_id": uuid.UUID(run_id_str),
+            "scene_id": uuid.UUID(scene_id_str),
+            "provider": provider,
+            "status": status,
+            "video_path": video_path,
+            "score": None,
+        }
+        if "language" in cols:
+            row_kwargs["language"] = str(language or "ru")
+        if "estimated_cost_usd" in cols:
+            row_kwargs["estimated_cost_usd"] = round(float(cost_usd), 6) if cost_usd is not None else None
+        if "cost_breakdown_json" in cols:
+            row_kwargs["cost_breakdown_json"] = cost_breakdown or {}
+        row = VideoResult(**row_kwargs)
         db.add(row)
         db.commit()
         return str(row.id)

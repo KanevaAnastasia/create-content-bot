@@ -93,6 +93,8 @@ def test_multiproject_tables_registered_in_metadata():
         "locations",
         "project_characters",
         "project_locations",
+        "project_publish_accounts",
+        "publication_jobs",
         "text_steps",
         "text_step_revisions",
     }

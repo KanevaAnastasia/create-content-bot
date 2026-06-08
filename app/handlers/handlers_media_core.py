@@ -458,10 +458,10 @@ def _image_scene_prompt(scene: dict) -> str:
 
 
 def _image_end_scene_prompt(scene: dict) -> str | None:
+    if not scene.get("end_frame_requested"):
+        return None
     end_prompt = str(scene.get("end_frame_prompt", "")).strip() or str(scene.get("end_frame_prompt_ru", "")).strip()
     if not end_prompt or end_prompt.lower() == "пусто":
-        return None
-    if not _end_frame_image_warranted(scene):
         return None
     continuity_block = (
         "Референс: приложенный стартовый кадр — полная база композиции. "

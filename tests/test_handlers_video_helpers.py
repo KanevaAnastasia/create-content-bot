@@ -51,6 +51,7 @@ from app.handlers.handlers_media_scene import (
     PIXAR_REFERENCE_STYLE_PHRASE,
     VIDEO_PROMPT_POLICY_FAILURE_THRESHOLD,
     _append_scene_identity_to_image_prompt,
+    _extract_prompt_override,
     _append_pixar_reference_style_phrase,
     _loaded_reference_paths,
     _planned_reference_summary,
@@ -197,10 +198,49 @@ def test_call_with_503_retries_waits_and_retries_ai_rate_limit(monkeypatch):
     assert any("Уперлась в лимит AI" in reply and "попробую сама" in reply for reply in message.replies)
 
 
+def test_safe_reply_video_recreates_stream_for_retry(monkeypatch):
+    class Message:
+        def __init__(self):
+            self.calls = []
+
+        async def reply_video(self, *, video, caption):
+            payload = video.read()
+            self.calls.append((payload, caption, getattr(video, "name", "")))
+            if len(self.calls) == 1:
+                raise handlers_state_media.TimedOut("Timed out")
+            return SimpleNamespace(message_id=123)
+
+    async def fake_sleep(_seconds):
+        return None
+
+    monkeypatch.setattr(handlers_state_media, "_SEND_RETRY_ATTEMPTS", 2)
+    monkeypatch.setattr(handlers_state_media, "_SEND_RETRY_BASE_DELAY_SEC", 0)
+    monkeypatch.setattr(handlers_state_media.asyncio, "sleep", fake_sleep)
+
+    message = Message()
+    stream = handlers_state_media.io.BytesIO(b"video-bytes")
+    stream.name = "scene_1_ru.mp4"
+
+    out = asyncio.run(
+        handlers_state_media._safe_reply_video(
+            message,
+            video=stream,
+            caption="test caption",
+        )
+    )
+
+    assert out.message_id == 123
+    assert len(message.calls) == 2
+    assert message.calls[0][0] == b"video-bytes"
+    assert message.calls[1][0] == b"video-bytes"
+    assert message.calls[1][2] == "scene_1_ru.mp4"
+
+
 def test_compose_locked_video_prompt_keeps_existing_scene_phrase():
     scene = {
         "text": "Оригинальная фраза",
         "video_prompt": "lang:ru cinematic shot. CHARACTERS SPEAKS: Старая фраза",
+        "duration_sec": 6,
     }
     out = handlers_state_media._compose_locked_video_prompt(
         scene,
@@ -209,6 +249,7 @@ def test_compose_locked_video_prompt_keeps_existing_scene_phrase():
     )
     assert "CHARACTERS SPEAKS: Оригинальная фраза" in out
     assert "Подмена фразы" not in out
+    assert "speech_timing_plan:" in out
 
 
 def test_set_scene_video_prompt_for_all_languages_preserves_each_phrase_and_invalidates_videos():
@@ -267,11 +308,13 @@ def test_scene_media_markups_use_prompt_feedback_buttons_without_add_fix():
         assert "ОК" in buttons
         assert "Автоапрув" in buttons
         assert "🤖 ИИ апрув" in buttons
+        assert "СТОП" not in buttons
         assert "ПРОМПТ:" in buttons
         assert "ФИДБЕК:" in buttons
         assert "Добавь" not in buttons
         assert "Исправь" not in buttons
     assert "ФРАЗА:" in video_buttons
+    assert "ИЗМЕНИТЬ СКОРОСТЬ" in video_buttons
     assert "ПРОМПТ ru:" in video_buttons
     assert "ИСПРАВЬ en:" not in video_buttons
     assert "ФИДБЕК en:" not in video_buttons
@@ -287,8 +330,10 @@ def test_scene_language_approval_markup_contains_expected_language_commands():
     assert "ОК все" in buttons
     assert "Автоапрув" in buttons
     assert "🤖 ИИ апрув" in buttons
+    assert "СТОП" not in buttons
     assert "ОК ru" in buttons
     assert "ОК en" in buttons
+    assert "ИЗМЕНИТЬ СКОРОСТЬ" in buttons
     assert "ФИДБЕК:" in buttons
     assert "ПРОМПТ ru:" in buttons
     assert "ПРОМПТ en:" in buttons
@@ -300,6 +345,77 @@ def test_scene_language_approval_markup_contains_expected_language_commands():
     assert "ПЕРЕГЕНЕРИРОВАТЬ en" in buttons
 
 
+def test_change_speed_button_then_value_auto_approves_current_language():
+    class _Msg:
+        def __init__(self):
+            self.replies = []
+
+        async def reply_text(self, text, **_kwargs):
+            self.replies.append(text)
+
+    scene = {
+        "video_results_by_lang": {"ru": {"video_b64": "x"}},
+        "video_approvals_by_lang": {"ru": False},
+        "video_candidates_by_lang": {
+            "ru": [
+                {
+                    "candidate_id": "cand-1",
+                    "language": "ru",
+                    "video_b64": "eA==",
+                    "created_at": "now",
+                    "liked": False,
+                    "approved_for_production": False,
+                    "speed_coef": 1.2,
+                    "source_image_candidate_id": "img-1",
+                }
+            ]
+        },
+    }
+    session = {
+        "scene_media_substep": handlers_state_media.SCENE_MEDIA_SUBSTEP_VIDEO,
+        "target_languages": ["ru"],
+        "production": {"json_plan": [scene, {"video_results_by_lang": {}}]},
+        "image_scene_index": 0,
+    }
+    message = _Msg()
+    update = SimpleNamespace(message=message)
+
+    out_button = asyncio.run(
+        handlers_state_media._handle_waiting_scene_media_state(
+            update,
+            SimpleNamespace(),
+            chat_id=1,
+            session=session,
+            text="ИЗМЕНИТЬ СКОРОСТЬ",
+        )
+    )
+
+    assert out_button is True
+    assert handlers_state_media.SCENE_VIDEO_SPEED_PENDING_KEY in session
+
+    async def _fake_send_next_scene_media_step(_update, _session):
+        return None
+
+    monkeypatch_send = handlers_state_media._send_next_scene_media_step
+    handlers_state_media._send_next_scene_media_step = _fake_send_next_scene_media_step
+    try:
+        out_speed = asyncio.run(
+            handlers_state_media._handle_waiting_scene_media_state(
+                update,
+                SimpleNamespace(),
+                chat_id=1,
+                session=session,
+                text="1.3",
+            )
+        )
+    finally:
+        handlers_state_media._send_next_scene_media_step = monkeypatch_send
+
+    assert out_speed is True
+    assert scene["video_approvals_by_lang"]["ru"] is True
+    assert scene["video_candidates_by_lang"]["ru"][0]["speed_coef"] == 1.3
+
+
 def test_scene_generated_image_approval_markup_has_expected_buttons():
     buttons = [
         btn.text
@@ -308,6 +424,9 @@ def test_scene_generated_image_approval_markup_has_expected_buttons():
     ]
     assert "ОК" in buttons
     assert "Автоапрув" in buttons
+    assert "🤖 ИИ апрув" in buttons
+    assert "СТОП" not in buttons
+    assert "ПРОМПТ:" in buttons
     assert "ИЗМЕНИТЬ" in buttons
     assert "ФИДБЕК" in buttons
     assert "ПЕРЕГЕНЕРИРОВАТЬ" in buttons
@@ -318,6 +437,30 @@ def test_scene_generated_image_approval_markup_has_expected_buttons():
         for btn in row
     ]
     assert "ПОВЫСИТЬ МОДЕЛЬ" in buttons_with_upgrade
+
+
+def test_scene_media_markups_show_stop_button_when_auto_or_ai_enabled():
+    auto_session = {
+        handlers_media_scene.SCENE_MEDIA_AUTO_APPROVE_SESSION_KEY: True,
+        handlers_media_scene.SCENE_MEDIA_APPROVE_MODE_SESSION_KEY: handlers_media_scene.SCENE_MEDIA_APPROVE_MODE_AUTO,
+    }
+    ai_session = {
+        handlers_media_scene.SCENE_MEDIA_APPROVE_MODE_SESSION_KEY: handlers_media_scene.SCENE_MEDIA_APPROVE_MODE_AI,
+    }
+
+    for session in (auto_session, ai_session):
+        buttons = [
+            btn.text
+            for row in handlers_media_scene.scene_video_approval_markup(
+                include_restart_end=True,
+                languages=["ru"],
+                session=session,
+            ).keyboard
+            for btn in row
+        ]
+        assert "СТОП" in buttons
+        assert "Автоапрув" not in buttons
+        assert "🤖 ИИ апрув" not in buttons
 
 
 def test_video_approval_text_shows_prompts_for_all_languages():
@@ -659,6 +802,11 @@ def test_extract_format_or_feedback_supports_format_and_feedback():
     assert _extract_format_or_feedback("ФОРМАТ: cinematic short") == "cinematic short"
     assert _extract_format_or_feedback("ФИДБЕК: less camera shake") == "less camera shake"
     assert _extract_format_or_feedback("ПРОМПТ: hello") is None
+
+
+def test_extract_prompt_override_supports_code_block():
+    text = "ПРОМПТ: ```\nКрупный план у двери\nкот как на референсе\n```"
+    assert _extract_prompt_override(text) == "Крупный план у двери\nкот как на референсе"
 
 
 def test_should_soften_image_prompt_only_for_policy_like_errors():
@@ -1438,11 +1586,24 @@ def test_end_frame_image_not_warranted_when_start_prompt_already_mentions_markiz
     assert _end_frame_image_warranted(scene) is False
 
 
-def test_image_end_scene_prompt_none_when_not_warranted_even_if_end_set():
+def test_image_end_scene_prompt_keeps_explicit_delta_even_without_new_character():
     scene = {
         "characters": ["grandma", "cat"],
         "start_frame_prompt_ru": "Бабушка месит тесто в миске.",
-        "end_frame_prompt": "Полная кухня заново со всеми деталями",
+        "end_frame_prompt": "Кот уже внутри дома и стряхивает капли с мокрой шерсти.",
+        "end_frame_requested": True,
+    }
+    out = _image_end_scene_prompt(scene)
+    assert out is not None
+    assert "Кот уже внутри дома" in out
+    assert "ТОЛЬКО отличия финала" in out
+
+
+def test_image_end_scene_prompt_ignored_without_explicit_request():
+    scene = {
+        "characters": ["grandma", "cat"],
+        "start_frame_prompt_ru": "Бабушка месит тесто в миске.",
+        "end_frame_prompt": "Кот уже внутри дома и стряхивает капли с мокрой шерсти.",
     }
     assert _image_end_scene_prompt(scene) is None
 
@@ -1525,8 +1686,162 @@ def test_scene_needs_end_frame_step_handles_missing_import_regression():
         "characters": ["grandma", "cat", "granddaughter"],
         "start_frame_prompt_ru": "Бабушка и кот на кухне.",
         "end_frame_prompt": "В кадр входит внучка и берёт тарелку.",
+        "end_frame_requested": True,
+    }
+    assert _scene_needs_end_frame_step(scene) is True
+
+
+def test_scene_needs_end_frame_step_false_for_pusto():
+    scene = {
+        "characters": ["grandma", "cat"],
+        "start_frame_prompt_ru": "Бабушка и кот на кухне.",
+        "end_frame_prompt": "пусто",
     }
     assert _scene_needs_end_frame_step(scene) is False
+
+
+def test_scene_needs_end_frame_step_false_without_explicit_request():
+    scene = {
+        "characters": ["grandma", "cat"],
+        "start_frame_prompt_ru": "Бабушка и кот на кухне.",
+        "end_frame_prompt": "Кот уже внутри дома.",
+    }
+    assert _scene_needs_end_frame_step(scene) is False
+
+
+def test_start_prompt_feedback_switches_scene_to_closeup(monkeypatch):
+    async def _fake_call(*_args, **_kwargs):
+        return "Крупный план. Новый стартовый промпт."
+
+    async def _fake_send_next(_update, _session):
+        return None
+
+    messages: list[str] = []
+
+    class _Msg:
+        async def reply_text(self, text, **kwargs):
+            _ = kwargs
+            messages.append(text)
+
+    monkeypatch.setattr(handlers_state_media, "_call_with_503_retries", _fake_call)
+    monkeypatch.setattr(handlers_state_media, "_send_next_scene_media_step", _fake_send_next)
+
+    scene = {"shot_type": "medium", "start_frame_prompt": "Старый промпт", "start_frame_prompt_ru": "Старый промпт"}
+    out = asyncio.run(
+        handlers_state_media._scene_media_start_not_ok(
+            SimpleNamespace(message=_Msg()),
+            context=None,
+            chat_id=1,
+            session={},
+            scene=scene,
+            text="ФИДБЕК: Сделай крупный план кота у двери и сохрани референс",
+        )
+    )
+
+    assert out is True
+    assert scene["shot_type"] == "closeup"
+    assert scene["start_frame_prompt"] == "Крупный план. Новый стартовый промпт."
+    assert scene["start_frame_prompt_ru"] == "Крупный план. Новый стартовый промпт."
+    assert any("Перегенерирую стартовый промпт" in text for text in messages)
+
+
+def test_start_prompt_feedback_can_enable_end_frame_when_explicitly_requested(monkeypatch):
+    async def _fake_call(*_args, **_kwargs):
+        return "Новый стартовый промпт."
+
+    async def _fake_send_next(_update, _session):
+        return None
+
+    class _Msg:
+        async def reply_text(self, text, **kwargs):
+            _ = (text, kwargs)
+
+    monkeypatch.setattr(handlers_state_media, "_call_with_503_retries", _fake_call)
+    monkeypatch.setattr(handlers_state_media, "_send_next_scene_media_step", _fake_send_next)
+
+    scene = {
+        "start_frame_prompt": "Старый промпт",
+        "end_frame_prompt": "Кот уже внутри дома.",
+    }
+    out = asyncio.run(
+        handlers_state_media._scene_media_start_not_ok(
+            SimpleNamespace(message=_Msg()),
+            context=None,
+            chat_id=1,
+            session={"image_scene_index": 0},
+            scene=scene,
+            text="ФИДБЕК: в этой сцене нужен конечный кадр, где кот уже внутри дома",
+        )
+    )
+
+    assert out is True
+    assert scene["end_frame_requested"] is True
+
+
+def test_start_prompt_manual_override_switches_scene_to_closeup(monkeypatch):
+    messages: list[str] = []
+
+    async def _fake_start_ok(update, *, context, chat_id, session, scene, idx):
+        _ = (update, context, chat_id, session, idx)
+        messages.append(f"GEN:{scene.get('start_frame_prompt')}")
+        return True
+
+    class _Msg:
+        async def reply_text(self, text, **kwargs):
+            _ = kwargs
+            messages.append(text)
+
+    monkeypatch.setattr(handlers_state_media, "_scene_media_start_ok", _fake_start_ok)
+
+    scene = {"shot_type": "medium", "start_frame_prompt": "Старый промпт", "start_frame_prompt_ru": "Старый промпт"}
+    out = asyncio.run(
+        handlers_state_media._scene_media_start_not_ok(
+            SimpleNamespace(message=_Msg()),
+            context=None,
+            chat_id=1,
+            session={},
+            scene=scene,
+            text="ПРОМПТ: Крупный план у двери, кот маленький по масштабу, без baby-face",
+        )
+    )
+
+    assert out is True
+    assert scene["shot_type"] == "closeup"
+    assert scene["start_frame_prompt"] == "Крупный план у двери, кот маленький по масштабу, без baby-face"
+    assert scene["start_frame_prompt_ru"] == "Крупный план у двери, кот маленький по масштабу, без baby-face"
+    assert any("Сразу генерирую стартовый кадр" in text for text in messages)
+    assert any(text.startswith("GEN:") for text in messages)
+
+
+def test_start_prompt_feedback_rewrites_medium_prefix_to_closeup(monkeypatch):
+    async def _fake_call(*_args, **_kwargs):
+        return "Средний план. Кот у двери как на референсе."
+
+    async def _fake_send_next(_update, _session):
+        return None
+
+    class _Msg:
+        async def reply_text(self, _text, **kwargs):
+            _ = kwargs
+
+    monkeypatch.setattr(handlers_state_media, "_call_with_503_retries", _fake_call)
+    monkeypatch.setattr(handlers_state_media, "_send_next_scene_media_step", _fake_send_next)
+
+    scene = {"shot_type": "medium", "start_frame_prompt": "Старый промпт", "start_frame_prompt_ru": "Старый промпт"}
+    out = asyncio.run(
+        handlers_state_media._scene_media_start_not_ok(
+            SimpleNamespace(message=_Msg()),
+            context=None,
+            chat_id=1,
+            session={},
+            scene=scene,
+            text="ФИДБЕК: Сделай крупный план и сохрани кота как на референсе",
+        )
+    )
+
+    assert out is True
+    assert scene["shot_type"] == "closeup"
+    assert scene["start_frame_prompt"] == "Крупный план. Кот у двери как на референсе."
 
 
 def test_waiting_scene_media_ok_on_video_step_triggers_video_generation(monkeypatch):
@@ -1652,6 +1967,45 @@ def test_waiting_scene_media_ai_approve_enables_ai_mode(monkeypatch):
     assert called["ai"] is True
     assert session[handlers_media_scene.SCENE_MEDIA_APPROVE_MODE_SESSION_KEY] == "ai"
     assert any("Включён 🤖 ИИ апрув" in message for message in messages)
+
+
+def test_waiting_scene_media_stop_returns_to_manual_mode(monkeypatch):
+    called = {"shown": False}
+
+    async def _fake_show_manual(update, session):
+        called["shown"] = True
+        return None
+
+    monkeypatch.setattr(handlers_state_media, "_show_manual_scene_media_controls", _fake_show_manual)
+
+    messages: list[str] = []
+
+    class _Msg:
+        async def reply_text(self, text, **kwargs):
+            messages.append(text)
+
+    update = SimpleNamespace(message=_Msg())
+    session = {
+        "production": {"json_plan": [{"start_frame_prompt": "scene 1", "video_prompt": "video 1"}]},
+        "image_scene_index": 0,
+        "scene_media_substep": "start_prompt",
+        handlers_media_scene.SCENE_MEDIA_APPROVE_MODE_SESSION_KEY: handlers_media_scene.SCENE_MEDIA_APPROVE_MODE_AI,
+    }
+
+    out = asyncio.run(
+        handlers_state_media._handle_waiting_scene_media_state(
+            update,
+            context=None,
+            chat_id=1,
+            session=session,
+            text="СТОП",
+        )
+    )
+
+    assert out is True
+    assert called["shown"] is True
+    assert session[handlers_media_scene.SCENE_MEDIA_APPROVE_MODE_SESSION_KEY] == "manual"
+    assert any("Автоапрув остановлен" in message for message in messages)
 
 
 def test_ai_approve_start_skips_prompt_check_before_generating_image(monkeypatch):
@@ -1940,7 +2294,7 @@ def test_image_approval_edit_button_then_instruction_uses_latest_image(monkeypat
     assert scene["video_results_by_lang"] == {}
 
 
-def test_end_frame_generation_uses_only_start_frame_reference(monkeypatch):
+def test_end_frame_generation_uses_start_frame_and_first_scene_character_refs(monkeypatch):
     calls: list[dict] = []
 
     async def _gen_image(prompt, *, reference_images=None, model=None):
@@ -1952,11 +2306,16 @@ def test_end_frame_generation_uses_only_start_frame_reference(monkeypatch):
 
     monkeypatch.setattr(handlers_state_media, "_generate_scene_image_result", _gen_image)
     monkeypatch.setattr(handlers_state_media, "_safe_reply_photo", _fake_reply_photo)
-    monkeypatch.setattr(
-        handlers_state_media,
-        "_load_scene_reference_images",
-        lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("character refs must not be loaded")),
-    )
+
+    def _fake_load_refs(target_scene, **_kwargs):
+        chars = target_scene.get("characters") or []
+        if chars == ["grandma", "cat"]:
+            return [b"grandma-ref", b"cat-ref"]
+        if chars == ["grandma", "cat", "zaya"]:
+            return [b"grandma-ref", b"cat-ref", b"zaya-ref"]
+        return []
+
+    monkeypatch.setattr(handlers_state_media, "_load_scene_reference_images", _fake_load_refs)
 
     class _Msg:
         async def reply_text(self, _text, **kwargs):
@@ -1966,6 +2325,7 @@ def test_end_frame_generation_uses_only_start_frame_reference(monkeypatch):
         "start_frame_prompt": "бабушка и рыжий кот готовят у стола",
         "start_frame_image_b64": _encode_b64(b"start-frame"),
         "end_frame_prompt": "еда готова, белая кошка зая входит в кадр",
+        "end_frame_requested": True,
         "characters": ["grandma", "cat", "zaya"],
         "references": {
             "grandma": "assets/characters/grandma/base.png",
@@ -1977,14 +2337,17 @@ def test_end_frame_generation_uses_only_start_frame_reference(monkeypatch):
     out = asyncio.run(
         handlers_state_media._scene_media_end_ok(
             SimpleNamespace(message=_Msg()),
-            session={"target_languages": ["ru"]},
+            session={
+                "target_languages": ["ru"],
+                "production": {"json_plan": [{"characters": ["grandma", "cat"]}, scene]},
+            },
             scene=scene,
-            idx=0,
+            idx=1,
         )
     )
 
     assert out is True
-    assert calls[0]["reference_images"] == [b"start-frame"]
+    assert calls[0]["reference_images"] == [b"start-frame", b"grandma-ref", b"cat-ref", b"zaya-ref"]
     assert scene["end_frame_image_b64"] == _encode_b64(b"end-image")
 
 
@@ -2052,6 +2415,307 @@ def test_start_image_regenerate_keeps_same_model(monkeypatch):
     assert scene["start_frame_image_model"] == "gemini-2.5-flash-image"
 
 
+def test_start_image_approval_prompt_override_regenerates_immediately(monkeypatch):
+    calls: list[str] = []
+    messages: list[str] = []
+
+    async def _fake_start_ok(update, *, context, chat_id, session, scene, idx):
+        _ = (update, context, chat_id, session, idx)
+        calls.append(scene.get("start_frame_prompt"))
+        return True
+
+    monkeypatch.setattr(handlers_state_media, "_scene_media_start_ok", _fake_start_ok)
+
+    class _Msg:
+        async def reply_text(self, text, **kwargs):
+            _ = kwargs
+            messages.append(text)
+
+    scene = {"shot_type": "medium", "start_frame_prompt": "old", "start_frame_prompt_ru": "old"}
+    session = {"scene_media_substep": "start_image_approval"}
+    out = asyncio.run(
+        handlers_state_media._scene_media_start_image_approval_step(
+            SimpleNamespace(message=_Msg()),
+            context=None,
+            chat_id=1,
+            session=session,
+            scene=scene,
+            idx=0,
+            text="ПРОМПТ: Крупный план у двери, кот как на референсе",
+        )
+    )
+
+    assert out is True
+    assert calls == ["Крупный план у двери, кот как на референсе"]
+    assert scene["shot_type"] == "closeup"
+    assert scene["start_frame_prompt_raw_mode"] is True
+    assert session["scene_media_substep"] == "start_prompt"
+    assert any("Сразу перегенерирую стартовый кадр" in text for text in messages)
+
+
+def test_end_image_approval_prompt_override_regenerates_immediately(monkeypatch):
+    calls: list[str] = []
+    messages: list[str] = []
+
+    async def _fake_end_ok(update, *, session, scene, idx):
+        _ = (update, session, idx)
+        calls.append(scene.get("end_frame_prompt"))
+        return True
+
+    monkeypatch.setattr(handlers_state_media, "_scene_media_end_ok", _fake_end_ok)
+
+    class _Msg:
+        async def reply_text(self, text, **kwargs):
+            _ = kwargs
+            messages.append(text)
+
+    scene = {"end_frame_prompt": "old end"}
+    session = {"scene_media_substep": "end_image_approval"}
+    out = asyncio.run(
+        handlers_state_media._scene_media_end_image_approval_step(
+            SimpleNamespace(message=_Msg()),
+            context=None,
+            chat_id=1,
+            session=session,
+            scene=scene,
+            idx=0,
+            text="ПРОМПТ: Новый конечный кадр у двери",
+        )
+    )
+
+    assert out is True
+    assert calls == ["Новый конечный кадр у двери"]
+    assert scene["end_frame_requested"] is True
+    assert session["scene_media_substep"] == "end_prompt"
+    assert any("Сразу перегенерирую конечный кадр" in text for text in messages)
+
+
+def test_end_prompt_manual_override_regenerates_immediately(monkeypatch):
+    calls: list[str] = []
+    messages: list[str] = []
+
+    async def _fake_end_ok(update, *, session, scene, idx):
+        _ = (update, session, idx)
+        calls.append(scene.get("end_frame_prompt"))
+        return True
+
+    monkeypatch.setattr(handlers_state_media, "_scene_media_end_ok", _fake_end_ok)
+
+    class _Msg:
+        async def reply_text(self, text, **kwargs):
+            _ = kwargs
+            messages.append(text)
+
+    scene = {"end_frame_prompt": "old end"}
+    out = asyncio.run(
+        handlers_state_media._scene_media_end_not_ok(
+            SimpleNamespace(message=_Msg()),
+            context=None,
+            chat_id=1,
+            session={"image_scene_index": 0},
+            scene=scene,
+            text="ПРОМПТ: Новый финальный кадр у двери",
+        )
+    )
+
+    assert out is True
+    assert calls == ["Новый финальный кадр у двери"]
+    assert scene["end_frame_requested"] is True
+    assert scene["end_frame_prompt_raw_mode"] is True
+    assert any("Сразу генерирую конечный кадр" in text for text in messages)
+
+
+def test_video_prompt_manual_override_uses_raw_prompt_and_generates(monkeypatch):
+    calls: list[str] = []
+    messages: list[str] = []
+
+    async def _fake_video_ok(update, *, context, chat_id, session, scene, idx, total):
+        _ = (update, context, chat_id, session, idx, total)
+        calls.append(scene.get("video_prompt_by_lang", {}).get("ru"))
+        return True
+
+    monkeypatch.setattr(handlers_state_media, "_scene_media_video_ok", _fake_video_ok)
+
+    class _Msg:
+        async def reply_text(self, text, **kwargs):
+            _ = kwargs
+            messages.append(text)
+
+    scene = {
+        "video_prompt": "old",
+        "video_prompt_by_lang": {"ru": "old"},
+        "speech_by_lang": {"ru": "фраза"},
+    }
+    session = {
+        "image_scene_index": 0,
+        "scene_media_language_index": 0,
+        "target_languages": ["ru"],
+        "production": {"json_plan": [scene]},
+    }
+    out = asyncio.run(
+        handlers_state_media._scene_media_video_not_ok(
+            SimpleNamespace(message=_Msg()),
+            context=None,
+            chat_id=1,
+            session=session,
+            scene=scene,
+            text="ПРОМПТ: RAW VIDEO PROMPT",
+            language="ru",
+        )
+    )
+
+    assert out is True
+    assert calls == ["RAW VIDEO PROMPT"]
+    assert scene["video_prompt_raw_by_lang"]["ru"] is True
+    assert any("Сразу генерирую видео" in text for text in messages)
+
+
+def test_start_prompt_button_then_plain_text_is_treated_as_manual_prompt(monkeypatch):
+    calls: list[str] = []
+    messages: list[str] = []
+
+    async def _fake_start_ok(update, *, context, chat_id, session, scene, idx):
+        _ = (update, context, chat_id, session, idx)
+        calls.append(scene.get("start_frame_prompt"))
+        return True
+
+    monkeypatch.setattr(handlers_state_media, "_scene_media_start_ok", _fake_start_ok)
+
+    class _Msg:
+        async def reply_text(self, text, **kwargs):
+            _ = kwargs
+            messages.append(text)
+
+    session = {"image_scene_index": 0, "scene_prompt_input_pending": {"scene_idx": 0, "target": "start_pre", "language": ""}}
+    scene = {"shot_type": "medium", "start_frame_prompt": "old", "start_frame_prompt_ru": "old"}
+    out = asyncio.run(
+        handlers_state_media._scene_media_start_not_ok(
+            SimpleNamespace(message=_Msg()),
+            context=None,
+            chat_id=1,
+            session=session,
+            scene=scene,
+            text="Крупный план рыжего кота у двери",
+        )
+    )
+
+    assert out is True
+    assert calls == ["Крупный план рыжего кота у двери"]
+    assert "scene_prompt_input_pending" not in session
+    assert any("Сразу генерирую стартовый кадр" in text for text in messages)
+
+
+def test_video_prompt_button_then_plain_text_is_treated_as_manual_prompt(monkeypatch):
+    calls: list[str] = []
+
+    async def _fake_video_ok(update, *, context, chat_id, session, scene, idx, total):
+        _ = (update, context, chat_id, session, idx, total)
+        calls.append(scene.get("video_prompt_by_lang", {}).get("ru"))
+        return True
+
+    monkeypatch.setattr(handlers_state_media, "_scene_media_video_ok", _fake_video_ok)
+
+    class _Msg:
+        async def reply_text(self, _text, **kwargs):
+            _ = kwargs
+
+    scene = {
+        "video_prompt": "old",
+        "video_prompt_by_lang": {"ru": "old"},
+        "speech_by_lang": {"ru": "фраза"},
+    }
+    session = {
+        "image_scene_index": 0,
+        "scene_media_language_index": 0,
+        "target_languages": ["ru"],
+        "production": {"json_plan": [scene]},
+        "scene_prompt_input_pending": {"scene_idx": 0, "target": "video:ru", "language": "ru"},
+    }
+    out = asyncio.run(
+        handlers_state_media._scene_media_video_not_ok(
+            SimpleNamespace(message=_Msg()),
+            context=None,
+            chat_id=1,
+            session=session,
+            scene=scene,
+            text="RAW VIDEO PROMPT 2",
+            language="ru",
+        )
+    )
+
+    assert out is True
+    assert calls == ["RAW VIDEO PROMPT 2"]
+    assert "scene_prompt_input_pending" not in session
+
+
+def test_start_ok_uses_raw_manual_prompt_without_identity_block(monkeypatch):
+    captured: dict[str, object] = {}
+
+    async def _fake_generate(prompt, reference_images=None, model=None):
+        captured["prompt"] = prompt
+        captured["refs"] = reference_images
+        captured["model"] = model
+        return SimpleNamespace(data=b"img", model="gemini-3-pro-image-preview")
+
+    async def _fake_reply_photo(_message, *, photo, caption):
+        _ = (photo, caption)
+        return SimpleNamespace(message_id=1)
+
+    monkeypatch.setattr(handlers_state_media, "_generate_scene_image_result", _fake_generate)
+    monkeypatch.setattr(handlers_state_media, "_safe_reply_photo", _fake_reply_photo)
+    monkeypatch.setattr(handlers_state_media, "register_image_candidate", lambda *args, **kwargs: {"candidate_id": "c1"})
+    monkeypatch.setattr(handlers_state_media, "register_media_message_candidate", lambda *args, **kwargs: None)
+    monkeypatch.setattr(handlers_state_media, "add_scene_shared_cost", lambda *args, **kwargs: None)
+    async def _fake_reply_with_markup(*_args, **_kwargs):
+        return None
+
+    monkeypatch.setattr(handlers_state_media, "_reply_text_with_optional_markup", _fake_reply_with_markup)
+
+    class _Msg:
+        async def reply_text(self, _text, **kwargs):
+            _ = kwargs
+            return None
+
+    scene = {
+        "shot_type": "closeup",
+        "characters": ["grandma", "cat", "zaya"],
+        "romantic_drama_beat": "Белая кошка смотрит на рыжего кота",
+        "start_frame_prompt": "Крупный план рыжего кота у двери",
+        "start_frame_prompt_raw_mode": True,
+    }
+    out = asyncio.run(
+        handlers_state_media._scene_media_start_ok(
+            SimpleNamespace(message=_Msg()),
+            context=None,
+            chat_id=1,
+            session={"target_languages": ["ru"]},
+            scene=scene,
+            idx=0,
+        )
+    )
+
+    assert out is True
+    assert captured["prompt"] == "Крупный план рыжего кота у двери"
+    assert "Персонажи в кадре" not in str(captured["prompt"])
+    assert "Фоновая драма" not in str(captured["prompt"])
+
+
+def test_image_approval_text_uses_raw_prompt_verbatim():
+    scene = {
+        "scene": 1,
+        "shot_type": "closeup",
+        "characters": ["grandma", "cat", "zaya"],
+        "romantic_drama_beat": "Белая кошка смотрит на рыжего кота",
+        "start_frame_prompt": "Крупный план рыжего кота у двери",
+        "start_frame_prompt_raw_mode": True,
+    }
+    text = handlers_media_scene._image_approval_text(scene, 1, 4)
+    assert "Крупный план рыжего кота у двери" in text
+    assert "Режим raw prompt" in text
+    assert "Персонажи в кадре" not in text
+    assert "Фоновая драма этой сцены" not in text
+
+
 def test_start_image_upgrade_model_immediately_regenerates(monkeypatch):
     calls: list[str] = []
     messages: list[str] = []
@@ -2096,6 +2760,8 @@ def test_finish_scene_media_production_sends_copyable_social_descriptions(monkey
     {
       "youtube_ru_title": "Драники как у бабушки",
       "youtube_ru_description": "Живое описание\\nИнгредиенты: картофель 5 шт\\nШаги: натереть, отжать, пожарить\\n#убабушкивкуснее #бабушкинырецепты #драники #рецепты",
+      "rutube_ru_title": "Драники для RuTube",
+      "rutube_ru_description": "RuTube описание с ингредиентами и шагами. #убабушкивкуснее #бабушкинырецепты #драники #рецепты",
       "instagram_ru": "Инстаграм текст с ингредиентами 5 шт и шагами. #убабушкивкуснее #бабушкинырецепты #драники #рецепты",
       "vk_ru": "ВК текст с ингредиентами 5 шт и шагами. #убабушкивкуснее #бабушкинырецепты #драники #рецепты",
       "tiktok_ru": "Тикток текст с ингредиентами 5 шт и шагами. #убабушкивкуснее #бабушкинырецепты #драники #рецепты",
@@ -2125,10 +2791,15 @@ def test_finish_scene_media_production_sends_copyable_social_descriptions(monkey
     assert handlers_state_media.SCENE_MEDIA_AUTO_APPROVE_SESSION_KEY not in session
     assert handlers_state_media.SOCIAL_DESCRIPTIONS_SENT_KEY not in session
     assert handlers_state_media.SOCIAL_DESCRIPTIONS_PENDING_KEY in session
+    assert any("Привязка описаний к видео" in m for m in messages)
+    assert any("RU видео / финальный master: YouTube Shorts RU, RuTube RU, Instagram RU, VK RU, TikTok RU" in m for m in messages)
     assert any(m.startswith("YouTube Shorts RU заголовок") for m in messages)
     assert any(m.startswith("YouTube Shorts RU описание") for m in messages)
+    assert any(m.startswith("RuTube RU заголовок") for m in messages)
+    assert any(m.startswith("RuTube RU описание") for m in messages)
     assert any(m.startswith("Instagram EN description") for m in messages)
     assert any("```\nДраники как у бабушки\n```" in m for m in messages)
+    assert any("```\nДраники для RuTube\n```" in m for m in messages)
     assert any("```\nЖивое описание" in m for m in messages)
     assert "Markdown" in parse_modes
     assert any("#убабушкивкуснее" in m for m in messages)
@@ -2439,6 +3110,64 @@ def test_waiting_scene_media_manual_phrase_updates_scene_and_waits_for_approval(
         session[handlers_state_media.SCENE_SPEECH_PENDING_KEY]["stage"]
         == "approval"
     )
+
+
+def test_waiting_scene_media_manual_phrase_syncs_other_languages(monkeypatch):
+    async def _translate(_source_text: str, target_language: str, *, feedback: str = "", previous_translation: str = ""):
+        _ = (feedback, previous_translation)
+        return f"{target_language}-fresh"
+
+    monkeypatch.setattr(handlers_state_media, "_translate_scene_phrase_adaptive", _translate)
+
+    class _Msg:
+        async def reply_text(self, _text):
+            return None
+
+    update = SimpleNamespace(message=_Msg())
+    session = {
+        "target_languages": ["ru", "en"],
+        "production": {
+            "json_plan": [
+                {
+                    "video_prompt": "wide shot\ncharacters speaks: старая реплика",
+                    "video_prompt_by_lang": {
+                        "ru": "wide shot\ncharacters speaks: старая реплика",
+                        "en": "wide shot\ncharacters speaks: old english",
+                    },
+                    "speech_by_lang": {"ru": "старая реплика", "en": "old english"},
+                    "video_results_by_lang": {
+                        "ru": {"video_b64": _encode_b64(b"old-video-ru")},
+                        "en": {"video_b64": _encode_b64(b"old-video-en")},
+                    },
+                    "video_approvals_by_lang": {"ru": True, "en": True},
+                    "text": "старая реплика",
+                }
+            ]
+        },
+        "image_scene_index": 0,
+        "scene_media_substep": "video_prompt",
+        handlers_state_media.SCENE_SPEECH_PENDING_KEY: {
+            "scene_idx": 0,
+            "duration_sec": 6,
+            "stage": "manual_phrase",
+        },
+    }
+    out = asyncio.run(
+        handlers_state_media._handle_waiting_scene_media_state(
+            update,
+            context=None,
+            chat_id=1,
+            session=session,
+            text="новая короткая фраза",
+        )
+    )
+    assert out is True
+    scene = session["production"]["json_plan"][0]
+    assert scene["speech_by_lang"]["ru"] == "новая короткая фраза"
+    assert scene["speech_by_lang"]["en"] == "en-fresh"
+    assert "CHARACTERS SPEAKS: en-fresh" in scene["video_prompt_by_lang"]["en"]
+    assert "en" not in scene["video_results_by_lang"]
+    assert scene["video_approvals_by_lang"]["en"] is False
 
 
 def test_waiting_scene_media_approval_ok_continues_video_generation(monkeypatch):
@@ -2782,6 +3511,166 @@ def test_scene_media_video_ok_auto_shortens_then_waits_for_phrase_approval(monke
     assert "Новая фраза:\nyy" in joined
 
 
+def test_scene_media_video_ok_auto_shorten_updates_other_languages(monkeypatch):
+    async def _gen_ok(*args, **kwargs):
+        raise AssertionError("video generation should not start before phrase approval")
+
+    async def _translate(_source_text: str, target_language: str, *, feedback: str = "", previous_translation: str = ""):
+        _ = (feedback, previous_translation)
+        return f"{target_language}-translated"
+
+    monkeypatch.setattr(handlers_state_media, "_generate_video_bytes_with_high_load_retry", _gen_ok)
+    monkeypatch.setattr(handlers_state_media, "_translate_scene_phrase_adaptive", _translate)
+    monkeypatch.setattr(
+        handlers_state_media,
+        "shorten_scene_speech_and_sync_video_prompt_sync",
+        lambda _scene, _dur: {
+            "text": "короткая фраза",
+            "video_prompt": "close shot voice_lock_full: lock. CHARACTERS SPEAKS: короткая фраза",
+        },
+    )
+
+    messages: list[str] = []
+
+    class _Msg:
+        async def reply_text(self, text):
+            messages.append(text)
+
+        async def reply_video(self, *args, **kwargs):
+            return None
+
+    update = SimpleNamespace(message=_Msg())
+    scene = {
+        "model": "veo3_fast",
+        "video_prompt": "fixed camera voice_lock_full: x. veo3_framing: y.",
+        "video_prompt_by_lang": {
+            "ru": "lang:ru fixed camera CHARACTERS SPEAKS: старая русская",
+            "en": "lang:en fixed camera CHARACTERS SPEAKS: old english",
+        },
+        "speech_by_lang": {"ru": "старая русская", "en": "old english"},
+        "start_frame_image_b64": _encode_b64(b"img"),
+        "duration_sec": 4,
+        "text": "x" * 130,
+    }
+    out = asyncio.run(
+        handlers_state_media._scene_media_video_ok(
+            update,
+            session={"state": "waiting_scene_media", "target_languages": ["ru", "en"], "production": {"json_plan": [scene]}},
+            scene=scene,
+            idx=0,
+            total=1,
+        )
+    )
+    assert out is True
+    assert scene["speech_by_lang"]["ru"] == "короткая фраза"
+    assert scene["speech_by_lang"]["en"] == "en-translated"
+    assert "CHARACTERS SPEAKS: en-translated" in scene["video_prompt_by_lang"]["en"]
+    assert any("Переводы обновила для языков: en." in text for text in messages)
+
+
+def test_scene_media_video_ok_boosts_english_prompt_before_shortening(monkeypatch):
+    calls = {"shorten": 0, "video": 0}
+
+    async def _gen_ok(*args, **kwargs):
+        calls["video"] += 1
+        if kwargs["prompt"].startswith("lang:en"):
+            assert "natural-fast spoken delivery" in kwargs["prompt"]
+        return b"fake-mp4"
+
+    def _must_not_shorten(*args, **kwargs):
+        calls["shorten"] += 1
+        raise AssertionError("english shorten should not run when prompt speedup is enough")
+
+    monkeypatch.setattr(handlers_state_media, "_generate_video_bytes_with_high_load_retry", _gen_ok)
+    monkeypatch.setattr(handlers_state_media, "shorten_scene_speech_and_sync_video_prompt_sync", _must_not_shorten)
+    monkeypatch.setattr(handlers_state_media, "_safe_reply_video", lambda *_args, **_kwargs: asyncio.sleep(0))
+
+    class _Msg:
+        async def reply_text(self, _text, **_kwargs):
+            return None
+
+    update = SimpleNamespace(message=_Msg())
+    scene = {
+        "model": "veo3_fast",
+        "video_prompt_by_lang": {
+            "ru": "lang:ru prompt CHARACTERS SPEAKS: Коротко",
+            "en": "lang:en prompt CHARACTERS SPEAKS: " + ("a" * 70),
+        },
+        "speech_by_lang": {"ru": "Коротко", "en": "a" * 70},
+        "start_frame_image_b64": _encode_b64(b"img"),
+        "duration_sec": 6,
+        "video_results_by_lang": {},
+        "video_approvals_by_lang": {"ru": False, "en": False},
+        "text": "Коротко",
+    }
+
+    out = asyncio.run(
+        handlers_state_media._scene_media_video_ok(
+            update,
+            session={"state": "waiting_scene_media", "target_languages": ["ru", "en"]},
+            scene=scene,
+            idx=0,
+            total=1,
+        )
+    )
+    assert out is True
+    assert calls["shorten"] == 0
+    assert "natural-fast spoken delivery" in scene["video_prompt_by_lang"]["en"]
+
+
+def test_scene_media_video_ok_shortens_only_english_phrase(monkeypatch):
+    async def _gen_ok(*args, **kwargs):
+        assert kwargs["prompt"].startswith("lang:ru") or kwargs["prompt"].startswith("lang:en")
+        return b"fake-mp4"
+
+    def _shorten(scene: dict, duration_sec: int, *, language: str = "ru", current_text: str | None = None, current_video_prompt: str | None = None):
+        assert language == "en"
+        assert duration_sec == 6
+        assert current_text == "old english line" * 8
+        return {
+            "text": "short english",
+            "video_prompt": (current_video_prompt or "") + " CHARACTERS SPEAKS: short english",
+        }
+
+    monkeypatch.setattr(handlers_state_media, "_generate_video_bytes_with_high_load_retry", _gen_ok)
+    monkeypatch.setattr(handlers_state_media, "shorten_scene_speech_and_sync_video_prompt_sync", _shorten)
+    monkeypatch.setattr(handlers_state_media, "_safe_reply_video", lambda *_args, **_kwargs: asyncio.sleep(0))
+
+    class _Msg:
+        async def reply_text(self, _text, **_kwargs):
+            return None
+
+    update = SimpleNamespace(message=_Msg())
+    scene = {
+        "model": "veo3_fast",
+        "video_prompt_by_lang": {
+            "ru": "lang:ru prompt CHARACTERS SPEAKS: русская фраза",
+            "en": "lang:en prompt CHARACTERS SPEAKS: " + ("old english line" * 8),
+        },
+        "speech_by_lang": {"ru": "русская фраза", "en": "old english line" * 8},
+        "start_frame_image_b64": _encode_b64(b"img"),
+        "duration_sec": 6,
+        "video_results_by_lang": {"ru": {"video_b64": _encode_b64(b"ru-old")}, "en": {"video_b64": _encode_b64(b"en-old")}},
+        "video_approvals_by_lang": {"ru": True, "en": True},
+        "text": "русская фраза",
+    }
+
+    out = asyncio.run(
+        handlers_state_media._scene_media_video_ok(
+            update,
+            session={"state": "waiting_scene_media", "target_languages": ["ru", "en"]},
+            scene=scene,
+            idx=0,
+            total=1,
+        )
+    )
+    assert out is True
+    assert scene["speech_by_lang"]["ru"] == "русская фраза"
+    assert scene["speech_by_lang"]["en"] == "short english"
+    assert scene["video_results_by_lang"]["ru"]["video_b64"] == _encode_b64(b"ru-old")
+    assert scene["video_approvals_by_lang"]["en"] is False
+
+
 def test_scene_media_video_ok_extends_duration_to_8_before_shorten(monkeypatch):
     called = {"video": False}
 
@@ -2827,6 +3716,47 @@ def test_scene_media_video_ok_extends_duration_to_8_before_shorten(monkeypatch):
     assert called["video"] is True
     assert scene["duration_sec"] == 8
     assert any("увеличила видео до 8 сек" in text for text in messages)
+
+
+def test_scene_media_video_ok_user_long_phrase_offers_keep_or_shorten(monkeypatch):
+    async def _must_not_call(*args, **kwargs):
+        raise AssertionError("video generation should not start before explicit user choice")
+
+    monkeypatch.setattr(handlers_state_media, "_generate_video_bytes_with_high_load_retry", _must_not_call)
+
+    messages: list[str] = []
+
+    class _Msg:
+        async def reply_text(self, text, **_kwargs):
+            messages.append(text)
+
+        async def reply_video(self, *args, **kwargs):
+            raise AssertionError("video should not be sent")
+
+    scene = {
+        "model": "veo3_fast",
+        "video_prompt": "fixed camera voice_lock_full: x. veo3_framing: y.",
+        "start_frame_image_b64": _encode_b64(b"img"),
+        "duration_sec": 8,
+        "text": "x" * 130,
+        handlers_state_media.SCENE_PHRASE_ORIGIN_KEY: {"ru": "user"},
+    }
+    update = SimpleNamespace(message=_Msg())
+    session = {"state": "waiting_scene_media", "production": {"json_plan": [scene]}}
+
+    out = asyncio.run(
+        handlers_state_media._scene_media_video_ok(
+            update,
+            session=session,
+            scene=scene,
+            idx=0,
+            total=1,
+        )
+    )
+
+    assert out is True
+    assert session[handlers_state_media.SCENE_SPEECH_PENDING_KEY]["stage"] == "user_long_phrase_choice"
+    assert any("оставить фразу как есть" in text.lower() for text in messages)
 
 
 def test_scene_media_start_ok_shows_prompt_before_image_generation(monkeypatch):

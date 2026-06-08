@@ -37,6 +37,8 @@ def test_seed_default_project_creates_project_assets_and_text_steps():
         assert project.title == "Grandma Kitchen"
         assert project.is_default is True
         assert project.default_video_provider == "vertex"
+        assert project.background_music_asset_uri is None
+        assert project.background_music_volume == 0.18
         assert project.hashtags_fixed_ru == ["#убабушкивкуснее", "#бабушкинырецепты", "#рецепты"]
         assert project.hashtags_fixed_en == ["#grandmatastesbetter", "#grandmasrecipes", "#recipes"]
         assert stats.characters == 2

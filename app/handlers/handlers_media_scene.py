@@ -34,11 +34,13 @@ SCENE_MEDIA_SUBSTEP_START_IMAGE_APPROVAL = "start_image_approval"
 SCENE_MEDIA_SUBSTEP_END_IMAGE_APPROVAL = "end_image_approval"
 SCENE_MEDIA_AUTO_APPROVE_BUTTON = "Автоапрув"
 SCENE_MEDIA_AI_APPROVE_BUTTON = "🤖 ИИ апрув"
+SCENE_MEDIA_STOP_BUTTON = "СТОП"
 SCENE_MEDIA_AUTO_APPROVE_SESSION_KEY = "scene_media_auto_approve"
 SCENE_MEDIA_APPROVE_MODE_SESSION_KEY = "scene_media_approve_mode"
 SCENE_MEDIA_APPROVE_MODE_MANUAL = "manual"
 SCENE_MEDIA_APPROVE_MODE_AUTO = "auto"
 SCENE_MEDIA_APPROVE_MODE_AI = "ai"
+SCENE_MEDIA_CHANGE_SPEED_BUTTON = "ИЗМЕНИТЬ СКОРОСТЬ"
 NAV_BUTTON_PREVIOUS_STEP = "Предыдущий шаг"
 NAV_BUTTON_START_OVER = "В начало"
 PIXAR_REFERENCE_STYLE_PHRASE = "Пиксаровский стиль референса"
@@ -57,22 +59,35 @@ def _reply_markup_with_rows(*rows: list[str]) -> ReplyKeyboardMarkup:
     )
 
 
-def scene_image_approval_markup() -> ReplyKeyboardMarkup:
+def _scene_media_mode_row(session: dict | None) -> list[str]:
+    """Возвращает кнопки переключения режима апрува для текущей сессии."""
+    if not isinstance(session, dict):
+        return [SCENE_MEDIA_AUTO_APPROVE_BUTTON, SCENE_MEDIA_AI_APPROVE_BUTTON]
+    approve_mode = str(session.get(SCENE_MEDIA_APPROVE_MODE_SESSION_KEY) or "").strip()
+    ai_human_review_pending = bool(session.get("scene_media_ai_human_review"))
+    if bool(session.get(SCENE_MEDIA_AUTO_APPROVE_SESSION_KEY)) or (
+        approve_mode == SCENE_MEDIA_APPROVE_MODE_AI and not ai_human_review_pending
+    ):
+        return [SCENE_MEDIA_STOP_BUTTON]
+    return [SCENE_MEDIA_AUTO_APPROVE_BUTTON, SCENE_MEDIA_AI_APPROVE_BUTTON]
+
+
+def scene_image_approval_markup(*, session: dict | None = None) -> ReplyKeyboardMarkup:
     """Кнопки для шага стартового кадра."""
     return _reply_markup_with_rows(
         ["ОК"],
-        [SCENE_MEDIA_AUTO_APPROVE_BUTTON, SCENE_MEDIA_AI_APPROVE_BUTTON],
+        _scene_media_mode_row(session),
         ["ПРОМПТ:"],
         ["ФИДБЕК:"],
         ["старт заново"],
     )
 
 
-def scene_end_approval_markup() -> ReplyKeyboardMarkup:
+def scene_end_approval_markup(*, session: dict | None = None) -> ReplyKeyboardMarkup:
     """Кнопки для шага конечного кадра."""
     return _reply_markup_with_rows(
         ["ОК"],
-        [SCENE_MEDIA_AUTO_APPROVE_BUTTON, SCENE_MEDIA_AI_APPROVE_BUTTON],
+        _scene_media_mode_row(session),
         ["ПРОМПТ:"],
         ["ФИДБЕК:"],
         ["старт заново"],
@@ -83,12 +98,14 @@ def scene_video_approval_markup(
     *,
     include_restart_end: bool,
     languages: list[str] | None = None,
+    session: dict | None = None,
 ) -> ReplyKeyboardMarkup:
     """Кнопки для шага видео: подтверждение, правки prompt и рестарты кадров."""
     langs = [str(x).strip().lower() for x in (languages or []) if str(x).strip()]
     rows = [
         ["ОК"],
-        [SCENE_MEDIA_AUTO_APPROVE_BUTTON, SCENE_MEDIA_AI_APPROVE_BUTTON],
+        _scene_media_mode_row(session),
+        [SCENE_MEDIA_CHANGE_SPEED_BUTTON],
         ["ПРОМПТ:"],
         ["ФИДБЕК:"],
         ["ФРАЗА:"],
@@ -104,11 +121,16 @@ def scene_video_approval_markup(
     return _reply_markup_with_rows(*rows)
 
 
-def scene_generated_image_approval_markup(*, include_model_upgrade: bool = False) -> ReplyKeyboardMarkup:
+def scene_generated_image_approval_markup(
+    *,
+    include_model_upgrade: bool = False,
+    session: dict | None = None,
+) -> ReplyKeyboardMarkup:
     """Кнопки апрува уже сгенерированного изображения перед следующим шагом."""
     rows = [
         ["ОК"],
-        [SCENE_MEDIA_AUTO_APPROVE_BUTTON, SCENE_MEDIA_AI_APPROVE_BUTTON],
+        _scene_media_mode_row(session),
+        ["ПРОМПТ:"],
         ["ИЗМЕНИТЬ"],
         ["ФИДБЕК"],
         ["ПЕРЕГЕНЕРИРОВАТЬ"],
@@ -118,12 +140,13 @@ def scene_generated_image_approval_markup(*, include_model_upgrade: bool = False
     return _reply_markup_with_rows(*rows)
 
 
-def scene_language_approval_markup(languages: list[str]) -> ReplyKeyboardMarkup:
+def scene_language_approval_markup(languages: list[str], *, session: dict | None = None) -> ReplyKeyboardMarkup:
     """Кнопки апрува для мультиязычной сцены после генерации всех языков."""
     langs = [str(x).strip().lower() for x in languages if str(x).strip()]
-    rows: list[list[str]] = [["ОК все"], [SCENE_MEDIA_AUTO_APPROVE_BUTTON, SCENE_MEDIA_AI_APPROVE_BUTTON]]
+    rows: list[list[str]] = [["ОК все"], _scene_media_mode_row(session)]
     for lang in langs:
         rows.append([f"ОК {lang}"])
+    rows.append([SCENE_MEDIA_CHANGE_SPEED_BUTTON])
     rows.append(["ФИДБЕК:"])
     for lang in langs:
         rows.append([f"ПРОМПТ {lang}:"])
@@ -225,6 +248,9 @@ def _video_approval_text(scene: dict, scene_index: int, total: int) -> str:
         '• «ПРОМПТ <lang>: ...» — вручную заменить prompt конкретного языка.\n'
         '• «ФИДБЕК: ...» — правка текущего video prompt через нейросеть.\n'
         '• «ФРАЗА <lang>: ...» — обновить фразу конкретного языка до генерации.\n'
+        '• «ИЗМЕНИТЬ СКОРОСТЬ» — бот попросит коэффициент и после ответа сразу заапрувит текущее видео.\n'
+        '• «СКОРОСТЬ 1.25» — сохранить коэффициент для выбранного видео этой сцены перед финальной склейкой.\n'
+        '• «ОК 1.25» — для одноязычной сцены сразу утвердить видео с этим коэффициентом.\n'
         "• «старт заново» — вернуться к стартовому промпту: правь текст или «ФИДБЕК», затем «ОК» снова сгенерирует стартовый кадр "
         "(конечный кадр сбросится, если был)."
         f"{end_extra}"
@@ -233,8 +259,12 @@ def _video_approval_text(scene: dict, scene_index: int, total: int) -> str:
 
 def _scene_needs_end_frame_step(scene: dict) -> bool:
     """Нужен ли отдельный шаг конечного кадра (дельта + референс старта)."""
-    _ = scene
-    return False
+    end_prompt = str(scene.get("end_frame_prompt", "") or scene.get("end_frame_prompt_ru", "")).strip()
+    if not end_prompt:
+        return False
+    if end_prompt.lower() == "пусто":
+        return False
+    return bool(scene.get("end_frame_requested"))
 
 
 def _raw_end_frame_text(scene: dict) -> str:
@@ -263,9 +293,22 @@ def _extract_prefixed_payload(text: str, prefixes: tuple[str, ...]) -> str | Non
     return None
 
 
+def _strip_wrapping_code_fence(text: str) -> str:
+    raw = str(text or "").strip()
+    if raw.startswith("```") and raw.endswith("```"):
+        lines = raw.splitlines()
+        if len(lines) >= 2:
+            body = "\n".join(lines[1:-1]).strip()
+            return body or raw
+    return raw
+
+
 def _extract_prompt_override(text: str) -> str | None:
     """Поддерживает оба варианта команды: ПРОМПТ и ПРОМТ."""
-    return _extract_prefixed_payload(text, ("промпт", "промт"))
+    payload = _extract_prefixed_payload(text, ("промпт", "промт"))
+    if payload is None:
+        return None
+    return _strip_wrapping_code_fence(payload)
 
 
 def _extract_format_or_feedback(text: str) -> str | None:
@@ -418,14 +461,14 @@ async def _send_next_scene_media_step(update: Update, session: dict) -> None:
         await _reply_text_with_optional_markup(
             update,
             _image_approval_text(scene, idx + 1, total),
-            reply_markup=scene_image_approval_markup(),
+            reply_markup=scene_image_approval_markup(session=session),
         )
         return
     if sub == SCENE_MEDIA_SUBSTEP_END:
         await _reply_text_with_optional_markup(
             update,
             _end_frame_approval_text(scene, idx + 1, total),
-            reply_markup=scene_end_approval_markup(),
+            reply_markup=scene_end_approval_markup(session=session),
         )
         return
     start_img = _decode_b64(str(scene.get("start_frame_image_b64", "")).strip())
@@ -438,6 +481,7 @@ async def _send_next_scene_media_step(update: Update, session: dict) -> None:
         eb = io.BytesIO(end_img)
         eb.name = f"scene_{idx + 1}_end_preview.png"
         await update.message.reply_photo(photo=eb, caption=f"Сцена {idx + 1}: конечный кадр (для video-этапа).")
+    langs = ["ru"]
     prompt_map = scene.get("video_prompt_by_lang")
     if isinstance(prompt_map, dict) and prompt_map:
         langs = [str(k).strip().lower() for k in prompt_map.keys() if str(k).strip()]
@@ -458,6 +502,7 @@ async def _send_next_scene_media_step(update: Update, session: dict) -> None:
         reply_markup=scene_video_approval_markup(
             include_restart_end=_scene_needs_end_frame_step(scene),
             languages=langs,
+            session=session,
         ),
     )
 
@@ -822,8 +867,12 @@ def _image_approval_text(scene: dict, scene_index: int, total: int) -> str:
     anchors_text = ", ".join(str(x) for x in anchors if str(x).strip()) or "—"
     base_prompt = _image_scene_prompt(scene)
     ref_files = _load_scene_reference_images(scene, include_location=False)
-    prompt = _append_reference_style_to_image_prompt(base_prompt, bool(ref_files))
-    prompt = _append_scene_identity_to_image_prompt(prompt, scene, include_location=False)
+    raw_mode = bool(scene.get("start_frame_prompt_raw_mode"))
+    if raw_mode:
+        prompt = str(base_prompt or "").strip()
+    else:
+        prompt = _append_reference_style_to_image_prompt(base_prompt, bool(ref_files))
+        prompt = _append_scene_identity_to_image_prompt(prompt, scene, include_location=False)
     ref_note = (
         f"Референсы в запрос: персонажи ({len(ref_files)} файл(ов)); локация не отправляется."
         if ref_files
@@ -854,11 +903,13 @@ def _image_approval_text(scene: dict, scene_index: int, total: int) -> str:
         "Диагностика загрузки референсов (факт чтения с диска):\n"
         "• Реально загружены:\n"
         f"{loaded_paths_block}\n\n"
+        f"{'Режим raw prompt: в модель уйдёт ваш текст один в один; персонажи и референсы сцены прикладываются отдельно файлами.\n\n' if raw_mode else ''}"
         "Промпт (как уйдёт в модель):\n"
         f"{prompt}\n\n"
         "Варианты:\n"
         '• «ОК» — сгенерировать изображение.\n'
         '• «ПРОМПТ: ...» — вручную заменить промпт.\n'
+        '• «ПРОМПТ: ```...```» — вставить свой многострочный prompt как код-блок; кадр сгенерируется именно по нему с персонажами этой сцены.\n'
         '• «ФИДБЕК: ...» — описать, что не так; перегенерирую промпт нейросетью.\n'
         "• «старт заново» — то же (если вернулись с следующего шага): снова правки промпта, затем «ОК»."
     )

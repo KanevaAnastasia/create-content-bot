@@ -16,6 +16,7 @@
 import logging
 import os
 import re
+import time
 from logging.handlers import RotatingFileHandler
 
 from app.bot_app import build_application
@@ -23,22 +24,20 @@ from app.constants import TOKEN_ENV_NAME
 from app.db import DATABASE_URL_ENV_NAME, health_check
 from app.env_utils import load_env_file
 from app.llm_logging import get_llm_io_logger
+from telegram.error import NetworkError, TimedOut
 
 import fcntl
 import sys
 from pathlib import Path
 
 _LOCK_FILE = Path("/tmp/content_fabric_bot.lock")
-_LOCK_FD = _LOCK_FILE.open("w")
-
-try:
-    fcntl.flock(_LOCK_FD, fcntl.LOCK_EX | fcntl.LOCK_NB)
-except BlockingIOError:
-    print("Bot is already running. Exiting.")
-    sys.exit(1)
+_LOCK_FD = None
 
 
 _TELEGRAM_BOT_TOKEN_RE = re.compile(r"/bot\d+:[^/\s\"']+")
+_POLLING_RETRY_BASE_SECONDS = 3.0
+_POLLING_RETRY_MAX_SECONDS = 60.0
+_POLLING_BOOTSTRAP_RETRIES = 3
 
 
 class _SecretRedactionFilter(logging.Filter):
@@ -138,6 +137,47 @@ def _configure_logging() -> None:
     llm_logger.addHandler(llm_file)
 
 
+def _run_polling_with_retries(token: str) -> None:
+    """Restarts long polling after transient Telegram network failures."""
+    retry_delay = _POLLING_RETRY_BASE_SECONDS
+    bot_logger = logging.getLogger("bot")
+
+    while True:
+        application = build_application(token)
+        try:
+            application.run_polling(bootstrap_retries=_POLLING_BOOTSTRAP_RETRIES)
+            return
+        except (NetworkError, TimedOut):
+            bot_logger.warning(
+                "Telegram polling stopped due to a network error; restarting in %.1f seconds.",
+                retry_delay,
+                exc_info=True,
+            )
+            time.sleep(retry_delay)
+            retry_delay = min(retry_delay * 2, _POLLING_RETRY_MAX_SECONDS)
+        except Exception:
+            logging.exception("Bot polling stopped with an error.")
+            raise
+        else:
+            retry_delay = _POLLING_RETRY_BASE_SECONDS
+
+
+def _acquire_process_lock() -> None:
+    """Prevents multiple bot processes from polling the same token in parallel."""
+    global _LOCK_FD
+    if _LOCK_FD is not None:
+        return
+
+    lock_fd = _LOCK_FILE.open("w")
+    try:
+        fcntl.flock(lock_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except BlockingIOError:
+        lock_fd.close()
+        print("Bot is already running. Exiting.")
+        sys.exit(1)
+    _LOCK_FD = lock_fd
+
+
 def main() -> None:
     """
     Запускает бота.
@@ -148,6 +188,7 @@ def main() -> None:
     3. ``build_application(token)`` — регистрирует команды ``/start``, ``/generate`` и обработчик текста.
     4. ``run_polling()`` — бесконечный цикл опроса обновлений от Telegram.
     """
+    _acquire_process_lock()
     load_env_file()
     _configure_logging()
     bot_logger = logging.getLogger("bot")
@@ -164,12 +205,7 @@ def main() -> None:
     token = os.getenv(TOKEN_ENV_NAME)
     if not token:
         raise RuntimeError(f"Missing environment variable: {TOKEN_ENV_NAME}")
-    application = build_application(token)
-    try:
-        application.run_polling()
-    except Exception:
-        logging.exception("Bot polling stopped with an error.")
-        raise
+    _run_polling_with_retries(token)
 
 
 if __name__ == "__main__":

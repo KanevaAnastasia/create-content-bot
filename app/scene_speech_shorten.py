@@ -1,8 +1,4 @@
-"""
-Сокращение реплики сцены через Gemini под лимит Veo и синхронизация ``video_prompt``.
-
-Используется, когда реплика длиннее ``duration_sec * 14`` символов **без** токенов ``[пауза]``.
-"""
+"""Shorten scene speech for language-specific timing budgets and sync `video_prompt`."""
 
 from __future__ import annotations
 
@@ -52,25 +48,33 @@ def _has_final_subscribe_cta(text: str) -> bool:
     return bool(key) and key.endswith(_speech_key(FINAL_SCENE_SUBSCRIBE_CTA))
 
 
-def shorten_scene_speech_and_sync_video_prompt_sync(scene: dict[str, Any], duration_sec: int) -> dict[str, str] | None:
+def shorten_scene_speech_and_sync_video_prompt_sync(
+    scene: dict[str, Any],
+    duration_sec: int,
+    *,
+    language: str = "ru",
+    current_text: str | None = None,
+    current_video_prompt: str | None = None,
+) -> dict[str, str] | None:
     """
     Сокращает ``scene['text']`` и согласует ``scene['video_prompt']`` через Gemini.
 
     Returns:
         ``{"text": ..., "video_prompt": ...}`` при успехе, ``None`` если не удалось.
     """
-    max_chars = max_speech_chars_for_duration(duration_sec)
-    prev_text = str(scene.get("text", "") or "").strip()
-    prev_vp = str(scene.get("video_prompt", "") or "").strip()
-    must_keep_final_cta = _has_final_subscribe_cta(prev_text)
+    lang = str(language or "ru").strip().lower() or "ru"
+    max_chars = max_speech_chars_for_duration(duration_sec, lang)
+    prev_text = str(current_text if current_text is not None else scene.get("text", "") or "").strip()
+    prev_vp = str(current_video_prompt if current_video_prompt is not None else scene.get("video_prompt", "") or "").strip()
+    must_keep_final_cta = lang == "ru" and _has_final_subscribe_cta(prev_text)
     if speech_chars_excluding_pauses(prev_text) <= max_chars:
         return None
 
     measured = speech_chars_excluding_pauses(prev_text)
     err_human = (
         f"Реплика слишком длинная для длительности сцены: {measured} символов речи "
-        f"(без токенов {PAUSE_TOKEN}) при лимите {max_chars} (duration_sec={duration_sec} * 14). "
-        "Сократи текст, сохранив смысл, первое лицо (я/мы), русский язык."
+        f"(без токенов {PAUSE_TOKEN}) при лимите {max_chars}. "
+        f"Сократи текст, сохранив смысл и язык {lang}."
     )
     payload = {
         "duration_sec": duration_sec,
@@ -83,20 +87,35 @@ def shorten_scene_speech_and_sync_video_prompt_sync(scene: dict[str, Any], durat
         "system_feedback": err_human,
         "must_keep_final_subscribe_cta": must_keep_final_cta,
         "final_subscribe_cta_tts": FINAL_SCENE_SUBSCRIBE_CTA_VEO3,
+        "language": lang,
     }
+    if lang == "ru":
+        text_rules = (
+            "Поле text:\n"
+            "- русский, от первого лица бабушки к зрителю (я/мы);\n"
+            "- без ударений и без специальных акцентных меток;\n"
+            f"- допускается {PAUSE_TOKEN} только между смысловыми фразами;\n"
+            f"- длина речи **без** всех вхождений {PAUSE_TOKEN} — строго не больше max_speech_chars_excluding_pauses.\n"
+            f"- если must_keep_final_subscribe_cta=true, text обязан заканчиваться этой фразой дословно: {FINAL_SCENE_SUBSCRIBE_CTA}; "
+            "сокращай только основную фразу перед ней.\n"
+        )
+    else:
+        text_rules = (
+            "Поле text:\n"
+            "- natural spoken English for short dubbing;\n"
+            "- concise, easy to say, no stress markers or pronunciation annotations;\n"
+            f"- optional {PAUSE_TOKEN} only between major phrases;\n"
+            "- if the line is still risky, prefer making it shorter over preserving every detail;\n"
+            f"- длина речи **без** всех вхождений {PAUSE_TOKEN} — строго не больше max_speech_chars_excluding_pauses.\n"
+        )
     prompt = (
-        "Ты редактор сценария для Veo3 TTS. По system_feedback и INPUT сократи реплику и обнови video prompt.\n"
+        "You shorten short-video speech to fit clip timing and update the full video prompt.\n"
         'Верни ТОЛЬКО JSON-объект вида {"text":"...","video_prompt":"..."} без markdown.\n'
-        "Поле text:\n"
-        "- русский, от первого лица бабушки к зрителю (я/мы);\n"
-        f"- без знаков препинания; паузы только токеном {PAUSE_TOKEN} между смысловыми фразами;\n"
-        "- ударные гласные — заглавные внутри слова где уместно; слова ПОЛНОСТЬЮ ЗАГЛАВНЫМИ запрещены;\n"
-        f"- длина речи **без** всех вхождений {PAUSE_TOKEN} — строго не больше max_speech_chars_excluding_pauses.\n"
-        f"- если must_keep_final_subscribe_cta=true, text обязан заканчиваться этой фразой дословно: {FINAL_SCENE_SUBSCRIBE_CTA_VEO3}; "
-        "сокращай только основную фразу перед ней.\n"
-        "Поле video_prompt:\n"
+        + text_rules
+        + "Поле video_prompt:\n"
         "- полный готовый video prompt;\n"
         "- обязательна подстрока `CHARACTERS SPEAKS: ` (двоеточие и пробел) сразу затем **дословно** то же, что в text;\n"
+        "- если language=en и фраза на грани лимита, усили естественный темп речи и раннее завершение фразы до конца клипа;\n"
         "- сохрани прочие части промпта (камера, стиль, voice_lock), если возможно.\n\n"
         "INPUT:\n"
         + json.dumps(payload, ensure_ascii=False, indent=2)

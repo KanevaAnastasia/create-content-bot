@@ -10,6 +10,7 @@ from app.pipeline import (
     _bind_recipe_steps,
     _extract_production_prompts,
     _normalize_production_prompts,
+    _normalize_end_frame_prompt_for_stable_generation,
     _normalize_frame_prompts,
     _ensure_scene_block_len,
     _enforce_voice_lock_if_needed,
@@ -131,6 +132,8 @@ def test_append_veo3_video_framing_constraints_adds_cooking_cast_rule_by_default
     monkeypatch.delenv("CONTENT_FABRIC_PROJECT_SCOPE", raising=False)
     out = append_veo3_video_framing_constraints("close-up kitchen", {"model": "veo3_fast"})
     assert "veo3_cast_rule:" in out.lower()
+    assert "veo3_cat_count_rule:" in out.lower()
+    assert "exactly one orange cat in frame" in out.lower()
     assert "grandmother and the orange cat" in out.lower()
     assert "character_identity_rule:" not in out.lower()
     assert "Зая" not in out
@@ -153,11 +156,41 @@ def test_finalize_scene_video_prompt_adds_voice_lock_and_veo_framing():
     out = pipeline._finalize_scene_video_prompt("close-up kitchen", scene)
     assert "voice_lock_full:" in out
     assert "veo3_framing:" in out.lower()
+    assert "exactly one orange cat in frame" in out.lower()
     assert "cartoon cat" not in out
     assert "kitchen_physics_rule:" not in out.lower()
     assert out.startswith(
         pipeline._enforce_voice_lock_if_needed("close-up kitchen", scene)
     )
+
+
+def test_append_veo3_video_framing_constraints_adds_white_cat_rule_from_scene_characters(monkeypatch):
+    monkeypatch.delenv("CONTENT_FABRIC_PROJECT_SCOPE", raising=False)
+    scene = {"model": "veo3_fast", "characters": ["grandma", "cat", "zaya"]}
+    out = append_veo3_video_framing_constraints("close-up kitchen", scene)
+    assert "exactly one white cat in frame" in out.lower()
+    assert "black-and-white cat in frame" not in out.lower()
+
+
+def test_append_veo3_video_framing_constraints_adds_white_cat_rule_from_start_frame(monkeypatch):
+    monkeypatch.delenv("CONTENT_FABRIC_PROJECT_SCOPE", raising=False)
+    scene = {"model": "veo3_fast", "start_frame_prompt_ru": "Белая кошка выглядывает из-за окна."}
+    out = append_veo3_video_framing_constraints("close-up kitchen", scene)
+    assert "exactly one white cat in frame" in out.lower()
+
+
+def test_append_veo3_video_framing_constraints_adds_markiz_rule_from_scene_or_start_frame(monkeypatch):
+    monkeypatch.delenv("CONTENT_FABRIC_PROJECT_SCOPE", raising=False)
+    by_scene = append_veo3_video_framing_constraints(
+        "close-up kitchen",
+        {"model": "veo3_fast", "characters": ["grandma", "cat", "markiz"]},
+    )
+    by_frame = append_veo3_video_framing_constraints(
+        "close-up kitchen",
+        {"model": "veo3_fast", "start_frame_prompt_ru": "Черно-белый кот сидит за окном."},
+    )
+    assert "exactly one black-and-white cat in frame" in by_scene.lower()
+    assert "exactly one black-and-white cat in frame" in by_frame.lower()
 
 
 def test_pipeline_llm_steps_scenes_payload_carries_feedback_and_previous():
@@ -541,6 +574,11 @@ def test_normalize_production_prompts_fills_empty_frames_when_required():
     assert out[0]["end_frame_prompt_ru"] == "пусто"
 
 
+def test_normalize_end_frame_prompt_preserves_explicit_delta():
+    assert _normalize_end_frame_prompt_for_stable_generation("В финале кот делает шаг в дом.") == "В финале кот делает шаг в дом."
+    assert _normalize_end_frame_prompt_for_stable_generation("") == "пусто"
+
+
 def test_extract_production_prompts_accepts_nested_production_object():
     raw = json.dumps(
         {"production": {"prompts": [{"video_prompt_en": "nested video"}]}},
@@ -717,7 +755,12 @@ def test_generate_full_production_with_approved_frames(monkeypatch):
     assert "Markiz" not in scene["video_prompt"]
     assert "cartoon cat" not in scene["video_prompt"]
     assert set(scene["speech_by_lang"].keys()) == {"ru", "en"}
+    assert set(scene["speech_plan_by_lang"].keys()) == {"ru", "en"}
+    assert set(scene["speech_cues_by_lang"].keys()) == {"ru", "en"}
+    assert scene["speech_budget_by_lang"]["en"]["max_chars"] < scene["speech_budget_by_lang"]["ru"]["max_chars"]
     assert set(scene["video_prompt_by_lang"].keys()) == {"ru", "en"}
+    assert "speech_timing_plan:" in scene["video_prompt_by_lang"]["ru"]
+    assert "speech_timing_plan:" in scene["video_prompt_by_lang"]["en"]
     assert scene["video_approvals_by_lang"]["ru"] is False
     assert scene["video_approvals_by_lang"]["en"] is False
     assert "no background music" in captured_prompt["text"].lower()
@@ -766,7 +809,11 @@ def test_generate_full_production_without_approved_frames_fills_placeholders(mon
     assert scene["video_prompt"]
     assert "cartoon cat" not in scene["video_prompt"]
     assert "speech_by_lang" in scene
+    assert "speech_plan_by_lang" in scene
+    assert "speech_cues_by_lang" in scene
+    assert "speech_budget_by_lang" in scene
     assert "video_prompt_by_lang" in scene
+    assert "speech_timing_plan:" in scene["video_prompt_by_lang"]["ru"]
     assert "подробные описания ингредиентов" in captured_prompt["text"]
     assert "kitchen_physics_rule" in captured_prompt["text"]
     assert "do not invent extra characters" in captured_prompt["text"].lower()

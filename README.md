@@ -159,6 +159,8 @@ CONTENT_FABRIC_PROJECT_SCOPE="grandma_kitchen"
 DATABASE_URL="postgresql+psycopg2://user:password@localhost:5432/content_fabric"
 ```
 
+Для будущего автопостинга через `n8n` и соцсети список секретов, рекомендуемое место хранения и способ получения описаны в [docs/autoposting_secrets.md](/opt/content_fabric/docs/autoposting_secrets.md). Пошаговый локальный запуск `n8n` и wiring publish queue описаны в [docs/n8n_autoposting_setup.md](/opt/content_fabric/docs/n8n_autoposting_setup.md).
+
 Для video generation используется прямой вызов Python-функции `tools.gen_video.generate_video_via_vertex`
 (без внешней shell-команды и без `VIDEO_GEN_CMD_TEMPLATE`).
 

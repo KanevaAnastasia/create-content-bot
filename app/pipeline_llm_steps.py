@@ -223,13 +223,16 @@ def scenes_plan_requirements() -> dict[str, Any]:
             "should evolve during the clip—not one locked static tripod shot for the whole take."
         ),
         "veo3_speech_text": (
-            "if model is veo3 or veo3_fast, field text must be Veo3 TTS-ready: NO punctuation; "
-            "mark stressed vowels with a CAPITAL letter inside each word; replace punctuation with token [пауза] "
-            "only at logical phrase boundaries (do not put [пауза] after every word); "
-            "do not use FULL CAPS words for emphasis"
+            "if model is veo3 or veo3_fast, field text must be plain readable spoken text without stress markers, "
+            "pronunciation annotations, or ALL CAPS emphasis; optional [пауза] may appear only at logical phrase boundaries"
+        ),
+        "speech_plan_rule": (
+            "every scene must include speech_plan with 1-3 spoken chunks in order; each chunk should be a natural phrase "
+            "from the line, ready for later subtitle timing"
         ),
         "speech_length_budget": (
-            "max speakable text length ~= duration_sec * 14 chars excluding every [пауза] token (pauses not counted)"
+            "max speakable text length ~= duration_sec * 14 chars for ru and a stricter budget for en; "
+            "count excludes every [пауза] token"
         ),
         "speech_style": (
             "viral Shorts: живой разговорный русский бабушки, короткие тёплые фразы, энергия без канцелярита; "
@@ -360,7 +363,8 @@ def build_scenes_plan_prompt(payload: dict[str, Any]) -> str:
         "В КАЖДОЙ сцене добавь continuity_anchors: 3-6 конкретных предметов/опор кадра для консистентности "
         "(например та же кастрюля, миска, тарелка, разделочная доска, плита/конфорка как предмет, ложка, венчик, "
         "ингредиенты, поверхность стола, поза кота). Добавь continuity_state: текущее состояние еды и посуды.\n"
-        "СЦЕНА 1: только сильный хук и аппетитная витрина — крупно бабушка, кот и уже готовое блюдо; "
+        "СЦЕНА 1: сильный хук с первого кадра. По умолчанию это аппетитная витрина с блюдом, "
+        "НО если пользователь явно попросил другой первый кадр/другой хук для сцены 1, следуй запросу пользователя; "
         "короткая hook-first реплика с обязательным названием блюда в `text` (зритель должен услышать название в первом кадре). "
         "Если concept выглядит служебно или обобщенно, возьми конкретное название блюда из full_recipe_text. "
         "FIRST PHRASE HARD RULES: первая реплика сцены 1 должна быть 6-12 слов максимум 14 слов; "
@@ -370,11 +374,11 @@ def build_scenes_plan_prompt(payload: dict[str, Any]) -> str:
         "Если viral_concept_brief.strongest_first_phrase подходит, используй её дословно или сделай сильнее, но не слабее. "
         "Запрещены первые фразы: «сегодня мы готовим...», «давайте приготовим...», «в этом видео...», "
         "«это вкусное блюдо...», «простой рецепт...», если дальше нет немедленного payoff/open loop. "
-        "В сцене 1 НЕ начинай процесс готовки. "
+        "В сцене 1 НЕ начинай процесс готовки, если только пользователь явно не требует иной драматургический старт. "
         "Если в viral_concept_brief есть strongest_first_frame/first_frame_type — следуй им. "
         "Первая сцена должна содержать одно из: готовое блюдо крупным планом, разрез торта, тянущийся сыр, "
         "ложка с супом/кремом, бабушка показывает готовое блюдо, кот реагирует на запах, неожиданная фраза, "
-        "контраст было/стало, интрига «в конце покажу секрет».\n"
+        "контраст было/стало, интрига «в конце покажу секрет»; либо другой явный пользовательский hook-first кадр.\n"
         "Готовка по рецепту (действия типа режем/мешаем/жарим) начинается строго со СЦЕНЫ 2.\n"
         "ПОСЛЕДНЯЯ СЦЕНА: презентация/подача готового блюда, аппетит, реплика от первого лица. "
         "Финал обязан иметь сильный visual payoff: разрез, ложка, хруст, тянущийся сыр, бабушка пробует и улыбается, "
@@ -400,8 +404,9 @@ def build_scenes_plan_prompt(payload: dict[str, Any]) -> str:
         "Соседние сцены меняют shot_type/ракурс или фокус действия, но повторяют важные continuity_anchors "
         "из предыдущих сцен, если те предметы ещё должны быть в кадре.\n"
         "Для финала с блюдом — dish_description с ингредиентами.\n"
-        "Поле text для veo3/veo3_fast: без знаков препинания; [пауза] между смысловыми фразами; ударные гласные ЗАГЛАВНЫЕ внутри слова; без слов, написанных ПОЛНОСТЬЮ КАПСОМ; "
-        "длина речи без всех подстрок [пауза] не больше duration_sec * 14 символов.\n"
+        "Поле text для veo3/veo3_fast: обычный человекочитаемый текст без ударений и спецметок произношения; "
+        "[пауза] только между смысловыми фразами; длина речи без всех подстрок [пауза] не больше speech budget.\n"
+        "Для каждой сцены верни speech_plan: 1-3 коротких spoken chunks в порядке произнесения, чтобы потом по ним можно было собрать тайминги субтитров.\n"
         "Если в payload есть непустой feedback или previous_scenes — это режим РЕДАКТИРОВАНИЯ, а не генерации с нуля. "
         "Сначала прочитай previous_scenes, затем примени feedback как точные правки по указанным сценам: "
         "если пользователь пишет «в сцене 2 добавляем слово...», «в сцене 3 сразу говорим...», «пауза не нужна...» — "

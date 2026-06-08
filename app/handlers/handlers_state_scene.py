@@ -82,6 +82,7 @@ from .handlers_state_commands import (
 from .handlers_keyboards import reply_text_without_keyboard
 from ..assets import ASSETS
 from ..elevenlabs_tts import generate_elevenlabs_speech
+from ..scene_media_candidates import resolve_candidate_by_message
 from .handlers_state_start import (
     _handle_waiting_concept_state,
     _handle_waiting_recipe_approval_state,
@@ -1065,6 +1066,42 @@ async def on_photo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         reply_markup=first_step_menu_markup(),
     )
     _reset_first_step_session(chat_id, session)
+
+
+async def on_message_reaction(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    reaction_update = getattr(update, "message_reaction", None)
+    if reaction_update is None:
+        return
+    chat = getattr(reaction_update, "chat", None)
+    if chat is None:
+        return
+    chat_id = getattr(chat, "id", None)
+    if chat_id is None:
+        return
+    session = SESSIONS.get(chat_id)
+    if not isinstance(session, dict):
+        return
+    production = session.get("production") or {}
+    scenes = production.get("json_plan") if isinstance(production, dict) else None
+    if not isinstance(scenes, list) or not scenes:
+        return
+    message_id = getattr(reaction_update, "message_id", None)
+    new_reaction = getattr(reaction_update, "new_reaction", None)
+    liked = bool(new_reaction)
+    resolved = resolve_candidate_by_message(
+        session,
+        scenes,
+        message_id=message_id,
+        liked=liked,
+    )
+    if resolved is None:
+        return
+    logger.info(
+        "scene_media.reaction_like chat_id=%s message_id=%s liked=%s",
+        chat_id,
+        message_id,
+        liked,
+    )
 
 
 async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:

@@ -44,6 +44,10 @@ class ScenePerStepMedia(TypedDict, total=False):
     model: str
     duration_sec: int
     text: str
+    speech_by_lang: dict[str, str]
+    speech_plan_by_lang: dict[str, list[dict[str, Any]]]
+    speech_cues_by_lang: dict[str, list[dict[str, Any]]]
+    speech_budget_by_lang: dict[str, dict[str, Any]]
     action: str
     characters: list[str]
     start_frame_prompt: str
@@ -51,6 +55,8 @@ class ScenePerStepMedia(TypedDict, total=False):
     video_prompt: str
     start_frame_image_b64: str
     end_frame_image_b64: str
+    image_candidates: list[dict[str, Any]]
+    video_candidates_by_lang: dict[str, list[dict[str, Any]]]
     video_prompt_policy_candidate: str
     video_prompt_policy_failure_count: int
     voice_provider: str

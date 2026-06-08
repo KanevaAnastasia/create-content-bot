@@ -229,6 +229,31 @@ async def check_env(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         "AI_APPROVAL_EXTRACT_VIDEO_FRAMES",
         "AI_APPROVAL_FRAME_COUNT",
         "AI_APPROVAL_AUDIO_TRANSCRIPTION_ENABLED",
+        "N8N_PUBLISH_WEBHOOK_URL",
+        "N8N_PUBLISH_WEBHOOK_TOKEN",
+        "CONTENT_FABRIC_PUBLIC_BASE_URL",
+        "PUBLICATION_ARTIFACTS_DIR",
+        "YOUTUBE_CLIENT_ID",
+        "YOUTUBE_CLIENT_SECRET",
+        "YOUTUBE_REFRESH_TOKEN",
+        "YOUTUBE_CHANNEL_ID_RU",
+        "YOUTUBE_CHANNEL_ID_EN",
+        "INSTAGRAM_APP_ID",
+        "INSTAGRAM_APP_SECRET",
+        "INSTAGRAM_ACCESS_TOKEN",
+        "INSTAGRAM_BUSINESS_ACCOUNT_ID_RU",
+        "INSTAGRAM_BUSINESS_ACCOUNT_ID_EN",
+        "INSTAGRAM_PAGE_ID_RU",
+        "INSTAGRAM_PAGE_ID_EN",
+        "TIKTOK_CLIENT_KEY",
+        "TIKTOK_CLIENT_SECRET",
+        "TIKTOK_ACCESS_TOKEN",
+        "TIKTOK_OPEN_ID",
+        "VK_CLIENT_ID",
+        "VK_CLIENT_SECRET",
+        "VK_ACCESS_TOKEN",
+        "VK_GROUP_ID_RU",
+        "RUTUBE_CHANNEL_ID_RU",
     ]
     lines = ["Проверка окружения:"]
     for key in required:
@@ -263,7 +288,7 @@ async def ai_approve_command(update: Update, context: ContextTypes.DEFAULT_TYPE)
     session = SESSIONS.get(chat_id)
     if not isinstance(session, dict) or session.get("state") != STATE_WAITING_SCENE_MEDIA:
         await update.message.reply_text(
-            f"{SCENE_MEDIA_AI_APPROVE_BUTTON} можно включить на этапе пошаговой генерации сцен, рядом с ручным апрувом и автоапрувом."
+            f"{SCENE_MEDIA_AI_APPROVE_BUTTON} можно включить на этапе пошаговой генерации сцен. После включения появится кнопка `СТОП` для возврата в ручной режим."
         )
         return
     session.pop(SCENE_MEDIA_AUTO_APPROVE_SESSION_KEY, None)
@@ -271,7 +296,8 @@ async def ai_approve_command(update: Update, context: ContextTypes.DEFAULT_TYPE)
     session.pop("scene_media_ai_human_review", None)
     await update.message.reply_text(
         "Включён 🤖 ИИ апрув. Теперь промты, стартовые фреймы и видео будут проверяться ИИ по чек-листу. "
-        "Хорошие результаты будут проходить автоматически, спорные будут отправляться на ручную проверку."
+        "Хорошие результаты будут проходить автоматически, спорные будут отправляться на ручную проверку. "
+        "Кнопка `СТОП` вернёт ручной режим."
     )
     from .handlers_state_media import _run_scene_media_ai_approve
 

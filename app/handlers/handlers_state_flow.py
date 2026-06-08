@@ -10,4 +10,4 @@ from .handlers_state_commands import (
     fix_stress_command,
 )
 from .handlers_state_start import generate, quick_generate
-from .handlers_state_scene import on_photo, on_text
+from .handlers_state_scene import on_message_reaction, on_photo, on_text

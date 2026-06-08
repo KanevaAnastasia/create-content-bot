@@ -39,6 +39,13 @@ from .formatting import (
 from .llm_utils import extract_json_array, extract_json_object, gemini_generate_sync
 from .multilingual import language_name, target_languages_from_env
 from . import pipeline_llm_steps as llm_steps
+from .scene_speech_budget import (
+    append_prompt_timing_hints,
+    build_default_speech_plan,
+    build_speech_cues_from_plan,
+    speech_chars_excluding_pauses,
+    speech_budget_for_duration,
+)
 from .scene_utils import (
     extract_recipe_steps_text,
     normalize_recipe_steps,
@@ -310,7 +317,58 @@ def append_veo3_video_framing_constraints(
     if _is_grandma_cat_cooking_project_scope() and "veo3_cast_rule:" not in low:
         out = f"{out} {VEO3_COOKING_CAST_RULE}".strip()
         low = out.lower()
+    if _is_grandma_cat_cooking_project_scope() and "veo3_cat_count_rule:" not in low:
+        cat_count_rule = _build_veo3_cat_count_rule(scene)
+        if cat_count_rule:
+            out = f"{out} {cat_count_rule}".strip()
     return out
+
+
+def _scene_has_character(scene: dict[str, Any] | None, character_key: str) -> bool:
+    if not isinstance(scene, dict):
+        return False
+    chars = scene.get("characters")
+    if not isinstance(chars, list):
+        return False
+    needle = str(character_key).strip().lower()
+    return any(str(ch).strip().lower() == needle for ch in chars if str(ch).strip())
+
+
+def _scene_start_frame_mentions_white_cat(scene: dict[str, Any] | None) -> bool:
+    if not isinstance(scene, dict):
+        return False
+    text = " ".join(
+        str(scene.get(key, "")).strip().lower()
+        for key in ("start_frame_prompt", "start_frame_prompt_ru")
+    )
+    return any(token in text for token in ("zaya", "зая", "заю", "заи", "белая кошка", "белый кот", "white cat"))
+
+
+def _scene_start_frame_mentions_markiz(scene: dict[str, Any] | None) -> bool:
+    if not isinstance(scene, dict):
+        return False
+    text = " ".join(
+        str(scene.get(key, "")).strip().lower()
+        for key in ("start_frame_prompt", "start_frame_prompt_ru")
+    )
+    return any(
+        token in text
+        for token in ("markiz", "маркиз", "маркиза", "черно-белый кот", "чёрно-белый кот", "black-and-white cat")
+    )
+
+
+def _build_veo3_cat_count_rule(scene: dict[str, Any] | None) -> str:
+    """Builds strict anti-duplication rule for cat identities in Grandma Kitchen videos."""
+    rules = [
+        "veo3_cat_count_rule: exactly one orange cat in frame; never show two orange cats or duplicate the orange cat identity."
+    ]
+    if _scene_has_character(scene, "zaya") or _scene_start_frame_mentions_white_cat(scene):
+        rules.append("Exactly one white cat in frame; never show two white cats or duplicate the white cat identity.")
+    if _scene_has_character(scene, "markiz") or _scene_start_frame_mentions_markiz(scene):
+        rules.append(
+            "Exactly one black-and-white cat in frame; never show two black-and-white cats or duplicate the black-and-white cat identity."
+        )
+    return " ".join(rules)
 
 
 _LLM_VIDEO_CHARACTERS_SPEAKS_RULE = (
@@ -418,6 +476,33 @@ async def _build_scene_speech_by_lang(text: str, target_languages: list[str]) ->
             out[lang] = (text or "").strip()
     if "ru" not in out:
         out["ru"] = (text or "").strip()
+    return out
+
+
+def _build_scene_speech_plan_by_lang(
+    speech_by_lang: dict[str, str],
+) -> tuple[dict[str, list[dict[str, Any]]], dict[str, list[dict[str, Any]]]]:
+    """Build default phrase plans and provisional cues per language."""
+    plans: dict[str, list[dict[str, Any]]] = {}
+    cues: dict[str, list[dict[str, Any]]] = {}
+    for lang, text in speech_by_lang.items():
+        plan = build_default_speech_plan(text, lang)
+        plans[lang] = plan
+        cues[lang] = build_speech_cues_from_plan(plan, duration_sec=0.0)
+    return plans, cues
+
+
+def _speech_budget_by_lang(
+    speech_by_lang: dict[str, str],
+    duration_sec: int | float | None,
+) -> dict[str, dict[str, Any]]:
+    out: dict[str, dict[str, Any]] = {}
+    for lang, text in speech_by_lang.items():
+        meta = dict(speech_budget_for_duration(int(duration_sec or 6), lang))
+        meta["current_chars"] = speech_chars_excluding_pauses(str(text or ""))
+        meta["status"] = "ok" if meta["current_chars"] <= meta["max_chars"] else "overflow"
+        meta["auto_shortened"] = False
+        out[lang] = meta
     return out
 
 
@@ -936,8 +1021,13 @@ def _ensure_final_scene_subscribe_cta(scenes: list[dict[str, Any]]) -> None:
 
 
 def _normalize_end_frame_prompt_for_stable_generation(_value: Any) -> str:
-    """Keep the current stable media path on start frame only."""
-    return "пусто"
+    """Preserve explicit end-frame deltas while normalizing empty placeholders."""
+    value = str(_value or "").strip()
+    if not value:
+        return "пусто"
+    if value.lower() == "пусто":
+        return "пусто"
+    return value
 
 
 def _ensure_final_scene_subscribe_cta_legacy(scenes: list[dict[str, Any]]) -> None:
@@ -1303,9 +1393,9 @@ async def generate_frame_prompts_for_approval(
                 "обязательно включает способ нарезки, описание блюда/текущего состояния блюда и подробные описания ингредиентов"
             ),
             "end_frame_ru": (
-                "строго 'пусто', если в финале кадра нет персонажа, которого не было в стартовом кадре "
-                "(одни и те же видимые персонажи → 'пусто'). "
-                "Если не 'пусто': только ДЕЛЬТА относительно старта — что изменилось, кто вошёл в кадр, "
+                "по умолчанию 'пусто', если старт и финал визуально совпадают. "
+                "Если пользователь явно просит конечный кадр, "
+                "верни end_frame_prompt_ru. Если не 'пусто': только ДЕЛЬТА относительно старта — что изменилось, кто вошёл в кадр, "
                 "куда сдвинулись руки/еда; ЗАПРЕЩЕНО описывать весь кадр с нуля."
             ),
             "same_view_can_use_empty_start": True,
@@ -1330,8 +1420,9 @@ async def generate_frame_prompts_for_approval(
         "Each item must have keys: start_frame_prompt_ru, end_frame_prompt_ru.\n"
         "START FRAME: detailed static pre-action frame in Russian.\n"
         "START FRAME must explicitly include camera angle/viewpoint in words (required).\n"
-        "END FRAME: use Russian word 'пусто' unless a character appears at the end who was NOT visible in the start frame; "
-        "if needed, write ONLY the delta vs start (what changed, who entered) — never a full scene description from scratch.\n"
+        "END FRAME: use Russian word 'пусто' only when the final beat is visually the same as the start. "
+        "Return end_frame_prompt_ru only if the user explicitly asks for an end frame. "
+        "When end_frame_prompt_ru is used, write ONLY the delta vs start (what changed, who entered, what progressed) — never a full scene description from scratch.\n"
         "START FRAME must be self-contained and maximally specific: props, cookware, working surface, character pose, food details.\n"
         "START FRAME must include cutting/slicing method when relevant, dish/current dish-state description, and detailed ingredient descriptions: shape, color, texture, processing state.\n"
         f"START FRAME Russian mandatory rule: {START_FRAME_RECIPE_VISUAL_DETAIL_RULE}\n"
@@ -1491,10 +1582,18 @@ async def generate_full_production(
             scene_out["model"] = "veo3_fast"
             scene_out["voice_provider"] = "none"
             speech_by_lang = await _build_scene_speech_by_lang(str(scene_out.get("text", "")).strip(), target_languages)
+            speech_plan_by_lang, speech_cues_by_lang = _build_scene_speech_plan_by_lang(speech_by_lang)
             base_prompt = _finalize_scene_video_prompt(str(p.get("video_prompt_en", "")), scene_out)
             scene_out["speech_by_lang"] = speech_by_lang
+            scene_out["speech_plan_by_lang"] = speech_plan_by_lang
+            scene_out["speech_cues_by_lang"] = speech_cues_by_lang
+            scene_out["speech_budget_by_lang"] = _speech_budget_by_lang(speech_by_lang, scene_out.get("duration_sec"))
             scene_out["video_prompt_by_lang"] = {
-                lang: _replace_characters_speaks(base_prompt, speech)
+                lang: append_prompt_timing_hints(
+                    _replace_characters_speaks(base_prompt, speech),
+                    speech_plan_by_lang.get(lang),
+                    duration_sec=float(scene_out.get("duration_sec") or 0.0),
+                )
                 for lang, speech in speech_by_lang.items()
             }
             scene_out["video_results_by_lang"] = {}
@@ -1517,7 +1616,8 @@ async def generate_full_production(
                 "обязательно включи способ нарезки, описание блюда/текущего состояния блюда и подробные описания ингредиентов"
             ),
             "end_frame_ru": (
-                "'пусто' если состав видимых персонажей на конце совпадает со стартом; иначе только дельта vs старт, без описания кадра с нуля"
+                "'пусто' только если старт и финал сцены визуально совпадают. Если пользователь явно просит конечный кадр "
+                "или в сцене есть заметный финальный beat, верни только дельту vs старт, без описания кадра с нуля"
             ),
             "video_prompt_en": (
                 "include exact clip duration, reference style, no on-screen text or subtitles; "
@@ -1527,7 +1627,8 @@ async def generate_full_production(
                 "include the exact phrase cartoon cat; "
                 "obey kitchen physics: cookware and appliances must be functional and physically plausible; "
                 "do not invent extra characters, extra animals, extra hands, or unrelated parallel actions; "
-                "close-up with full grandma + all characters visible, lip sync, camera angle evolves "
+                "close-up with full grandma + all characters visible, lip sync, camera angle evolves; "
+                "spoken delivery should feel natural but efficient, and the final phrase should finish slightly before the clip ends "
                 "(not a single fixed static angle for the whole clip)"
             ),
             "if_speech_add_lipsync": True,
@@ -1587,6 +1688,7 @@ async def generate_full_production(
         "Use the cartoon-character and kitchen-physics rules when composing the prompt, but do not append bulky "
         "meta-rule labels like veo3_cartoon_character_rule or kitchen_physics_rule unless they naturally belong in the prompt.\n"
         "Do not mention location names or location references; preserve continuity through recurring props and food state.\n"
+        "If the user explicitly asks for an end frame in a scene, keep a non-empty end_frame_prompt_ru for that scene.\n"
         "Respect the Viral Concept Brief and scene retention fields. First frame must not be boring preparation; "
         "final scene must deliver the visual payoff. If sponsored_content is true, integrate the brand naturally "
         "inside the cooking story, not as an ad break.\n"
@@ -1617,10 +1719,18 @@ async def generate_full_production(
             model=str(scene_out.get("model", "")),
         )
         speech_by_lang = await _build_scene_speech_by_lang(str(scene_out.get("text", "")).strip(), target_languages)
+        speech_plan_by_lang, speech_cues_by_lang = _build_scene_speech_plan_by_lang(speech_by_lang)
         base_prompt = _finalize_scene_video_prompt(str(p.get("video_prompt_en", "")), scene_out)
         scene_out["speech_by_lang"] = speech_by_lang
+        scene_out["speech_plan_by_lang"] = speech_plan_by_lang
+        scene_out["speech_cues_by_lang"] = speech_cues_by_lang
+        scene_out["speech_budget_by_lang"] = _speech_budget_by_lang(speech_by_lang, scene_out.get("duration_sec"))
         scene_out["video_prompt_by_lang"] = {
-            lang: _replace_characters_speaks(base_prompt, speech)
+            lang: append_prompt_timing_hints(
+                _replace_characters_speaks(base_prompt, speech),
+                speech_plan_by_lang.get(lang),
+                duration_sec=float(scene_out.get("duration_sec") or 0.0),
+            )
             for lang, speech in speech_by_lang.items()
         }
         scene_out["video_results_by_lang"] = {}

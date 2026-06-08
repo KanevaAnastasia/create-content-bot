@@ -33,6 +33,8 @@ class Project(Base):
     hashtags_fixed_en: Mapped[list[str]] = mapped_column(JSON, nullable=False, default=list)
     default_video_provider: Mapped[str | None] = mapped_column(String(64), nullable=True)
     allowed_video_models: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+    background_music_asset_uri: Mapped[str | None] = mapped_column(Text, nullable=True)
+    background_music_volume: Mapped[float | None] = mapped_column(Float, nullable=True)
     created_at: Mapped[DateTime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
     updated_at: Mapped[DateTime] = mapped_column(
         DateTime(timezone=True),
@@ -45,6 +47,14 @@ class Project(Base):
     locations: Mapped[list["ProjectLocation"]] = relationship(back_populates="project", cascade="all, delete-orphan")
     visual_props: Mapped[list["VisualProp"]] = relationship(back_populates="project", cascade="all, delete-orphan")
     text_steps: Mapped[list["TextStep"]] = relationship(back_populates="project", cascade="all, delete-orphan")
+    publish_accounts: Mapped[list["ProjectPublishAccount"]] = relationship(
+        back_populates="project",
+        cascade="all, delete-orphan",
+    )
+    publication_jobs: Mapped[list["PublicationJob"]] = relationship(
+        back_populates="project",
+        cascade="all, delete-orphan",
+    )
 
 
 class Character(Base):
@@ -347,3 +357,93 @@ class PublishedVideoAnalytics(Base):
     posted_at: Mapped[DateTime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     notes: Mapped[str | None] = mapped_column(Text, nullable=True)
     created_at: Mapped[DateTime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
+
+
+class ProjectPublishAccount(Base):
+    """Project-level mapping of locale/platform to target social account or channel."""
+
+    __tablename__ = "project_publish_accounts"
+    __table_args__ = (
+        UniqueConstraint(
+            "project_id",
+            "platform",
+            "language",
+            "account_key",
+            name="uq_project_publish_accounts_project_platform_language_key",
+        ),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
+    project_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid,
+        ForeignKey("projects.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    platform: Mapped[str] = mapped_column(String(64), nullable=False)
+    language: Mapped[str] = mapped_column(String(8), nullable=False)
+    account_key: Mapped[str] = mapped_column(String(128), nullable=False, default="default")
+    external_account_id: Mapped[str | None] = mapped_column(Text, nullable=True)
+    publish_policy: Mapped[str] = mapped_column(String(64), nullable=False, default="auto_after_copy_approval")
+    is_active: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
+    meta_json: Mapped[dict] = mapped_column(JSON, nullable=False, default=dict)
+    created_at: Mapped[DateTime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
+    updated_at: Mapped[DateTime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        server_default=func.now(),
+        onupdate=func.now(),
+    )
+
+    project: Mapped["Project"] = relationship(back_populates="publish_accounts")
+
+
+class PublicationJob(Base):
+    """Single publish-ready video package for one platform/language/account."""
+
+    __tablename__ = "publication_jobs"
+    __table_args__ = (
+        UniqueConstraint(
+            "bundle_key",
+            "platform",
+            "language",
+            "account_key",
+            name="uq_publication_jobs_bundle_platform_language_account",
+        ),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
+    project_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid,
+        ForeignKey("projects.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    bundle_key: Mapped[str] = mapped_column(String(128), nullable=False, index=True)
+    origin: Mapped[str] = mapped_column(String(64), nullable=False, default="production_final")
+    platform: Mapped[str] = mapped_column(String(64), nullable=False)
+    language: Mapped[str] = mapped_column(String(8), nullable=False)
+    account_key: Mapped[str] = mapped_column(String(128), nullable=False, default="default")
+    external_account_id: Mapped[str | None] = mapped_column(Text, nullable=True)
+    status: Mapped[str] = mapped_column(String(64), nullable=False, default="draft", index=True)
+    video_path: Mapped[str] = mapped_column(Text, nullable=False)
+    video_label: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    title: Mapped[str | None] = mapped_column(Text, nullable=True)
+    description: Mapped[str | None] = mapped_column(Text, nullable=True)
+    hashtags_json: Mapped[list[str]] = mapped_column(JSON, nullable=False, default=list)
+    recipe: Mapped[str | None] = mapped_column(Text, nullable=True)
+    publish_policy: Mapped[str] = mapped_column(String(64), nullable=False, default="auto_after_copy_approval")
+    payload_json: Mapped[dict] = mapped_column(JSON, nullable=False, default=dict)
+    scheduled_at: Mapped[DateTime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    approved_at: Mapped[DateTime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    published_at: Mapped[DateTime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    external_post_id: Mapped[str | None] = mapped_column(Text, nullable=True)
+    publish_error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    attempt_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    created_at: Mapped[DateTime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
+    updated_at: Mapped[DateTime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        server_default=func.now(),
+        onupdate=func.now(),
+    )
+
+    project: Mapped["Project"] = relationship(back_populates="publication_jobs")

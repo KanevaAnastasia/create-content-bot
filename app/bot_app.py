@@ -17,6 +17,7 @@ from .handlers import (
     generate,
     generate_image_command,
     generate_video_command,
+    on_message_reaction,
     on_photo,
     on_text,
     quick_generate,
@@ -24,6 +25,11 @@ from .handlers import (
 )
 
 logger = logging.getLogger("bot")
+
+try:
+    from telegram.ext import MessageReactionHandler
+except Exception:  # pragma: no cover - compatibility fallback
+    MessageReactionHandler = None
 
 
 async def _on_application_error(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -53,6 +59,8 @@ def build_application(token: str) -> Application:
     app.add_handler(CommandHandler("video", generate_video_command))
     app.add_handler(CommandHandler("fix_stress", fix_stress_command))
     app.add_handler(MessageHandler(filters.PHOTO | filters.Document.IMAGE, on_photo))
+    if MessageReactionHandler is not None:
+        app.add_handler(MessageReactionHandler(on_message_reaction))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, on_text))
     app.add_error_handler(_on_application_error)
     return app
