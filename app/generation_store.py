@@ -21,6 +21,17 @@ def _language_for_session(session: dict[str, Any]) -> str:
     return "ru"
 
 
+def _scenes_plan_for_session(session: dict[str, Any]) -> list[dict[str, Any]]:
+    raw = session.get("scenes_plan")
+    if isinstance(raw, list) and raw:
+        return [item for item in raw if isinstance(item, dict)]
+    production = session.get("production")
+    plan = production.get("json_plan") if isinstance(production, dict) else None
+    if isinstance(plan, list) and plan:
+        return [item for item in plan if isinstance(item, dict)]
+    return []
+
+
 def ensure_generation_run_for_session(session: dict[str, Any]) -> tuple[str | None, dict[int, str]]:
     """Create a lightweight run+scene snapshot in DB on first persistence."""
     existing = str(session.get("generation_run_id") or "").strip()
@@ -28,8 +39,8 @@ def ensure_generation_run_for_session(session: dict[str, Any]) -> tuple[str | No
     if existing and isinstance(raw_map, dict):
         return existing, {int(k): str(v) for k, v in raw_map.items()}
 
-    scenes_plan = session.get("scenes_plan")
-    if not isinstance(scenes_plan, list) or not scenes_plan:
+    scenes_plan = _scenes_plan_for_session(session)
+    if not scenes_plan:
         return None, {}
     script = str(session.get("recipe_full_text") or "").strip()
     if not script:

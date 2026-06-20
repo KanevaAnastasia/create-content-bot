@@ -172,6 +172,7 @@ def test_generate_video_via_vertex_uses_sdk_operation_polling(monkeypatch):
     mod = _load_gen_video_module()
     monkeypatch.setenv("GOOGLE_CLOUD_PROJECT", "proj")
     monkeypatch.setenv("GOOGLE_CLOUD_LOCATION", "us-central1")
+    monkeypatch.delenv("VERTEX_VIDEO_OPERATION_TIMEOUT_SEC", raising=False)
 
     called = {}
 

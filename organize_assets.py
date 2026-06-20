@@ -5,7 +5,7 @@
 
 Алгоритм (папка-источник **без рекурсии**):
 1. По имени файла ищется подстрока из списков токенов (персонажи / локации).
-2. Алиасы (например ``daughter`` → ``granddaughter``) приводятся к каноническим папкам.
+2. Алиасы приводятся к каноническим папкам.
 3. Файл переносится в целевую папку; если не PNG — конвертация через Pillow в ``base.png``.
 4. Пересобирается ``config.py`` в корне проекта с путями к ассетам.
 
@@ -41,9 +41,7 @@ logger = logging.getLogger("organize_assets")
 CHARACTER_TOKENS = ["grandma", "grandfather", "grandson", "granddaughter", "daughter", "cat", "dog"]
 LOCATION_TOKENS = ["kitchen", "cutting", "stove", "serving", "sink", "fridge", "table_setting", "serving_table", "fireplace"]
 
-CHARACTER_ALIASES = {
-    "daughter": "granddaughter",
-}
+CHARACTER_ALIASES: dict[str, str] = {}
 
 LOCATION_ALIASES = {
     "table_setting": "serving",
@@ -52,7 +50,7 @@ LOCATION_ALIASES = {
 }
 
 # Pre-create these folders even if no matching files are found.
-EXPECTED_CHARACTER_DIRS = ["grandma", "grandfather", "grandson", "granddaughter", "cat", "dog"]
+EXPECTED_CHARACTER_DIRS = ["grandma", "grandfather", "grandson", "granddaughter", "daughter", "cat", "dog"]
 EXPECTED_LOCATION_DIRS = ["kitchen", "cutting", "stove", "serving", "sink", "fridge"]
 
 
@@ -218,4 +216,3 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-

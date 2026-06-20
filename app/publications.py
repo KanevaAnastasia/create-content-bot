@@ -200,6 +200,13 @@ def export_publication_video_assets(
         if not isinstance(payload, dict):
             continue
         source = payload.get("subtitled_music") or payload.get("clean") or {}
+        filename = f"publish_{language}.mp4"
+        path = target_dir / filename
+        video_path = str((source or {}).get("video_path") or "").strip()
+        if video_path and Path(video_path).exists():
+            path.write_bytes(Path(video_path).read_bytes())
+            out[str(language)] = str(path.resolve())
+            continue
         video_b64 = str((source or {}).get("video_b64") or "").strip()
         if not video_b64:
             continue
@@ -207,8 +214,6 @@ def export_publication_video_assets(
             video_bytes = base64.b64decode(video_b64)
         except Exception:
             continue
-        filename = f"publish_{language}.mp4"
-        path = target_dir / filename
         path.write_bytes(video_bytes)
         out[str(language)] = str(path.resolve())
     return out

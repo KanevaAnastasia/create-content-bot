@@ -32,7 +32,7 @@ def test_extract_and_normalize_recipe_steps():
 def test_normalize_scenes_for_pipeline_adds_contract_fields():
     raw = [{"location": "stove", "action": "Жарит лук", "text": "жарим"}]
     scenes = normalize_scenes_for_pipeline(raw)
-    assert len(scenes) >= 4
+    assert len(scenes) >= 3
     assert scenes[0]["goal"] == "хук"
     assert scenes[-1]["goal"] == "результат"
     assert all(s.get("voice_needed") is True for s in scenes)

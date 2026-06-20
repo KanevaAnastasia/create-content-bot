@@ -8,7 +8,7 @@ SUPERVISOR_LOG="$LOG_DIR/bot.supervisor.log"
 PYTHON_BIN="$ROOT_DIR/.venv/bin/python"
 
 usage() {
-  echo "Usage: $0 {start|stop|restart|status|logs}"
+  echo "Usage: $0 {start [-f|--follow]|stop|restart [-f|--follow]|status|logs [-f|--follow]}"
 }
 
 ensure_runtime() {
@@ -92,9 +92,33 @@ status_bot() {
   fi
 }
 
+follow_requested() {
+  case "${1:-}" in
+    -f|--follow|follow)
+      return 0
+      ;;
+    *)
+      return 1
+      ;;
+  esac
+}
+
+show_logs() {
+  ensure_runtime
+  touch "$SUPERVISOR_LOG"
+  if follow_requested "${1:-}"; then
+    tail -f "$SUPERVISOR_LOG"
+  else
+    tail -80 "$SUPERVISOR_LOG"
+  fi
+}
+
 case "${1:-}" in
   start)
     start_bot
+    if follow_requested "${2:-}"; then
+      show_logs --follow
+    fi
     ;;
   stop)
     stop_bot
@@ -102,14 +126,15 @@ case "${1:-}" in
   restart)
     stop_bot
     start_bot
+    if follow_requested "${2:-}"; then
+      show_logs --follow
+    fi
     ;;
   status)
     status_bot
     ;;
   logs)
-    ensure_runtime
-    touch "$SUPERVISOR_LOG"
-    tail -80 "$SUPERVISOR_LOG"
+    show_logs "${2:-}"
     ;;
   *)
     usage >&2

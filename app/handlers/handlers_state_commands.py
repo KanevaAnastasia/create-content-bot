@@ -63,6 +63,14 @@ from .handlers_keyboards import (
     FIRST_STEP_BUTTON_VIDEO,
     first_step_menu_markup,
     reply_text_without_keyboard,
+    safe_reply_text,
+)
+from ..state import save_loaded_session_if_possible
+from ..scene_speech_budget import (
+    build_default_speech_plan,
+    build_speech_cues_from_plan,
+    speech_budget_for_duration,
+    speech_chars_excluding_pauses,
 )
 
 NAV_BUTTON_PREVIOUS_STEP = "Предыдущий шаг"
@@ -74,6 +82,36 @@ PROJECT_LABEL_GRANDMA_CAT_COOKING = GRANDMA_KITCHEN_PROJECT_TITLE
 PROJECT_LEGACY_KEY_GRANDMA_CAT_COOKING = "grandma_cat_cooking"
 PROJECT_LEGACY_LABEL_GRANDMA_CAT_COOKING = "Бабушка + кот (кулинарный Shorts)"
 PROJECT_BUTTON_BACK = "Назад"
+
+
+def _refresh_scene_ru_speech_metadata(scene: dict) -> None:
+    """Keep RU speech-derived metadata in sync after local phrase edits."""
+    text = str(scene.get("text") or "").strip()
+    duration_sec = int(scene.get("duration_sec") or 6)
+    plan = build_default_speech_plan(text, "ru")
+    cues = build_speech_cues_from_plan(plan, duration_sec=float(duration_sec))
+
+    plan_map = scene.get("speech_plan_by_lang")
+    if not isinstance(plan_map, dict):
+        plan_map = {}
+    plan_map["ru"] = list(plan)
+    scene["speech_plan_by_lang"] = plan_map
+
+    cues_map = scene.get("speech_cues_by_lang")
+    if not isinstance(cues_map, dict):
+        cues_map = {}
+    cues_map["ru"] = list(cues)
+    scene["speech_cues_by_lang"] = cues_map
+
+    budget_map = scene.get("speech_budget_by_lang")
+    if not isinstance(budget_map, dict):
+        budget_map = {}
+    meta = dict(speech_budget_for_duration(duration_sec, "ru"))
+    meta["current_chars"] = speech_chars_excluding_pauses(text)
+    meta["status"] = "ok" if meta["current_chars"] <= int(meta["max_chars"]) else "overflow"
+    meta["auto_shortened"] = False
+    budget_map["ru"] = meta
+    scene["speech_budget_by_lang"] = budget_map
 
 
 def _project_label_by_key(project_key: str | None) -> str:
@@ -130,7 +168,7 @@ async def _reply_text_chunked(update: Update, text: str, *, separator: str = "\n
     if update.message is None:
         return
     if len(text) <= TELEGRAM_MAX_TEXT_LEN:
-        await update.message.reply_text(text)
+        await safe_reply_text(update.message, text)
         return
     parts = text.split(separator) if separator and separator in text else [text]
     chunk = ""
@@ -140,7 +178,7 @@ async def _reply_text_chunked(update: Update, text: str, *, separator: str = "\n
             chunk = candidate
             continue
         if chunk:
-            await update.message.reply_text(chunk)
+            await safe_reply_text(update.message, chunk)
         if len(part) <= TELEGRAM_MAX_TEXT_LEN:
             chunk = part
             continue
@@ -148,11 +186,11 @@ async def _reply_text_chunked(update: Update, text: str, *, separator: str = "\n
         start = 0
         while start < len(part):
             end = min(start + TELEGRAM_MAX_TEXT_LEN, len(part))
-            await update.message.reply_text(part[start:end])
+            await safe_reply_text(update.message, part[start:end])
             start = end
         chunk = ""
     if chunk:
-        await update.message.reply_text(chunk)
+        await safe_reply_text(update.message, chunk)
 
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -279,7 +317,7 @@ async def check_env(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     await update.message.reply_text("\n".join(lines))
 
 
-async def ai_approve_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+async def _ai_approve_command_impl(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Команда ``/ai_approve``: включает ИИ-апрув для текущего медиа-пайплайна."""
     _ = context
     if update.message is None or update.effective_chat is None:
@@ -302,6 +340,15 @@ async def ai_approve_command(update: Update, context: ContextTypes.DEFAULT_TYPE)
     from .handlers_state_media import _run_scene_media_ai_approve
 
     await _run_scene_media_ai_approve(update, context=context, chat_id=chat_id, session=session)
+
+
+async def ai_approve_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    chat = getattr(update, "effective_chat", None)
+    chat_id = getattr(chat, "id", None)
+    try:
+        await _ai_approve_command_impl(update, context)
+    finally:
+        save_loaded_session_if_possible(chat_id)
 
 
 async def generate_image_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -355,7 +402,7 @@ async def _extract_video_source_image(update: Update, context: ContextTypes.DEFA
     return bytes(data)
 
 
-async def generate_video_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+async def _generate_video_command_impl(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """
     Команда ``/video <секунды> <промпт>``: сгенерировать одно видео по изображению.
 
@@ -456,6 +503,15 @@ async def generate_video_command(update: Update, context: ContextTypes.DEFAULT_T
         "Выберите первый шаг кнопкой.",
         reply_markup=first_step_menu_markup(),
     )
+
+
+async def generate_video_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    chat = getattr(update, "effective_chat", None)
+    chat_id = getattr(chat, "id", None)
+    try:
+        await _generate_video_command_impl(update, context)
+    finally:
+        save_loaded_session_if_possible(chat_id)
 
 
 async def _handle_syntax_fallback_pending_video_command(
@@ -615,7 +671,7 @@ async def _handle_video_provider_choice_pending_video_command(
     return True
 
 
-async def fix_stress_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+async def _fix_stress_command_impl(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """
     Команда ``/fix_stress``: приводит реплики veo3 к формату без ударений/пунктуации.
     """
@@ -650,11 +706,23 @@ async def fix_stress_command(update: Update, context: ContextTypes.DEFAULT_TYPE)
                 if isinstance(new_text, str) and new_text.strip():
                     item["text"] = new_text
                     speech_map = item.get("speech_by_lang")
-                    if isinstance(speech_map, dict):
-                        speech_map["ru"] = new_text
+                    if not isinstance(speech_map, dict):
+                        speech_map = {}
+                    speech_map["ru"] = new_text
+                    item["speech_by_lang"] = speech_map
+                    _refresh_scene_ru_speech_metadata(item)
                     tts = item.get("tts")
                     if isinstance(tts, dict):
                         tts["text_ru"] = new_text
 
     await update.message.reply_text("Убрала ударения и нормализовала [пауза] в текущих сценах.")
     await _reply_text_chunked(update, session["scenes_text"])
+
+
+async def fix_stress_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    chat = getattr(update, "effective_chat", None)
+    chat_id = getattr(chat, "id", None)
+    try:
+        await _fix_stress_command_impl(update, context)
+    finally:
+        save_loaded_session_if_possible(chat_id)

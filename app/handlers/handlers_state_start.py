@@ -35,7 +35,7 @@ from .handlers_state_deps import (
 )
 from .handlers_state_commands import _reply_text_chunked
 from .handlers_state_commands import NAV_BUTTON_START_OVER
-from .handlers_keyboards import reply_text_without_keyboard
+from .handlers_keyboards import reply_text_without_keyboard, safe_reply_text
 from .handlers_state_media import send_social_descriptions_for_recipe
 
 _PROJECT_KEY_SESSION = "selected_project_key"
@@ -93,13 +93,10 @@ async def _reply_text_with_optional_markup(update: Update, text: str, reply_mark
     """Отправляет сообщение с клавиатурой, но не ломается на тестовых стабах без kwargs."""
     if update.message is None:
         return
-    try:
-        if reply_markup is None:
-            await update.message.reply_text(text)
-            return
-        await update.message.reply_text(text, reply_markup=reply_markup)
-    except TypeError:
-        await update.message.reply_text(text)
+    if reply_markup is None:
+        await safe_reply_text(update.message, text)
+        return
+    await safe_reply_text(update.message, text, reply_markup=reply_markup)
 
 
 def _concept_choice_markup(concepts: list[dict]) -> object | None:

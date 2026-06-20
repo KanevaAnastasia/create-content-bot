@@ -79,7 +79,7 @@ from .handlers_state_commands import (
     first_step_menu_markup,
     project_choice_markup,
 )
-from .handlers_keyboards import reply_text_without_keyboard
+from .handlers_keyboards import reply_text_without_keyboard, safe_reply_text
 from ..assets import ASSETS
 from ..elevenlabs_tts import generate_elevenlabs_speech
 from ..scene_media_candidates import resolve_candidate_by_message
@@ -89,6 +89,7 @@ from .handlers_state_start import (
     _start_description_with_recipe,
     _start_generation_with_recipe,
 )
+from ..state import save_loaded_session_if_possible
 from .handlers_state_media import (
     STATE_REFINING_SOCIAL_DESCRIPTIONS,
     STATE_WAITING_SOCIAL_DESCRIPTIONS_APPROVAL,
@@ -96,19 +97,18 @@ from .handlers_state_media import (
     _handle_waiting_social_descriptions_approval_state,
 )
 from ..character_catalog import format_character_short_descriptions
+from ..scene_media_store import mark_candidate_liked_by_message as persist_mark_candidate_liked_by_message
+from ..session_store import save_session_if_possible
 
 
 async def _reply_text_with_optional_markup(update: Update, text: str, reply_markup=None) -> None:
     """Отправляет текст с клавиатурой и не падает на тестовых стабах без kwargs."""
     if update.message is None:
         return
-    try:
-        if reply_markup is None:
-            await update.message.reply_text(text)
-            return
-        await update.message.reply_text(text, reply_markup=reply_markup)
-    except TypeError:
-        await update.message.reply_text(text)
+    if reply_markup is None:
+        await safe_reply_text(update.message, text)
+        return
+    await safe_reply_text(update.message, text, reply_markup=reply_markup)
 
 
 _STEP_GUIDED_FEEDBACK_KEY = "guided_step_feedback"
@@ -994,78 +994,81 @@ async def on_photo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         return
     chat_id = update.effective_chat.id
     session = SESSIONS.get(chat_id) or {}
-    state = str(session.get("state") or "")
-    if state in {
-        _STATE_WAITING_FIRST_STEP_IMAGE_REFERENCES,
-        _STATE_WAITING_FIRST_STEP_PROJECT_IMAGE_REFERENCES,
-    }:
-        image_bytes = await _extract_any_image_from_update(update, context)
-        if not image_bytes:
-            await update.message.reply_text("Не удалось прочитать изображение. Пришлите фото или image-файл еще раз.")
+    try:
+        state = str(session.get("state") or "")
+        if state in {
+            _STATE_WAITING_FIRST_STEP_IMAGE_REFERENCES,
+            _STATE_WAITING_FIRST_STEP_PROJECT_IMAGE_REFERENCES,
+        }:
+            image_bytes = await _extract_any_image_from_update(update, context)
+            if not image_bytes:
+                await update.message.reply_text("Не удалось прочитать изображение. Пришлите фото или image-файл еще раз.")
+                return
+            count = _append_custom_reference_image(session, image_bytes)
+            SESSIONS[chat_id] = session
+            await _reply_text_with_optional_markup(
+                update,
+                f"Добавила файл #{count}. Можно прислать ещё или нажать «{_CUSTOM_REFERENCE_DONE_BUTTON}».",
+                reply_markup=_custom_reference_markup(),
+            )
             return
-        count = _append_custom_reference_image(session, image_bytes)
-        SESSIONS[chat_id] = session
-        await _reply_text_with_optional_markup(
-            update,
-            f"Добавила файл #{count}. Можно прислать ещё или нажать «{_CUSTOM_REFERENCE_DONE_BUTTON}».",
-            reply_markup=_custom_reference_markup(),
-        )
-        return
-    if session.get("state") != _STATE_WAITING_FIRST_STEP_VIDEO_IMAGE:
-        return
-    duration_sec = int(session.get("first_step_video_duration_sec") or 6)
-    prompt = str(session.get("first_step_video_prompt") or "").strip()
-    if not prompt:
-        await _reply_text_with_optional_markup(
-            update,
-            "Не вижу сохраненного prompt. Нажмите «Видео» и пришлите сначала текст формата: 6 ваш prompt.",
+        if session.get("state") != _STATE_WAITING_FIRST_STEP_VIDEO_IMAGE:
+            return
+        duration_sec = int(session.get("first_step_video_duration_sec") or 6)
+        prompt = str(session.get("first_step_video_prompt") or "").strip()
+        if not prompt:
+            await _reply_text_with_optional_markup(
+                update,
+                "Не вижу сохраненного prompt. Нажмите «Видео» и пришлите сначала текст формата: 6 ваш prompt.",
+                reply_markup=first_step_menu_markup(),
+            )
+            _reset_first_step_session(chat_id, session)
+            return
+        source_image = await _extract_video_source_image(update, context)
+        if not source_image:
+            await update.message.reply_text("Не удалось прочитать фото. Пришлите изображение еще раз.")
+            return
+        await reply_text_without_keyboard(update.message, "Генерируем видео, это может занять некоторое время.")
+        try:
+            video_bytes = await _generate_video_bytes_with_high_load_retry(
+                update,
+                prompt=prompt,
+                model="veo3_fast",
+                duration_sec=duration_sec,
+                start_image=source_image,
+                end_image=None,
+                quality="720",
+                aspect_ratio="9:16",
+                audio_enabled=True,
+            )
+        except VideoProviderChoiceRequired as pending_choice:
+            payload = encode_video_provider_choice_for_session(pending_choice)
+            payload["source"] = "video_command"
+            payload["duration_for_caption"] = duration_sec
+            payload["original_prompt"] = prompt
+            session["video_provider_choice_pending"] = payload
+            await update.message.reply_text(
+                "Syntax не вернул видео.\n\n"
+                "Напишите `Syntax`, чтобы повторить через Syntax, или `Vertex`, чтобы попробовать резервный Vertex/Veo."
+            )
+            return
+        except Exception as e:
+            logger.exception("first-step video generation failed")
+            await update.message.reply_text(f"Ошибка генерации видео: {_user_error_message(e, domain='video')}")
+            return
+        vb = io.BytesIO(video_bytes)
+        vb.name = "video.mp4"
+        await update.message.reply_video(video=vb, caption=f"Видео готово ({duration_sec} сек, 9:16, 720, audio).")
+        if get_last_video_result_source() == "uri":
+            uri = get_last_video_result_uri() or "gs://..."
+            await update.message.reply_text(f"Источник результата: video URI ({uri}).")
+        await update.message.reply_text(
+            "Выберите первый шаг кнопкой.",
             reply_markup=first_step_menu_markup(),
         )
         _reset_first_step_session(chat_id, session)
-        return
-    source_image = await _extract_video_source_image(update, context)
-    if not source_image:
-        await update.message.reply_text("Не удалось прочитать фото. Пришлите изображение еще раз.")
-        return
-    await reply_text_without_keyboard(update.message, "Генерируем видео, это может занять некоторое время.")
-    try:
-        video_bytes = await _generate_video_bytes_with_high_load_retry(
-            update,
-            prompt=prompt,
-            model="veo3_fast",
-            duration_sec=duration_sec,
-            start_image=source_image,
-            end_image=None,
-            quality="720",
-            aspect_ratio="9:16",
-            audio_enabled=True,
-        )
-    except VideoProviderChoiceRequired as pending_choice:
-        payload = encode_video_provider_choice_for_session(pending_choice)
-        payload["source"] = "video_command"
-        payload["duration_for_caption"] = duration_sec
-        payload["original_prompt"] = prompt
-        session["video_provider_choice_pending"] = payload
-        await update.message.reply_text(
-            "Syntax не вернул видео.\n\n"
-            "Напишите `Syntax`, чтобы повторить через Syntax, или `Vertex`, чтобы попробовать резервный Vertex/Veo."
-        )
-        return
-    except Exception as e:
-        logger.exception("first-step video generation failed")
-        await update.message.reply_text(f"Ошибка генерации видео: {_user_error_message(e, domain='video')}")
-        return
-    vb = io.BytesIO(video_bytes)
-    vb.name = "video.mp4"
-    await update.message.reply_video(video=vb, caption=f"Видео готово ({duration_sec} сек, 9:16, 720, audio).")
-    if get_last_video_result_source() == "uri":
-        uri = get_last_video_result_uri() or "gs://..."
-        await update.message.reply_text(f"Источник результата: video URI ({uri}).")
-    await update.message.reply_text(
-        "Выберите первый шаг кнопкой.",
-        reply_markup=first_step_menu_markup(),
-    )
-    _reset_first_step_session(chat_id, session)
+    finally:
+        save_session_if_possible(chat_id, SESSIONS.get(chat_id) or session)
 
 
 async def on_message_reaction(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -1096,6 +1099,15 @@ async def on_message_reaction(update: Update, context: ContextTypes.DEFAULT_TYPE
     )
     if resolved is None:
         return
+    try:
+        persist_mark_candidate_liked_by_message(chat_id, message_id, liked)
+    except Exception:
+        logger.exception(
+            "scene_media.reaction_like_persist_failed chat_id=%s message_id=%s",
+            chat_id,
+            message_id,
+        )
+    save_session_if_possible(chat_id, session)
     logger.info(
         "scene_media.reaction_like chat_id=%s message_id=%s liked=%s",
         chat_id,
@@ -1104,7 +1116,7 @@ async def on_message_reaction(update: Update, context: ContextTypes.DEFAULT_TYPE
     )
 
 
-async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+async def _on_text_impl(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     chat_id, session, text = await _debounced_session(update)
     if chat_id is None:
         return
@@ -1563,3 +1575,12 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
     # keep legacy no-op for unknown states
     return
+
+
+async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    chat = getattr(update, "effective_chat", None)
+    chat_id = getattr(chat, "id", None)
+    try:
+        await _on_text_impl(update, context)
+    finally:
+        save_loaded_session_if_possible(chat_id)

@@ -44,6 +44,8 @@ class ScenePerStepMedia(TypedDict, total=False):
     model: str
     duration_sec: int
     text: str
+    dialogue_mode: str
+    dialogue: list[dict[str, Any]]
     speech_by_lang: dict[str, str]
     speech_plan_by_lang: dict[str, list[dict[str, Any]]]
     speech_cues_by_lang: dict[str, list[dict[str, Any]]]

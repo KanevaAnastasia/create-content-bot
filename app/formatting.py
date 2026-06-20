@@ -37,6 +37,30 @@ def _display_text(value: Any) -> str:
     return sanitize_character_names_and_keys(_safe_text(value))
 
 
+def _scene_audience_label(value: Any) -> str:
+    normalized = _safe_text(value).strip().lower()
+    if normalized in {"child", "male", "neutral"}:
+        return normalized
+    return "neutral"
+
+
+def _scene_dialogue_lines(scene: dict[str, Any]) -> list[str]:
+    if str(scene.get("dialogue_mode") or "").strip().lower() != "multi":
+        return []
+    raw = scene.get("dialogue")
+    if not isinstance(raw, list):
+        return []
+    lines: list[str] = []
+    for item in raw:
+        if not isinstance(item, dict):
+            continue
+        speaker = format_character_short_descriptions([str(item.get("speaker") or "")]) or _display_text(item.get("speaker"))
+        text = _display_text(item.get("text"))
+        if speaker and text:
+            lines.append(f"{speaker}: {text}")
+    return lines
+
+
 def _romantic_short_descriptions() -> dict[str, str]:
     catalog = character_prompt_catalog(["cat", "zaya", "markiz"])
     return {
@@ -109,6 +133,7 @@ def build_human_readable_plan(scenes: list[dict[str, Any]]) -> str:
     blocks: list[str] = []
     for scene in scenes:
         scene_no = scene.get("scene", scene.get("scene_id", "?"))
+        audience_type = _scene_audience_label(scene.get("dish_audience_type"))
         shot = scene.get("shot_type", "medium")
         anchors = scene.get("continuity_anchors") if isinstance(scene.get("continuity_anchors"), list) else []
         anchors_text = ", ".join(_display_text(x) for x in anchors if _display_text(x)) or "—"
@@ -127,6 +152,15 @@ def build_human_readable_plan(scenes: list[dict[str, Any]]) -> str:
             _romantic_short_descriptions(),
         ) or "—"
         text_line = _safe_text(scene.get("text")) or "—"
+        dialogue_lines = _scene_dialogue_lines(scene)
+        speech_block = (
+            "Диалог сцены (будет в озвучке):\n"
+            + "\n".join(dialogue_lines)
+            + "\n\n"
+            f"Агрегированная фраза сцены:\n{text_line}\n\n"
+            if dialogue_lines
+            else "Фраза бабушки (будет в сцене):\n" + f"{text_line}\n\n"
+        )
         retention_function = _display_text(scene.get("retention_function")) or "—"
         micro_events_raw = scene.get("micro_events") if isinstance(scene.get("micro_events"), list) else []
         micro_events = ", ".join(_display_text(x) for x in micro_events_raw if _display_text(x)) or "—"
@@ -149,7 +183,7 @@ def build_human_readable_plan(scenes: list[dict[str, Any]]) -> str:
             "voice_provider", "native" if str(model).lower().startswith("veo3") else "elevenlabs"
         )
         blocks.append(
-            f"СЦЕНА {scene_no}\n"
+            f"СЦЕНА {scene_no} [{audience_type}]\n"
             f"Вид/ракурс: {shot}\n"
             f"Опоры консистентности: {anchors_text}\n"
             f"Персонажи: {chars_text}\n"
@@ -165,8 +199,7 @@ def build_human_readable_plan(scenes: list[dict[str, Any]]) -> str:
             f"Риск скучной сцены: {risk}/10\n"
             f"Рекомендация: {suggestion}\n\n"
             f"{first_phrase_block}"
-            "Фраза бабушки (будет в сцене):\n"
-            f"{text_line}\n\n"
+            f"{speech_block}"
             f"Нужна ли озвучка: {'да' if voice_needed else 'нет'}\n\n"
             f"Провайдер озвучки: {voice_provider}\n\n"
             "Почему эта модель:\n"
@@ -263,8 +296,12 @@ def format_viral_concept_brief(brief: dict[str, Any] | None) -> str:
     hooks = brief.get("hooks") if isinstance(brief.get("hooks"), dict) else {}
     hook_text = "\n".join(_hook_lines(hooks)) or "—"
     brand_plan = _safe_text(brief.get("brand_integration_plan")) or "—"
+    audience_type = _scene_audience_label(brief.get("dish_audience_type"))
+    family_cast_plan = _safe_text(brief.get("family_cast_plan")) or "—"
     return (
         "VIRAL CONCEPT BRIEF\n\n"
+        f"Тип блюда для каста: {audience_type}\n"
+        f"План семейных персонажей: {family_cast_plan}\n"
         f"Главный хук: {_safe_text(brief.get('main_hook')) or '—'}\n"
         f"Обещание зрителю: {_safe_text(brief.get('viewer_promise')) or '—'}\n"
         f"Причина досмотреть: {_safe_text(brief.get('reason_to_watch_end')) or '—'}\n"

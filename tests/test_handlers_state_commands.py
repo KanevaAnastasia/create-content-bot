@@ -1,6 +1,7 @@
 import asyncio
 from types import SimpleNamespace
 
+from app.handlers.handlers_state_deps import SESSIONS
 from app.handlers.handlers_state_commands import (
     FIRST_STEP_BUTTON_DESCRIPTION,
     FIRST_STEP_BUTTON_GENERATE,
@@ -11,6 +12,7 @@ from app.handlers.handlers_state_commands import (
     _regenerate_image_prompt_from_feedback,
     _handle_syntax_fallback_pending_video_command,
     check_env,
+    fix_stress_command,
     first_step_menu_markup,
     start,
 )
@@ -215,3 +217,50 @@ def test_regenerate_image_prompt_from_feedback_uses_gemini(monkeypatch):
     out = asyncio.run(_regenerate_image_prompt_from_feedback(scene, "добавь пар от еды"))
     assert out == "Новый промпт"
     assert captured
+
+
+def test_fix_stress_command_refreshes_production_ru_speech_metadata(monkeypatch):
+    monkeypatch.setattr(
+        "app.handlers.handlers_state_commands.apply_veo3_lowercase_format",
+        lambda scenes: [{"scene": 1, "model": "veo3_fast", "text": "новая [пауза] фраза", "duration_sec": 8}],
+    )
+
+    captured: list[str] = []
+
+    class _Message:
+        async def reply_text(self, text):
+            captured.append(text)
+
+    chat_id = 4242
+    SESSIONS[chat_id] = {
+        "scenes_plan": [{"scene": 1, "model": "veo3_fast", "text": "СТАрАЯ фрАза", "duration_sec": 8}],
+        "production": {
+            "json_plan": [
+                {
+                    "scene": 1,
+                    "text": "старая фраза",
+                    "duration_sec": 8,
+                    "speech_by_lang": {"ru": "старая фраза"},
+                    "speech_cues_by_lang": {"ru": [{"text": "старое", "start_sec": 0.0, "end_sec": 8.0}]},
+                    "speech_plan_by_lang": {"ru": [{"text": "старое"}]},
+                    "speech_budget_by_lang": {"ru": {"status": "ok", "max_chars": 999, "current_chars": 6}},
+                    "tts": {"text_ru": "старая фраза"},
+                }
+            ]
+        },
+    }
+    update = SimpleNamespace(message=_Message(), effective_chat=SimpleNamespace(id=chat_id))
+
+    try:
+        asyncio.run(fix_stress_command(update, context=None))
+
+        scene = SESSIONS[chat_id]["production"]["json_plan"][0]
+        assert scene["text"] == "новая [пауза] фраза"
+        assert scene["speech_by_lang"]["ru"] == "новая [пауза] фраза"
+        assert scene["tts"]["text_ru"] == "новая [пауза] фраза"
+        assert scene["speech_cues_by_lang"]["ru"]
+        assert scene["speech_plan_by_lang"]["ru"]
+        assert scene["speech_budget_by_lang"]["ru"]["current_chars"] > 0
+        assert captured
+    finally:
+        SESSIONS.pop(chat_id, None)

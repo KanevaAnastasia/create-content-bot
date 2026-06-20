@@ -36,6 +36,7 @@ from ..syntax_fallback_output import video_bytes_from_fallback_result
 from ..syntax_video_fallback import BatchFallbackRequest, try_generate_via_syntax, try_generate_via_syntax_batch
 from ..vertex_images import generate_image_vertex
 from ..video_generation import generate_video_bytes
+from .handlers_keyboards import safe_reply_text, safe_send_message
 
 logger = __import__('logging').getLogger("bot")
 PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))
@@ -289,22 +290,42 @@ class ServiceUnavailableRetriesExhaustedError(RuntimeError):
 
 
 async def _send_chat_action_safely(
-    context: ContextTypes.DEFAULT_TYPE,
+    context: ContextTypes.DEFAULT_TYPE | None,
     *,
-    chat_id: int,
+    chat_id: int | None,
     action_name: str,
 ) -> None:
     """Best-effort typing indicator; Telegram hiccups must not abort generation."""
+    if context is None or chat_id is None:
+        return
     try:
         await context.bot.send_chat_action(chat_id=chat_id, action=ChatAction.TYPING)
     except Exception as e:
         logger.warning("%s typing indicator failed, continuing: %s", action_name, e)
 
 
+async def _send_llm_retry_notice_safely(
+    update: Update | None,
+    context: ContextTypes.DEFAULT_TYPE | None,
+    *,
+    chat_id: int | None,
+    text: str,
+) -> None:
+    """Best-effort user notice for long LLM retries, even outside message handlers."""
+    try:
+        if update is not None and update.message is not None:
+            await safe_reply_text(update.message, text)
+            return
+        if context is not None and chat_id is not None:
+            await safe_send_message(context.bot, chat_id=chat_id, text=text)
+    except Exception as e:
+        logger.warning("LLM retry notice failed, continuing: %s", e)
+
+
 async def _call_with_503_retries(
-    update: Update,
-    context: ContextTypes.DEFAULT_TYPE,
-    chat_id: int,
+    update: Update | None,
+    context: ContextTypes.DEFAULT_TYPE | None,
+    chat_id: int | None,
     action_name: str,
     op: Callable[[], Awaitable[T]],
 ) -> T:
@@ -325,9 +346,8 @@ async def _call_with_503_retries(
                 result = await op()
             finally:
                 reset_prefer_vertex_api(token)
-            if update.message is not None:
-                for note in pop_runtime_notices():
-                    await update.message.reply_text(note)
+            for note in pop_runtime_notices():
+                await _send_llm_retry_notice_safely(update, context, chat_id=chat_id, text=note)
             return result
         except Exception as e:
             if _is_service_unavailable_retryable(e) and service_attempt < SERVICE_UNAVAILABLE_RETRY_COUNT:
@@ -340,14 +360,16 @@ async def _call_with_503_retries(
                     SERVICE_UNAVAILABLE_RETRY_DELAY_SEC,
                     e,
                 )
-                if update.message is not None:
-                    await update.message.reply_text(
-                        (
-                            "Сервис модели сейчас перегружен. "
-                            f"Повторяю через {SERVICE_UNAVAILABLE_RETRY_DELAY_SEC} секунд "
-                            f"(попытка {service_attempt}/{SERVICE_UNAVAILABLE_RETRY_COUNT})."
-                        )
+                await _send_llm_retry_notice_safely(
+                    update,
+                    context,
+                    chat_id=chat_id,
+                    text=(
+                        "Сервис модели сейчас перегружен. "
+                        f"Повторяю через {SERVICE_UNAVAILABLE_RETRY_DELAY_SEC} секунд "
+                        f"(попытка {service_attempt}/{SERVICE_UNAVAILABLE_RETRY_COUNT})."
                     )
+                )
                 await asyncio.sleep(SERVICE_UNAVAILABLE_RETRY_DELAY_SEC)
                 continue
             if _is_service_unavailable_retryable(e):
@@ -364,14 +386,16 @@ async def _call_with_503_retries(
                     AI_RATE_LIMIT_RETRY_DELAY_SEC,
                     e,
                 )
-                if update.message is not None:
-                    await update.message.reply_text(
-                        (
-                            "Уперлась в лимит AI: слишком много запросов подряд. "
-                            f"Подожду {AI_RATE_LIMIT_RETRY_DELAY_SEC} секунд и попробую сама "
-                            f"(попытка {rate_attempt}/{AI_RATE_LIMIT_RETRY_COUNT})."
-                        )
+                await _send_llm_retry_notice_safely(
+                    update,
+                    context,
+                    chat_id=chat_id,
+                    text=(
+                        "Уперлась в лимит AI: слишком много запросов подряд. "
+                        f"Подожду {AI_RATE_LIMIT_RETRY_DELAY_SEC} секунд и попробую сама "
+                        f"(попытка {rate_attempt}/{AI_RATE_LIMIT_RETRY_COUNT})."
                     )
+                )
                 await asyncio.sleep(AI_RATE_LIMIT_RETRY_DELAY_SEC)
                 continue
             if _is_ai_rate_limit_retryable(e):
@@ -931,10 +955,8 @@ async def _generate_video_bytes_with_high_load_retry(
 ) -> bytes:
     """Generate video through the current policy: auto Syntax, manual Vertex fallback."""
 
-    syntax_attempted = False
-    syntax_disabled = disable_syntax_fallback
-    if not force_vertex_fallback and _syntax_fallback_env_enabled() and not skip_initial_syntax:
-        syntax_attempted = True
+    syntax_enabled = _syntax_fallback_env_enabled() and not disable_syntax_fallback
+    if not force_vertex_fallback and syntax_enabled and not skip_initial_syntax:
         if update.message is not None:
             await update.message.reply_text(
                 "Сначала пробую генерацию через Syntax. В Vertex автоматически не ухожу."
@@ -962,7 +984,7 @@ async def _generate_video_bytes_with_high_load_retry(
             audio_enabled=audio_enabled,
             syntax_error_message="Syntax не вернул видео.",
         )
-    if not force_vertex_fallback and _syntax_fallback_env_enabled() and skip_initial_syntax:
+    if not force_vertex_fallback and syntax_enabled and skip_initial_syntax:
         raise VideoProviderChoiceRequired(
             prompt=prompt,
             model=model,
@@ -974,7 +996,7 @@ async def _generate_video_bytes_with_high_load_retry(
             audio_enabled=audio_enabled,
             syntax_error_message="Syntax уже был запущен для этой сцены, но видео не вернул.",
         )
-    if not force_vertex_fallback and not _syntax_fallback_env_enabled():
+    if not force_vertex_fallback and not syntax_enabled and not disable_syntax_fallback:
         raise VideoProviderChoiceRequired(
             prompt=prompt,
             model=model,

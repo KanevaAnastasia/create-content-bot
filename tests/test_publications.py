@@ -78,6 +78,25 @@ def test_export_publication_video_assets_writes_language_files(tmp_path: Path) -
     assert Path(out["en"]).read_bytes() == en_bytes
 
 
+def test_export_publication_video_assets_accepts_render_paths(tmp_path: Path) -> None:
+    source_path = tmp_path / "rendered_ru.mp4"
+    source_path.write_bytes(b"rendered-ru")
+    post_production = {
+        "renders_by_language": {
+            "ru": {"subtitled_music": {"video_path": str(source_path)}},
+        }
+    }
+
+    out = export_publication_video_assets(
+        post_production,
+        bundle_key="bundle-path",
+        base_dir=tmp_path / "exports",
+    )
+
+    assert set(out) == {"ru"}
+    assert Path(out["ru"]).read_bytes() == b"rendered-ru"
+
+
 def test_resolve_project_for_publications_rejects_unknown_slug() -> None:
     engine, Session = _session_factory()
     try:

@@ -295,15 +295,15 @@ def normalize_scenes_for_pipeline(scenes: list[dict[str, Any]]) -> list[dict[str
 
     Действия:
     - обрезает до 6 сцен, при нехватке дублирует последнюю (временный костыль для модели);
-    - требует минимум 4 сцены (дополняет копиями);
+    - требует минимум 3 сцены (дополняет копиями);
     - первая сцена помечается ``goal=хук``, последняя — ``результат``;
     - **во всех сценах** — короткая реплика ``text``, ``voice_needed``, ``has_lipsync``.
 
     Важно: длина списка потом может быть урезана до ``len(recipe_steps)`` в ``pipeline.generate_scenes_plan``.
     """
     scenes = scenes[:6]
-    if len(scenes) < 4:
-        while len(scenes) < 4:
+    if len(scenes) < 3:
+        while len(scenes) < 3:
             scenes.append(dict(scenes[-1] if scenes else {}))
     normalized = [_sanitize_scene(scene, idx) for idx, scene in enumerate(scenes, start=1)]
     normalized[0]["goal"] = "хук"

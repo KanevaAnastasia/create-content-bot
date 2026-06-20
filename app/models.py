@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import uuid
 
-from sqlalchemy import Boolean, Enum, Float, ForeignKey, Integer, JSON, String, Text, UniqueConstraint, func
+from sqlalchemy import Boolean, Enum, Float, ForeignKey, Integer, JSON, LargeBinary, String, Text, UniqueConstraint, func
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 from sqlalchemy.sql.sqltypes import DateTime, Uuid
 
@@ -296,6 +296,18 @@ class Scene(Base):
 
     run: Mapped["GenerationRun"] = relationship(back_populates="scenes")
     video_results: Mapped[list["VideoResult"]] = relationship(back_populates="scene", cascade="all, delete-orphan")
+    image_candidates: Mapped[list["SceneImageCandidate"]] = relationship(
+        back_populates="scene",
+        cascade="all, delete-orphan",
+    )
+    media_message_links: Mapped[list["SceneMediaMessageLink"]] = relationship(
+        back_populates="scene",
+        cascade="all, delete-orphan",
+    )
+    video_candidates: Mapped[list["SceneVideoCandidate"]] = relationship(
+        back_populates="scene",
+        cascade="all, delete-orphan",
+    )
 
 
 class VideoResult(Base):
@@ -327,6 +339,101 @@ class VideoResult(Base):
 
     run: Mapped["GenerationRun"] = relationship(back_populates="video_results")
     scene: Mapped["Scene"] = relationship(back_populates="video_results")
+
+
+class ChatSession(Base):
+    """Persistent snapshot of the active Telegram session."""
+
+    __tablename__ = "chat_sessions"
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
+    chat_id: Mapped[int] = mapped_column(Integer, nullable=False, unique=True, index=True)
+    state: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    session_json: Mapped[dict] = mapped_column(JSON, nullable=False, default=dict)
+    generation_run_id: Mapped[uuid.UUID | None] = mapped_column(
+        Uuid,
+        ForeignKey("generation_runs.id", ondelete="SET NULL"),
+        nullable=True,
+    )
+    created_at: Mapped[DateTime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
+    updated_at: Mapped[DateTime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        server_default=func.now(),
+        onupdate=func.now(),
+    )
+
+
+class SceneImageCandidate(Base):
+    """Persistent start/end frame candidate for one scene."""
+
+    __tablename__ = "scene_image_candidates"
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
+    candidate_id: Mapped[str] = mapped_column(String(64), nullable=False, unique=True, index=True)
+    scene_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid,
+        ForeignKey("scenes.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    kind: Mapped[str] = mapped_column(String(16), nullable=False)
+    image_blob: Mapped[bytes] = mapped_column(LargeBinary, nullable=False)
+    liked: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    approved_for_video: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    created_at: Mapped[DateTime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
+
+    scene: Mapped["Scene"] = relationship(back_populates="image_candidates")
+
+
+class SceneVideoCandidate(Base):
+    """Persistent rendered video candidate for one scene/language."""
+
+    __tablename__ = "scene_video_candidates"
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
+    candidate_id: Mapped[str] = mapped_column(String(64), nullable=False, unique=True, index=True)
+    scene_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid,
+        ForeignKey("scenes.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    language: Mapped[str] = mapped_column(String(8), nullable=False, index=True)
+    video_blob: Mapped[bytes] = mapped_column(LargeBinary, nullable=False)
+    liked: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    approved_for_production: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    speed_coef: Mapped[float] = mapped_column(Float, nullable=False, default=1.2)
+    source_image_candidate_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    created_at: Mapped[DateTime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
+
+    scene: Mapped["Scene"] = relationship(back_populates="video_candidates")
+
+
+class SceneMediaMessageLink(Base):
+    """Maps Telegram message ids back to persistent scene candidates."""
+
+    __tablename__ = "scene_media_message_links"
+    __table_args__ = (
+        UniqueConstraint("chat_id", "telegram_message_id", name="uq_scene_media_message_links_chat_message"),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
+    chat_id: Mapped[int] = mapped_column(Integer, nullable=False, index=True)
+    telegram_message_id: Mapped[int] = mapped_column(Integer, nullable=False)
+    scene_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid,
+        ForeignKey("scenes.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    media_type: Mapped[str] = mapped_column(String(16), nullable=False)
+    candidate_id: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
+    language: Mapped[str | None] = mapped_column(String(8), nullable=True)
+    kind: Mapped[str | None] = mapped_column(String(16), nullable=True)
+    created_at: Mapped[DateTime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
+
+    scene: Mapped["Scene"] = relationship(back_populates="media_message_links")
 
 
 class PublishedVideoAnalytics(Base):

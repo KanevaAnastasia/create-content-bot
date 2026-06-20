@@ -27,6 +27,9 @@ def test_normalize_viral_concept_brief_fills_required_hooks_and_scores() -> None
     assert len(flatten_hooks(hooks)) >= 10
     assert brief["analysis"]["hook_strength"] == 10
     assert brief["analysis"]["risk_of_boring_scene"] == 1
+    assert brief["dish_audience_type"] == "neutral"
+    assert brief["family_cast_plan"]
+    assert brief["first_scene_dialogue_hint"] is False
 
 
 def test_normalize_hooks_fallback_has_minimum_ten() -> None:
@@ -70,6 +73,16 @@ def test_review_first_phrase_rewards_payoff_and_visual_match() -> None:
     assert not review["issues"]
 
 
+def test_review_first_phrase_accepts_non_secret_payoff_hook() -> None:
+    review = review_first_phrase(
+        "Не теряйте медовик, сейчас покажу красивый разрез",
+        scene={"action": "Бабушка показывает готовый медовик и красивый разрез"},
+    )
+
+    assert review["score"] >= 8
+    assert not review["issues"]
+
+
 def test_enrich_scenes_adds_first_phrase_review_to_first_scene() -> None:
     scenes = [
         {"scene": 1, "action": "Бабушка показывает готовый торт и разрез", "text": "Сегодня мы готовим вкусное блюдо"},
@@ -83,3 +96,18 @@ def test_enrich_scenes_adds_first_phrase_review_to_first_scene() -> None:
     assert enriched[0]["first_phrase_score"] < 7
     assert enriched[0]["first_phrase_suggestion"]
     assert review["first_scene_review"]["issues"]
+
+
+def test_normalize_viral_concept_brief_preserves_family_cast_fields() -> None:
+    brief = normalize_viral_concept_brief(
+        {
+            "dish_audience_type": "child",
+            "family_cast_plan": "Добавить внука в первую и последнюю сцену.",
+            "first_scene_dialogue_hint": True,
+        },
+        concept="корн-доги",
+    )
+
+    assert brief["dish_audience_type"] == "child"
+    assert "внука" in brief["family_cast_plan"].lower()
+    assert brief["first_scene_dialogue_hint"] is True

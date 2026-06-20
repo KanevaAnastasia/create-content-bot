@@ -13,9 +13,10 @@ _GEMINI_TEXT_PRICING_PER_MTOK_USD: dict[str, tuple[float, float]] = {
 
 # Closest currently published per-image Vertex price tiers.
 _IMAGE_GENERATION_PRICE_USD: dict[str, float] = {
-    "gemini-2.5-flash-image": 0.02,
+    "gemini-3-pro-image": 0.06,
+    "gemini-3.1-flash-image": 0.04,
     "gemini-3.1-flash-image-preview": 0.04,
-    "gemini-3-pro-image-preview": 0.06,
+    "gemini-2.5-flash-image": 0.039,
     "imagen-4.0-fast-generate-001": 0.02,
     "imagen-4.0-generate-001": 0.04,
     "imagen-4.0-ultra-generate-001": 0.06,

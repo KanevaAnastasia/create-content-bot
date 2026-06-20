@@ -143,9 +143,13 @@ GEMINI_MODEL_FALLBACKS="gemini-2.5-flash-lite,gemini-2.5-pro"
 VERTEX_API_KEY="..."
 GOOGLE_CLOUD_PROJECT="your-project-id"
 GOOGLE_CLOUD_LOCATION="us-central1"
-VERTEX_IMAGE_MODEL="nano-banana-pro-preview"
-VERTEX_IMAGE_MODEL_FALLBACKS="gemini-3.1-flash-image-preview,imagen-4.0-fast-generate-001,imagen-3.0-generate-002"
+VERTEX_IMAGE_MODEL="gemini-3-pro-image"
+VERTEX_IMAGE_MODEL_FALLBACKS="gemini-3.1-flash-image,gemini-2.5-flash-image"
 ```
+
+`VERTEX_IMAGE_MODEL` — основная, самая сильная модель. `VERTEX_IMAGE_MODEL_FALLBACKS`
+не перебираются автоматически: если основная модель не сработала, бот спрашивает,
+повторить генерацию на сильной модели или явно понизить модель.
 
 Профиль проекта для prompt-политик (по умолчанию кулинарный проект с бабушкой и котом):
 
@@ -347,7 +351,7 @@ mp4-документ/видео, прямую ссылку на `.mp4` или с
 ### `404 NOT_FOUND model ...`
 
 Модель недоступна в текущем проекте/версии API.  
-Используйте `VERTEX_IMAGE_MODEL_FALLBACKS`.
+Проверьте, что `VERTEX_IMAGE_MODEL="gemini-3-pro-image"`, модель доступна в проекте и используется поддерживаемый регион. Если модель временно недоступна, бот предложит повторить сильную модель или вручную понизить до следующей из `VERTEX_IMAGE_MODEL_FALLBACKS`.
 
 ### `SSL CERTIFICATE_VERIFY_FAILED`
 

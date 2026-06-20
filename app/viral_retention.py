@@ -24,6 +24,8 @@ RETENTION_FUNCTIONS = {
     "brand_integration",
 }
 
+DISH_AUDIENCE_TYPES = {"child", "male", "neutral"}
+
 FIRST_FRAME_TYPES = {
     "ready_dish_closeup",
     "cake_cut",
@@ -79,7 +81,6 @@ FIRST_PHRASE_GENERIC_BAD_PATTERNS = (
 )
 FIRST_PHRASE_POWER_MARKERS = (
     "в конце",
-    "секрет",
     "разрез",
     "ложк",
     "хруст",
@@ -94,6 +95,8 @@ FIRST_PHRASE_POWER_MARKERS = (
     "сохрани",
     "слишком красив",
     "кот",
+    "сравни",
+    "не теря",
 )
 FIRST_SCENE_VISUAL_HOOK_MARKERS = (
     "готов",
@@ -148,12 +151,12 @@ def _fallback_hooks(concept: str) -> dict[str, list[str]]:
         ],
         "intrigue": [
             f"Все думали, что {dish} покупной, но бабушка сделала его дома.",
-            f"В конце покажу секрет, почему {dish} получается таким нежным.",
+            f"Покажу разрез {dish}, ради него хочется досмотреть до конца.",
             f"Сначала кажется просто, но финал у этого блюда слишком красивый.",
         ],
         "useful": [
             f"Сохрани этот способ, чтобы {dish} получался ровнее и вкуснее.",
-            f"Главный секрет тут в одном маленьком шаге, покажу по порядку.",
+            f"Не теряй этот приём, с ним {dish} получается заметно лучше.",
         ],
         "cliffhanger": [
             "Досмотрите до разреза, он получился слишком красивым.",
@@ -199,6 +202,20 @@ def _normalize_first_phrase(raw: str, *, fallback: str) -> str:
     return shortened or fallback.strip()
 
 
+def _normalize_dish_audience_type(value: Any) -> str:
+    text = _text(value).lower()
+    if text in DISH_AUDIENCE_TYPES:
+        return text
+    return "neutral"
+
+
+def _boolish(value: Any) -> bool:
+    if isinstance(value, bool):
+        return value
+    text = _text(value).lower()
+    return text in {"1", "true", "yes", "да", "нужен", "нужно"}
+
+
 def review_first_phrase(
     phrase: str,
     *,
@@ -241,7 +258,7 @@ def review_first_phrase(
     if issues:
         if isinstance(brief, dict):
             suggestion = _text(brief.get("strongest_first_phrase")) or _text(brief.get("main_hook"))
-        suggestion = suggestion or "В конце покажу секрет, из-за которого это блюдо хочется сохранить."
+        suggestion = suggestion or "Не теряйте это блюдо, сейчас покажу самый аппетитный момент."
     return {
         "score": max(1, min(10, score)),
         "issues": issues,
@@ -295,6 +312,15 @@ def normalize_viral_concept_brief(
     if phrase_review["score"] < 7:
         strongest_first_phrase = _normalize_first_phrase(main_hook, fallback=flatten_hooks(hooks)[0])
         phrase_review = review_first_phrase(strongest_first_phrase)
+    dish_audience_type = _normalize_dish_audience_type(raw.get("dish_audience_type"))
+    family_cast_plan = _text(raw.get("family_cast_plan"))
+    if not family_cast_plan:
+        if dish_audience_type == "child":
+            family_cast_plan = "В первой и последней сцене добавить одного из внуков; в середине оставить только базовых персонажей."
+        elif dish_audience_type == "male":
+            family_cast_plan = "В первой и последней сцене добавить дедушку; в середине оставить только базовых персонажей."
+        else:
+            family_cast_plan = "Дополнительных семейных персонажей не добавлять."
     return {
         "main_hook": main_hook,
         "viewer_promise": _text(raw.get("viewer_promise")) or "уютный домашний рецепт с понятным результатом",
@@ -314,6 +340,9 @@ def normalize_viral_concept_brief(
         "brand_integration_plan": brand_plan,
         "analysis": analysis,
         "sponsored_content": bool(sponsored_content),
+        "dish_audience_type": dish_audience_type,
+        "family_cast_plan": family_cast_plan,
+        "first_scene_dialogue_hint": _boolish(raw.get("first_scene_dialogue_hint")),
     }
 
 

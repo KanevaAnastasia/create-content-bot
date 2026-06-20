@@ -4,7 +4,7 @@ import re
 
 from ..scene_utils import extract_recipe_steps_text, normalize_recipe_steps
 
-_CONCEPT_TEXT_MAX_CHARS = 200
+_CONCEPT_TEXT_MAX_CHARS = 150
 _COOKING_TRANSCRIPT_MIN_CHARS = _CONCEPT_TEXT_MAX_CHARS
 _COOKING_TRANSCRIPT_MARKERS = (
     "steak",
@@ -94,16 +94,44 @@ def _extract_cooking_transcript_steps(text: str) -> list[str]:
     return _normalize_user_recipe_steps(steps)
 
 
+def _split_long_recipe_text_into_steps(text: str) -> list[str]:
+    """Грубо режет длинный пользовательский рецепт на фрагменты для fastpath-сессии."""
+    cleaned = re.sub(r"\s+", " ", (text or "")).strip()
+    if not cleaned:
+        return []
+    parts = [
+        part.strip(" .;:-")
+        for part in re.split(r"(?:[.!?]+|\n+)\s*", cleaned)
+        if part.strip(" .;:-")
+    ]
+    if len(parts) < 2:
+        parts = [
+            part.strip(" .;:-")
+            for part in re.split(r"\s{2,}|;\s*", cleaned)
+            if part.strip(" .;:-")
+        ]
+    if not parts:
+        parts = [cleaned]
+    return _normalize_user_recipe_steps(parts)
+
+
 def _try_parse_direct_recipe_from_user_text(text: str) -> list[str] | None:
     """
     Если в сообщении явно распознаны шаги рецепта (минимум 2), возвращает 4–6 шагов.
+    Текст длиннее короткого концепта считаем готовым рецептом даже без нумерации.
     Иначе None — идём в обычный flow с концептами.
     """
     raw = normalize_recipe_steps(extract_recipe_steps_text(text))
     if len(raw) < 2:
-        if not _looks_like_cooking_transcript(text):
+        low = re.sub(r"\s+", " ", (text or "").lower()).strip()
+        if len(low) > _CONCEPT_TEXT_MAX_CHARS:
+            normalized = (
+                _extract_cooking_transcript_steps(text)
+                if _looks_like_cooking_transcript(text)
+                else _split_long_recipe_text_into_steps(text)
+            )
+        else:
             return None
-        normalized = _extract_cooking_transcript_steps(text)
     else:
         if _is_obvious_placeholder_recipe(raw):
             return None

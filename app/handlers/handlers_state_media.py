@@ -1,5 +1,6 @@
 import asyncio
 import re
+import subprocess
 from types import SimpleNamespace
 from telegram import ReplyKeyboardMarkup, ReplyKeyboardRemove
 from telegram.error import NetworkError, RetryAfter, TimedOut
@@ -96,7 +97,7 @@ from ..ai_approval_service import (
     get_ai_approval_config,
 )
 from .handlers_state_commands import _regenerate_image_prompt_from_feedback
-from .handlers_keyboards import first_step_menu_markup, reply_text_without_keyboard
+from .handlers_keyboards import first_step_menu_markup, reply_text_without_keyboard, safe_send_message
 from ..llm_utils import extract_json_object
 from ..multilingual import normalize_language_code
 from ..post_production import build_post_production, probe_video_bytes_dimensions
@@ -115,17 +116,26 @@ from ..scene_media_candidates import (
     resolve_scene_video_for_production,
     selected_image_bytes_for_video,
 )
+from ..scene_media_store import (
+    persist_image_candidate,
+    persist_image_candidate_state,
+    persist_message_link,
+    persist_video_candidate,
+    persist_video_candidate_state,
+)
 from ..scene_speech_budget import (
     append_prompt_timing_hints,
     build_default_speech_plan,
     build_speech_cues_from_plan,
     max_speech_chars_for_duration,
+    normalize_speech_phrase_for_voice,
     speech_budget_for_duration,
     speech_chars_excluding_pauses,
 )
 from ..scene_speech_shorten import shorten_scene_speech_and_sync_video_prompt_sync
 from ..syntax_video_fallback import BatchFallbackRequest
 from ..db import SessionLocal
+from ..vertex_images import primary_image_generation_model
 
 SCENE_SPEECH_WAIT_TIMEOUT_SEC = 600
 SCENE_SPEECH_OPTION_RETRY = "Перегенерировать ещё раз"
@@ -147,6 +157,9 @@ SCENE_IMAGE_EDIT_PENDING_KEY = "scene_image_edit_pending"
 SCENE_VIDEO_FEEDBACK_PENDING_KEY = "scene_video_feedback_pending"
 SCENE_VIDEO_SPEED_PENDING_KEY = "scene_video_speed_pending"
 SCENE_PROMPT_INPUT_PENDING_KEY = "scene_prompt_input_pending"
+SCENE_IMAGE_MODEL_CHOICE_PENDING_KEY = "image_model_choice_pending"
+SCENE_IMAGE_MODEL_RETRY_BUTTON = "ПОВТОРИТЬ СИЛЬНУЮ"
+SCENE_IMAGE_MODEL_DOWNGRADE_BUTTON = "ПОНИЗИТЬ МОДЕЛЬ"
 SCENE_MEDIA_AI_HUMAN_REVIEW_SESSION_KEY = "scene_media_ai_human_review"
 START_IMAGE_MODEL_KEY = "start_frame_image_model"
 END_IMAGE_MODEL_KEY = "end_frame_image_model"
@@ -175,10 +188,187 @@ NAV_BUTTON_PREVIOUS_STEP = "Предыдущий шаг"
 NAV_BUTTON_START_OVER = "В начало"
 _SEND_RETRY_ATTEMPTS = 3
 _SEND_RETRY_BASE_DELAY_SEC = 1.0
+_POST_PRODUCTION_RETRY_ATTEMPTS = 2
+_POST_PRODUCTION_RETRY_DELAY_SEC = 2.0
+
+
+def _persist_image_candidate_best_effort(session: dict | None, *, scene_idx: int, candidate: dict | None) -> None:
+    if not isinstance(session, dict) or not isinstance(candidate, dict):
+        return
+    try:
+        persist_image_candidate(session, scene_idx=scene_idx, candidate=candidate)
+    except Exception:
+        logger.exception("scene_media.persist_image_candidate_failed scene_idx=%s", scene_idx)
+
+
+def _persist_video_candidate_best_effort(session: dict | None, *, scene_idx: int, candidate: dict | None) -> None:
+    if not isinstance(session, dict) or not isinstance(candidate, dict):
+        return
+    try:
+        persist_video_candidate(session, scene_idx=scene_idx, candidate=candidate)
+    except Exception:
+        logger.exception("scene_media.persist_video_candidate_failed scene_idx=%s", scene_idx)
+
+
+def _persist_message_link_best_effort(
+    session: dict | None,
+    *,
+    chat_id: int | None,
+    message_id: int | None,
+    scene_idx: int,
+    media_type: str,
+    candidate_id: str,
+    language: str | None = None,
+    kind: str | None = None,
+) -> None:
+    if chat_id is None or not isinstance(session, dict):
+        return
+    try:
+        persist_message_link(
+            session,
+            chat_id=chat_id,
+            message_id=message_id,
+            scene_idx=scene_idx,
+            media_type=media_type,
+            candidate_id=candidate_id,
+            language=language,
+            kind=kind,
+        )
+    except Exception:
+        logger.exception("scene_media.persist_message_link_failed scene_idx=%s message_id=%s", scene_idx, message_id)
+
+
+def _persist_image_state_best_effort(candidate: dict | None) -> None:
+    if not isinstance(candidate, dict):
+        return
+    try:
+        persist_image_candidate_state(candidate)
+    except Exception:
+        logger.exception("scene_media.persist_image_state_failed candidate_id=%s", candidate.get("candidate_id"))
+
+
+def _persist_video_state_best_effort(candidate: dict | None) -> None:
+    if not isinstance(candidate, dict):
+        return
+    try:
+        persist_video_candidate_state(candidate)
+    except Exception:
+        logger.exception("scene_media.persist_video_state_failed candidate_id=%s", candidate.get("candidate_id"))
 
 
 def _scene_image_model_key(target: str) -> str:
     return END_IMAGE_MODEL_KEY if target == "end" else START_IMAGE_MODEL_KEY
+
+
+def _scene_image_model_manual_key(target: str) -> str:
+    return f"{_scene_image_model_key(target)}_manual"
+
+
+def _is_retryable_post_production_timeout(exc: Exception) -> bool:
+    if isinstance(exc, (TimeoutError, TimedOut, subprocess.TimeoutExpired)):
+        return True
+    low = str(exc or "").strip().lower()
+    return "timed out" in low or "timeout" in low or "time out" in low
+
+
+def _post_production_timeout_user_message() -> str:
+    return (
+        "Финальная сборка ролика заняла слишком много времени. "
+        "Я уже попробовала повторить автоматически; можно запустить сборку ещё раз чуть позже."
+    )
+
+
+def _strip_post_production_inline_video_payloads(value):
+    if isinstance(value, dict):
+        return {
+            str(key): _strip_post_production_inline_video_payloads(item)
+            for key, item in value.items()
+            if str(key) not in {"video_b64", "video_bytes"}
+        }
+    if isinstance(value, list):
+        return [_strip_post_production_inline_video_payloads(item) for item in value]
+    return value
+
+
+def _is_request_entity_too_large_error(exc: Exception) -> bool:
+    low = str(exc or "").lower()
+    return (
+        "request entity too large" in low
+        or "413" in low
+        or "payload too large" in low
+        or "entity too large" in low
+    )
+
+
+async def _reply_final_master_video(
+    message,
+    *,
+    video_bytes: bytes,
+    filename: str,
+    caption: str,
+    label: str,
+    video_path: str | None = None,
+) -> None:
+    stream = io.BytesIO(video_bytes)
+    stream.name = filename
+    try:
+        await _safe_reply_video(
+            message,
+            video=stream,
+            caption=caption,
+            label=label,
+        )
+    except (NetworkError, TimedOut) as exc:
+        if not _is_request_entity_too_large_error(exc):
+            raise
+        logger.warning(
+            "telegram.final_master_too_large label=%s filename=%s bytes=%s path=%s",
+            label,
+            filename,
+            len(video_bytes),
+            video_path or "",
+        )
+        path_note = f"\nПуть к файлу: `{video_path}`" if video_path else ""
+        await _safe_reply_text(
+            message,
+            (
+                f"{caption}\n"
+                "Файл собран, но Telegram не принял его как video: размер payload слишком большой."
+                f"{path_note}"
+            ),
+            parse_mode="Markdown",
+        )
+
+
+async def _build_post_production_with_retries(
+    update: Update,
+    *,
+    session: dict,
+    production: dict,
+    scenes: list[dict],
+) -> dict:
+    project_slug = str(session.get("selected_project_key") or "").strip() or None
+    last_exc: Exception | None = None
+    for attempt in range(1, _POST_PRODUCTION_RETRY_ATTEMPTS + 1):
+        try:
+            post = await asyncio.to_thread(
+                build_post_production,
+                scenes,
+                project_slug=project_slug,
+            )
+            production["post_production"] = _strip_post_production_inline_video_payloads(post)
+            return post
+        except Exception as exc:
+            last_exc = exc
+            if _is_retryable_post_production_timeout(exc) and attempt < _POST_PRODUCTION_RETRY_ATTEMPTS:
+                await update.message.reply_text(
+                    "Финальная сборка заняла слишком много времени. Повторяю автоматически."
+                )
+                await asyncio.sleep(_POST_PRODUCTION_RETRY_DELAY_SEC)
+                continue
+            raise
+    assert last_exc is not None
+    raise last_exc
 
 
 def _set_scene_prompt_input_pending(
@@ -280,12 +470,64 @@ def _enforce_start_prompt_shot_type(scene: dict, prompt: str) -> str:
 
 
 def _scene_image_model_for_generation(scene: dict, target: str) -> str | None:
-    return str(scene.get(_scene_image_model_key(target)) or "").strip() or None
+    if not bool(scene.get(_scene_image_model_manual_key(target))):
+        return None
+    model = str(scene.get(_scene_image_model_key(target)) or "").strip()
+    return model or None
 
 
 def _store_scene_image_model(scene: dict, target: str, model: str | None) -> None:
     if model:
         scene[_scene_image_model_key(target)] = str(model).strip()
+
+
+def _clear_scene_image_model_choice_pending(scene: dict) -> None:
+    scene.pop(SCENE_IMAGE_MODEL_CHOICE_PENDING_KEY, None)
+
+
+def _next_lower_scene_image_model(scene: dict, target: str) -> str | None:
+    return _next_image_quality_model(_scene_image_model_for_generation(scene, target) or primary_image_generation_model())
+
+
+def _scene_image_model_retry_markup(*, lower_model: str | None) -> ReplyKeyboardMarkup:
+    rows = [[SCENE_IMAGE_MODEL_RETRY_BUTTON]]
+    if lower_model:
+        rows.append([SCENE_IMAGE_MODEL_DOWNGRADE_BUTTON])
+    rows.append([NAV_BUTTON_PREVIOUS_STEP])
+    rows.append([NAV_BUTTON_START_OVER])
+    return ReplyKeyboardMarkup(rows, resize_keyboard=True, one_time_keyboard=False)
+
+
+async def _ask_scene_image_model_choice(
+    update: Update,
+    *,
+    scene: dict,
+    target: str,
+    failed_model: str,
+    error: Exception,
+) -> None:
+    lower_model = _next_image_quality_model(failed_model)
+    retry_model = primary_image_generation_model()
+    scene[SCENE_IMAGE_MODEL_CHOICE_PENDING_KEY] = {
+        "target": target,
+        "retry_model": retry_model,
+        "failed_model": failed_model,
+        "lower_model": lower_model or "",
+        "error": str(error),
+    }
+    target_label = "стартовый кадр" if target == "start" else "конечный кадр"
+    if lower_model:
+        tail = (
+            f"Можно повторить на сильной модели `{retry_model}` или понизить до `{lower_model}`. "
+            "Автоматически на модель ниже не ухожу."
+        )
+    else:
+        tail = f"Модели ниже не настроены, могу только повторить сильную `{retry_model}`."
+    await update.message.reply_text(
+        f"Не удалось сгенерировать {target_label} на модели `{failed_model}`.\n"
+        f"Ошибка: {_user_error_message(error)}\n\n{tail}",
+        reply_markup=_scene_image_model_retry_markup(lower_model=lower_model),
+    )
 
 
 def _dedupe_image_reference_bytes(items: list[bytes | None]) -> list[bytes]:
@@ -311,21 +553,11 @@ def _end_frame_reference_images(session: dict, scene: dict, start_bytes: bytes) 
 
 
 def _escalate_scene_image_model(scene: dict, target: str) -> str | None:
-    key = _scene_image_model_key(target)
-    current = str(scene.get(key) or "").strip() or None
-    if not current:
-        return None
-    upgraded = _next_image_quality_model(current)
-    if upgraded and upgraded != current:
-        scene[key] = upgraded
-        return upgraded
     return None
 
 
 def _can_escalate_scene_image_model(scene: dict, target: str) -> bool:
-    current = _scene_image_model_for_generation(scene, target)
-    upgraded = _next_image_quality_model(current)
-    return bool(current and upgraded and upgraded != current)
+    return False
 
 
 def _prepare_ai_image_retry_model_message(scene: dict, target: str) -> str:
@@ -420,7 +652,7 @@ async def _safe_reply_photo(message, *, photo, caption: str) -> None:
     )
 
 
-async def _safe_reply_video(message, *, video, caption: str) -> None:
+async def _safe_reply_video(message, *, video, caption: str, label: str = "reply_video") -> None:
     if isinstance(video, (bytes, bytearray)):
         payload = bytes(video)
         filename = "video.mp4"
@@ -440,7 +672,7 @@ async def _safe_reply_video(message, *, video, caption: str) -> None:
 
     return await _safe_send(
         lambda: message.reply_video(video=_fresh_video(), caption=caption),
-        label="reply_video",
+        label=label,
     )
 
 
@@ -491,6 +723,7 @@ def _approve_scene_video_language(scene: dict, language: str, *, speed_coef: flo
         str(selected.get("candidate_id") or ""),
         speed_coef=speed_coef if speed_coef is not None else _scene_speed_coef(scene, language),
     )
+    _persist_video_state_best_effort(selected)
 
 
 def _set_scene_video_speed(scene: dict, language: str, speed_coef: float) -> bool:
@@ -504,8 +737,10 @@ def _set_scene_video_speed(scene: dict, language: str, speed_coef: float) -> boo
         if latest is None:
             return False
         latest["speed_coef"] = float(speed_coef)
+        _persist_video_state_best_effort(latest)
         return True
     updated["approved_for_production"] = bool(updated.get("approved_for_production"))
+    _persist_video_state_best_effort(updated)
     return True
 
 
@@ -519,6 +754,7 @@ def _apply_scene_like_fallback(session: dict, scene: dict, *, idx: int, text: st
             return "Не нашла такой стартовый кадр в истории сцены."
         candidate = candidates[-ordinal]
         candidate["liked"] = True
+        _persist_image_state_best_effort(candidate)
         return f"Лайк поставлен стартовому кадру сцены {idx + 1}."
     if substep == SCENE_MEDIA_SUBSTEP_END_IMAGE_APPROVAL:
         candidates = image_candidates_for_kind(scene, "end")
@@ -526,6 +762,7 @@ def _apply_scene_like_fallback(session: dict, scene: dict, *, idx: int, text: st
             return "Не нашла такой конечный кадр в истории сцены."
         candidate = candidates[-ordinal]
         candidate["liked"] = True
+        _persist_image_state_best_effort(candidate)
         return f"Лайк поставлен конечному кадру сцены {idx + 1}."
     if substep == SCENE_MEDIA_SUBSTEP_VIDEO:
         language = _scene_current_language(session, scene)
@@ -536,6 +773,7 @@ def _apply_scene_like_fallback(session: dict, scene: dict, *, idx: int, text: st
             return f"Не нашла такое видео для языка {language}."
         candidate = candidates[-ordinal]
         candidate["liked"] = True
+        _persist_video_state_best_effort(candidate)
         return f"Лайк поставлен видео сцены {idx + 1} для языка {language}."
     return "Лайк сейчас можно ставить только на уже сгенерированное изображение или видео."
 
@@ -1308,62 +1546,76 @@ async def _finish_scene_media_production(update: Update, session: dict, *, messa
     )
     if isinstance(production, dict) and isinstance(scenes, list) and scenes:
         try:
-            post = build_post_production(
-                scenes,
-                project_slug=str(session.get("selected_project_key") or "").strip() or None,
+            post = await _build_post_production_with_retries(
+                update,
+                session=session,
+                production=production,
+                scenes=scenes,
             )
-            production["post_production"] = post
             renders = post.get("renders_by_language")
             if isinstance(renders, dict) and renders:
                 for language, payload in renders.items():
                     if not isinstance(payload, dict):
                         continue
-                    clean_b64 = str(((payload.get("clean") or {}).get("video_b64")) or "")
+                    clean_payload = payload.get("clean") or {}
+                    clean_b64 = str((clean_payload.get("video_b64")) or "")
                     clean_bytes = _decode_b64(clean_b64)
                     if clean_bytes:
-                        clean_io = io.BytesIO(clean_bytes)
-                        clean_io.name = f"final_clean_master_{language}.mp4"
-                        await _safe_reply_video(
+                        await _reply_final_master_video(
                             update.message,
-                            video=clean_io,
+                            video_bytes=clean_bytes,
+                            filename=f"final_clean_master_{language}.mp4",
                             caption=f"Финальный clean master готов для языка {language}.",
+                            label=f"reply_video:final_clean_master:{language}",
+                            video_path=str(clean_payload.get("video_path") or "").strip() or None,
                         )
-                    subtitled_b64 = str(((payload.get("subtitled_music") or {}).get("video_b64")) or "")
+                    subtitled_payload = payload.get("subtitled_music") or {}
+                    subtitled_b64 = str((subtitled_payload.get("video_b64")) or "")
                     subtitled_bytes = _decode_b64(subtitled_b64)
                     if subtitled_bytes:
-                        subtitled_io = io.BytesIO(subtitled_bytes)
-                        subtitled_io.name = f"final_subtitled_music_master_{language}.mp4"
-                        await _safe_reply_video(
+                        await _reply_final_master_video(
                             update.message,
-                            video=subtitled_io,
+                            video_bytes=subtitled_bytes,
+                            filename=f"final_subtitled_music_master_{language}.mp4",
                             caption=f"Финальный master с субтитрами и музыкой готов для языка {language}.",
+                            label=f"reply_video:final_subtitled_master:{language}",
+                            video_path=str(subtitled_payload.get("video_path") or "").strip() or None,
                         )
             else:
-                clean_b64 = str(((post.get("final_clean_video") or {}).get("video_b64")) or "")
-                subtitled_b64 = str(((post.get("final_subtitled_music_video") or {}).get("video_b64")) or "")
+                clean_payload = post.get("final_clean_video") or {}
+                subtitled_payload = post.get("final_subtitled_music_video") or {}
+                clean_b64 = str((clean_payload.get("video_b64")) or "")
+                subtitled_b64 = str((subtitled_payload.get("video_b64")) or "")
                 clean_bytes = _decode_b64(clean_b64)
                 if clean_bytes:
-                    clean_io = io.BytesIO(clean_bytes)
-                    clean_io.name = "final_clean_master.mp4"
-                    await _safe_reply_video(
+                    await _reply_final_master_video(
                         update.message,
-                        video=clean_io,
+                        video_bytes=clean_bytes,
+                        filename="final_clean_master.mp4",
                         caption="Финальный clean master готов.",
+                        label="reply_video:final_clean_master",
+                        video_path=str(clean_payload.get("video_path") or "").strip() or None,
                     )
                 subtitled_bytes = _decode_b64(subtitled_b64)
                 if subtitled_bytes:
-                    subtitled_io = io.BytesIO(subtitled_bytes)
-                    subtitled_io.name = "final_subtitled_music_master.mp4"
-                    await _safe_reply_video(
+                    await _reply_final_master_video(
                         update.message,
-                        video=subtitled_io,
+                        video_bytes=subtitled_bytes,
+                        filename="final_subtitled_music_master.mp4",
                         caption="Финальный master с субтитрами и музыкой готов.",
+                        label="reply_video:final_subtitled_master",
+                        video_path=str(subtitled_payload.get("video_path") or "").strip() or None,
                     )
         except Exception as e:
             logger.exception("post production build failed")
             production["post_production"] = {"error": str(e)}
+            user_message = (
+                _post_production_timeout_user_message()
+                if _is_retryable_post_production_timeout(e)
+                else f"Финальную сборку ролика пока не удалось завершить: {_user_error_message(e, domain='video')}"
+            )
             await update.message.reply_text(
-                f"Финальную сборку ролика пока не удалось завершить: {_user_error_message(e, domain='video')}"
+                user_message
             )
     started = await _send_final_social_descriptions(update, session)
     if not started:
@@ -1545,17 +1797,25 @@ def _schedule_scene_speech_timeout(
             if spoken_len <= max_chars:
                 session.pop(SCENE_SPEECH_PENDING_KEY, None)
                 return
-            await context.bot.send_message(
+            await safe_send_message(
+                context.bot,
                 chat_id=chat_id,
                 text="Прошло 10 минут без ответа. Пробую сократить реплику автоматически ещё раз…",
             )
-            shortened = await asyncio.to_thread(
-                shorten_scene_speech_and_sync_video_prompt_sync,
-                scene,
-                duration_sec,
+            shortened = await _call_with_503_retries(
+                None,
+                context,
+                chat_id,
+                "retry_shorten_scene_speech_after_timeout",
+                lambda: asyncio.to_thread(
+                    shorten_scene_speech_and_sync_video_prompt_sync,
+                    scene,
+                    duration_sec,
+                ),
             )
             if shortened is None:
-                await context.bot.send_message(
+                await safe_send_message(
+                    context.bot,
                     chat_id=chat_id,
                     text=(
                         "Снова не получилось автоматически сократить реплику. "
@@ -1580,6 +1840,9 @@ def _schedule_scene_speech_timeout(
                 origin="auto_shorten",
             )
             updated_langs, failed_langs = await _sync_scene_phrase_translations(
+                update=None,
+                context=context,
+                chat_id=chat_id,
                 session=session,
                 scene=scene,
                 scene_idx=idx,
@@ -1592,7 +1855,8 @@ def _schedule_scene_speech_timeout(
                 duration_sec=duration_sec,
                 stage="approval",
             )
-            await context.bot.send_message(
+            await safe_send_message(
+                context.bot,
                 chat_id=chat_id,
                 text=(
                     "Реплика автоматически сокращена.\n"
@@ -1613,6 +1877,12 @@ def _schedule_scene_speech_timeout(
             )
         except asyncio.CancelledError:
             return
+        except ServiceUnavailableRetriesExhaustedError as e:
+            logger.warning("scene speech timeout LLM retries exhausted: %s", e)
+            try:
+                await safe_send_message(context.bot, chat_id=chat_id, text=str(e))
+            except Exception:
+                logger.exception("failed to notify about exhausted scene speech timeout retries")
         except Exception:
             logger.exception("scene speech timeout handler failed")
 
@@ -1700,6 +1970,7 @@ def _set_scene_video_prompt_for_all_languages(session: dict, scene: dict, prompt
 
 def _set_scene_speech_for_language(scene: dict, language: str, text: str) -> None:
     """Store phrase in multilingual map and legacy text field."""
+    text = normalize_speech_phrase_for_voice(text)
     speech_map = scene.get("speech_by_lang")
     if not isinstance(speech_map, dict):
         speech_map = {}
@@ -1721,6 +1992,204 @@ def _scene_speech_for_language(scene: dict, language: str) -> str:
     return ""
 
 
+_DIALOGUE_SPEAKER_ALIASES = {
+    "grandma": "grandma",
+    "бабушка": "grandma",
+    "grandfather": "grandfather",
+    "grandpa": "grandfather",
+    "дедушка": "grandfather",
+    "grandson": "grandson",
+    "внук": "grandson",
+    "granddaughter": "granddaughter",
+    "внучка": "granddaughter",
+}
+
+_DIALOGUE_SPEAKER_PROMPT_LABELS = {
+    "grandma": "GRANDMA",
+    "grandfather": "GRANDFATHER",
+    "grandson": "GRANDSON",
+    "granddaughter": "GRANDDAUGHTER",
+}
+
+
+def _normalize_dialogue_speaker(value: str) -> str:
+    return _DIALOGUE_SPEAKER_ALIASES.get(str(value or "").strip().lower(), str(value or "").strip().lower())
+
+
+def _scene_dialogue_for_language(scene: dict, language: str) -> list[dict[str, str]]:
+    dialogue_map = scene.get("dialogue_by_lang")
+    raw = dialogue_map.get(language) if isinstance(dialogue_map, dict) else None
+    if not isinstance(raw, list) and normalize_language_code(language) == "ru":
+        raw = scene.get("dialogue")
+    if not isinstance(raw, list):
+        return []
+    out: list[dict[str, str]] = []
+    for item in raw:
+        if not isinstance(item, dict):
+            continue
+        speaker = _normalize_dialogue_speaker(item.get("speaker"))
+        text = normalize_speech_phrase_for_voice(str(item.get("text") or "").strip())
+        if speaker and text:
+            out.append({"speaker": speaker, "text": text})
+    return out
+
+
+def _dialogue_voice_lock_full(speaker: str, language: str) -> str:
+    lang = normalize_language_code(language) or "ru"
+    if speaker == "grandma":
+        return (
+            "female voice English language elderly grandmother; neutral English accent; warm calm wise tone; medium slow pace."
+            if lang == "en"
+            else "female voice Russian language elderly grandmother; neutral Russian accent; warm calm wise tone; medium slow pace."
+        )
+    if speaker == "grandfather":
+        return (
+            "male voice English language adult around sixty years old; neutral English accent; tone calm friendly; pitch low to medium; speech rate 0.9."
+            if lang == "en"
+            else "male voice Russian language adult around sixty years old; neutral Russian accent; tone calm friendly; pitch low to medium; speech rate 0.9."
+        )
+    if speaker == "grandson":
+        return (
+            "male child voice English language around eight to ten years old; neutral English accent; tone bright excited; pitch medium to high; speech rate 1.0; clear articulation."
+            if lang == "en"
+            else "male child voice Russian language around eight to ten years old; neutral Russian accent; tone bright excited; pitch medium to high; speech rate 1.0; clear articulation."
+        )
+    if speaker == "granddaughter":
+        return (
+            "female child voice English language around eight to ten years old; neutral English accent; tone bright warm; pitch medium to high; speech rate normal 1.0; clear articulation."
+            if lang == "en"
+            else "female child voice Russian language around eight to ten years old; neutral Russian accent; tone bright warm; pitch medium to high; speech rate normal 1.0; clear articulation."
+        )
+    return (
+        "neutral English voice, medium pitch, calm delivery."
+        if lang == "en"
+        else "neutral Russian voice, medium pitch, calm delivery."
+    )
+
+
+def _strip_dialogue_prompt_metadata(prompt: str) -> str:
+    out = str(prompt or "").strip()
+    patterns = (
+        r"\n?speaker_dialogue_order:\s*[^\n]*",
+        r"\n?character_dialogue_script:\s*(?:\n[^\n:]+:\s*[^\n]*)+",
+        r"\n?voice_lock_full_[a-z_]+:\s*[^\n]*",
+    )
+    for pattern in patterns:
+        out = re.sub(pattern, "", out, flags=re.IGNORECASE)
+    return out.strip()
+
+
+def _append_dialogue_prompt_metadata(prompt: str, scene: dict, language: str) -> str:
+    dialogue = _scene_dialogue_for_language(scene, language)
+    if len(dialogue) < 2:
+        return _strip_dialogue_prompt_metadata(prompt)
+    order: list[str] = []
+    lines: list[str] = []
+    voice_locks: list[str] = []
+    for item in dialogue:
+        speaker = item["speaker"]
+        label = _DIALOGUE_SPEAKER_PROMPT_LABELS.get(speaker, speaker.upper())
+        if label not in order:
+            order.append(label)
+        lines.append(f"{label}: {item['text']}")
+        voice_locks.append(f"voice_lock_full_{speaker}: {_dialogue_voice_lock_full(speaker, language)}")
+    base = _strip_dialogue_prompt_metadata(prompt)
+    metadata = [
+        f"speaker_dialogue_order: {', '.join(order)}",
+        "character_dialogue_script:",
+        *lines,
+        *voice_locks,
+    ]
+    return f"{base}\n" + "\n".join(metadata)
+
+
+def _scene_video_provider_choice_entry(
+    *,
+    prompt: str,
+    model: str,
+    duration_sec: int,
+    start_image: bytes,
+    end_image: bytes | None,
+    quality: str,
+    aspect_ratio: str,
+    audio_enabled: bool,
+    syntax_error_message: str,
+) -> dict:
+    return {
+        "schema": 1,
+        "prompt": prompt,
+        "model": model,
+        "duration_sec": duration_sec,
+        "vertex_duration_sec": 8 if str(model or "").strip().lower().startswith("veo") else duration_sec,
+        "quality": quality,
+        "aspect_ratio": aspect_ratio,
+        "audio_enabled": audio_enabled,
+        "start_image_b64": _encode_b64(start_image),
+        "end_image_b64": _encode_b64(end_image) if end_image else "",
+        "syntax_error_message": (syntax_error_message or "")[:8000],
+    }
+
+
+async def _deliver_scene_video_result(
+    update: Update,
+    *,
+    chat_id: int | None,
+    session: dict,
+    scene: dict,
+    idx: int,
+    total: int,
+    language: str,
+    video_bytes: bytes,
+    provider: str,
+    caption_suffix: str,
+) -> None:
+    vb = io.BytesIO(video_bytes)
+    vb.name = f"scene_{idx + 1}_{language}.mp4"
+    sent_message = await _safe_reply_video(
+        update.message,
+        video=vb,
+        caption=f"Сцена {idx + 1}/{total}, язык {language}: видео готово{caption_suffix}",
+    )
+    cost_summary = _store_scene_video_result(
+        scene,
+        language,
+        video_bytes,
+        session=session,
+        scene_idx=idx,
+        provider=provider,
+        source_image_candidate_id=str((resolve_scene_image_for_video(scene, kind='start') or {}).get("candidate_id") or ""),
+    )
+    latest_candidate = latest_scene_video_candidate(scene, language)
+    register_media_message_candidate(
+        session,
+        message_id=getattr(sent_message, "message_id", None),
+        scene_idx=idx,
+        media_type="video",
+        candidate_id=str((latest_candidate or {}).get("candidate_id") or ""),
+        language=language,
+    )
+    _persist_message_link_best_effort(
+        session,
+        chat_id=chat_id,
+        message_id=getattr(sent_message, "message_id", None),
+        scene_idx=idx,
+        media_type="video",
+        candidate_id=str((latest_candidate or {}).get("candidate_id") or ""),
+        language=language,
+    )
+    width, height = probe_video_bytes_dimensions(video_bytes)
+    if (width, height) != (1080, 1920):
+        await update.message.reply_text(
+            f"Видео {language} пришло в размере {width or '?'}x{height or '?'}. "
+            "На финальной сборке нормализую до 1080x1920."
+        )
+    _set_scene_policy_candidate(scene, language, "")
+    _reset_video_prompt_policy_failure_count(scene)
+    await update.message.reply_text(
+        f"Оценка себестоимости видео ({language}): ~${float(cost_summary['estimated_total_cost_usd']):.4f}."
+    )
+
+
 def _compose_locked_video_prompt(scene: dict, language: str, prompt: str) -> str:
     """
     Build final prompt while locking phrase in CHARACTERS SPEAKS.
@@ -1731,6 +2200,7 @@ def _compose_locked_video_prompt(scene: dict, language: str, prompt: str) -> str
     speech = _scene_speech_for_language(scene, language)
     if speech:
         out = _sync_scene_text_into_video_prompt(out, speech)
+    out = _append_dialogue_prompt_metadata(out, scene, language)
     plan_map = scene.get("speech_plan_by_lang")
     plan = plan_map.get(language) if isinstance(plan_map, dict) else build_default_speech_plan(speech, language)
     out = append_prompt_timing_hints(out, plan, duration_sec=float(scene.get("duration_sec") or 0.0))
@@ -1911,6 +2381,9 @@ def _apply_scene_phrase_update_to_scene(
     phrase = (phrase_text or "").strip()
     lang = normalize_language_code(language) or "ru"
     _set_scene_speech_for_language(scene, lang, phrase)
+    phrase = _scene_speech_for_language(scene, lang)
+    _set_scene_speech_budget_override(scene, lang, False)
+    _refresh_scene_language_speech_metadata(scene, lang, auto_shortened=origin == "auto_shorten")
     locked = _compose_locked_video_prompt(
         scene,
         lang,
@@ -1918,8 +2391,6 @@ def _apply_scene_phrase_update_to_scene(
     )
     _set_scene_video_prompt_for_language(scene, lang, locked)
     _invalidate_scene_language_video(scene, lang)
-    _set_scene_speech_budget_override(scene, lang, False)
-    _refresh_scene_language_speech_metadata(scene, lang, auto_shortened=origin == "auto_shorten")
     if origin:
         _set_scene_phrase_origin(scene, lang, origin)
     languages = _scene_target_languages(session, scene)
@@ -1930,6 +2401,9 @@ def _apply_scene_phrase_update_to_scene(
 
 async def _sync_scene_phrase_translations(
     *,
+    update: Update | None = None,
+    context: ContextTypes.DEFAULT_TYPE | None = None,
+    chat_id: int | None = None,
     session: dict,
     scene: dict,
     scene_idx: int,
@@ -1945,11 +2419,24 @@ async def _sync_scene_phrase_translations(
             continue
         previous_text = _scene_speech_for_language(scene, lang)
         try:
-            translated = await _translate_scene_phrase_adaptive(
-                source_text,
-                lang,
-                previous_translation=previous_text,
-            )
+            if context is not None and chat_id is not None:
+                translated = await _call_with_503_retries(
+                    update,
+                    context,
+                    chat_id,
+                    "sync_scene_phrase_translation",
+                    lambda lang=lang, previous_text=previous_text: _translate_scene_phrase_adaptive(
+                        source_text,
+                        lang,
+                        previous_translation=previous_text,
+                    ),
+                )
+            else:
+                translated = await _translate_scene_phrase_adaptive(
+                    source_text,
+                    lang,
+                    previous_translation=previous_text,
+                )
         except Exception:
             logger.exception("adaptive phrase sync failed", extra={"source_language": source_lang, "target_language": lang})
             failed.append(lang)
@@ -1991,14 +2478,15 @@ async def _translate_scene_phrase_adaptive(
         "Translation must be adaptive and natural for spoken voiceover.\n"
         "Keep it concise enough to fit a short clip; if needed, prefer a shorter natural line over a literal long translation.\n"
         "Keep pauses and emotional accents if present.\n"
+        "Do not use hyphen-minus, en dash, or em dash in the spoken phrase; use words or [пауза] instead.\n"
         "If user feedback is provided, revise the translation according to that feedback.\n"
         "Return only translated phrase.\n\n"
         f"SOURCE:\n{source_text.strip()}\n"
         f"{feedback_block}"
     )
     raw = await asyncio.to_thread(gemini_generate_sync, prompt)
-    out = (raw or "").strip()
-    return out or source_text.strip()
+    out = normalize_speech_phrase_for_voice(raw or "")
+    return out or normalize_speech_phrase_for_voice(source_text)
 
 
 async def _apply_scene_phrase_update(
@@ -2096,13 +2584,15 @@ def _store_scene_video_result(
             auto_shortened=_scene_phrase_origin(scene, language) == "auto_shorten",
         )
     scene["video_results_by_lang"] = results
-    register_video_candidate(
+    candidate = register_video_candidate(
         scene,
         language=language,
         video_bytes=payload,
         source_image_candidate_id=source_image_candidate_id,
         speed_coef=DEFAULT_SCENE_VIDEO_SPEED_COEF,
     )
+    if session is not None and scene_idx is not None:
+        _persist_video_candidate_best_effort(session, scene_idx=scene_idx, candidate=candidate)
     approvals = scene.get("video_approvals_by_lang")
     if not isinstance(approvals, dict):
         approvals = {}
@@ -2537,18 +3027,20 @@ async def _scene_media_start_ok(
         await update.message.reply_text("Внимание: референсы для сцены указаны, но ни один файл не загрузился. Проверь пути в `references`.")
     if not auto_approve:
         await reply_text_without_keyboard(update.message, "Генерируем стартовый кадр, ждите.")
+    image_model = _scene_image_model_for_generation(scene, "start") or primary_image_generation_model()
     try:
         image_result = await _generate_scene_image_result(
             prompt,
             reference_images=scene_refs if scene_refs else None,
-            model=_scene_image_model_for_generation(scene, "start"),
+            model=image_model,
         )
         image_bytes = image_result.data
         _store_scene_image_model(scene, "start", image_result.model)
+        _clear_scene_image_model_choice_pending(scene)
         add_scene_shared_cost(scene, estimate_image_generation_cost_usd(image_result.model))
     except Exception as e:
         logger.exception("vertex image generation failed")
-        await update.message.reply_text(f"Ошибка генерации изображения: {e}")
+        await _ask_scene_image_model_choice(update, scene=scene, target="start", failed_model=image_model, error=e)
         return True
     bio = io.BytesIO(image_bytes)
     bio.name = f"scene_{idx + 1}.png"
@@ -2559,8 +3051,18 @@ async def _scene_media_start_ok(
     )
     scene["start_frame_image_b64"] = _encode_b64(image_bytes)
     image_candidate = register_image_candidate(scene, kind="start", image_bytes=image_bytes)
+    _persist_image_candidate_best_effort(session, scene_idx=idx, candidate=image_candidate)
     register_media_message_candidate(
         session,
+        message_id=getattr(sent_message, "message_id", None),
+        scene_idx=idx,
+        media_type="image",
+        candidate_id=str(image_candidate["candidate_id"]),
+        kind="start",
+    )
+    _persist_message_link_best_effort(
+        session,
+        chat_id=chat_id,
         message_id=getattr(sent_message, "message_id", None),
         scene_idx=idx,
         media_type="image",
@@ -2614,8 +3116,7 @@ async def _scene_media_start_ok(
         "«ОК» — перейти дальше к видео/конечному кадру.\n"
         "«ИЗМЕНИТЬ» — поправить текущее изображение по вашему описанию.\n"
         "«ФИДБЕК» — пришлите, что исправить, и перегенерирую промпт + изображение.\n"
-        "«ПЕРЕГЕНЕРИРОВАТЬ» — запущу снова с тем же промптом, входными данными и моделью.\n"
-        "«ПОВЫСИТЬ МОДЕЛЬ» — если доступно, сразу перегенерировать на следующей модели.",
+        "«ПЕРЕГЕНЕРИРОВАТЬ» — запущу снова с тем же промптом, входными данными и моделью.",
         reply_markup=scene_generated_image_approval_markup(
             include_model_upgrade=_can_escalate_scene_image_model(scene, "start"),
             session=session,
@@ -2744,8 +3245,19 @@ async def _scene_media_edit_generated_image(
     )
     scene[image_key] = _encode_b64(edited_bytes)
     image_candidate = register_image_candidate(scene, kind="end" if is_end else "start", image_bytes=edited_bytes)
+    _persist_image_candidate_best_effort(session, scene_idx=idx, candidate=image_candidate)
     register_media_message_candidate(
         session,
+        message_id=getattr(sent_message, "message_id", None),
+        scene_idx=idx,
+        media_type="image",
+        candidate_id=str(image_candidate["candidate_id"]),
+        kind="end" if is_end else "start",
+    )
+    effective_chat = getattr(update, "effective_chat", None)
+    _persist_message_link_best_effort(
+        session,
+        chat_id=getattr(effective_chat, "id", None),
         message_id=getattr(sent_message, "message_id", None),
         scene_idx=idx,
         media_type="image",
@@ -2800,18 +3312,20 @@ async def _scene_media_end_ok(update: Update, *, session: dict, scene: dict, idx
     )
     if not auto_approve:
         await reply_text_without_keyboard(update.message, "Генерируем конечный кадр (референс — стартовый), ждите.")
+    image_model = _scene_image_model_for_generation(scene, "end") or primary_image_generation_model()
     try:
         end_result = await _generate_scene_image_result(
             end_full if raw_end_mode else f"{end_full}\n\n{_end_frame_delta_instruction(scene)}",
             reference_images=end_references,
-            model=_scene_image_model_for_generation(scene, "end"),
+            model=image_model,
         )
         end_bytes = end_result.data
         _store_scene_image_model(scene, "end", end_result.model)
+        _clear_scene_image_model_choice_pending(scene)
         add_scene_shared_cost(scene, estimate_image_generation_cost_usd(end_result.model))
     except Exception as e:
         logger.exception("vertex end-frame generation failed")
-        await update.message.reply_text(f"Ошибка генерации конечного кадра: {e}")
+        await _ask_scene_image_model_choice(update, scene=scene, target="end", failed_model=image_model, error=e)
         return True
     end_bio = io.BytesIO(end_bytes)
     end_bio.name = f"scene_{idx + 1}_end.png"
@@ -2822,8 +3336,19 @@ async def _scene_media_end_ok(update: Update, *, session: dict, scene: dict, idx
     )
     scene["end_frame_image_b64"] = _encode_b64(end_bytes)
     image_candidate = register_image_candidate(scene, kind="end", image_bytes=end_bytes)
+    _persist_image_candidate_best_effort(session, scene_idx=idx, candidate=image_candidate)
     register_media_message_candidate(
         session,
+        message_id=getattr(sent_message, "message_id", None),
+        scene_idx=idx,
+        media_type="image",
+        candidate_id=str(image_candidate["candidate_id"]),
+        kind="end",
+    )
+    effective_chat = getattr(update, "effective_chat", None)
+    _persist_message_link_best_effort(
+        session,
+        chat_id=getattr(effective_chat, "id", None),
         message_id=getattr(sent_message, "message_id", None),
         scene_idx=idx,
         media_type="image",
@@ -2874,8 +3399,7 @@ async def _scene_media_end_ok(update: Update, *, session: dict, scene: dict, idx
         "«ОК» — перейти к видео.\n"
         "«ИЗМЕНИТЬ» — поправить текущее изображение по вашему описанию.\n"
         "«ФИДБЕК» — пришлите, что исправить, и перегенерирую промпт + изображение.\n"
-        "«ПЕРЕГЕНЕРИРОВАТЬ» — запущу снова с тем же промптом, входными данными и моделью.\n"
-        "«ПОВЫСИТЬ МОДЕЛЬ» — если доступно, сразу перегенерировать на следующей модели.",
+        "«ПЕРЕГЕНЕРИРОВАТЬ» — запущу снова с тем же промптом, входными данными и моделью.",
         reply_markup=scene_generated_image_approval_markup(
             include_model_upgrade=_can_escalate_scene_image_model(scene, "end"),
             session=session,
@@ -2924,7 +3448,8 @@ async def _scene_media_start_image_approval_step(
     if low in {"ок", "ok", "okay", "approve"}:
         selected = resolve_scene_image_for_video(scene, kind="start")
         if selected is not None:
-            mark_image_candidate_approved(scene, str(selected.get("candidate_id") or ""))
+            approved = mark_image_candidate_approved(scene, str(selected.get("candidate_id") or ""))
+            _persist_image_state_best_effort(approved)
         session["scene_media_substep"] = (
             SCENE_MEDIA_SUBSTEP_END if _scene_needs_end_frame_step(scene) else SCENE_MEDIA_SUBSTEP_VIDEO
         )
@@ -3024,7 +3549,8 @@ async def _scene_media_end_image_approval_step(
     if low in {"ок", "ok", "okay", "approve"}:
         selected = resolve_scene_image_for_video(scene, kind="end")
         if selected is not None:
-            mark_image_candidate_approved(scene, str(selected.get("candidate_id") or ""))
+            approved = mark_image_candidate_approved(scene, str(selected.get("candidate_id") or ""))
+            _persist_image_state_best_effort(approved)
         session["scene_media_substep"] = SCENE_MEDIA_SUBSTEP_VIDEO
         await _send_next_scene_media_step(update, session)
         return True
@@ -3365,11 +3891,25 @@ async def _maybe_shorten_scene_speech_for_video_budget(
         await update.message.reply_text(
             "Реплика длиннее лимита озвучки — отправляю описание нейросети для сокращения…"
         )
-    shortened = await asyncio.to_thread(
-        shorten_scene_speech_and_sync_video_prompt_sync,
-        scene,
-        duration_sec,
-    )
+    try:
+        shortened = await _call_with_503_retries(
+            update,
+            context,
+            chat_id,
+            "shorten_scene_speech_for_video_budget",
+            lambda: asyncio.to_thread(
+                shorten_scene_speech_and_sync_video_prompt_sync,
+                scene,
+                duration_sec,
+            ),
+        )
+    except ServiceUnavailableRetriesExhaustedError as e:
+        await update.message.reply_text(str(e))
+        return True
+    except Exception as e:
+        logger.exception("scene speech auto-shorten failed")
+        await update.message.reply_text(f"Не удалось автоматически сократить реплику: {_user_error_message(e)}")
+        return True
     if shortened is None:
         _refresh_scene_language_speech_metadata(scene, "ru", status="overflow")
         _set_scene_speech_pending(
@@ -3405,6 +3945,9 @@ async def _maybe_shorten_scene_speech_for_video_budget(
         origin="auto_shorten",
     )
     updated_langs, failed_langs = await _sync_scene_phrase_translations(
+        update=update,
+        context=context,
+        chat_id=chat_id,
         session=session,
         scene=scene,
         scene_idx=scene_idx,
@@ -3487,6 +4030,8 @@ def _boost_scene_prompt_delivery(prompt: str, language: str) -> str:
 async def _maybe_adjust_english_speech_for_video_budget(
     update: Update,
     *,
+    context: ContextTypes.DEFAULT_TYPE | None = None,
+    chat_id: int | None = None,
     session: dict,
     scene: dict,
     duration_sec: int,
@@ -3516,14 +4061,28 @@ async def _maybe_adjust_english_speech_for_video_budget(
             "English line is near the timing limit, so I boosted delivery speed in the EN video prompt."
         )
         return False
-    shortened = await asyncio.to_thread(
-        shorten_scene_speech_and_sync_video_prompt_sync,
-        scene,
-        duration_sec,
-        language="en",
-        current_text=text_en,
-        current_video_prompt=boosted_prompt,
-    )
+    try:
+        shortened = await _call_with_503_retries(
+            update,
+            context,
+            chat_id,
+            "shorten_english_scene_speech_for_video_budget",
+            lambda: asyncio.to_thread(
+                shorten_scene_speech_and_sync_video_prompt_sync,
+                scene,
+                duration_sec,
+                language="en",
+                current_text=text_en,
+                current_video_prompt=boosted_prompt,
+            ),
+        )
+    except ServiceUnavailableRetriesExhaustedError as e:
+        await update.message.reply_text(str(e))
+        return True
+    except Exception as e:
+        logger.exception("english scene speech auto-shorten failed")
+        await update.message.reply_text(f"Не удалось автоматически сократить EN-реплику: {_user_error_message(e)}")
+        return True
     if shortened is None:
         _refresh_scene_language_speech_metadata(scene, "en", status="overflow")
         await update.message.reply_text(
@@ -3592,6 +4151,8 @@ async def _scene_media_video_ok(
     if "en" in languages and not any(_scene_video_prompt_raw(scene, lang) for lang in languages):
         should_stop = await _maybe_adjust_english_speech_for_video_budget(
             update,
+            context=context,
+            chat_id=chat_id,
             session=session,
             scene=scene,
             duration_sec=duration_sec,
@@ -3694,7 +4255,65 @@ async def _scene_media_video_ok(
                 model=model,
                 duration_sec=duration_sec,
             )
-            if syntax_batch_results:
+            expected_syntax_keys = {str(req.key) for req in batch_requests}
+            returned_syntax_keys = set(syntax_batch_results)
+            missing_syntax_keys = sorted(expected_syntax_keys - returned_syntax_keys)
+            if missing_syntax_keys:
+                for language in sorted(returned_syntax_keys):
+                    await _deliver_scene_video_result(
+                        update,
+                        chat_id=int(chat_id) if chat_id is not None else 0,
+                        session=session,
+                        scene=scene,
+                        idx=idx,
+                        total=total,
+                        language=language,
+                        video_bytes=syntax_batch_results[language],
+                        provider="telegram",
+                        caption_suffix=". Источник: Syntax.",
+                    )
+                scene["video_provider_choice_pending"] = {
+                    "source": "scene_batch",
+                    "languages": missing_syntax_keys,
+                    "missing_languages": missing_syntax_keys,
+                    "entries_by_lang": {
+                        language: _scene_video_provider_choice_entry(
+                            prompt=prompts_by_language.get(language, ""),
+                            model=model,
+                            duration_sec=duration_sec,
+                            start_image=start_bytes,
+                            end_image=end_bytes,
+                            quality="1080",
+                            aspect_ratio="9:16",
+                            audio_enabled=True,
+                            syntax_error_message=(
+                                "Syntax вернул не весь набор языков. "
+                                f"Не пришли: {', '.join(missing_syntax_keys)}."
+                            ),
+                        )
+                        for language in missing_syntax_keys
+                        if prompts_by_language.get(language, "")
+                    },
+                }
+                ready_syntax_keys = sorted(returned_syntax_keys)
+                await _reply_text_with_optional_markup(
+                    update,
+                    (
+                        "Syntax вернул не весь набор языков. Автоматически в Vertex не ухожу.\n\n"
+                        f"Языки сцены: {', '.join(sorted(expected_syntax_keys))}\n"
+                        f"Готово из Syntax: {', '.join(ready_syntax_keys) or 'ничего'}\n"
+                        f"Не пришли из Syntax: {', '.join(missing_syntax_keys)}\n\n"
+                        "Напишите `Syntax`, чтобы отправить недостающие языки ещё раз через Syntax, "
+                        "или `Vertex`, чтобы запустить Vertex/Veo для недостающих языков."
+                    ),
+                    reply_markup=ReplyKeyboardMarkup(
+                        [["Syntax"], ["Vertex"], [NAV_BUTTON_PREVIOUS_STEP], [NAV_BUTTON_START_OVER]],
+                        resize_keyboard=True,
+                        one_time_keyboard=False,
+                    ),
+                )
+                return True
+            elif syntax_batch_results:
                 await reply_text_without_keyboard(
                     update.message,
                     "Syntax already returned: " + ", ".join(sorted(syntax_batch_results)),
@@ -3705,8 +4324,8 @@ async def _scene_media_video_ok(
             _generate_for_language(
                 lang,
                 syntax_video=syntax_batch_results.get(lang),
-                skip_initial_syntax=bool(syntax_batch_results or len(pending_languages) > 1),
-                disable_syntax_fallback=len(pending_languages) > 1,
+                skip_initial_syntax=bool(syntax_batch_results),
+                disable_syntax_fallback=False,
             )
             for lang in pending_languages
         ]
@@ -3714,43 +4333,18 @@ async def _scene_media_video_ok(
 
     for language, video_bytes, err in generated:
         if video_bytes is not None:
-            vb = io.BytesIO(video_bytes)
-            vb.name = f"scene_{idx + 1}_{language}.mp4"
-            sent_message = await _safe_reply_video(
-                update.message,
-                video=vb,
-                caption=f"Сцена {idx + 1}/{total}, язык {language}: видео готово.",
-            )
             provider = get_last_video_provider() or ("telegram" if syntax_batch_results.get(language) is not None else "veo")
-            cost_summary = _store_scene_video_result(
-                scene,
-                language,
-                video_bytes,
+            await _deliver_scene_video_result(
+                update,
+                chat_id=int(chat_id) if chat_id is not None else 0,
                 session=session,
-                scene_idx=idx,
-                provider=provider,
-                source_image_candidate_id=str(selected_start_image.get("candidate_id") or "") if selected_start_image else None,
-            )
-            latest_candidate = latest_scene_video_candidate(scene, language)
-            register_media_message_candidate(
-                session,
-                message_id=getattr(sent_message, "message_id", None),
-                scene_idx=idx,
-                media_type="video",
-                candidate_id=str((latest_candidate or {}).get("candidate_id") or ""),
+                scene=scene,
+                idx=idx,
+                total=total,
                 language=language,
-            )
-            width, height = probe_video_bytes_dimensions(video_bytes)
-            if (width, height) != (1080, 1920):
-                await update.message.reply_text(
-                    f"Видео {language} пришло в размере {width or '?'}x{height or '?'}. "
-                    "На финальной сборке нормализую до 1080x1920."
-                )
-            _set_scene_policy_candidate(scene, language, "")
-            _reset_video_prompt_policy_failure_count(scene)
-            await update.message.reply_text(
-                f"Оценка себестоимости видео ({language}): ~${float(cost_summary['estimated_total_cost_usd']):.4f} "
-                f"(Gemini/media-side + image generation estimate)."
+                video_bytes=video_bytes,
+                provider=provider,
+                caption_suffix=".",
             )
             continue
         if err is None:
@@ -4236,6 +4830,15 @@ async def _handle_scene_syntax_fallback_pending(
         candidate_id=str((latest_candidate or {}).get("candidate_id") or ""),
         language=language,
     )
+    _persist_message_link_best_effort(
+        session,
+        chat_id=chat_id,
+        message_id=getattr(sent_message, "message_id", None),
+        scene_idx=idx,
+        media_type="video",
+        candidate_id=str((latest_candidate or {}).get("candidate_id") or ""),
+        language=language,
+    )
     _set_scene_policy_candidate(scene, language, "")
     _reset_video_prompt_policy_failure_count(scene)
     await update.message.reply_text(
@@ -4267,6 +4870,78 @@ async def _handle_scene_syntax_fallback_pending(
     return True
 
 
+async def _handle_scene_image_model_choice_pending(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+    *,
+    chat_id: int,
+    session: dict,
+    text: str,
+) -> bool:
+    scenes, idx = _scene_media_context(session)
+    if not scenes or idx >= len(scenes):
+        return False
+    scene = scenes[idx]
+    pending = scene.get(SCENE_IMAGE_MODEL_CHOICE_PENDING_KEY)
+    if not isinstance(pending, dict):
+        return False
+    if update.message is None:
+        return True
+    target = "end" if str(pending.get("target") or "").strip() == "end" else "start"
+    low = str(text or "").strip().lower()
+    retry_model = str(pending.get("retry_model") or primary_image_generation_model()).strip() or primary_image_generation_model()
+    lower_model = str(pending.get("lower_model") or "").strip()
+    retry_commands = {
+        SCENE_IMAGE_MODEL_RETRY_BUTTON.lower(),
+        "повторить",
+        "повторить сильную",
+        "retry",
+        "retry strong",
+        "strong",
+    }
+    downgrade_commands = {
+        SCENE_IMAGE_MODEL_DOWNGRADE_BUTTON.lower(),
+        "понизить",
+        "понизить модель",
+        "downgrade",
+        "lower",
+    }
+    if low not in retry_commands and low not in downgrade_commands:
+        await update.message.reply_text(
+            "Выберите, что делать с неудачной генерацией изображения: повторить сильную модель или понизить модель.",
+            reply_markup=_scene_image_model_retry_markup(lower_model=lower_model),
+        )
+        return True
+    if low in downgrade_commands:
+        if not lower_model:
+            await update.message.reply_text(
+                f"Модель ниже не настроена. Могу повторить сильную `{retry_model}`.",
+                reply_markup=_scene_image_model_retry_markup(lower_model=None),
+            )
+            return True
+        selected_model = lower_model
+        await update.message.reply_text(f"Понижаю модель до `{selected_model}` и перегенерирую кадр.")
+        scene[_scene_image_model_manual_key(target)] = True
+    else:
+        selected_model = retry_model
+        await update.message.reply_text(f"Повторяю генерацию на сильной модели `{selected_model}`.")
+        scene.pop(_scene_image_model_manual_key(target), None)
+    scene[_scene_image_model_key(target)] = selected_model
+    _clear_scene_image_model_choice_pending(scene)
+    if target == "end":
+        session["scene_media_substep"] = SCENE_MEDIA_SUBSTEP_END
+        return await _scene_media_end_ok(update, session=session, scene=scene, idx=idx)
+    session["scene_media_substep"] = SCENE_MEDIA_SUBSTEP_START
+    return await _scene_media_start_ok(
+        update,
+        context=context,
+        chat_id=chat_id,
+        session=session,
+        scene=scene,
+        idx=idx,
+    )
+
+
 async def _handle_scene_video_provider_choice_pending(
     update: Update,
     context: ContextTypes.DEFAULT_TYPE,
@@ -4283,7 +4958,7 @@ async def _handle_scene_video_provider_choice_pending(
         return False
     scene = scenes[idx]
     pending = scene.get("video_provider_choice_pending")
-    if not isinstance(pending, dict) or pending.get("source") != "scene":
+    if not isinstance(pending, dict) or pending.get("source") not in {"scene", "scene_batch"}:
         return False
     if session.get("scene_media_substep") != SCENE_MEDIA_SUBSTEP_VIDEO:
         return False
@@ -4303,6 +4978,137 @@ async def _handle_scene_video_provider_choice_pending(
         return True
 
     total = len(scenes)
+    if pending.get("source") == "scene_batch":
+        entries_by_lang = pending.get("entries_by_lang")
+        languages = [
+            normalize_language_code(str(lang)) or str(lang)
+            for lang in pending.get("languages", [])
+            if str(lang).strip()
+        ]
+        if not isinstance(entries_by_lang, dict) or not languages:
+            scene.pop("video_provider_choice_pending", None)
+            await update.message.reply_text("Не нашла корректные данные для повторного выбора провайдера видео.")
+            return True
+        if choice == "syntax":
+            await update.message.reply_text(
+                "Повторяю эту сцену через Syntax сразу для всех языков…"
+            )
+            requests = [
+                BatchFallbackRequest(
+                    key=language,
+                    prompt=str(entries_by_lang.get(language, {}).get("prompt") or ""),
+                    start_image=_decode_b64(str(entries_by_lang.get(language, {}).get("start_image_b64") or "")),
+                    end_image=(
+                        _decode_b64(str(entries_by_lang.get(language, {}).get("end_image_b64") or ""))
+                        if str(entries_by_lang.get(language, {}).get("end_image_b64") or "").strip()
+                        else None
+                    ),
+                )
+                for language in languages
+                if isinstance(entries_by_lang.get(language), dict) and str(entries_by_lang.get(language, {}).get("prompt") or "").strip()
+            ]
+            try:
+                syntax_batch_results = await _attempt_syntax_video_fallback_batch(
+                    requests=requests,
+                    model=str(next(iter(entries_by_lang.values())).get("model") or scene.get("model") or "veo3_fast"),
+                    duration_sec=int(next(iter(entries_by_lang.values())).get("duration_sec") or scene.get("duration_sec") or 6),
+                )
+            except Exception as fb_err:
+                logger.exception("scene Syntax batch retry execution failed")
+                await update.message.reply_text(
+                    f"Ошибка Syntax: {_user_error_message(fb_err, domain='video')}"
+                )
+                return True
+            missing = [language for language in languages if language not in syntax_batch_results]
+            if missing:
+                for language in sorted(set(syntax_batch_results) & set(languages)):
+                    await _deliver_scene_video_result(
+                        update,
+                        chat_id=chat_id,
+                        session=session,
+                        scene=scene,
+                        idx=idx,
+                        total=total,
+                        language=language,
+                        video_bytes=syntax_batch_results[language],
+                        provider="telegram",
+                        caption_suffix=". Источник: Syntax.",
+                    )
+                entries_by_lang = {
+                    language: entries_by_lang[language]
+                    for language in missing
+                    if isinstance(entries_by_lang.get(language), dict)
+                }
+                pending["missing_languages"] = missing
+                pending["languages"] = missing
+                pending["entries_by_lang"] = entries_by_lang
+                await _reply_text_with_optional_markup(
+                    update,
+                    (
+                        "Syntax снова вернул не все видео.\n\n"
+                        f"Готово: {', '.join(sorted(syntax_batch_results)) or 'ничего'}\n"
+                        f"Не пришли: {', '.join(missing)}\n\n"
+                        "Напишите `Syntax`, чтобы ещё раз отправить недостающие языки в Syntax, "
+                        "или `Vertex`, чтобы переключить недостающие языки сцены на Vertex/Veo."
+                    ),
+                    reply_markup=ReplyKeyboardMarkup(
+                        [["Syntax"], ["Vertex"], [NAV_BUTTON_PREVIOUS_STEP], [NAV_BUTTON_START_OVER]],
+                        resize_keyboard=True,
+                        one_time_keyboard=False,
+                    ),
+                )
+                return True
+            scene.pop("video_provider_choice_pending", None)
+            for language in languages:
+                await _deliver_scene_video_result(
+                    update,
+                    chat_id=chat_id,
+                    session=session,
+                    scene=scene,
+                    idx=idx,
+                    total=total,
+                    language=language,
+                    video_bytes=syntax_batch_results[language],
+                    provider="telegram",
+                    caption_suffix=". Источник: Syntax.",
+                )
+            return True
+
+        await update.message.reply_text("Пробую резервный канал Vertex/Veo для всех языков сцены…")
+        async def _vertex_for_language(language: str) -> tuple[str, bytes | None, Exception | None]:
+            payload = entries_by_lang.get(language, {})
+            try:
+                return language, await run_vertex_fallback_from_session_payload(payload), None
+            except Exception as err:
+                return language, None, err
+
+        results = await asyncio.gather(*[_vertex_for_language(language) for language in languages])
+        scene.pop("video_provider_choice_pending", None)
+        for language, video_bytes, err in results:
+            if err is not None:
+                logger.exception("scene Vertex batch fallback execution failed for language=%s", language, exc_info=err)
+                await update.message.reply_text(
+                    f"Ошибка резервного Vertex для {language}: {_user_error_message(err, domain='video')}"
+                )
+                continue
+            if video_bytes is None:
+                continue
+            payload = entries_by_lang.get(language, {})
+            vertex_duration_sec = int(payload.get("vertex_duration_sec") or payload.get("duration_sec") or 6)
+            await _deliver_scene_video_result(
+                update,
+                chat_id=chat_id,
+                session=session,
+                scene=scene,
+                idx=idx,
+                total=total,
+                language=language,
+                video_bytes=video_bytes,
+                provider="veo",
+                caption_suffix=f" ({vertex_duration_sec} сек). Источник: Vertex fallback.",
+            )
+        return True
+
     language = normalize_language_code(
         str(pending.get("language") or _scene_current_language(session, scene))
     ) or _scene_current_language(session, scene)
@@ -4323,35 +5129,17 @@ async def _handle_scene_video_provider_choice_pending(
             )
             return True
         scene.pop("video_provider_choice_pending", None)
-        vb = io.BytesIO(video_bytes)
-        vb.name = f"scene_{idx + 1}_{language}.mp4"
-        sent_message = await _safe_reply_video(
-            update.message,
-            video=vb,
-            caption=f"Сцена {idx + 1}/{total}, язык {language}: видео готово. Источник: Syntax.",
-        )
-        cost_summary = _store_scene_video_result(
-            scene,
-            language,
-            video_bytes,
+        await _deliver_scene_video_result(
+            update,
+            chat_id=chat_id,
             session=session,
-            scene_idx=idx,
-            provider="telegram",
-            source_image_candidate_id=str((resolve_scene_image_for_video(scene, kind='start') or {}).get("candidate_id") or ""),
-        )
-        latest_candidate = latest_scene_video_candidate(scene, language)
-        register_media_message_candidate(
-            session,
-            message_id=getattr(sent_message, "message_id", None),
-            scene_idx=idx,
-            media_type="video",
-            candidate_id=str((latest_candidate or {}).get("candidate_id") or ""),
+            scene=scene,
+            idx=idx,
+            total=total,
             language=language,
-        )
-        _set_scene_policy_candidate(scene, language, "")
-        _reset_video_prompt_policy_failure_count(scene)
-        await update.message.reply_text(
-            f"Оценка себестоимости видео ({language}): ~${float(cost_summary['estimated_total_cost_usd']):.4f}."
+            video_bytes=video_bytes,
+            provider="telegram",
+            caption_suffix=". Источник: Syntax.",
         )
     else:
         await update.message.reply_text("Пробую резервный канал Vertex/Veo…")
@@ -4365,38 +5153,17 @@ async def _handle_scene_video_provider_choice_pending(
             return True
         scene.pop("video_provider_choice_pending", None)
         vertex_duration_sec = int(pending.get("vertex_duration_sec") or pending.get("duration_sec") or 6)
-        vb = io.BytesIO(video_bytes)
-        vb.name = f"scene_{idx + 1}_{language}.mp4"
-        sent_message = await _safe_reply_video(
-            update.message,
-            video=vb,
-            caption=(
-                f"Сцена {idx + 1}/{total}, язык {language}: видео готово "
-                f"({vertex_duration_sec} сек). Источник: Vertex fallback."
-            ),
-        )
-        cost_summary = _store_scene_video_result(
-            scene,
-            language,
-            video_bytes,
+        await _deliver_scene_video_result(
+            update,
+            chat_id=chat_id,
             session=session,
-            scene_idx=idx,
-            provider="veo",
-            source_image_candidate_id=str((resolve_scene_image_for_video(scene, kind='start') or {}).get("candidate_id") or ""),
-        )
-        latest_candidate = latest_scene_video_candidate(scene, language)
-        register_media_message_candidate(
-            session,
-            message_id=getattr(sent_message, "message_id", None),
-            scene_idx=idx,
-            media_type="video",
-            candidate_id=str((latest_candidate or {}).get("candidate_id") or ""),
+            scene=scene,
+            idx=idx,
+            total=total,
             language=language,
-        )
-        _set_scene_policy_candidate(scene, language, "")
-        _reset_video_prompt_policy_failure_count(scene)
-        await update.message.reply_text(
-            f"Оценка себестоимости видео ({language}): ~${float(cost_summary['estimated_total_cost_usd']):.4f}."
+            video_bytes=video_bytes,
+            provider="veo",
+            caption_suffix=f" ({vertex_duration_sec} сек). Источник: Vertex fallback.",
         )
 
     requires_multilingual_approval = (
@@ -4441,6 +5208,17 @@ async def _handle_waiting_scene_media_state(
         if isinstance(pending, dict):
             _cancel_scene_speech_timeout(chat_id)
             session.pop(SCENE_SPEECH_PENDING_KEY, None)
+        scenes_for_pending, idx_for_pending = _scene_media_context(session)
+        if (
+            scenes_for_pending
+            and idx_for_pending < len(scenes_for_pending)
+            and isinstance(scenes_for_pending[idx_for_pending].get(SCENE_IMAGE_MODEL_CHOICE_PENDING_KEY), dict)
+        ):
+            await update.message.reply_text(
+                "ИИ апрув включён, но текущий кадр требует решения по модели. "
+                f"Выберите `{SCENE_IMAGE_MODEL_RETRY_BUTTON}` или `{SCENE_IMAGE_MODEL_DOWNGRADE_BUTTON}`."
+            )
+            return True
         await update.message.reply_text(
             "Включён 🤖 ИИ апрув. Теперь промты, стартовые фреймы и видео будут проверяться ИИ по чек-листу. "
             "Хорошие результаты будут проходить автоматически, спорные будут отправляться на ручную проверку. "
@@ -4465,11 +5243,12 @@ async def _handle_waiting_scene_media_state(
             and (
                 isinstance(scenes_for_pending[idx_for_pending].get("syntax_fallback_pending"), dict)
                 or isinstance(scenes_for_pending[idx_for_pending].get("video_provider_choice_pending"), dict)
+                or isinstance(scenes_for_pending[idx_for_pending].get(SCENE_IMAGE_MODEL_CHOICE_PENDING_KEY), dict)
             )
         ):
             await update.message.reply_text(
-                "Автоапрув включён, но текущий шаг видео требует отдельного решения по провайдеру. "
-                "Сначала выберите `Syntax` или `Vertex`, после этого продолжу без апрувов."
+                "Автоапрув включён, но текущий шаг требует отдельного решения. "
+                "Сначала выберите вариант на кнопках, после этого продолжу без апрувов."
             )
             return True
         await update.message.reply_text(
@@ -4487,6 +5266,10 @@ async def _handle_waiting_scene_media_state(
     ):
         return True
     if await _handle_scene_syntax_fallback_pending(
+        update, context, chat_id=chat_id, session=session, text=text
+    ):
+        return True
+    if await _handle_scene_image_model_choice_pending(
         update, context, chat_id=chat_id, session=session, text=text
     ):
         return True
@@ -4861,6 +5644,9 @@ async def _handle_waiting_scene_media_state(
                 origin="user",
             )
             updated_langs, failed_langs = await _sync_scene_phrase_translations(
+                update=update,
+                context=context,
+                chat_id=chat_id,
                 session=session,
                 scene=scene,
                 scene_idx=idx,
@@ -4904,6 +5690,9 @@ async def _handle_waiting_scene_media_state(
                 origin="user",
             )
             updated_langs, failed_langs = await _sync_scene_phrase_translations(
+                update=update,
+                context=context,
+                chat_id=chat_id,
                 session=session,
                 scene=scene,
                 scene_idx=idx,
@@ -4979,6 +5768,9 @@ async def _handle_waiting_scene_media_state(
                 origin="user",
             )
             updated_langs, failed_langs = await _sync_scene_phrase_translations(
+                update=update,
+                context=context,
+                chat_id=chat_id,
                 session=session,
                 scene=scene,
                 scene_idx=idx,

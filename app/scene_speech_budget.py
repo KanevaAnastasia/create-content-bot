@@ -10,11 +10,21 @@ import re
 
 PAUSE_TOKEN = "[пауза]"
 PROMPT_TIMING_MARKER = "speech_timing_plan:"
+SPEECH_DASH_CHARS_RE = re.compile(r"\s*[-–—]\s*")
 DEFAULT_SPEECH_CHARS_PER_SECOND = 14
 SPEECH_CHARS_PER_SECOND_BY_LANG = {
     "ru": 14,
     "en": 11,
 }
+
+
+def normalize_speech_phrase_for_voice(text: str) -> str:
+    """Remove dash characters from spoken phrases before TTS/video prompt sync."""
+    raw = str(text or "").strip()
+    if not raw:
+        return ""
+    no_dashes = SPEECH_DASH_CHARS_RE.sub(" ", raw)
+    return re.sub(r"\s+", " ", no_dashes).strip()
 
 
 def speech_chars_excluding_pauses(text: str) -> int:
@@ -154,12 +164,16 @@ def append_prompt_timing_hints(
     *,
     duration_sec: float,
 ) -> str:
-    """Append a stable timing block to the prompt if it is not already there."""
+    """Append or replace the stable timing block in a prompt."""
     text = str(prompt or "").strip()
     if not text:
         return text
-    if PROMPT_TIMING_MARKER in text.lower():
-        return text
+    text = re.sub(
+        rf"(?:\n)?{re.escape(PROMPT_TIMING_MARKER)}\s*(?:\n\s*-\s*\d+(?:\.\d+)?-\d+(?:\.\d+)?s:\s*.*)*\s*$",
+        "",
+        text,
+        flags=re.IGNORECASE,
+    ).strip()
     timing_block = build_prompt_timing_hints(speech_plan, duration_sec=duration_sec)
     if not timing_block:
         return text

@@ -188,12 +188,13 @@ def resolve_scene_video_for_production(scene: dict[str, Any], language: str) -> 
     if not candidates:
         legacy = _legacy_video_candidate(scene, lang)
         return legacy
+    approved = [item for item in candidates if bool(item.get("approved_for_production"))]
+    if approved:
+        liked_approved = [item for item in approved if bool(item.get("liked"))]
+        return liked_approved[-1] if liked_approved else approved[-1]
     liked = [item for item in candidates if bool(item.get("liked"))]
     if liked:
         return liked[-1]
-    approved = [item for item in candidates if bool(item.get("approved_for_production"))]
-    if approved:
-        return approved[-1]
     return candidates[-1]
 
 

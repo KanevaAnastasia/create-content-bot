@@ -10,7 +10,12 @@ from typing import Any
 from .llm_utils import extract_json_object, gemini_generate_sync
 from .media_costs import estimate_gemini_text_cost_usd
 from .pipeline_llm_steps import FINAL_SCENE_SUBSCRIBE_CTA, FINAL_SCENE_SUBSCRIBE_CTA_VEO3
-from .scene_speech_budget import PAUSE_TOKEN, max_speech_chars_for_duration, speech_chars_excluding_pauses
+from .scene_speech_budget import (
+    PAUSE_TOKEN,
+    max_speech_chars_for_duration,
+    normalize_speech_phrase_for_voice,
+    speech_chars_excluding_pauses,
+)
 
 logger = logging.getLogger("bot")
 
@@ -94,6 +99,7 @@ def shorten_scene_speech_and_sync_video_prompt_sync(
             "Поле text:\n"
             "- русский, от первого лица бабушки к зрителю (я/мы);\n"
             "- без ударений и без специальных акцентных меток;\n"
+            "- без дефиса и тире в самой фразе озвучки: не используй символы -, – или —; для паузы используй только [пауза];\n"
             f"- допускается {PAUSE_TOKEN} только между смысловыми фразами;\n"
             f"- длина речи **без** всех вхождений {PAUSE_TOKEN} — строго не больше max_speech_chars_excluding_pauses.\n"
             f"- если must_keep_final_subscribe_cta=true, text обязан заканчиваться этой фразой дословно: {FINAL_SCENE_SUBSCRIBE_CTA}; "
@@ -104,6 +110,7 @@ def shorten_scene_speech_and_sync_video_prompt_sync(
             "Поле text:\n"
             "- natural spoken English for short dubbing;\n"
             "- concise, easy to say, no stress markers or pronunciation annotations;\n"
+            "- no hyphen-minus or dash characters in the spoken phrase: do not use -, – or —; use words or [пауза] instead;\n"
             f"- optional {PAUSE_TOKEN} only between major phrases;\n"
             "- if the line is still risky, prefer making it shorter over preserving every detail;\n"
             f"- длина речи **без** всех вхождений {PAUSE_TOKEN} — строго не больше max_speech_chars_excluding_pauses.\n"
@@ -133,7 +140,10 @@ def shorten_scene_speech_and_sync_video_prompt_sync(
         vp = obj.get("video_prompt")
         if not isinstance(t, str) or not t.strip():
             continue
-        t = t.strip()
+        raw_t = t.strip()
+        t = normalize_speech_phrase_for_voice(raw_t)
+        if not t:
+            continue
         if not isinstance(vp, str) or not vp.strip():
             merged = _replace_speech_in_video_prompt_if_substring(prev_vp, t, prev_text)
             if merged is None:
@@ -141,6 +151,8 @@ def shorten_scene_speech_and_sync_video_prompt_sync(
             vp = merged
         else:
             vp = vp.strip()
+            if raw_t != t:
+                vp = _replace_speech_in_video_prompt_if_substring(vp, t, raw_t) or vp
         if speech_chars_excluding_pauses(t) > max_chars:
             continue
         if must_keep_final_cta and not _has_final_subscribe_cta(t):

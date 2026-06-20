@@ -4,6 +4,7 @@ ASSETS = {
     'characters': {
         'cat': {'base': 'assets/characters/cat/base.png'},
         'dog': {'base': 'assets/characters/dog/base.png'},
+        'daughter': {'base': 'assets/characters/daughter/base.png'},
         'granddaughter': {'base': 'assets/characters/granddaughter/base.png'},
         'grandfather': {'base': 'assets/characters/grandfather/base.png'},
         'grandma': {'base': 'assets/characters/grandma/base.jpeg'},

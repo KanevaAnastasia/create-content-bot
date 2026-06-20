@@ -4,12 +4,14 @@ from pathlib import Path
 import pytest
 
 from app.vertex_images import (
+    LATEST_IMAGE_GENERATION_MODEL,
     _coerce_reference_images,
     _enforce_vertical_9_16_prompt,
     _image_size,
     _response_excerpt,
     image_generation_profile_models,
     next_image_generation_model,
+    primary_image_generation_model,
 )
 
 
@@ -30,34 +32,37 @@ def test_response_excerpt_omits_inline_binary_data():
     assert "\\211PNG" not in text
 
 
-def test_image_generation_profile_defaults_to_legacy_env_order(monkeypatch):
+def test_image_generation_defaults_to_latest_with_manual_fallbacks(monkeypatch):
     monkeypatch.delenv("IMAGE_GENERATION_PROFILE", raising=False)
-    monkeypatch.setenv("VERTEX_IMAGE_MODEL", "gemini-3-pro-image-preview")
-    monkeypatch.setenv("VERTEX_IMAGE_MODEL_FALLBACKS", "gemini-3.1-flash-image-preview,gemini-2.5-flash-image")
+    monkeypatch.delenv("VERTEX_IMAGE_MODEL", raising=False)
+    monkeypatch.setenv("VERTEX_IMAGE_MODEL_FALLBACKS", "gemini-3.1-flash-image,gemini-2.5-flash-image")
 
     models = image_generation_profile_models()
 
-    assert models == ["gemini-3-pro-image-preview", "gemini-3.1-flash-image-preview", "gemini-2.5-flash-image"]
-    assert next_image_generation_model("gemini-3-pro-image-preview") == "gemini-3-pro-image-preview"
+    assert models == [LATEST_IMAGE_GENERATION_MODEL, "gemini-3.1-flash-image", "gemini-2.5-flash-image"]
+    assert primary_image_generation_model() == LATEST_IMAGE_GENERATION_MODEL
+    assert next_image_generation_model(LATEST_IMAGE_GENERATION_MODEL) == "gemini-3.1-flash-image"
 
 
-def test_image_generation_profile_cheap_allows_quality_upgrade(monkeypatch):
+def test_image_generation_profiles_are_pinned_to_latest(monkeypatch):
     monkeypatch.setenv("IMAGE_GENERATION_PROFILE", "cheap")
     monkeypatch.delenv("VERTEX_IMAGE_MODEL", raising=False)
     monkeypatch.delenv("VERTEX_IMAGE_MODEL_FALLBACKS", raising=False)
 
     models = image_generation_profile_models()
 
-    assert models[:3] == ["gemini-2.5-flash-image", "gemini-3.1-flash-image-preview", "gemini-3-pro-image-preview"]
-    assert next_image_generation_model("gemini-2.5-flash-image") == "gemini-3.1-flash-image-preview"
+    assert models == [LATEST_IMAGE_GENERATION_MODEL]
+    assert next_image_generation_model("gemini-3.1-flash-image-preview") is None
 
 
-def test_image_generation_profile_legacy_uses_env_order(monkeypatch):
+def test_image_generation_legacy_uses_primary_env_model_with_manual_fallbacks(monkeypatch):
     monkeypatch.setenv("IMAGE_GENERATION_PROFILE", "legacy")
     monkeypatch.setenv("VERTEX_IMAGE_MODEL", "custom-a")
     monkeypatch.setenv("VERTEX_IMAGE_MODEL_FALLBACKS", "custom-b,custom-c")
 
     assert image_generation_profile_models() == ["custom-a", "custom-b", "custom-c"]
+    assert primary_image_generation_model() == "custom-a"
+    assert next_image_generation_model("custom-a") == "custom-b"
 
 
 def test_image_size_caps_request_at_2k(monkeypatch):
@@ -443,8 +448,8 @@ def test_vertex_sdk_requires_project_even_with_api_key(monkeypatch):
         vertex_images._generate_image_vertex_sdk("prompt", reference_images=None)
 
 
-def test_generate_image_vertex_tries_all_fallbacks_after_primary_fails(monkeypatch):
-    """После ошибки VERTEX_IMAGE_MODEL перебираются все имена из VERTEX_IMAGE_MODEL_FALLBACKS."""
+def test_generate_image_vertex_does_not_try_fallbacks_after_primary_fails(monkeypatch):
+    """Image generation must fail loudly instead of silently using older fallback models."""
     from app import vertex_images
 
     monkeypatch.setenv("IMAGE_GENERATION_PROFILE", "legacy")
@@ -461,12 +466,12 @@ def test_generate_image_vertex_tries_all_fallbacks_after_primary_fails(monkeypat
 
     monkeypatch.setattr(vertex_images, "_generate_image_vertex_sdk", fake_sdk)
 
-    out = vertex_images.generate_image_vertex("p", reference_images=None, request_id="t1")
-    assert out == b"img-ok"
-    assert calls == ["bad-model", "good-a"]
+    with pytest.raises(RuntimeError, match="bad-model"):
+        vertex_images.generate_image_vertex("p", reference_images=None, request_id="t1")
+    assert calls == ["bad-model"]
 
 
-def test_generate_image_vertex_403_on_primary_then_next_model(monkeypatch):
+def test_generate_image_vertex_403_on_primary_does_not_try_next_model(monkeypatch):
     from app import vertex_images
 
     monkeypatch.setenv("IMAGE_GENERATION_PROFILE", "legacy")
@@ -483,12 +488,12 @@ def test_generate_image_vertex_403_on_primary_then_next_model(monkeypatch):
 
     monkeypatch.setattr(vertex_images, "_generate_image_vertex_sdk", fake_sdk)
 
-    out = vertex_images.generate_image_vertex("p", reference_images=None)
-    assert out == b"ok-by-second"
-    assert calls == ["first-model", "second-model"]
+    with pytest.raises(RuntimeError, match="first-model"):
+        vertex_images.generate_image_vertex("p", reference_images=None)
+    assert calls == ["first-model"]
 
 
-def test_generate_image_vertex_timeout_then_next_model(monkeypatch):
+def test_generate_image_vertex_timeout_does_not_try_next_model(monkeypatch):
     from app import vertex_images
     from app.llm_queue import LLMCallTimeoutError
 
@@ -501,9 +506,7 @@ def test_generate_image_vertex_timeout_then_next_model(monkeypatch):
 
     def fake_run(fn, timeout_sec):
         timeouts.append(timeout_sec)
-        if len(timeouts) == 1:
-            raise LLMCallTimeoutError("timed out")
-        return fn()
+        raise LLMCallTimeoutError("timed out")
 
     def fake_sdk(*_args, model=None, **_kwargs):
         sdk_models.append(model)
@@ -512,11 +515,11 @@ def test_generate_image_vertex_timeout_then_next_model(monkeypatch):
     monkeypatch.setattr(vertex_images, "_run_llm_call_with_deadline", fake_run)
     monkeypatch.setattr(vertex_images, "_generate_image_vertex_sdk", fake_sdk)
 
-    out = vertex_images.generate_image_vertex("p")
+    with pytest.raises(RuntimeError, match="timed out"):
+        vertex_images.generate_image_vertex("p")
 
-    assert out == b"img-ok"
-    assert timeouts == [45.0, 45.0]
-    assert sdk_models == ["fast-model"]
+    assert timeouts == [45.0]
+    assert sdk_models == []
 
 
 def test_generate_image_vertex_retries_429_then_succeeds(monkeypatch):
@@ -559,5 +562,5 @@ def test_generate_image_vertex_requires_env_models(monkeypatch):
     monkeypatch.setenv("IMAGE_GENERATION_PROFILE", "legacy")
     monkeypatch.delenv("VERTEX_IMAGE_MODEL", raising=False)
     monkeypatch.delenv("VERTEX_IMAGE_MODEL_FALLBACKS", raising=False)
-    with pytest.raises(RuntimeError, match="no image model candidates configured"):
-        vertex_images.generate_image_vertex("p")
+    monkeypatch.setattr(vertex_images, "_generate_image_vertex_sdk", lambda *_args, **_kwargs: b"ok")
+    assert vertex_images.generate_image_vertex("p") == b"ok"

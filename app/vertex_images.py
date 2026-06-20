@@ -24,28 +24,12 @@ IMAGE_GENERATION_PROFILE_CHEAP = "cheap"
 IMAGE_GENERATION_PROFILE_BALANCED = "balanced"
 IMAGE_GENERATION_PROFILE_BEST = "best"
 IMAGE_GENERATION_PROFILE_LEGACY = "legacy"
+LATEST_IMAGE_GENERATION_MODEL = "gemini-3-pro-image"
 _PROFILE_MODELS: dict[str, list[str]] = {
-    IMAGE_GENERATION_PROFILE_CHEAP: [
-        "gemini-2.5-flash-image",
-        "gemini-3.1-flash-image-preview",
-        "gemini-3-pro-image-preview",
-    ],
-    IMAGE_GENERATION_PROFILE_BALANCED: [
-        "gemini-3.1-flash-image-preview",
-        "gemini-3-pro-image-preview",
-        "gemini-2.5-flash-image",
-    ],
-    IMAGE_GENERATION_PROFILE_BEST: [
-        "gemini-3-pro-image-preview",
-        "gemini-3.1-flash-image-preview",
-        "gemini-2.5-flash-image",
-    ],
+    IMAGE_GENERATION_PROFILE_CHEAP: [LATEST_IMAGE_GENERATION_MODEL],
+    IMAGE_GENERATION_PROFILE_BALANCED: [LATEST_IMAGE_GENERATION_MODEL],
+    IMAGE_GENERATION_PROFILE_BEST: [LATEST_IMAGE_GENERATION_MODEL],
 }
-_IMAGE_QUALITY_ORDER = [
-    "gemini-2.5-flash-image",
-    "gemini-3.1-flash-image-preview",
-    "gemini-3-pro-image-preview",
-]
 _DEFAULT_IMAGE_SIZE = "2K"
 
 
@@ -176,50 +160,51 @@ def _image_size() -> str:
 
 
 def _legacy_image_model_candidates() -> list[str]:
-    primary = (os.getenv("VERTEX_IMAGE_MODEL") or "").strip()
-    raw_fallbacks = (os.getenv("VERTEX_IMAGE_MODEL_FALLBACKS") or "").strip()
-    fallbacks = [m.strip() for m in raw_fallbacks.split(",") if m.strip()] if raw_fallbacks else []
-    models: list[str] = []
-    for m in [primary, *fallbacks]:
-        if m and m not in models:
-            models.append(m)
-    return models
+    primary = (os.getenv("VERTEX_IMAGE_MODEL") or LATEST_IMAGE_GENERATION_MODEL).strip()
+    fallbacks_raw = os.getenv("VERTEX_IMAGE_MODEL_FALLBACKS") or ""
+    out: list[str] = []
+    for item in [primary or LATEST_IMAGE_GENERATION_MODEL, *fallbacks_raw.split(",")]:
+        model = str(item or "").strip()
+        if model and model not in out:
+            out.append(model)
+    return out or [LATEST_IMAGE_GENERATION_MODEL]
+
+
+def primary_image_generation_model(profile: str | None = None) -> str:
+    models = image_generation_profile_models(profile)
+    return models[0] if models else LATEST_IMAGE_GENERATION_MODEL
 
 
 def image_generation_profile_models(profile: str | None = None) -> list[str]:
     """
     Возвращает порядок моделей для генерации изображений.
 
-    По умолчанию используется legacy-поведение env: `VERTEX_IMAGE_MODEL` +
-    `VERTEX_IMAGE_MODEL_FALLBACKS`. Профили можно включить явно.
+    The first model is the default strongest attempt. Remaining models are
+    available only for explicit user-approved downgrade, not for silent
+    automatic fallback.
     """
     raw = (profile or os.getenv(IMAGE_GENERATION_PROFILE_ENV_NAME) or IMAGE_GENERATION_PROFILE_LEGACY).strip().lower()
     if raw in {"", IMAGE_GENERATION_PROFILE_LEGACY, "env", "custom"}:
         return _legacy_image_model_candidates()
-    profile_models = list(_PROFILE_MODELS.get(raw) or _PROFILE_MODELS[IMAGE_GENERATION_PROFILE_CHEAP])
-    models: list[str] = []
-    for m in [*profile_models, *_legacy_image_model_candidates()]:
-        if m and m not in models:
-            models.append(m)
-    return models
+    return list(_PROFILE_MODELS.get(raw) or [LATEST_IMAGE_GENERATION_MODEL])
 
 
 def next_image_generation_model(current_model: str | None, profile: str | None = None) -> str | None:
-    """Следующая более дорогая/качественная модель в рамках профиля."""
+    """Return the next lower configured image model after ``current_model``."""
     models = image_generation_profile_models(profile)
     if not models:
         return None
-    current = (current_model or "").strip()
+    current = str(current_model or "").strip()
     if not current:
-        return models[0]
-    if current not in _IMAGE_QUALITY_ORDER:
-        return current if current in models else None
-    current_quality_idx = _IMAGE_QUALITY_ORDER.index(current)
-    allowed = set(models)
-    for candidate in _IMAGE_QUALITY_ORDER[current_quality_idx + 1 :]:
-        if candidate in allowed:
-            return candidate
-    return current
+        return models[1] if len(models) > 1 else None
+    try:
+        idx = models.index(current)
+    except ValueError:
+        return models[1] if len(models) > 1 else None
+    next_idx = idx + 1
+    if next_idx < len(models):
+        return models[next_idx]
+    return None
 
 
 def _generate_image_vertex_sdk(
@@ -236,7 +221,7 @@ def _generate_image_vertex_sdk(
         or os.getenv("GOOGLE_CLOUD_LOCATION")
         or "us-central1"
     ).strip() or "us-central1"
-    eff_model = (model or "").strip() or _required_env("VERTEX_IMAGE_MODEL")
+    eff_model = (model or "").strip() or (os.getenv("VERTEX_IMAGE_MODEL") or LATEST_IMAGE_GENERATION_MODEL).strip()
     if not project:
         raise RuntimeError("Missing environment variable: GOOGLE_CLOUD_PROJECT")
     try:
@@ -385,7 +370,7 @@ def generate_image_vertex_result(
     model_candidates: list[str] | None = None,
 ) -> ImageGenerationResult:
     """
-    Главная точка генерации изображения через Vertex AI SDK с auto-fallback.
+    Главная точка генерации изображения через Vertex AI SDK.
 
     Args:
         prompt: Текстовый промпт.
@@ -395,19 +380,23 @@ def generate_image_vertex_result(
         Байты, имя модели и request_id для первой успешно сработавшей модели.
 
     Логика:
-        1) Собирает список моделей из `IMAGE_GENERATION_PROFILE` или legacy env
-           `VERTEX_IMAGE_MODEL` + `VERTEX_IMAGE_MODEL_FALLBACKS`.
-        2) Для каждой модели делает вызов `ImageGenerationModel.from_pretrained(...).generate_images(...)`.
+        1) Uses exactly one selected image model. By default this is
+           `VERTEX_IMAGE_MODEL` (default: `gemini-3-pro-image`).
+        2) Делает вызов выбранной модели через Vertex SDK.
         3) На 429/RESOURCE_EXHAUSTED делает retry с backoff на той же модели.
-        4) Любая финальная ошибка переводит на следующую модель, пока список не исчерпан.
+        4) Любая финальная ошибка возвращается наверх; на старые модели
+           автоматически не откатываемся.
     """
     refs_list = _coerce_reference_images(reference_image, reference_images)
     rid = request_id or uuid.uuid4().hex[:12]
-    models: list[str] = []
-    candidates = model_candidates if model_candidates is not None else image_generation_profile_models()
-    for m in [model, *(candidates or [])]:
-        if m and m not in models:
-            models.append(m)
+    explicit_model = str(model or "").strip()
+    if explicit_model:
+        selected_model = explicit_model
+    elif model_candidates:
+        selected_model = next((str(m or "").strip() for m in model_candidates if str(m or "").strip()), "")
+    else:
+        selected_model = primary_image_generation_model()
+    models = [selected_model] if selected_model else []
 
     last_error: Exception | None = None
     for model in models:
@@ -449,8 +438,8 @@ def generate_image_vertex_result(
                 break
 
     if last_error is not None:
-        raise RuntimeError(f"Vertex image generation failed after model fallbacks: {last_error}") from last_error
-    raise RuntimeError("Vertex image generation failed: no image model candidates configured.")
+        raise RuntimeError(f"Vertex image generation failed on model {models[0]}: {last_error}") from last_error
+    raise RuntimeError("Vertex image generation failed: no image model configured.")
 
 
 def generate_image_vertex(
@@ -463,7 +452,7 @@ def generate_image_vertex(
     model_candidates: list[str] | None = None,
 ) -> bytes:
     """
-    Главная точка генерации изображения через Vertex AI SDK с auto-fallback.
+    Главная точка генерации изображения через Vertex AI SDK.
 
     Возвращает только байты для совместимости. Если нужно знать фактически
     использованную модель, вызывайте `generate_image_vertex_result`.

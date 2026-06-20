@@ -337,7 +337,8 @@ def test_check_video_attaches_original_mp4_for_pronunciation_review(monkeypatch,
 
     def _fake_model(prompt, *, images, config):
         assert "original MP4 for speech/pronunciation review" in prompt
-        assert "Russian pronunciation and word stress must sound natural" in prompt
+        assert "pronunciation must sound natural" in prompt
+        assert "spoken words have natural accent/stress" in prompt
         assert "Wrong stress" in prompt
         assert "giant cat" in prompt
         assert images[-1] == video_bytes

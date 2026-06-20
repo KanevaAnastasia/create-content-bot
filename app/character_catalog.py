@@ -77,14 +77,26 @@ CHARACTER_CATALOG: dict[str, dict[str, Any]] = {
             "или рыжеватая, грудка светлее, лапы округлые и мягкие."
         ),
     },
+    "daughter": {
+        "name": "Дочка",
+        "short_description": "дочка",
+        "role": "взрослая дочь бабушки",
+        "description": (
+            "Мультяшная взрослая молодая женщина с мягкими семейными чертами, добрым открытым лицом, "
+            "теплой улыбкой и аккуратной уютной одеждой. Она выглядит как дочь бабушки, заботливая взрослая "
+            "помощница на кухне, а не маленький ребенок."
+        ),
+    },
     "granddaughter": {
         "name": "Внучка",
         "short_description": "внучка",
         "role": "юная помощница бабушки",
         "description": (
-            "Мультяшная девочка с мягкими округлыми чертами лица, большими добрыми глазами, аккуратной "
-            "детской улыбкой и чистыми собранными волосами, например косичками или хвостиком с небольшими бантиками. "
-            "Носит простую уютную одежду в теплых семейных цветах и маленький кухонный фартук."
+            "Мультяшная маленькая девочка с мягкими округлыми чертами лица, большими добрыми карими глазами "
+            "за тонкими круглыми очками, веснушками, румяными щеками и аккуратной детской улыбкой. У нее светло-рыжие "
+            "кудрявые волосы, собранные в два пышных хвостика с розовыми бантиками. Носит розовый сарафан поверх "
+            "светлой блузки с мелким узором, светлые колготки с маленькими сердечками и звездочками, розовые ботинки "
+            "и небольшую розовую сумочку через плечо."
         ),
     },
     "grandfather": {
@@ -242,7 +254,7 @@ def sanitize_character_names_and_keys(text: str) -> str:
         return ""
     shorts = {
         key: character_short_description(key)
-        for key in ("cat", "zaya", "markiz", "grandma", "granddaughter", "grandfather", "grandson", "dog")
+        for key in ("cat", "zaya", "markiz", "grandma", "daughter", "granddaughter", "grandfather", "grandson", "dog")
     }
     replacements = (
         (r"\bTimosha\b", shorts.get("cat", "рыжий кот")),
@@ -250,6 +262,7 @@ def sanitize_character_names_and_keys(text: str) -> str:
         (r"\bMarkiz\b", shorts.get("markiz", "черно-белый кот")),
         (r"\bzaya\b", shorts.get("zaya", "белая кошка")),
         (r"\bmarkiz\b", shorts.get("markiz", "черно-белый кот")),
+        (r"\bdaughter\b", shorts.get("daughter", "дочка")),
         (r"\bgranddaughter\b", shorts.get("granddaughter", "внучка")),
         (r"\bgrandfather\b", shorts.get("grandfather", "дедушка")),
         (r"\bgrandson\b", shorts.get("grandson", "внук")),
@@ -303,10 +316,12 @@ def maybe_choose_romantic_subplot(
         "episode_rule": (
             "If enabled, the LLM must invent one recipe-aware drama case for the whole episode. It must be visible "
             "as a subtle background beat in every scene, while grandma's recipe remains the main story. The subplot "
-            "must have a clear happy ending in the final scene that viewers can understand from the visible action."
+            "may be romantic, emotional, situational, or comedic-dramatic, but it must have a clear happy ending in "
+            "the final scene that viewers can understand from the visible action."
         ),
         "rules": (
             "This is a subtle background subplot, not the main recipe. Keep food and grandma's cooking action primary. "
-            "Include selected subplot characters by canonical keys in every scene.characters and keep them on model."
+            "Include selected subplot characters by canonical keys in every scene.characters and keep them on model. "
+            "Avoid defaulting the white cat to a fixed position outside the window unless the specific beat calls for it."
         ),
     }

@@ -6,9 +6,12 @@
 
 import logging
 
+from telegram import Update as TelegramUpdate
+from telegram.error import Conflict
 from telegram.ext import Application, CommandHandler, ContextTypes, MessageHandler, filters
 from telegram.request import HTTPXRequest
 
+from .llm_utils import GeminiQuotaError
 from .handlers import (
     ai_approve_command,
     cancel,
@@ -34,7 +37,42 @@ except Exception:  # pragma: no cover - compatibility fallback
 
 async def _on_application_error(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Centralized error logger to avoid silent crashes in update loop."""
-    logger.exception("telegram.update.error update=%s", type(update).__name__, exc_info=context.error)
+    error = context.error
+    if error is None:
+        return
+    if isinstance(error, Conflict):
+        logger.warning(
+            "telegram.update.conflict update=%s; another getUpdates request is active, polling will retry.",
+            type(update).__name__,
+        )
+        return
+    logger.exception("telegram.update.error update=%s", type(update).__name__, exc_info=error)
+    text = str(error)
+    low = text.lower()
+    is_ai_limit = (
+        isinstance(error, GeminiQuotaError)
+        or "429" in text
+        or "resource_exhausted" in low
+        or "resource exhausted" in low
+        or "too many requests" in low
+        or "слишком много запросов" in low
+    )
+    if not is_ai_limit:
+        return
+    message = None
+    if isinstance(update, TelegramUpdate):
+        message = update.effective_message
+    else:
+        message = getattr(update, "effective_message", None)
+    if message is None:
+        return
+    try:
+        await message.reply_text(
+            "Уперлась в лимит AI на этом шаге. Этот запрос не удалось продолжить из аварийного обработчика; "
+            "отправьте последнее действие ещё раз через минуту."
+        )
+    except Exception:
+        logger.exception("failed to notify user about application-level AI limit")
 
 
 def build_application(token: str) -> Application:
@@ -46,7 +84,7 @@ def build_application(token: str) -> Application:
 
     Увеличенные таймауты ``HTTPXRequest`` снижают число ``TimedOut`` на медленных сетях/прокси.
     """
-    request = HTTPXRequest(connect_timeout=30.0, read_timeout=30.0, write_timeout=30.0, pool_timeout=10.0)
+    request = HTTPXRequest(connect_timeout=30.0, read_timeout=120.0, write_timeout=120.0, pool_timeout=30.0)
     app = Application.builder().token(token).request(request).build()
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("check_env", check_env))

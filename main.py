@@ -24,11 +24,14 @@ from app.constants import TOKEN_ENV_NAME
 from app.db import DATABASE_URL_ENV_NAME, health_check
 from app.env_utils import load_env_file
 from app.llm_logging import get_llm_io_logger
-from telegram.error import NetworkError, TimedOut
+from telegram.error import Conflict, NetworkError, TimedOut
 
 import fcntl
 import sys
 from pathlib import Path
+
+from alembic import command as alembic_command
+from alembic.config import Config as AlembicConfig
 
 _LOCK_FILE = Path("/tmp/content_fabric_bot.lock")
 _LOCK_FD = None
@@ -37,7 +40,8 @@ _LOCK_FD = None
 _TELEGRAM_BOT_TOKEN_RE = re.compile(r"/bot\d+:[^/\s\"']+")
 _POLLING_RETRY_BASE_SECONDS = 3.0
 _POLLING_RETRY_MAX_SECONDS = 60.0
-_POLLING_BOOTSTRAP_RETRIES = 3
+_POLLING_CONFLICT_RETRY_SECONDS = 30.0
+_POLLING_BOOTSTRAP_RETRIES = -1
 
 
 class _SecretRedactionFilter(logging.Filter):
@@ -76,7 +80,7 @@ def _configure_logging() -> None:
 
     fmt = _RedactingFormatter("%(asctime)s | %(levelname)s | %(name)s | %(message)s")
 
-    console = logging.StreamHandler()
+    console = logging.StreamHandler(sys.stdout)
     console.setLevel(logging.INFO)
     console.setFormatter(fmt)
     console.addFilter(redaction_filter)
@@ -138,7 +142,7 @@ def _configure_logging() -> None:
 
 
 def _run_polling_with_retries(token: str) -> None:
-    """Restarts long polling after transient Telegram network failures."""
+    """Restarts long polling after transient Telegram polling failures."""
     retry_delay = _POLLING_RETRY_BASE_SECONDS
     bot_logger = logging.getLogger("bot")
 
@@ -147,6 +151,15 @@ def _run_polling_with_retries(token: str) -> None:
         try:
             application.run_polling(bootstrap_retries=_POLLING_BOOTSTRAP_RETRIES)
             return
+        except Conflict:
+            bot_logger.warning(
+                "Telegram polling conflict: another getUpdates request is active; "
+                "retrying in %.1f seconds.",
+                _POLLING_CONFLICT_RETRY_SECONDS,
+                exc_info=True,
+            )
+            time.sleep(_POLLING_CONFLICT_RETRY_SECONDS)
+            retry_delay = _POLLING_RETRY_BASE_SECONDS
         except (NetworkError, TimedOut):
             bot_logger.warning(
                 "Telegram polling stopped due to a network error; restarting in %.1f seconds.",
@@ -160,6 +173,15 @@ def _run_polling_with_retries(token: str) -> None:
             raise
         else:
             retry_delay = _POLLING_RETRY_BASE_SECONDS
+
+
+def upgrade_database_to_head() -> None:
+    """Apply Alembic migrations before the bot starts serving updates."""
+    project_root = Path(__file__).resolve().parent
+    config = AlembicConfig(str(project_root / "alembic.ini"))
+    config.set_main_option("script_location", str(project_root / "migrations"))
+    config.attributes["skip_logging_config"] = True
+    alembic_command.upgrade(config, "head")
 
 
 def _acquire_process_lock() -> None:
@@ -192,19 +214,20 @@ def main() -> None:
     load_env_file()
     _configure_logging()
     bot_logger = logging.getLogger("bot")
+    bot_logger.info("Bot startup initialized.")
     if (os.getenv(DATABASE_URL_ENV_NAME) or "").strip():
         try:
+            bot_logger.info("Applying database migrations.")
+            upgrade_database_to_head()
             health_check()
         except Exception:
-            bot_logger.warning(
-                "Database health-check failed; continuing without confirmed database connection.",
-                exc_info=True,
-            )
-        else:
-            bot_logger.info("Database health-check passed.")
+            bot_logger.exception("Database migration or health-check failed; aborting bot startup.")
+            raise
+        bot_logger.info("Database migrations are current and health-check passed.")
     token = os.getenv(TOKEN_ENV_NAME)
     if not token:
         raise RuntimeError(f"Missing environment variable: {TOKEN_ENV_NAME}")
+    bot_logger.info("Starting Telegram polling.")
     _run_polling_with_retries(token)
 
 

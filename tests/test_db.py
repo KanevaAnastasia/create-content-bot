@@ -88,6 +88,7 @@ def test_health_check_executes_select():
 
 def test_multiproject_tables_registered_in_metadata():
     expected = {
+        "chat_sessions",
         "projects",
         "characters",
         "locations",
@@ -95,6 +96,9 @@ def test_multiproject_tables_registered_in_metadata():
         "project_locations",
         "project_publish_accounts",
         "publication_jobs",
+        "scene_image_candidates",
+        "scene_media_message_links",
+        "scene_video_candidates",
         "text_steps",
         "text_step_revisions",
     }

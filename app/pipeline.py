@@ -28,6 +28,7 @@ from .cache import (
     set_recipe_steps,
     set_scenes_plan,
 )
+from .assets import ASSETS
 from .character_catalog import GRANDMA_KITCHEN_PROJECT_SLUG, sanitize_character_names_and_keys
 from .constants import ELEVENLABS_VOICE_ID_ENV_NAME
 from .formatting import (
@@ -43,6 +44,7 @@ from .scene_speech_budget import (
     append_prompt_timing_hints,
     build_default_speech_plan,
     build_speech_cues_from_plan,
+    normalize_speech_phrase_for_voice,
     speech_chars_excluding_pauses,
     speech_budget_for_duration,
 )
@@ -249,9 +251,11 @@ def _enforce_romantic_subplot_characters(scenes: list[dict[str, Any]], subplot: 
         scene["characters"] = chars
         if not str(scene.get("romantic_drama_beat") or "").strip():
             if "markiz" in required:
-                scene["romantic_drama_beat"] = "Белая кошка наблюдает за рыжим котом у окна, черно-белый кот виден снаружи окна."
+                scene["romantic_drama_beat"] = (
+                    "Белая кошка напряженно следит за рыжим котом во время готовки, а черно-белый кот виден снаружи окна."
+                )
             else:
-                scene["romantic_drama_beat"] = "Белая кошка наблюдает за рыжим котом у окна."
+                scene["romantic_drama_beat"] = "Белая кошка напряженно следит за рыжим котом во время готовки."
 
 
 def _ensure_image_prompt_framing_requirements(
@@ -375,6 +379,7 @@ _LLM_VIDEO_CHARACTERS_SPEAKS_RULE = (
     "CHARACTERS SPEAKS (обязательно, если у сцены непустое поле `text`): внутри `video_prompt_en` должна быть "
     "подстрока ровно в формате `CHARACTERS SPEAKS: ` сразу за двоеточием и пробелом — далее **дословно** "
     "то же значение, что в `text` (те же символы, регистр, токены [пауза], язык). Не перефразировать. "
+    "В самом `text` озвучки не должно быть дефиса или тире: символы -, – и — запрещены. "
     "Обычно размещайте эту подстроку ближе к концу промпта. "
     "Python-код **не** дописывает `CHARACTERS SPEAKS` — если опустить, озвучка по сценарию потеряется."
 )
@@ -444,6 +449,133 @@ def _replace_characters_speaks(video_prompt: str, speech_text: str) -> str:
     return merged.strip()
 
 
+_DIALOGUE_SPEAKER_ALIASES = {
+    "grandma": "grandma",
+    "бабушка": "grandma",
+    "grandfather": "grandfather",
+    "grandpa": "grandfather",
+    "дедушка": "grandfather",
+    "grandson": "grandson",
+    "внук": "grandson",
+    "granddaughter": "granddaughter",
+    "внучка": "granddaughter",
+    "daughter": "daughter",
+    "дочь": "daughter",
+    "дочка": "daughter",
+}
+
+
+def _normalize_dialogue_speaker(value: Any) -> str:
+    text = str(value or "").strip().lower()
+    return _DIALOGUE_SPEAKER_ALIASES.get(text, text)
+
+
+def _aggregate_dialogue_text(dialogue: list[dict[str, str]]) -> str:
+    parts = [str(item.get("text") or "").strip() for item in dialogue if str(item.get("text") or "").strip()]
+    return " [пауза] ".join(parts).strip()
+
+
+def _normalize_scene_dialogue(scene: dict[str, Any], *, scene_index: int) -> None:
+    raw_mode = str(scene.get("dialogue_mode") or "").strip().lower()
+    raw_dialogue = scene.get("dialogue")
+    normalized: list[dict[str, str]] = []
+    if isinstance(raw_dialogue, list):
+        for item in raw_dialogue:
+            if not isinstance(item, dict):
+                continue
+            speaker = _normalize_dialogue_speaker(item.get("speaker"))
+            text = str(item.get("text") or "").strip()
+            if not speaker or not text:
+                continue
+            normalized.append({"speaker": speaker, "text": text})
+    if scene_index != 1:
+        scene["dialogue_mode"] = "single"
+        scene.pop("dialogue", None)
+        return
+    if raw_mode == "multi" or len(normalized) >= 2:
+        scene["dialogue_mode"] = "multi"
+        scene["dialogue"] = normalized
+        aggregated = _aggregate_dialogue_text(normalized)
+        if aggregated:
+            scene["text"] = aggregated
+    else:
+        scene["dialogue_mode"] = "single"
+        if normalized:
+            scene["dialogue"] = normalized[:1]
+        elif scene.get("dialogue") is not None:
+            scene["dialogue"] = []
+
+
+def _dialogue_by_lang_for_scene(scene: dict[str, Any], speech_by_lang: dict[str, str]) -> dict[str, list[dict[str, str]]]:
+    mode = str(scene.get("dialogue_mode") or "").strip().lower()
+    if mode != "multi":
+        return {}
+    raw = scene.get("dialogue")
+    if not isinstance(raw, list):
+        return {}
+    ru_items: list[dict[str, str]] = []
+    for item in raw:
+        if not isinstance(item, dict):
+            continue
+        speaker = _normalize_dialogue_speaker(item.get("speaker"))
+        text = str(item.get("text") or "").strip()
+        if speaker and text:
+            ru_items.append({"speaker": speaker, "text": text})
+    return {"ru": ru_items} if ru_items and "ru" in speech_by_lang else {}
+
+
+async def _build_scene_dialogue_by_lang(
+    scene: dict[str, Any],
+    target_languages: list[str],
+) -> dict[str, list[dict[str, str]]]:
+    """Translate structured dialogue per language while keeping speaker identities intact."""
+    mode = str(scene.get("dialogue_mode") or "").strip().lower()
+    if mode != "multi":
+        return {}
+    raw = scene.get("dialogue")
+    if not isinstance(raw, list):
+        return {}
+    ru_items: list[dict[str, str]] = []
+    for item in raw:
+        if not isinstance(item, dict):
+            continue
+        speaker = _normalize_dialogue_speaker(item.get("speaker"))
+        text = str(item.get("text") or "").strip()
+        if speaker and text:
+            ru_items.append({"speaker": speaker, "text": text})
+    if len(ru_items) < 2:
+        return {}
+
+    languages = target_languages or target_languages_from_env()
+    out: dict[str, list[dict[str, str]]] = {"ru": ru_items}
+    for lang in languages:
+        lang_code = str(lang or "").strip().lower()
+        if not lang_code or lang_code == "ru":
+            continue
+        translated_items: list[dict[str, str]] = []
+        for item in ru_items:
+            try:
+                translated_text = await _translate_scene_text(item["text"], lang_code)
+            except Exception:
+                logger.warning("dialogue translation failed for lang=%s speaker=%s", lang_code, item["speaker"])
+                translated_text = item["text"]
+            translated_items.append({"speaker": item["speaker"], "text": translated_text or item["text"]})
+        out[lang_code] = translated_items
+    return out
+
+
+def _speech_by_lang_from_dialogue(dialogue_by_lang: dict[str, list[dict[str, str]]]) -> dict[str, str]:
+    """Aggregate dialogue lines into the legacy single-string speech map."""
+    out: dict[str, str] = {}
+    for lang, items in dialogue_by_lang.items():
+        if not isinstance(items, list):
+            continue
+        aggregated = _aggregate_dialogue_text(items)
+        if aggregated:
+            out[str(lang).strip().lower()] = aggregated
+    return out
+
+
 async def _translate_scene_text(text: str, target_language: str) -> str:
     """Translate scene phrase to requested language using LLM."""
     source = (text or "").strip()
@@ -456,12 +588,13 @@ async def _translate_scene_text(text: str, target_language: str) -> str:
     prompt = (
         "Translate the phrase for short video dubbing.\n"
         f"Target language: {lang_label} ({lang_code}).\n"
+        "Do not use hyphen-minus, en dash, or em dash in the spoken phrase; use words or [пауза] instead.\n"
         "Return only translated phrase without comments.\n"
         f"SOURCE:\n{source}\n"
     )
     raw = await asyncio.to_thread(gemini_generate_sync, prompt)
-    translated = (raw or "").strip()
-    return translated or source
+    translated = normalize_speech_phrase_for_voice(raw or "")
+    return translated or normalize_speech_phrase_for_voice(source)
 
 
 async def _build_scene_speech_by_lang(text: str, target_languages: list[str]) -> dict[str, str]:
@@ -481,12 +614,18 @@ async def _build_scene_speech_by_lang(text: str, target_languages: list[str]) ->
 
 def _build_scene_speech_plan_by_lang(
     speech_by_lang: dict[str, str],
+    dialogue_by_lang: dict[str, list[dict[str, str]]] | None = None,
 ) -> tuple[dict[str, list[dict[str, Any]]], dict[str, list[dict[str, Any]]]]:
     """Build default phrase plans and provisional cues per language."""
     plans: dict[str, list[dict[str, Any]]] = {}
     cues: dict[str, list[dict[str, Any]]] = {}
+    dialogue_map = dialogue_by_lang if isinstance(dialogue_by_lang, dict) else {}
     for lang, text in speech_by_lang.items():
-        plan = build_default_speech_plan(text, lang)
+        dialogue_items = dialogue_map.get(lang) if isinstance(dialogue_map.get(lang), list) else None
+        if dialogue_items:
+            plan = [{"speaker": item["speaker"], "text": item["text"]} for item in dialogue_items if item.get("text")]
+        else:
+            plan = build_default_speech_plan(text, lang)
         plans[lang] = plan
         cues[lang] = build_speech_cues_from_plan(plan, duration_sec=0.0)
     return plans, cues
@@ -516,15 +655,26 @@ def _speaker_voice_params(character: str) -> dict[str, str]:
             "voice_profile": "grandma_ru_warm_70yo",
             "voice_lock_full": GRANDMA_VOICE_LOCK_FULL,
         }
+    if c in {"grandson"}:
+        return {
+            "voice_profile": "male_ru_child_bright",
+            "voice_lock_full": (
+                "male child voice Russian language around eight to ten years old; "
+                "tone bright excited; pitch medium to high; speech rate 1.0; clear articulation."
+            ),
+        }
     if c in {"daughter", "granddaughter"}:
         return {
-            "voice_profile": "female_ru_adult_soft",
+            "voice_profile": "female_ru_child_soft" if c == "granddaughter" else "female_ru_adult_soft",
             "voice_lock_full": (
-                "female voice Russian language adult around thirty years old; "
+                "female child voice Russian language around eight to ten years old; "
+                "tone bright warm; pitch medium to high; speech rate normal 1.0; clear articulation."
+                if c == "granddaughter"
+                else "female voice Russian language adult around thirty years old; "
                 "tone warm lively; pitch medium; speech rate normal 0.95; clear articulation."
             ),
         }
-    if c in {"husband", "grandpa"}:
+    if c in {"husband", "grandpa", "grandfather"}:
         return {
             "voice_profile": "male_ru_adult_calm",
             "voice_lock_full": (
@@ -550,6 +700,23 @@ def _tts_payload_for_scene(scene: dict[str, Any]) -> dict[str, Any]:
         "speaker": "grandma",
         "text_ru": text_ru,
     }
+    dialogue_mode = str(scene.get("dialogue_mode") or "single").strip().lower()
+    dialogue = scene.get("dialogue") if isinstance(scene.get("dialogue"), list) else []
+    if dialogue_mode == "multi" and dialogue:
+        payload["dialogue_mode"] = "multi"
+        payload["dialogue_ru"] = [
+            {"speaker": _normalize_dialogue_speaker(item.get("speaker")), "text": str(item.get("text") or "").strip()}
+            for item in dialogue
+            if isinstance(item, dict) and str(item.get("text") or "").strip()
+        ]
+        speaking = []
+        for item in payload["dialogue_ru"]:
+            sp = item.get("speaker")
+            if sp and sp not in speaking:
+                speaking.append(sp)
+        payload["speaking_characters_order"] = speaking
+        if speaking:
+            payload["speaker"] = speaking[0]
     if provider == "elevenlabs":
         voice_id = (os.getenv(ELEVENLABS_VOICE_ID_ENV_NAME) or "").strip()
         payload["voice_profile"] = "grandma_ru_warm_70yo"
@@ -564,7 +731,7 @@ def _tts_payload_for_scene(scene: dict[str, Any]) -> dict[str, Any]:
         payload["non_speaking_characters"] = ["cat"]
         payload["multi_speaker_note"] = (
             "Если в сцене говорят несколько персонажей, используй speaker_profiles и разделяй реплики "
-            "по ролям (пример: GRANDMA:, DAUGHTER:, HUSBAND:). "
+            "по ролям (пример: GRANDMA:, GRANDFATHER:, GRANDSON:, GRANDDAUGHTER:). "
             "CAT никогда не говорит."
         )
     else:
@@ -633,6 +800,7 @@ async def _apply_llm_stress_for_veo3(scenes: list[dict[str, Any]]) -> list[dict[
         "- не используй слова, написанные полностью заглавными буквами\n"
         "- паузы обозначай только токеном [пауза] и используй его как замену знаков препинания\n"
         "- ставь [пауза] только в логических местах между смысловыми фразами, не после каждого слова\n"
+        "- не используй дефис и тире в фразах озвучки: запрещены символы -, – и —\n"
         "- не используй знаки препинания\n"
         "- верни ТОЛЬКО JSON объекта формата {\"items\":[{\"scene_index\":0,\"text\":\"...\"}]}\n\n"
         "INPUT:\n"
@@ -962,10 +1130,10 @@ async def merge_recipe_steps(recipe_steps: list[str]) -> list[str]:
 def _ensure_scene_block_len(
     scenes: list[dict[str, Any]],
     *,
-    min_n: int = 4,
+    min_n: int = 3,
     max_n: int = 6,
 ) -> list[dict[str, Any]]:
-    """Подгоняет число сцен к допустимому диапазону (как правило 4–6)."""
+    """Подгоняет число сцен к допустимому диапазону (как правило 3–6)."""
     if not scenes:
         return scenes
     out = [dict(s) for s in scenes]
@@ -994,18 +1162,93 @@ def _bind_recipe_steps(scenes: list[dict[str, Any]], recipe_steps: list[str]) ->
 def _postprocess_scenes_output(
     scenes: list[dict[str, Any]],
     concept: str,
+    *,
+    viral_concept_brief: dict[str, Any] | None = None,
 ) -> list[dict[str, Any]]:
     """
     Минимальная стыковка с ботом: ``recipe_step`` дублирует реплику ``text`` из ответа модели.
     """
     _ = concept
     out = [dict(s) for s in scenes]
-    for scene in out:
-        t = str(scene.get("text", "")).strip()
+    for idx, scene in enumerate(out, start=1):
+        _normalize_scene_dialogue(scene, scene_index=idx)
+        t = normalize_speech_phrase_for_voice(str(scene.get("text", "")).strip())
         if t:
+            scene["text"] = t
             scene["recipe_step"] = t
+    _apply_family_cast_rules(out, viral_concept_brief=viral_concept_brief)
     _ensure_final_scene_subscribe_cta(out)
     return out
+
+
+def _scene_optional_family_characters() -> tuple[str, ...]:
+    return ("grandfather", "grandson", "granddaughter")
+
+
+def _family_character_references(scene: dict[str, Any]) -> None:
+    refs_raw = scene.get("references")
+    refs = dict(refs_raw) if isinstance(refs_raw, dict) else {}
+    chars = scene.get("characters") if isinstance(scene.get("characters"), list) else []
+    allowed = {str(ch).strip().lower() for ch in chars if str(ch).strip()}
+    for key in _scene_optional_family_characters():
+        if key not in allowed:
+            refs.pop(key, None)
+    for key in allowed:
+        base = ((ASSETS.get("characters") or {}).get(key) or {}).get("base")
+        if isinstance(base, str) and base.strip():
+            refs.setdefault(key, base.strip())
+    scene["references"] = refs
+
+
+def _pick_family_child_character(
+    scenes: list[dict[str, Any]],
+    brief: dict[str, Any],
+) -> str:
+    for scene in scenes:
+        chars = scene.get("characters") if isinstance(scene.get("characters"), list) else []
+        normalized = [str(ch).strip().lower() for ch in chars if str(ch).strip()]
+        for key in ("grandson", "granddaughter"):
+            if key in normalized:
+                return key
+    family_plan = str(brief.get("family_cast_plan") or "").lower()
+    if "внуч" in family_plan or "granddaughter" in family_plan:
+        return "granddaughter"
+    return "grandson"
+
+
+def _apply_family_cast_rules(
+    scenes: list[dict[str, Any]],
+    *,
+    viral_concept_brief: dict[str, Any] | None = None,
+) -> None:
+    if not scenes:
+        return
+    brief = viral_concept_brief if isinstance(viral_concept_brief, dict) else {}
+    audience_type = str(brief.get("dish_audience_type") or "neutral").strip().lower()
+    optional_family = set(_scene_optional_family_characters())
+    selected_child = _pick_family_child_character(scenes, brief) if audience_type == "child" else ""
+    total = len(scenes)
+    for idx, scene in enumerate(scenes, start=1):
+        scene["dish_audience_type"] = audience_type or "neutral"
+        chars = scene.get("characters")
+        if not isinstance(chars, list):
+            chars = []
+        normalized = [str(ch).strip().lower() for ch in chars if str(ch).strip()]
+        keep = [ch for ch in normalized if ch not in optional_family]
+        if "grandma" not in keep:
+            keep.append("grandma")
+        if "cat" not in keep:
+            keep.append("cat")
+        if audience_type == "child" and idx in {1, total} and selected_child:
+            keep.append(selected_child)
+        elif audience_type == "male" and idx in {1, total}:
+            keep.append("grandfather")
+        deduped: list[str] = []
+        for ch in keep:
+            if ch not in deduped:
+                deduped.append(ch)
+        scene["characters"] = deduped
+        _family_character_references(scene)
 
 
 def _speech_without_pause_and_punctuation(text: str) -> str:
@@ -1028,6 +1271,11 @@ def _normalize_end_frame_prompt_for_stable_generation(_value: Any) -> str:
     if value.lower() == "пусто":
         return "пусто"
     return value
+
+
+def _end_frame_prompt_requests_generation(value: Any) -> bool:
+    text = str(value or "").strip()
+    return bool(text) and text.lower() != "пусто"
 
 
 def _ensure_final_scene_subscribe_cta_legacy(scenes: list[dict[str, Any]]) -> None:
@@ -1121,7 +1369,7 @@ async def generate_scenes_plan(
     romantic_drama_subplot: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """
-    Один запрос к Gemini: сценарий из 4–6 сцен по **полному тексту рецепта**, с репликами Veo3 в ``text``.
+    Один запрос к Gemini: сценарий из 3–6 сцен по **полному тексту рецепта**, с репликами Veo3 в ``text``.
 
     Кэш: (concept, full_recipe_text, feedback). Правки — через ``user_feedback`` и ``previous_scenes`` в промпте
     (см. ``pipeline_llm_steps``), без циклов валидации/fix в Python.
@@ -1137,7 +1385,11 @@ async def generate_scenes_plan(
         if isinstance(cached, dict):
             cached_plan = cached.get("json_plan")
             if isinstance(cached_plan, list):
-                fixed = _postprocess_scenes_output(cached_plan, concept)
+                fixed = _postprocess_scenes_output(
+                    cached_plan,
+                    concept,
+                    viral_concept_brief=viral_concept_brief,
+                )
                 fixed, retention_review = enrich_scenes_with_retention(
                     fixed,
                     viral_concept_brief=viral_concept_brief,
@@ -1200,7 +1452,11 @@ async def generate_scenes_plan(
 
     arr = normalize_scenes_for_pipeline(extract_json_array(raw_once))
     arr = _ensure_scene_block_len(arr)
-    raw_scenes = _postprocess_scenes_output(arr, concept)
+    raw_scenes = _postprocess_scenes_output(
+        arr,
+        concept,
+        viral_concept_brief=viral_concept_brief,
+    )
     raw_scenes, retention_review = enrich_scenes_with_retention(
         raw_scenes,
         viral_concept_brief=viral_concept_brief,
@@ -1374,6 +1630,74 @@ def _extract_production_prompts(raw: str) -> Any:
         raise RuntimeError("Модель вернула неверный формат production (prompts).") from e
 
 
+def _fallback_start_frame_prompt_from_scene(scene: dict[str, Any]) -> str:
+    """Builds a minimal deterministic start-frame prompt when production JSON is invalid."""
+    shot = str(scene.get("shot_type") or "medium-close").strip()
+    action = sanitize_character_names_and_keys(
+        str(scene.get("action") or scene.get("recipe_step") or scene.get("text") or "бабушка готовит блюдо").strip()
+    )
+    anchors = scene.get("continuity_anchors") if isinstance(scene.get("continuity_anchors"), list) else []
+    anchors_text = ", ".join(
+        sanitize_character_names_and_keys(str(item).strip())
+        for item in anchors
+        if str(item).strip()
+    )
+    continuity_state = sanitize_character_names_and_keys(str(scene.get("continuity_state") or "").strip())
+    parts = [
+        f"Крупный или средне-крупный план, ракурс {shot}.",
+        "Бабушка и кот полностью видны в кадре.",
+        action.rstrip(".") + ".",
+    ]
+    if anchors_text:
+        parts.append(f"Сохранить опоры консистентности: {anchors_text}.")
+    if continuity_state:
+        parts.append(f"Текущее состояние сцены: {continuity_state}.")
+    return " ".join(parts).strip()
+
+
+def _fallback_video_prompt_from_scene(scene: dict[str, Any]) -> str:
+    """Builds a minimal deterministic video prompt when production JSON is invalid."""
+    duration = int(scene.get("duration_sec") or 4)
+    action = sanitize_character_names_and_keys(
+        str(scene.get("action") or scene.get("recipe_step") or scene.get("text") or "grandma cooks the dish").strip()
+    )
+    anchors = scene.get("continuity_anchors") if isinstance(scene.get("continuity_anchors"), list) else []
+    anchors_text = ", ".join(
+        sanitize_character_names_and_keys(str(item).strip())
+        for item in anchors
+        if str(item).strip()
+    )
+    continuity_state = sanitize_character_names_and_keys(str(scene.get("continuity_state") or "").strip())
+    prompt = (
+        f"{duration}-second cozy cartoon cooking clip, close-up to medium-close framing, "
+        f"grandmother and cartoon cat fully visible, gentle camera evolution, accurate lip sync, "
+        f"no on-screen text, no subtitles, no background music. Main action: {action}."
+    )
+    if anchors_text:
+        prompt += f" Keep continuity with: {anchors_text}."
+    if continuity_state:
+        prompt += f" Food and props state: {continuity_state}."
+    return prompt.strip()
+
+
+def _fallback_production_prompts(
+    scenes: list[dict[str, Any]],
+    *,
+    require_frames: bool,
+) -> list[dict[str, str]]:
+    """Returns a safe production fallback so invalid LLM format does not break the session."""
+    out: list[dict[str, str]] = []
+    for scene in scenes:
+        out.append(
+            {
+                "start_frame_prompt_ru": _fallback_start_frame_prompt_from_scene(scene) if require_frames else "",
+                "end_frame_prompt_ru": "пусто" if require_frames else "",
+                "video_prompt_en": _fallback_video_prompt_from_scene(scene),
+            }
+        )
+    return out
+
+
 async def generate_frame_prompts_for_approval(
     scenes_plan: list[dict[str, Any]],
     user_feedback: str | None = None,
@@ -1409,7 +1733,8 @@ async def generate_frame_prompts_for_approval(
                 ),
                 "romantic_drama_rule": (
                     "If scene.romantic_drama_beat is non-empty, every start_frame_prompt_ru must explicitly describe "
-                    "that background drama beat as visible action in the frame. Do not leave subplot characters only "
+                    "that background drama beat as visible action in the frame, using concrete pose, distance, gaze, "
+                    "blocking or object interaction rather than abstract labels. Do not leave subplot characters only "
                     "in scene.characters; if a subplot character is listed, they must be described in the frame."
                 ),
             "no_text_overlay": True,
@@ -1468,6 +1793,7 @@ async def generate_full_production(
             raise RuntimeError("Approved frame prompts count mismatch.")
         for i, scene in enumerate(scenes):
             p = approved_frame_prompts[i]
+            end_frame_prompt = _normalize_end_frame_prompt_for_stable_generation(p.get("end_frame_prompt_ru"))
             scene["start_frame_prompt"] = _ensure_image_prompt_framing_requirements(
                 append_visual_prop_descriptions(
                     _append_romantic_drama_to_start_prompt(str(p.get("start_frame_prompt_ru", "пусто")), scene)
@@ -1477,11 +1803,12 @@ async def generate_full_production(
             scene["end_frame_prompt"] = _ensure_image_prompt_framing_requirements(
                 append_visual_prop_descriptions(
                     sanitize_character_names_and_keys(
-                        _normalize_end_frame_prompt_for_stable_generation(p.get("end_frame_prompt_ru"))
+                        end_frame_prompt
                     )
                 ),
                 model=str(scene.get("model", "")),
             )
+            scene["end_frame_requested"] = _end_frame_prompt_requests_generation(end_frame_prompt)
 
         payload = {
             "scenes_in_order": _strip_location_context_for_llm(scenes),
@@ -1510,7 +1837,8 @@ async def generate_full_production(
                 ),
                 "romantic_drama_rule": (
                     "If scene.romantic_drama_beat is non-empty, video_prompt_en must explicitly include that background "
-                    "drama beat as visible action throughout the clip. Do not leave subplot characters only in scene.characters."
+                    "drama beat as visible action throughout the clip, using concrete staging and behavior rather than "
+                    "abstract labels. Do not leave subplot characters only in scene.characters."
                 ),
                 "kitchen_physics_rule": VIDEO_KITCHEN_PHYSICS_RULE,
                 "viral_retention_rule": (
@@ -1571,20 +1899,33 @@ async def generate_full_production(
             + json.dumps(payload, ensure_ascii=False, indent=2)
         )
         raw = await asyncio.to_thread(gemini_generate_sync, prompt)
-        prompts = _normalize_production_prompts(
-            _extract_production_prompts(raw),
-            scenes_count=len(scenes),
-            require_frames=False,
-        )
+        try:
+            prompts = _normalize_production_prompts(
+                _extract_production_prompts(raw),
+                scenes_count=len(scenes),
+                require_frames=False,
+            )
+        except Exception:
+            logger.exception("production prompts parse failed; using deterministic fallback", extra={"require_frames": False})
+            prompts = _fallback_production_prompts(scenes, require_frames=False)
         enriched: list[dict[str, Any]] = []
         for scene, p in zip(scenes, prompts):
             scene_out = dict(scene)
             scene_out["model"] = "veo3_fast"
             scene_out["voice_provider"] = "none"
-            speech_by_lang = await _build_scene_speech_by_lang(str(scene_out.get("text", "")).strip(), target_languages)
-            speech_plan_by_lang, speech_cues_by_lang = _build_scene_speech_plan_by_lang(speech_by_lang)
+            dialogue_by_lang = await _build_scene_dialogue_by_lang(scene_out, target_languages)
+            speech_by_lang = (
+                _speech_by_lang_from_dialogue(dialogue_by_lang)
+                if dialogue_by_lang
+                else await _build_scene_speech_by_lang(str(scene_out.get("text", "")).strip(), target_languages)
+            )
+            speech_plan_by_lang, speech_cues_by_lang = _build_scene_speech_plan_by_lang(
+                speech_by_lang,
+                dialogue_by_lang=dialogue_by_lang or _dialogue_by_lang_for_scene(scene_out, speech_by_lang),
+            )
             base_prompt = _finalize_scene_video_prompt(str(p.get("video_prompt_en", "")), scene_out)
             scene_out["speech_by_lang"] = speech_by_lang
+            scene_out["dialogue_by_lang"] = dialogue_by_lang
             scene_out["speech_plan_by_lang"] = speech_plan_by_lang
             scene_out["speech_cues_by_lang"] = speech_cues_by_lang
             scene_out["speech_budget_by_lang"] = _speech_budget_by_lang(speech_by_lang, scene_out.get("duration_sec"))
@@ -1645,7 +1986,8 @@ async def generate_full_production(
             ),
             "romantic_drama_rule": (
                 "If scene.romantic_drama_beat is non-empty, both start_frame_ru and video_prompt_en must explicitly "
-                "include that background drama beat as visible action. Do not leave subplot characters only in scene.characters."
+                "include that background drama beat as visible action, using concrete staging and behavior rather than "
+                "abstract labels. Do not leave subplot characters only in scene.characters."
             ),
             "kitchen_physics_rule": VIDEO_KITCHEN_PHYSICS_RULE,
             "viral_retention_rule": (
@@ -1696,16 +2038,21 @@ async def generate_full_production(
         + json.dumps(payload, ensure_ascii=False, indent=2)
     )
     raw = await asyncio.to_thread(gemini_generate_sync, prompt)
-    prompts = _normalize_production_prompts(
-        _extract_production_prompts(raw),
-        scenes_count=len(scenes),
-        require_frames=True,
-    )
+    try:
+        prompts = _normalize_production_prompts(
+            _extract_production_prompts(raw),
+            scenes_count=len(scenes),
+            require_frames=True,
+        )
+    except Exception:
+        logger.exception("production prompts parse failed; using deterministic fallback", extra={"require_frames": True})
+        prompts = _fallback_production_prompts(scenes, require_frames=True)
     enriched: list[dict[str, Any]] = []
     for scene, p in zip(scenes, prompts):
         scene_out = dict(scene)
         scene_out["model"] = "veo3_fast"
         scene_out["voice_provider"] = "none"
+        end_frame_prompt = _normalize_end_frame_prompt_for_stable_generation(p.get("end_frame_prompt_ru"))
         scene_out["start_frame_prompt"] = _ensure_image_prompt_framing_requirements(
             append_visual_prop_descriptions(_append_romantic_drama_to_start_prompt(p.get("start_frame_prompt_ru", ""), scene_out)),
             model=str(scene_out.get("model", "")),
@@ -1713,15 +2060,25 @@ async def generate_full_production(
         scene_out["end_frame_prompt"] = _ensure_image_prompt_framing_requirements(
             append_visual_prop_descriptions(
                 sanitize_character_names_and_keys(
-                    _normalize_end_frame_prompt_for_stable_generation(p.get("end_frame_prompt_ru"))
+                    end_frame_prompt
                 )
             ),
             model=str(scene_out.get("model", "")),
         )
-        speech_by_lang = await _build_scene_speech_by_lang(str(scene_out.get("text", "")).strip(), target_languages)
-        speech_plan_by_lang, speech_cues_by_lang = _build_scene_speech_plan_by_lang(speech_by_lang)
+        scene_out["end_frame_requested"] = _end_frame_prompt_requests_generation(end_frame_prompt)
+        dialogue_by_lang = await _build_scene_dialogue_by_lang(scene_out, target_languages)
+        speech_by_lang = (
+            _speech_by_lang_from_dialogue(dialogue_by_lang)
+            if dialogue_by_lang
+            else await _build_scene_speech_by_lang(str(scene_out.get("text", "")).strip(), target_languages)
+        )
+        speech_plan_by_lang, speech_cues_by_lang = _build_scene_speech_plan_by_lang(
+            speech_by_lang,
+            dialogue_by_lang=dialogue_by_lang or _dialogue_by_lang_for_scene(scene_out, speech_by_lang),
+        )
         base_prompt = _finalize_scene_video_prompt(str(p.get("video_prompt_en", "")), scene_out)
         scene_out["speech_by_lang"] = speech_by_lang
+        scene_out["dialogue_by_lang"] = dialogue_by_lang
         scene_out["speech_plan_by_lang"] = speech_plan_by_lang
         scene_out["speech_cues_by_lang"] = speech_cues_by_lang
         scene_out["speech_budget_by_lang"] = _speech_budget_by_lang(speech_by_lang, scene_out.get("duration_sec"))

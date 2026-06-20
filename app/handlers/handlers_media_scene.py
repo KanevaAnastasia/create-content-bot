@@ -14,6 +14,7 @@ from telegram import ReplyKeyboardMarkup, Update
 from ..assets import ASSETS
 from ..character_catalog import character_identity_lines, format_character_short_descriptions, sanitize_character_names_and_keys
 from ..constants import STATE_READY_FOR_PRODUCTION
+from .handlers_keyboards import safe_reply_text
 from .handlers_media_core import (
     _decode_b64,
     _image_end_scene_prompt,
@@ -192,16 +193,12 @@ async def _reply_text_with_optional_markup(update: Update, text: str, reply_mark
         chunks.append(raw[:cut].rstrip())
         raw = raw[cut:].lstrip()
     chunks.append(raw)
-    try:
-        for chunk in chunks[:-1]:
-            await update.message.reply_text(chunk)
-        if reply_markup is None:
-            await update.message.reply_text(chunks[-1])
-            return
-        await update.message.reply_text(chunks[-1], reply_markup=reply_markup)
-    except TypeError:
-        for chunk in chunks:
-            await update.message.reply_text(chunk)
+    for chunk in chunks[:-1]:
+        await safe_reply_text(update.message, chunk)
+    if reply_markup is None:
+        await safe_reply_text(update.message, chunks[-1])
+        return
+    await safe_reply_text(update.message, chunks[-1], reply_markup=reply_markup)
 
 def _video_approval_text(scene: dict, scene_index: int, total: int) -> str:
     langs_raw = scene.get("video_prompt_by_lang")
@@ -233,11 +230,25 @@ def _video_approval_text(scene: dict, scene_index: int, total: int) -> str:
             "\n• «конец заново» — вернуться к дельте конечного кадра и перегенерировать только конечное изображение "
             "(стартовый кадр сохранится)."
         )
+    dialogue_block = ""
+    if str(scene.get("dialogue_mode") or "").strip().lower() == "multi" and isinstance(scene.get("dialogue"), list):
+        lines: list[str] = []
+        for item in scene.get("dialogue") or []:
+            if not isinstance(item, dict):
+                continue
+            speaker_key = str(item.get("speaker") or "").strip()
+            speaker = format_character_short_descriptions([speaker_key]) or speaker_key
+            text = str(item.get("text") or "").strip()
+            if speaker and text:
+                lines.append(f"• {speaker}: {text}")
+        if lines:
+            dialogue_block = "Структура говорящих в сцене 1:\n" + "\n".join(lines) + "\n\n"
     return (
         f"Сцена {scene_index}/{total} — апрув перед генерацией видео.\n"
         f"Модель: {model}, длительность: {duration} сек\n"
         f"Язык текущей генерации: {current_lang}\n"
         f"Языков сцены: {', '.join(languages)}\n\n"
+        f"{dialogue_block}"
         "VIDEO PROMPT (как уйдут в генератор) — по языкам:\n"
         f"{prompts_text}\n\n"
         "Варианты:\n"

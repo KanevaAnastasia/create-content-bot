@@ -10,6 +10,7 @@ from app.formatting import (
     format_recipe_step_scene_draft,
     format_recipe_steps,
     format_romantic_drama_status,
+    format_viral_concept_brief,
     format_viral_application_summary,
 )
 
@@ -28,7 +29,7 @@ def test_cost_label_known_and_unknown():
 def test_build_human_readable_plan_includes_defaults():
     scenes = [{"scene": 1, "text": "привет", "characters": ["grandma", "cat", "zaya"], "action": "Zaya смотрит на Timosha", "romantic_drama_beat": "Zaya машет Timosha за окном"}]
     out = build_human_readable_plan(scenes)
-    assert "СЦЕНА 1" in out
+    assert "СЦЕНА 1 [neutral]" in out
     assert "Нужна ли озвучка: да" in out
     assert "Вид/ракурс: medium" in out
     assert "Персонажи: бабушка, рыжий кот, белая кошка" in out
@@ -50,9 +51,49 @@ def test_build_human_readable_plan_supports_raw_scene_aliases():
         }
     ]
     out = build_human_readable_plan(scenes)
-    assert "СЦЕНА 3" in out
+    assert "СЦЕНА 3 [neutral]" in out
     assert "Нейросеть: veo3_fast" in out
     assert "Lip sync: да" in out
+
+
+def test_build_human_readable_plan_shows_scene_audience_type():
+    scenes = [{"scene": 2, "dish_audience_type": "child", "text": "корн-доги готовы"}]
+    out = build_human_readable_plan(scenes)
+    assert "СЦЕНА 2 [child]" in out
+
+
+def test_build_human_readable_plan_shows_dialogue_for_multi_speaker_scene():
+    scenes = [
+        {
+            "scene": 1,
+            "dish_audience_type": "male",
+            "dialogue_mode": "multi",
+            "dialogue": [
+                {"speaker": "grandfather", "text": "Ммм, вот это я понимаю, настоящий ужин!"},
+                {"speaker": "grandma", "text": "Одна сковорода и вкуснейшее жаркое на всю неделю готово."},
+            ],
+            "text": "Ммм [пауза] Одна сковорода",
+        }
+    ]
+    out = build_human_readable_plan(scenes)
+    assert "Диалог сцены (будет в озвучке):" in out
+    assert "дедушка: Ммм, вот это я понимаю, настоящий ужин!" in out
+    assert "бабушка: Одна сковорода и вкуснейшее жаркое на всю неделю готово." in out
+    assert "Агрегированная фраза сцены:" in out
+
+
+def test_format_viral_concept_brief_shows_audience_type_and_family_plan():
+    out = format_viral_concept_brief(
+        {
+            "dish_audience_type": "male",
+            "family_cast_plan": "Добавить дедушку в первую и последнюю сцену.",
+            "main_hook": "хук",
+            "hooks": {},
+            "analysis": {},
+        }
+    )
+    assert "Тип блюда для каста: male" in out
+    assert "План семейных персонажей: Добавить дедушку в первую и последнюю сцену." in out
 
 
 def test_format_romantic_drama_status_explicitly_reports_decision():
