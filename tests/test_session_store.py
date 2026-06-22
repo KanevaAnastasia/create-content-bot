@@ -5,6 +5,8 @@ from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 
 from app import db, session_store
+from app.generation_store import _human_title_for_session
+from app.models import GenerationArtifact
 from app.handlers.handlers_media_core import SyntaxFallbackPendingConfirmation, VideoProviderChoiceRequired
 from app.handlers.handlers_state_commands import generate_video_command
 from app.handlers.handlers_state_scene import on_message_reaction, on_text
@@ -30,6 +32,15 @@ def _install_sqlite(monkeypatch):
     monkeypatch.setattr(db, "get_engine", lambda: engine)
     monkeypatch.setattr(db, "get_session_factory", lambda: factory)
     return engine
+
+
+def test_generation_title_extracts_structured_viral_brief():
+    title = _human_title_for_session(
+        {"viral_concept_brief": {"dish_name": "Вишнёвый пирог"}},
+        [],
+    )
+
+    assert title == "Вишнёвый пирог"
 
 
 def test_save_and_load_session_restores_bytes_and_scene_candidates(monkeypatch):
@@ -62,6 +73,9 @@ def test_save_and_load_session_restores_bytes_and_scene_candidates(monkeypatch):
     persist_image_candidate(session, scene_idx=0, candidate=image_candidate)
     persist_video_candidate(session, scene_idx=0, candidate=liked_video)
     persist_video_candidate(session, scene_idx=0, candidate=latest_video)
+    with db.SessionLocal() as check_db:
+        artifacts = check_db.query(GenerationArtifact).all()
+    assert {item.artifact_type for item in artifacts} == {"scene_start_image", "scene_video_candidate"}
     session_store.save_session(101, session)
 
     loaded = session_store.load_session(101)

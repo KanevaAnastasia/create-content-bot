@@ -110,16 +110,19 @@ def test_burned_subtitle_ass_style_adapts_to_video_shape(tmp_path):
     assert ",1,2,5,2,80,80,145,1" in horizontal_text
 
 
-def test_burned_subtitles_reveal_words_progressively_with_clean_style():
+def test_burned_subtitles_reveal_lines_progressively_with_clean_style():
     cues = post_production._build_burned_subtitle_cues(
-        {"text": "для белого мусса", "start_sec": 1.0, "end_sec": 4.0},
+        {"text": "для белого мусса нужен белый шоколад", "start_sec": 1.0, "end_sec": 4.0},
         video_width=1080,
         video_height=1920,
     )
 
-    assert [cue["text"] for cue in cues] == ["для", "для белого", "для белого мусса"]
-    assert [cue["start_sec"] for cue in cues] == [1.0, 2.0, 3.0]
-    assert [cue["end_sec"] for cue in cues] == [2.0, 3.0, 4.0]
+    assert [cue["text"] for cue in cues] == [
+        f"для белого мусса\n{post_production.SUBTITLE_ASS_INVISIBLE_TOKEN}",
+        "для белого мусса\nнужен белый шоколад",
+    ]
+    assert [cue["start_sec"] for cue in cues] == [1.0, 2.5]
+    assert [cue["end_sec"] for cue in cues] == [2.5, 4.0]
 
 
 def test_build_post_production_prefers_language_specific_speech_cues(monkeypatch):

@@ -1,11 +1,14 @@
 import asyncio
 import re
 import subprocess
+from dataclasses import dataclass
+from pathlib import Path
 from types import SimpleNamespace
 from telegram import ReplyKeyboardMarkup, ReplyKeyboardRemove
 from telegram.error import NetworkError, RetryAfter, TimedOut
 
 from ..character_catalog import sanitize_character_names_and_keys
+from ..pipeline_llm_steps import RUSSIAN_YO_RULE
 from .handlers_state_deps import (
     ContextTypes,
     SESSIONS,
@@ -19,6 +22,8 @@ from .handlers_state_deps import (
     SCENE_MEDIA_AUTO_APPROVE_BUTTON,
     SCENE_MEDIA_AUTO_APPROVE_SESSION_KEY,
     SCENE_MEDIA_CHANGE_SPEED_BUTTON,
+    SCENE_MEDIA_REQUEST_END_FRAME_BUTTON,
+    SCENE_MEDIA_SKIP_END_FRAME_BUTTON,
     SCENE_MEDIA_STOP_BUTTON,
     SCENE_MEDIA_SUBSTEP_END,
     SCENE_MEDIA_SUBSTEP_END_IMAGE_APPROVAL,
@@ -96,6 +101,7 @@ from ..ai_approval_service import (
     format_ai_approval_summary,
     get_ai_approval_config,
 )
+from ..artifact_store import persist_post_production_artifacts
 from .handlers_state_commands import _regenerate_image_prompt_from_feedback
 from .handlers_keyboards import first_step_menu_markup, reply_text_without_keyboard, safe_send_message
 from ..llm_utils import extract_json_object
@@ -190,6 +196,254 @@ _SEND_RETRY_ATTEMPTS = 3
 _SEND_RETRY_BASE_DELAY_SEC = 1.0
 _POST_PRODUCTION_RETRY_ATTEMPTS = 2
 _POST_PRODUCTION_RETRY_DELAY_SEC = 2.0
+
+
+@dataclass(frozen=True)
+class SceneMediaKeyboardSnapshot:
+    """Declarative description of the keyboard required by the current scene-media state."""
+
+    state: str
+    rows: tuple[tuple[str, ...], ...]
+    markup: object
+
+
+SCENE_MEDIA_KEYBOARD_STATE_NAMES = frozenset(
+    {
+        "scene_media.start.prompt",
+        "scene_media.start.image_approval",
+        "scene_media.end.prompt",
+        "scene_media.end.image_approval",
+        "scene_media.video.prompt",
+        "scene_media.video.provider_choice",
+        "scene_media.video.syntax_confirmation",
+        "scene_media.image.model_choice",
+        "scene_media.video.speech.choice",
+        "scene_media.video.speech.manual_phrase",
+        "scene_media.video.speech.approval",
+        "scene_media.video.speech.approval_manual_phrase",
+        "scene_media.video.speech.user_long_phrase_choice",
+        "scene_media.video.translation.confirm",
+        "scene_media.video.translation.approval",
+        "scene_media.video.translation.revision",
+        "scene_media.input.phrase_input",
+        "scene_media.input.feedback_input",
+        "scene_media.input.speed_input",
+        "scene_media.input.prompt_input",
+        "scene_media.input.image_edit_input",
+        "scene_media.video.policy_retry",
+        "scene_media.video.language_approval",
+        "scene_media.complete",
+    }
+)
+
+
+def _keyboard_rows(markup: object) -> tuple[tuple[str, ...], ...]:
+    keyboard = getattr(markup, "keyboard", None)
+    if not isinstance(keyboard, (list, tuple)):
+        return ()
+    return tuple(
+        tuple(str(getattr(button, "text", button)) for button in row)
+        for row in keyboard
+    )
+
+
+def _keyboard_snapshot(state: str, markup: object) -> SceneMediaKeyboardSnapshot:
+    if state not in SCENE_MEDIA_KEYBOARD_STATE_NAMES:
+        raise ValueError(
+            f"Unknown scene-media keyboard state {state!r}. "
+            "Register it in SCENE_MEDIA_KEYBOARD_STATE_NAMES and review the keyboard schema."
+        )
+    return SceneMediaKeyboardSnapshot(state=state, rows=_keyboard_rows(markup), markup=markup)
+
+
+def _syntax_recovery_markup(languages: list[str] | None = None) -> ReplyKeyboardMarkup:
+    rows: list[list[str]] = [["Syntax"], ["Vertex"], ["ФИДБЕК:"]]
+    langs = [str(lang).strip().lower() for lang in (languages or []) if str(lang).strip()]
+    if langs:
+        for lang in langs:
+            rows.append([f"ПРОМПТ {lang}:"])
+        for lang in langs:
+            rows.append([f"ФРАЗА {lang}:"])
+    else:
+        rows.append(["ПРОМПТ:"])
+        rows.append(["ФРАЗА:"])
+    rows.append([NAV_BUTTON_PREVIOUS_STEP])
+    rows.append([NAV_BUTTON_START_OVER])
+    return ReplyKeyboardMarkup(rows, resize_keyboard=True, one_time_keyboard=False)
+
+
+def scene_media_keyboard_snapshot(session: dict) -> SceneMediaKeyboardSnapshot:
+    """
+    Resolve the one keyboard allowed by the current scene-media state.
+
+    Pending decisions have priority over the base substep. This prevents stale
+    Syntax/Vertex buttons from surviving after the pending payload is cleared.
+    """
+    scenes, idx = _scene_media_context(session)
+    if not scenes or idx >= len(scenes):
+        return _keyboard_snapshot("scene_media.complete", first_step_menu_markup())
+    scene = scenes[idx]
+    languages = _scene_target_languages(session, scene)
+
+    provider_pending = scene.get("video_provider_choice_pending")
+    if isinstance(provider_pending, dict):
+        pending_languages = (
+            [
+                normalize_language_code(str(language)) or str(language)
+                for language in provider_pending.get("languages", [])
+                if str(language).strip()
+            ]
+            if provider_pending.get("source") == "scene_batch"
+            else [normalize_language_code(str(provider_pending.get("language") or "")) or languages[0]]
+        )
+        return _keyboard_snapshot(
+            "scene_media.video.provider_choice",
+            _syntax_recovery_markup(pending_languages),
+        )
+
+    if isinstance(scene.get("syntax_fallback_pending"), dict):
+        return _keyboard_snapshot(
+            "scene_media.video.syntax_confirmation",
+            ReplyKeyboardMarkup(
+                [["да"], ["нет"], [NAV_BUTTON_PREVIOUS_STEP], [NAV_BUTTON_START_OVER]],
+                resize_keyboard=True,
+                one_time_keyboard=False,
+            ),
+        )
+
+    image_model_pending = scene.get(SCENE_IMAGE_MODEL_CHOICE_PENDING_KEY)
+    if isinstance(image_model_pending, dict):
+        return _keyboard_snapshot(
+            "scene_media.image.model_choice",
+            _scene_image_model_retry_markup(
+                lower_model=str(image_model_pending.get("lower_model") or "").strip() or None
+            ),
+        )
+
+    speech_pending = session.get(SCENE_SPEECH_PENDING_KEY)
+    if isinstance(speech_pending, dict) and int(speech_pending.get("scene_idx", -1)) == idx:
+        stage = str(speech_pending.get("stage") or "choice")
+        if stage == "approval":
+            markup = _scene_speech_approval_markup()
+        elif stage == "approval_manual_phrase":
+            markup = ReplyKeyboardRemove()
+        elif stage == "user_long_phrase_choice":
+            markup = _scene_speech_user_long_phrase_markup()
+        else:
+            markup = _scene_speech_options_markup()
+        return _keyboard_snapshot(f"scene_media.video.speech.{stage}", markup)
+
+    translation_pending = session.get(SCENE_PHRASE_TRANSLATION_PENDING_KEY)
+    if isinstance(translation_pending, dict) and int(translation_pending.get("scene_idx", -1)) == idx:
+        stage = str(translation_pending.get("stage") or "confirm")
+        if stage == "revision":
+            markup = ReplyKeyboardMarkup(
+                [["ФИДБЕК:"], ["ФРАЗА:"], [NAV_BUTTON_PREVIOUS_STEP], [NAV_BUTTON_START_OVER]],
+                resize_keyboard=True,
+                one_time_keyboard=False,
+            )
+        else:
+            markup = ReplyKeyboardMarkup(
+                [["да"], ["нет"], [NAV_BUTTON_PREVIOUS_STEP], [NAV_BUTTON_START_OVER]],
+                resize_keyboard=True,
+                one_time_keyboard=False,
+            )
+        return _keyboard_snapshot(f"scene_media.video.translation.{stage}", markup)
+
+    text_input_pending_keys = (
+        (SCENE_PHRASE_INPUT_PENDING_KEY, "phrase_input"),
+        (SCENE_VIDEO_FEEDBACK_PENDING_KEY, "feedback_input"),
+        (SCENE_VIDEO_SPEED_PENDING_KEY, "speed_input"),
+        (SCENE_PROMPT_INPUT_PENDING_KEY, "prompt_input"),
+        (SCENE_IMAGE_EDIT_PENDING_KEY, "image_edit_input"),
+    )
+    for pending_key, state_suffix in text_input_pending_keys:
+        pending = session.get(pending_key)
+        if isinstance(pending, dict) and int(pending.get("scene_idx", -1)) == idx:
+            return _keyboard_snapshot(
+                f"scene_media.input.{state_suffix}",
+                ReplyKeyboardRemove(),
+            )
+
+    substep = str(session.get("scene_media_substep") or SCENE_MEDIA_SUBSTEP_START)
+    if substep == SCENE_MEDIA_SUBSTEP_START:
+        return _keyboard_snapshot(
+            "scene_media.start.prompt",
+            scene_image_approval_markup(session=session),
+        )
+    if substep == SCENE_MEDIA_SUBSTEP_START_IMAGE_APPROVAL:
+        return _keyboard_snapshot(
+            "scene_media.start.image_approval",
+            scene_generated_image_approval_markup(
+                include_model_upgrade=_can_escalate_scene_image_model(scene, "start"),
+                include_end_frame_choice=_scene_has_available_end_frame_prompt(scene),
+                session=session,
+            ),
+        )
+    if substep == SCENE_MEDIA_SUBSTEP_END:
+        return _keyboard_snapshot(
+            "scene_media.end.prompt",
+            scene_end_approval_markup(session=session),
+        )
+    if substep == SCENE_MEDIA_SUBSTEP_END_IMAGE_APPROVAL:
+        return _keyboard_snapshot(
+            "scene_media.end.image_approval",
+            scene_generated_image_approval_markup(
+                include_model_upgrade=_can_escalate_scene_image_model(scene, "end"),
+                session=session,
+            ),
+        )
+
+    current_language = _scene_current_language(session, scene)
+    if _get_scene_policy_candidate(scene, current_language):
+        return _keyboard_snapshot(
+            "scene_media.video.policy_retry",
+            video_policy_retry_markup(
+                include_restart_hint=_should_suggest_regenerate_start_frame_after_video_prompt_fails(scene)
+            ),
+        )
+    if _all_scene_languages_have_video(scene, languages):
+        return _keyboard_snapshot(
+            "scene_media.video.language_approval",
+            scene_language_approval_markup(languages, session=session),
+        )
+    return _keyboard_snapshot(
+        "scene_media.video.prompt",
+        scene_video_approval_markup(
+            include_restart_end=_scene_needs_end_frame_step(scene),
+            languages=languages,
+            session=session,
+        ),
+    )
+
+
+async def _reply_current_scene_media_keyboard(update: Update, session: dict, text: str) -> None:
+    snapshot = scene_media_keyboard_snapshot(session)
+    await _reply_text_with_optional_markup(update, text, reply_markup=snapshot.markup)
+
+
+def _store_syntax_retry_context(
+    scene: dict,
+    *,
+    languages: list[str],
+    pending_payload: dict,
+    error_message: str,
+) -> None:
+    attempts = scene.get("syntax_attempts_by_lang")
+    if not isinstance(attempts, dict):
+        attempts = {}
+    for language in languages:
+        attempts[str(language)] = {
+            "prompt": _scene_video_prompt_for_language(scene, str(language)),
+            "speech": _scene_speech_for_language(scene, str(language)),
+            "error": error_message,
+        }
+    scene["syntax_attempts_by_lang"] = attempts
+    scene["syntax_retry_context"] = {
+        "languages": list(languages),
+        "error": error_message,
+        "pending": pending_payload,
+    }
 
 
 def _persist_image_candidate_best_effort(session: dict | None, *, scene_idx: int, candidate: dict | None) -> None:
@@ -300,6 +554,39 @@ def _is_request_entity_too_large_error(exc: Exception) -> bool:
     )
 
 
+async def _reply_final_master_document(
+    message,
+    *,
+    video_bytes: bytes,
+    filename: str,
+    caption: str,
+    label: str,
+    video_path: str | None = None,
+):
+    document_caption = f"{caption}\nОтправляю как файл: Telegram не принял video payload."
+    path = Path(video_path).expanduser() if video_path else None
+
+    if path is not None and path.exists() and path.is_file():
+        async def _send_from_path():
+            with path.open("rb") as stream:
+                return await message.reply_document(document=stream, caption=document_caption, filename=filename)
+
+        return await _safe_send(
+            lambda: _send_from_path(),
+            label=label.replace("reply_video", "reply_document", 1),
+        )
+
+    def _fresh_document():
+        stream = io.BytesIO(video_bytes)
+        stream.name = filename
+        return stream
+
+    return await _safe_send(
+        lambda: message.reply_document(document=_fresh_document(), caption=document_caption, filename=filename),
+        label=label.replace("reply_video", "reply_document", 1),
+    )
+
+
 async def _reply_final_master_video(
     message,
     *,
@@ -328,6 +615,22 @@ async def _reply_final_master_video(
             len(video_bytes),
             video_path or "",
         )
+        try:
+            return await _reply_final_master_document(
+                message,
+                video_bytes=video_bytes,
+                filename=filename,
+                caption=caption,
+                label=label,
+                video_path=video_path,
+            )
+        except Exception:
+            logger.exception(
+                "telegram.final_master_document_fallback_failed label=%s filename=%s path=%s",
+                label,
+                filename,
+                video_path or "",
+            )
         path_note = f"\nПуть к файлу: `{video_path}`" if video_path else ""
         await _safe_reply_text(
             message,
@@ -357,6 +660,7 @@ async def _build_post_production_with_retries(
                 project_slug=project_slug,
             )
             production["post_production"] = _strip_post_production_inline_video_payloads(post)
+            persist_post_production_artifacts(session, post)
             return post
         except Exception as exc:
             last_exc = exc
@@ -420,6 +724,11 @@ def _set_scene_video_prompt_raw(scene: dict, language: str, enabled: bool) -> No
 
 def _set_end_frame_requested(scene: dict, enabled: bool) -> None:
     scene[END_FRAME_REQUESTED_KEY] = bool(enabled)
+
+
+def _scene_has_available_end_frame_prompt(scene: dict) -> bool:
+    end_prompt = str(scene.get("end_frame_prompt") or scene.get("end_frame_prompt_ru") or "").strip()
+    return bool(end_prompt and end_prompt.lower() != "пусто")
 
 
 def _has_explicit_end_frame_request(text: str) -> bool:
@@ -953,6 +1262,7 @@ async def _show_manual_scene_media_controls(update: Update, session: dict) -> No
             "Автоапрув остановлен. Проверьте стартовый кадр вручную.",
             reply_markup=scene_generated_image_approval_markup(
                 include_model_upgrade=_can_escalate_scene_image_model(scene, "start"),
+                include_end_frame_choice=_scene_has_available_end_frame_prompt(scene),
                 session=session,
             ),
         )
@@ -1324,6 +1634,7 @@ def _social_copy_prompt(recipe: str) -> str:
         "- в английские описания добавь переведенные постоянные хэштеги: #grandmatastesbetter #grandmasrecipes #recipes\n"
         "- в английские описания добавь еще 1-2 английских хэштега, отражающие конкретный рецепт, например #potatopancakes или #redvelvet\n"
         "- не выдумывай ингредиенты, если количества нет, оставь без количества\n\n"
+        f"{RUSSIAN_YO_RULE}\n\n"
         "Верни строго JSON объект без markdown с ключами:\n"
         "youtube_ru_title, youtube_ru_description, rutube_ru_title, rutube_ru_description, instagram_ru, vk_ru, tiktok_ru, instagram_en, youtube_en_title, youtube_en_description.\n\n"
         "УТВЕРЖДЕННЫЙ РЕЦЕПТ:\n"
@@ -1425,6 +1736,7 @@ async def _refine_social_copy_from_feedback(
         "Учти фидбэк пользователя, но не выдумывай ингредиенты и количества.\n"
         "Русские описания: #убабушкивкуснее #бабушкинырецепты #рецепты + 1-2 хэштега по рецепту.\n"
         "Английские описания: #grandmatastesbetter #grandmasrecipes #recipes + 1-2 английских хэштега по рецепту.\n"
+        f"{RUSSIAN_YO_RULE}\n"
         "Верни строго JSON объект без markdown с ключами:\n"
         "youtube_ru_title, youtube_ru_description, rutube_ru_title, rutube_ru_description, instagram_ru, vk_ru, tiktok_ru, "
         "instagram_en, youtube_en_title, youtube_en_description.\n\n"
@@ -2867,6 +3179,34 @@ async def _handle_scene_media_common_restarts(update: Update, session: dict, sce
     has_format_or_feedback = _extract_format_or_feedback(text) is not None
     if has_prompt_override or has_format_or_feedback:
         return False
+    low = str(text or "").strip().lower()
+    if low == SCENE_MEDIA_REQUEST_END_FRAME_BUTTON.lower():
+        if not _scene_has_available_end_frame_prompt(scene):
+            await _reply_text_with_optional_markup(
+                update,
+                "Для этой сцены нет подготовленного текста конечного кадра. Можно задать его через `ПРОМПТ: ...` на шаге конечного кадра после возврата к production plan.",
+                reply_markup=scene_image_approval_markup(session=session),
+            )
+            return True
+        _set_end_frame_requested(scene, True)
+        scene.pop("end_frame_image_b64", None)
+        scene["video_results_by_lang"] = {}
+        _set_all_scene_languages_approval(scene, _scene_target_languages(session, scene), False)
+        session["scene_media_language_index"] = 0
+        session["scene_media_substep"] = SCENE_MEDIA_SUBSTEP_END
+        await update.message.reply_text("Ок, добавляю конечный кадр для этой сцены.")
+        await _send_next_scene_media_step(update, session)
+        return True
+    if low == SCENE_MEDIA_SKIP_END_FRAME_BUTTON.lower():
+        _set_end_frame_requested(scene, False)
+        scene.pop("end_frame_image_b64", None)
+        scene["video_results_by_lang"] = {}
+        _set_all_scene_languages_approval(scene, _scene_target_languages(session, scene), False)
+        session["scene_media_language_index"] = 0
+        session["scene_media_substep"] = SCENE_MEDIA_SUBSTEP_VIDEO
+        await update.message.reply_text("Ок, конечный кадр для этой сцены не используем.")
+        await _send_next_scene_media_step(update, session)
+        return True
     if _wants_restart_start_frame(text):
         _reset_video_prompt_policy_failure_count(scene)
         scene.pop("start_frame_image_b64", None)
@@ -2955,10 +3295,6 @@ async def _scene_media_start_not_ok(
     if not feedback:
         await update.message.reply_text('После "ФИДБЕК:" пришлите комментарий, что изменить.')
         return True
-    if _has_explicit_end_frame_request(feedback):
-        end_prompt = str(scene.get("end_frame_prompt") or scene.get("end_frame_prompt_ru") or "").strip()
-        if end_prompt and end_prompt.lower() != "пусто":
-            _set_end_frame_requested(scene, True)
     _apply_shot_type_hint_from_text(scene, feedback)
     await update.message.reply_text("Перегенерирую стартовый промпт (нейросеть).")
     try:
@@ -3119,6 +3455,7 @@ async def _scene_media_start_ok(
         "«ПЕРЕГЕНЕРИРОВАТЬ» — запущу снова с тем же промптом, входными данными и моделью.",
         reply_markup=scene_generated_image_approval_markup(
             include_model_upgrade=_can_escalate_scene_image_model(scene, "start"),
+            include_end_frame_choice=_scene_has_available_end_frame_prompt(scene),
             session=session,
         ),
     )
@@ -3485,10 +3822,6 @@ async def _scene_media_start_image_approval_step(
     if not feedback:
         await update.message.reply_text("Пришлите комментарий, что изменить в изображении.")
         return True
-    if _has_explicit_end_frame_request(feedback):
-        end_prompt = str(scene.get("end_frame_prompt") or scene.get("end_frame_prompt_ru") or "").strip()
-        if end_prompt and end_prompt.lower() != "пусто":
-            _set_end_frame_requested(scene, True)
     await update.message.reply_text("Перегенерирую стартовый промпт и кадр по фидбеку.")
     try:
         new_prompt = await _call_with_503_retries(
@@ -4295,6 +4628,12 @@ async def _scene_media_video_ok(
                         if prompts_by_language.get(language, "")
                     },
                 }
+                _store_syntax_retry_context(
+                    scene,
+                    languages=missing_syntax_keys,
+                    pending_payload=scene["video_provider_choice_pending"],
+                    error_message="Syntax вернул не весь набор языков.",
+                )
                 ready_syntax_keys = sorted(returned_syntax_keys)
                 await _reply_text_with_optional_markup(
                     update,
@@ -4306,11 +4645,7 @@ async def _scene_media_video_ok(
                         "Напишите `Syntax`, чтобы отправить недостающие языки ещё раз через Syntax, "
                         "или `Vertex`, чтобы запустить Vertex/Veo для недостающих языков."
                     ),
-                    reply_markup=ReplyKeyboardMarkup(
-                        [["Syntax"], ["Vertex"], [NAV_BUTTON_PREVIOUS_STEP], [NAV_BUTTON_START_OVER]],
-                        resize_keyboard=True,
-                        one_time_keyboard=False,
-                    ),
+                    reply_markup=_syntax_recovery_markup(missing_syntax_keys),
                 )
                 return True
             elif syntax_batch_results:
@@ -4355,6 +4690,12 @@ async def _scene_media_video_ok(
             payload["source"] = "scene"
             payload["language"] = language
             scene["video_provider_choice_pending"] = payload
+            _store_syntax_retry_context(
+                scene,
+                languages=[language],
+                pending_payload=payload,
+                error_message=str(getattr(err, "syntax_error_message", "") or err),
+            )
             await _reply_text_with_optional_markup(
                 update,
                 (
@@ -4362,11 +4703,7 @@ async def _scene_media_video_ok(
                     "Напишите `Syntax`, чтобы запустить эту сцену ещё раз через Syntax, "
                     "или `Vertex`, чтобы попробовать резервный канал Vertex/Veo."
                 ),
-                reply_markup=ReplyKeyboardMarkup(
-                    [["Syntax"], ["Vertex"], [NAV_BUTTON_PREVIOUS_STEP], [NAV_BUTTON_START_OVER]],
-                    resize_keyboard=True,
-                    one_time_keyboard=False,
-                ),
+                reply_markup=_syntax_recovery_markup([language]),
             )
             continue
         if _is_video_prompt_filtered_error(err) or _is_video_policy_error(err) or _is_video_safety_error(err):
@@ -4942,6 +5279,215 @@ async def _handle_scene_image_model_choice_pending(
     )
 
 
+def _refresh_video_provider_choice_payloads(scene: dict, pending: dict, languages: list[str]) -> None:
+    """Keep retry payload prompts aligned with the editable scene prompts."""
+    if pending.get("source") == "scene_batch":
+        entries_by_lang = pending.get("entries_by_lang")
+        if not isinstance(entries_by_lang, dict):
+            return
+        for language in languages:
+            entry = entries_by_lang.get(language)
+            if isinstance(entry, dict):
+                entry["prompt"] = _scene_video_prompt_for_language(scene, language)
+        return
+    language = normalize_language_code(str(pending.get("language") or "")) or (languages[0] if languages else "ru")
+    pending["prompt"] = _scene_video_prompt_for_language(scene, language)
+
+
+async def _handle_scene_video_provider_choice_edit_command(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+    *,
+    chat_id: int,
+    session: dict,
+    scene: dict,
+    pending: dict,
+    text: str,
+    languages: list[str],
+) -> bool:
+    """Handle prompt/feedback/phrase edits while Syntax/Vertex choice is pending."""
+    prompt_cmd = _parse_lang_payload_command(text, "промпт")
+    phrase_cmd = _parse_lang_payload_command(text, "фраза")
+    feedback = _extract_format_or_feedback(text)
+    generic_prompt = _extract_prompt_override(text)
+
+    if prompt_cmd:
+        lang, payload = prompt_cmd
+        if lang not in languages:
+            await update.message.reply_text(
+                f"Язык `{lang}` не входит в текущий набор: {', '.join(languages) or 'ru'}."
+            )
+            return True
+        if not payload:
+            await update.message.reply_text(f'После "ПРОМПТ {lang}:" пришлите новый prompt.')
+            return True
+        _set_scene_video_prompt_for_language(scene, lang, _compose_locked_video_prompt(scene, lang, payload))
+        session["scene_media_language_index"] = languages.index(lang)
+        _refresh_video_provider_choice_payloads(scene, pending, languages)
+        await _reply_text_with_optional_markup(
+            update,
+            f"Обновила retry prompt для {lang}. Можно снова нажать `Syntax` или `Vertex`.",
+            reply_markup=_syntax_recovery_markup(languages),
+        )
+        return True
+
+    if phrase_cmd:
+        lang, payload = phrase_cmd
+        if lang not in languages:
+            await update.message.reply_text(
+                f"Язык `{lang}` не входит в текущий набор: {', '.join(languages) or 'ru'}."
+            )
+            return True
+        if not payload:
+            await update.message.reply_text(f'После "ФРАЗА {lang}:" пришлите текст фразы.')
+            return True
+        asked = await _apply_scene_phrase_update(
+            update,
+            session=session,
+            scene=scene,
+            scene_idx=int(session.get("image_scene_index", 0) or 0),
+            language=lang,
+            phrase_text=payload,
+        )
+        session["scene_media_language_index"] = languages.index(lang)
+        _refresh_video_provider_choice_payloads(scene, pending, languages)
+        if asked:
+            return True
+        await _reply_text_with_optional_markup(
+            update,
+            f"Фразу для {lang} обновила. Можно снова нажать `Syntax` или `Vertex`.",
+            reply_markup=_syntax_recovery_markup(languages),
+        )
+        return True
+
+    if generic_prompt is not None:
+        lang = _scene_current_language(session, scene)
+        if lang not in languages and languages:
+            lang = languages[0]
+        if not generic_prompt:
+            await update.message.reply_text('После "ПРОМПТ:" пришлите новый prompt.')
+            return True
+        _set_scene_video_prompt_for_language(scene, lang, _compose_locked_video_prompt(scene, lang, generic_prompt))
+        if lang in languages:
+            session["scene_media_language_index"] = languages.index(lang)
+        _refresh_video_provider_choice_payloads(scene, pending, languages)
+        await _reply_text_with_optional_markup(
+            update,
+            f"Обновила retry prompt для {lang}. Можно снова нажать `Syntax` или `Vertex`.",
+            reply_markup=_syntax_recovery_markup(languages),
+        )
+        return True
+
+    if feedback is not None:
+        if not feedback.strip():
+            await update.message.reply_text('После "ФИДБЕК:" пришлите комментарий.')
+            return True
+        current_lang = _scene_current_language(session, scene)
+        current = _scene_video_prompt_for_language(scene, current_lang)
+        try:
+            rewritten = await _call_with_503_retries(
+                update,
+                context,
+                chat_id,
+                "rewrite_video_prompt_feedback_pending_provider",
+                lambda: _rewrite_video_prompt_by_format_instruction(current, feedback),
+            )
+        except ServiceUnavailableRetriesExhaustedError as e:
+            await update.message.reply_text(str(e))
+            return True
+        except Exception as e:
+            logger.exception("pending provider video prompt feedback rewrite failed")
+            await update.message.reply_text(f"Ошибка переформатирования video prompt: {_user_error_message(e)}")
+            return True
+        applied_languages = _set_scene_video_prompt_for_all_languages(session, scene, rewritten)
+        _refresh_video_provider_choice_payloads(scene, pending, applied_languages)
+        await _reply_text_with_optional_markup(
+            update,
+            "Обновила retry prompt по фидбэку для языков: "
+            f"{', '.join(applied_languages)}. Можно снова нажать `Syntax` или `Vertex`.",
+            reply_markup=_syntax_recovery_markup(applied_languages),
+        )
+        return True
+
+    return False
+
+
+async def _continue_after_scene_video_provider_result(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+    *,
+    chat_id: int,
+    session: dict,
+    scene: dict,
+    idx: int,
+    total: int,
+) -> bool:
+    """Advance from provider recovery and redraw the keyboard from the resulting state."""
+    languages = _scene_target_languages(session, scene)
+    session["scene_media_language_index"] = 0
+
+    if not _all_scene_languages_have_video(scene, languages):
+        await _reply_current_scene_media_keyboard(
+            update,
+            session,
+            "Не все языки имеют готовое видео. Выберите провайдера для оставшихся языков.",
+        )
+        return True
+
+    if _is_scene_media_ai_approve_enabled(session):
+        approved_by_ai = await _ai_check_existing_scene_videos(
+            update,
+            session=session,
+            scene=scene,
+            idx=idx,
+            languages=languages,
+        )
+        if not approved_by_ai:
+            return True
+
+    requires_multilingual_approval = (
+        len(languages) > 1 or isinstance(scene.get("video_prompt_by_lang"), dict)
+    )
+    automatic = (
+        _is_scene_media_auto_approve_enabled(session)
+        or _is_scene_media_ai_approve_enabled(session)
+    )
+    if not requires_multilingual_approval or automatic:
+        for language in languages:
+            _approve_scene_video_language(
+                scene,
+                language,
+                speed_coef=DEFAULT_SCENE_VIDEO_SPEED_COEF,
+            )
+        session["image_scene_index"] = idx + 1
+        if session["image_scene_index"] >= total:
+            return await _finish_scene_media_production(update, session)
+        session["scene_media_substep"] = SCENE_MEDIA_SUBSTEP_START
+        if _is_scene_media_auto_approve_enabled(session):
+            return await _run_scene_media_auto_approve(
+                update,
+                context=context,
+                chat_id=chat_id,
+                session=session,
+            )
+        if _is_scene_media_ai_approve_enabled(session):
+            return await _run_scene_media_ai_approve(
+                update,
+                context=context,
+                chat_id=chat_id,
+                session=session,
+            )
+        await _send_next_scene_media_step(update, session)
+        return True
+
+    await _reply_current_scene_media_keyboard(
+        update,
+        session,
+        "Видео по всем языкам готовы. Подтвердите нужные версии или внесите правки.",
+    )
+    return True
+
+
 async def _handle_scene_video_provider_choice_pending(
     update: Update,
     context: ContextTypes.DEFAULT_TYPE,
@@ -4964,16 +5510,32 @@ async def _handle_scene_video_provider_choice_pending(
         return False
     if update.message is None:
         return True
+    pending_languages = (
+        [
+            normalize_language_code(str(lang)) or str(lang)
+            for lang in pending.get("languages", [])
+            if str(lang).strip()
+        ]
+        if pending.get("source") == "scene_batch"
+        else _scene_target_languages(session, scene)
+    )
+    if await _handle_scene_video_provider_choice_edit_command(
+        update,
+        context,
+        chat_id=chat_id,
+        session=session,
+        scene=scene,
+        pending=pending,
+        text=text,
+        languages=pending_languages,
+    ):
+        return True
     choice = video_provider_choice_parse_user_selection(text)
     if choice is None:
         await _reply_text_with_optional_markup(
             update,
             "Нажмите `Syntax` для повтора через Syntax или `Vertex` для резервного Vertex/Veo.",
-            reply_markup=ReplyKeyboardMarkup(
-                [["Syntax"], ["Vertex"], [NAV_BUTTON_PREVIOUS_STEP], [NAV_BUTTON_START_OVER]],
-                resize_keyboard=True,
-                one_time_keyboard=False,
-            ),
+            reply_markup=_syntax_recovery_markup(pending_languages),
         )
         return True
 
@@ -4987,7 +5549,11 @@ async def _handle_scene_video_provider_choice_pending(
         ]
         if not isinstance(entries_by_lang, dict) or not languages:
             scene.pop("video_provider_choice_pending", None)
-            await update.message.reply_text("Не нашла корректные данные для повторного выбора провайдера видео.")
+            await _reply_current_scene_media_keyboard(
+                update,
+                session,
+                "Не нашла корректные данные для повторного выбора провайдера видео.",
+            )
             return True
         if choice == "syntax":
             await update.message.reply_text(
@@ -5015,8 +5581,10 @@ async def _handle_scene_video_provider_choice_pending(
                 )
             except Exception as fb_err:
                 logger.exception("scene Syntax batch retry execution failed")
-                await update.message.reply_text(
-                    f"Ошибка Syntax: {_user_error_message(fb_err, domain='video')}"
+                await _reply_current_scene_media_keyboard(
+                    update,
+                    session,
+                    f"Ошибка Syntax: {_user_error_message(fb_err, domain='video')}",
                 )
                 return True
             missing = [language for language in languages if language not in syntax_batch_results]
@@ -5042,6 +5610,12 @@ async def _handle_scene_video_provider_choice_pending(
                 pending["missing_languages"] = missing
                 pending["languages"] = missing
                 pending["entries_by_lang"] = entries_by_lang
+                _store_syntax_retry_context(
+                    scene,
+                    languages=missing,
+                    pending_payload=pending,
+                    error_message="Syntax снова вернул не все видео.",
+                )
                 await _reply_text_with_optional_markup(
                     update,
                     (
@@ -5051,11 +5625,7 @@ async def _handle_scene_video_provider_choice_pending(
                         "Напишите `Syntax`, чтобы ещё раз отправить недостающие языки в Syntax, "
                         "или `Vertex`, чтобы переключить недостающие языки сцены на Vertex/Veo."
                     ),
-                    reply_markup=ReplyKeyboardMarkup(
-                        [["Syntax"], ["Vertex"], [NAV_BUTTON_PREVIOUS_STEP], [NAV_BUTTON_START_OVER]],
-                        resize_keyboard=True,
-                        one_time_keyboard=False,
-                    ),
+                    reply_markup=_syntax_recovery_markup(missing),
                 )
                 return True
             scene.pop("video_provider_choice_pending", None)
@@ -5072,7 +5642,15 @@ async def _handle_scene_video_provider_choice_pending(
                     provider="telegram",
                     caption_suffix=". Источник: Syntax.",
                 )
-            return True
+            return await _continue_after_scene_video_provider_result(
+                update,
+                context,
+                chat_id=chat_id,
+                session=session,
+                scene=scene,
+                idx=idx,
+                total=total,
+            )
 
         await update.message.reply_text("Пробую резервный канал Vertex/Veo для всех языков сцены…")
         async def _vertex_for_language(language: str) -> tuple[str, bytes | None, Exception | None]:
@@ -5083,15 +5661,17 @@ async def _handle_scene_video_provider_choice_pending(
                 return language, None, err
 
         results = await asyncio.gather(*[_vertex_for_language(language) for language in languages])
-        scene.pop("video_provider_choice_pending", None)
+        failed_languages: list[str] = []
         for language, video_bytes, err in results:
             if err is not None:
                 logger.exception("scene Vertex batch fallback execution failed for language=%s", language, exc_info=err)
                 await update.message.reply_text(
                     f"Ошибка резервного Vertex для {language}: {_user_error_message(err, domain='video')}"
                 )
+                failed_languages.append(language)
                 continue
             if video_bytes is None:
+                failed_languages.append(language)
                 continue
             payload = entries_by_lang.get(language, {})
             vertex_duration_sec = int(payload.get("vertex_duration_sec") or payload.get("duration_sec") or 6)
@@ -5107,25 +5687,58 @@ async def _handle_scene_video_provider_choice_pending(
                 provider="veo",
                 caption_suffix=f" ({vertex_duration_sec} сек). Источник: Vertex fallback.",
             )
-        return True
+        if failed_languages:
+            pending["languages"] = failed_languages
+            pending["missing_languages"] = failed_languages
+            pending["entries_by_lang"] = {
+                language: entries_by_lang[language]
+                for language in failed_languages
+                if isinstance(entries_by_lang.get(language), dict)
+            }
+            _store_syntax_retry_context(
+                scene,
+                languages=failed_languages,
+                pending_payload=pending,
+                error_message="Vertex не вернул все видео.",
+            )
+            await _reply_current_scene_media_keyboard(
+                update,
+                session,
+                "Vertex не вернул все видео. Можно повторить оставшиеся языки через Syntax или Vertex.",
+            )
+            return True
+        scene.pop("video_provider_choice_pending", None)
+        return await _continue_after_scene_video_provider_result(
+            update,
+            context,
+            chat_id=chat_id,
+            session=session,
+            scene=scene,
+            idx=idx,
+            total=total,
+        )
 
     language = normalize_language_code(
         str(pending.get("language") or _scene_current_language(session, scene))
     ) or _scene_current_language(session, scene)
     languages = _scene_target_languages(session, scene)
     if choice == "syntax":
-        await update.message.reply_text("Повторяю эту сцену через Syntax…")
+        await update.message.reply_text("Готовлю повтор этой сцены через Syntax…")
         try:
             video_bytes = await run_syntax_fallback_from_session_payload(pending)
         except Exception as fb_err:
             logger.exception("scene Syntax retry execution failed")
-            await update.message.reply_text(
-                f"Ошибка Syntax: {_user_error_message(fb_err, domain='video')}"
+            await _reply_text_with_optional_markup(
+                update,
+                f"Не удалось отправить запрос в Syntax: {_user_error_message(fb_err, domain='video')}",
+                reply_markup=_syntax_recovery_markup(languages),
             )
             return True
         if not video_bytes:
-            await update.message.reply_text(
-                "Syntax снова не вернул видео. Можно ещё раз написать `Syntax` или переключиться на `Vertex`."
+            await _reply_text_with_optional_markup(
+                update,
+                "Syntax снова не вернул видео. Можно поправить prompt/фразу, ещё раз нажать `Syntax` или переключиться на `Vertex`.",
+                reply_markup=_syntax_recovery_markup(languages),
             )
             return True
         scene.pop("video_provider_choice_pending", None)
@@ -5147,8 +5760,17 @@ async def _handle_scene_video_provider_choice_pending(
             video_bytes = await run_vertex_fallback_from_session_payload(pending)
         except Exception as err:
             logger.exception("scene Vertex fallback execution failed")
-            await update.message.reply_text(
-                f"Ошибка резервного Vertex: {_user_error_message(err, domain='video')}"
+            await _reply_current_scene_media_keyboard(
+                update,
+                session,
+                f"Ошибка резервного Vertex: {_user_error_message(err, domain='video')}",
+            )
+            return True
+        if not video_bytes:
+            await _reply_current_scene_media_keyboard(
+                update,
+                session,
+                "Vertex не вернул видео. Можно повторить попытку через Syntax или Vertex.",
             )
             return True
         scene.pop("video_provider_choice_pending", None)
@@ -5166,23 +5788,15 @@ async def _handle_scene_video_provider_choice_pending(
             caption_suffix=f" ({vertex_duration_sec} сек). Источник: Vertex fallback.",
         )
 
-    requires_multilingual_approval = (
-        len(languages) > 1 or isinstance(scene.get("video_prompt_by_lang"), dict)
+    return await _continue_after_scene_video_provider_result(
+        update,
+        context,
+        chat_id=chat_id,
+        session=session,
+        scene=scene,
+        idx=idx,
+        total=total,
     )
-    current_idx = int(session.get("scene_media_language_index", 0) or 0)
-    if current_idx + 1 < len(languages):
-        session["scene_media_language_index"] = current_idx + 1
-    else:
-        session["scene_media_language_index"] = 0
-    if not requires_multilingual_approval and session["scene_media_language_index"] == 0:
-        for lang in languages:
-            _approve_scene_video_language(scene, lang, speed_coef=DEFAULT_SCENE_VIDEO_SPEED_COEF)
-        session["image_scene_index"] = idx + 1
-        if session["image_scene_index"] >= total:
-            return await _finish_scene_media_production(update, session)
-        session["scene_media_substep"] = SCENE_MEDIA_SUBSTEP_START
-    await _send_next_scene_media_step(update, session)
-    return True
 
 
 async def _handle_waiting_scene_media_state(

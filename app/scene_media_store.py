@@ -8,6 +8,7 @@ from typing import Any
 
 from sqlalchemy import select
 
+from .artifact_store import persist_generation_artifact
 from .db import SessionLocal
 from .generation_store import ensure_generation_run_for_session
 from .models import Scene, SceneImageCandidate, SceneMediaMessageLink, SceneVideoCandidate
@@ -56,6 +57,20 @@ def persist_image_candidate(session: dict[str, Any], *, scene_idx: int, candidat
         row.liked = bool(candidate.get("liked"))
         row.approved_for_video = bool(candidate.get("approved_for_video"))
         db.commit()
+    persist_generation_artifact(
+        session,
+        artifact_type=f"scene_{str(candidate.get('kind') or 'start')}_image",
+        label=f"Scene {scene_idx + 1} {str(candidate.get('kind') or 'start')} frame",
+        uri=f"db://scene_image_candidates/{candidate_id}",
+        scene_idx=scene_idx,
+        mime_type="image/png",
+        payload={
+            "candidate_id": candidate_id,
+            "kind": str(candidate.get("kind") or "start"),
+            "liked": bool(candidate.get("liked")),
+            "approved_for_video": bool(candidate.get("approved_for_video")),
+        },
+    )
 
 
 def persist_video_candidate(session: dict[str, Any], *, scene_idx: int, candidate: dict[str, Any]) -> None:
@@ -86,6 +101,24 @@ def persist_video_candidate(session: dict[str, Any], *, scene_idx: int, candidat
         row.speed_coef = float(candidate.get("speed_coef") or 1.2)
         row.source_image_candidate_id = str(candidate.get("source_image_candidate_id") or "").strip() or None
         db.commit()
+    language = _normalize_language(candidate.get("language")) or "ru"
+    persist_generation_artifact(
+        session,
+        artifact_type="scene_video_candidate",
+        label=f"Scene {scene_idx + 1} video candidate ({language})",
+        uri=f"db://scene_video_candidates/{candidate_id}",
+        scene_idx=scene_idx,
+        language=language,
+        mime_type="video/mp4",
+        payload={
+            "candidate_id": candidate_id,
+            "language": language,
+            "liked": bool(candidate.get("liked")),
+            "approved_for_production": bool(candidate.get("approved_for_production")),
+            "speed_coef": float(candidate.get("speed_coef") or 1.2),
+            "source_image_candidate_id": str(candidate.get("source_image_candidate_id") or "").strip() or None,
+        },
+    )
 
 
 def persist_message_link(

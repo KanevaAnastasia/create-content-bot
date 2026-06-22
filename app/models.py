@@ -267,6 +267,7 @@ class GenerationRun(Base):
 
     id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
     status: Mapped[str] = mapped_column(String(64), nullable=False)
+    human_title: Mapped[str | None] = mapped_column(Text, nullable=True)
     language: Mapped[str] = mapped_column(
         Enum("ru", "en", name="generation_language"),
         nullable=False,
@@ -276,6 +277,7 @@ class GenerationRun(Base):
 
     scenes: Mapped[list["Scene"]] = relationship(back_populates="run", cascade="all, delete-orphan")
     video_results: Mapped[list["VideoResult"]] = relationship(back_populates="run", cascade="all, delete-orphan")
+    artifacts: Mapped[list["GenerationArtifact"]] = relationship(back_populates="run", cascade="all, delete-orphan")
 
 
 class Scene(Base):
@@ -308,6 +310,40 @@ class Scene(Base):
         back_populates="scene",
         cascade="all, delete-orphan",
     )
+    artifacts: Mapped[list["GenerationArtifact"]] = relationship(
+        back_populates="scene",
+        passive_deletes=True,
+    )
+
+
+class GenerationArtifact(Base):
+    """Human-readable artifact index for one generation run."""
+
+    __tablename__ = "generation_artifacts"
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
+    run_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid,
+        ForeignKey("generation_runs.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    scene_id: Mapped[uuid.UUID | None] = mapped_column(
+        Uuid,
+        ForeignKey("scenes.id", ondelete="SET NULL"),
+        nullable=True,
+        index=True,
+    )
+    artifact_type: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
+    label: Mapped[str] = mapped_column(Text, nullable=False)
+    uri: Mapped[str] = mapped_column(Text, nullable=False)
+    language: Mapped[str | None] = mapped_column(String(8), nullable=True, index=True)
+    mime_type: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    payload_json: Mapped[dict] = mapped_column(JSON, nullable=False, default=dict)
+    created_at: Mapped[DateTime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
+
+    run: Mapped["GenerationRun"] = relationship(back_populates="artifacts")
+    scene: Mapped["Scene | None"] = relationship(back_populates="artifacts")
 
 
 class VideoResult(Base):
@@ -362,6 +398,29 @@ class ChatSession(Base):
         server_default=func.now(),
         onupdate=func.now(),
     )
+
+
+class PipelineStepCheckpoint(Base):
+    """Restorable snapshot for navigating to a previous pipeline step."""
+
+    __tablename__ = "pipeline_step_checkpoints"
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
+    chat_id: Mapped[int] = mapped_column(Integer, nullable=False, index=True)
+    generation_run_id: Mapped[uuid.UUID | None] = mapped_column(
+        Uuid,
+        ForeignKey("generation_runs.id", ondelete="SET NULL"),
+        nullable=True,
+        index=True,
+    )
+    step_key: Mapped[str] = mapped_column(String(128), nullable=False, index=True)
+    scene_index: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    substep: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    language: Mapped[str | None] = mapped_column(String(8), nullable=True)
+    session_snapshot_json: Mapped[dict] = mapped_column(JSON, nullable=False, default=dict)
+    payload_json: Mapped[dict] = mapped_column(JSON, nullable=False, default=dict)
+    restored_at: Mapped[DateTime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    created_at: Mapped[DateTime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
 
 
 class SceneImageCandidate(Base):

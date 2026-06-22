@@ -9,7 +9,7 @@ from typing import Any
 
 from .llm_utils import extract_json_object, gemini_generate_sync
 from .media_costs import estimate_gemini_text_cost_usd
-from .pipeline_llm_steps import FINAL_SCENE_SUBSCRIBE_CTA, FINAL_SCENE_SUBSCRIBE_CTA_VEO3
+from .pipeline_llm_steps import FINAL_SCENE_SUBSCRIBE_CTA, FINAL_SCENE_SUBSCRIBE_CTA_VEO3, RUSSIAN_YO_RULE
 from .scene_speech_budget import (
     PAUSE_TOKEN,
     max_speech_chars_for_duration,
@@ -98,6 +98,7 @@ def shorten_scene_speech_and_sync_video_prompt_sync(
         text_rules = (
             "Поле text:\n"
             "- русский, от первого лица бабушки к зрителю (я/мы);\n"
+            f"- {RUSSIAN_YO_RULE}\n"
             "- без ударений и без специальных акцентных меток;\n"
             "- без дефиса и тире в самой фразе озвучки: не используй символы -, – или —; для паузы используй только [пауза];\n"
             f"- допускается {PAUSE_TOKEN} только между смысловыми фразами;\n"

@@ -755,6 +755,8 @@ _LLM_VIDEO_STAGES_JSON_RULE = (
     "Каждый элемент — один этап съёмки: конкретное действие с едой на русском, обычно 5–14 слов."
 )
 
+_RUSSIAN_YO_RULE = llm_steps.RUSSIAN_YO_RULE
+
 def _parse_video_stages_from_llm(raw: str) -> list[str]:
     """
     Разбирает ответ модели с **внутренними** этапами для сцен (не пользовательский рецепт).
@@ -801,6 +803,7 @@ async def _apply_llm_stress_for_veo3(scenes: list[dict[str, Any]]) -> list[dict[
         "- паузы обозначай только токеном [пауза] и используй его как замену знаков препинания\n"
         "- ставь [пауза] только в логических местах между смысловыми фразами, не после каждого слова\n"
         "- не используй дефис и тире в фразах озвучки: запрещены символы -, – и —\n"
+        f"- {_RUSSIAN_YO_RULE}\n"
         "- не используй знаки препинания\n"
         "- верни ТОЛЬКО JSON объекта формата {\"items\":[{\"scene_index\":0,\"text\":\"...\"}]}\n\n"
         "INPUT:\n"
@@ -913,6 +916,8 @@ async def generate_recipe_steps(
         "- конкретные глаголы: режет, мешает, жарит, формирует\n"
         "- каждый шаг развернутый: минимум 5-7 слов, с деталями действия\n"
         "- никаких 'готовит' и 'делает что-то'\n\n"
+        + _RUSSIAN_YO_RULE
+        + "\n"
         + _LLM_RECIPE_STEPS_QUALITY_RULE
         + "\n"
         + _LLM_RECIPE_STEPS_COUNT_RULE
@@ -1090,6 +1095,8 @@ async def expand_recipe_steps(recipe_steps: list[str]) -> list[str]:
         "- не добавлять новые ингредиенты\n"
         "- не менять блюдо\n"
         "- просто детализировать\n\n"
+        + _RUSSIAN_YO_RULE
+        + "\n"
         + _LLM_RECIPE_STEPS_QUALITY_RULE
         + "\n"
         + _LLM_RECIPE_STEPS_COUNT_RULE
@@ -1116,6 +1123,8 @@ async def merge_recipe_steps(recipe_steps: list[str]) -> list[str]:
         "ПРАВИЛА:\n"
         "- не терять ключевые этапы\n"
         "- сохранить понятность\n\n"
+        + _RUSSIAN_YO_RULE
+        + "\n"
         + _LLM_RECIPE_STEPS_QUALITY_RULE
         + "\n"
         + _LLM_RECIPE_STEPS_COUNT_RULE
@@ -1702,6 +1711,7 @@ async def generate_frame_prompts_for_approval(
     scenes_plan: list[dict[str, Any]],
     user_feedback: str | None = None,
     previous_frame_prompts: list[dict[str, Any]] | None = None,
+    requested_end_frame_scenes: list[int] | set[int] | tuple[int, ...] | None = None,
 ) -> dict[str, Any]:
     """
     Отдельный этап перед production: готовит и возвращает START/END frame промпты на апрув.
@@ -1710,6 +1720,11 @@ async def generate_frame_prompts_for_approval(
         "scenes": _strip_location_context_for_llm(scenes_plan),
         "feedback": (user_feedback or "").strip(),
         "previous_frame_prompts": _strip_location_context_for_llm(previous_frame_prompts or []),
+        "requested_end_frame_scenes": sorted(
+            int(value)
+            for value in (requested_end_frame_scenes or [])
+            if str(value).isdigit() and 1 <= int(value) <= len(scenes_plan)
+        ),
         "rules": {
             "start_frame_ru": (
                 "детально и самодостаточно описывает кадр ДО движения; "
@@ -1717,9 +1732,8 @@ async def generate_frame_prompts_for_approval(
                 "обязательно включает способ нарезки, описание блюда/текущего состояния блюда и подробные описания ингредиентов"
             ),
             "end_frame_ru": (
-                "по умолчанию 'пусто', если старт и финал визуально совпадают. "
-                "Если пользователь явно просит конечный кадр, "
-                "верни end_frame_prompt_ru. Если не 'пусто': только ДЕЛЬТА относительно старта — что изменилось, кто вошёл в кадр, "
+                "верни end_frame_prompt_ru только для сцен из requested_end_frame_scenes; "
+                "для всех остальных сцен строго 'пусто'. Если не 'пусто': только ДЕЛЬТА относительно старта — что изменилось, кто вошёл в кадр, "
                 "куда сдвинулись руки/еда; ЗАПРЕЩЕНО описывать весь кадр с нуля."
             ),
             "same_view_can_use_empty_start": True,
@@ -1744,9 +1758,11 @@ async def generate_frame_prompts_for_approval(
         "Return ONLY JSON array. One item per scene, same order.\n"
         "Each item must have keys: start_frame_prompt_ru, end_frame_prompt_ru.\n"
         "START FRAME: detailed static pre-action frame in Russian.\n"
+        + _RUSSIAN_YO_RULE
+        + "\n"
         "START FRAME must explicitly include camera angle/viewpoint in words (required).\n"
-        "END FRAME: use Russian word 'пусто' only when the final beat is visually the same as the start. "
-        "Return end_frame_prompt_ru only if the user explicitly asks for an end frame. "
+        "END FRAME is opt-in only. Return end_frame_prompt_ru only for scene numbers in requested_end_frame_scenes; "
+        "for every other scene return the Russian word 'пусто', even if the final beat differs visually. "
         "When end_frame_prompt_ru is used, write ONLY the delta vs start (what changed, who entered, what progressed) — never a full scene description from scratch.\n"
         "START FRAME must be self-contained and maximally specific: props, cookware, working surface, character pose, food details.\n"
         "START FRAME must include cutting/slicing method when relevant, dish/current dish-state description, and detailed ingredient descriptions: shape, color, texture, processing state.\n"
@@ -1762,6 +1778,14 @@ async def generate_frame_prompts_for_approval(
     raw = await asyncio.to_thread(gemini_generate_sync, prompt)
     arr = extract_json_array(raw)
     normalized = _normalize_frame_prompts(scenes_plan, arr)
+    requested_end_frames = {
+        int(value)
+        for value in (requested_end_frame_scenes or [])
+        if str(value).isdigit() and 1 <= int(value) <= len(normalized)
+    }
+    for scene_index, item in enumerate(normalized, start=1):
+        if scene_index not in requested_end_frames:
+            item["end_frame_prompt_ru"] = "пусто"
     return {"text_plan": format_frame_prompts_for_approval(normalized), "json_plan": normalized}
 
 
@@ -1771,6 +1795,7 @@ async def generate_full_production(
     *,
     user_feedback: str | None = None,
     previous_enriched_scenes: list[dict[str, Any]] | None = None,
+    requested_end_frame_scenes: list[int] | set[int] | tuple[int, ...] | None = None,
     viral_concept_brief: dict[str, Any] | None = None,
     sponsored_content: bool = False,
     brand_context: str | None = None,
@@ -1786,6 +1811,11 @@ async def generate_full_production(
     зафиксированными кадрами).
     """
     scenes = [dict(scene) for scene in scenes_plan]
+    requested_end_frames = {
+        int(value)
+        for value in (requested_end_frame_scenes or [])
+        if str(value).isdigit() and 1 <= int(value) <= len(scenes)
+    }
     viral_brief = viral_concept_brief if isinstance(viral_concept_brief, dict) else {}
     target_languages = target_languages_from_env()
     if approved_frame_prompts is not None:
@@ -1793,7 +1823,12 @@ async def generate_full_production(
             raise RuntimeError("Approved frame prompts count mismatch.")
         for i, scene in enumerate(scenes):
             p = approved_frame_prompts[i]
-            end_frame_prompt = _normalize_end_frame_prompt_for_stable_generation(p.get("end_frame_prompt_ru"))
+            scene_number = i + 1
+            end_frame_prompt = (
+                _normalize_end_frame_prompt_for_stable_generation(p.get("end_frame_prompt_ru"))
+                if scene_number in requested_end_frames
+                else "пусто"
+            )
             scene["start_frame_prompt"] = _ensure_image_prompt_framing_requirements(
                 append_visual_prop_descriptions(
                     _append_romantic_drama_to_start_prompt(str(p.get("start_frame_prompt_ru", "пусто")), scene)
@@ -1849,14 +1884,19 @@ async def generate_full_production(
                 "viral_concept_brief": viral_brief,
                 "sponsored_content": bool(sponsored_content),
                 "brand_context": brand_context or "",
+                "end_frame_rule": (
+                    "Return end_frame_prompt_ru only for scene numbers listed in requested_end_frame_scenes. "
+                    "For every other scene return the Russian word 'пусто'. The end frame is a delta vs start."
+                ),
             },
+            "requested_end_frame_scenes": sorted(requested_end_frames),
         }
         fb = (user_feedback or "").strip()
         prev_list = previous_enriched_scenes or []
         feedback_block = ""
         if fb:
             feedback_block += (
-                "\n\nФИДБЕК ПОЛЬЗОВАТЕЛЯ (перепиши video_prompt_en там, где нужно; порядок сцен не меняй):\n"
+                "\n\nФИДБЕК ПОЛЬЗОВАТЕЛЯ (перепиши video_prompt_en и, только если явно запрошено, end_frame_prompt_ru; порядок сцен не меняй):\n"
                 f"{fb}\n"
             )
         if isinstance(prev_list, list) and prev_list and len(prev_list) == len(scenes):
@@ -1866,7 +1906,10 @@ async def generate_full_production(
             )
         prompt = (
             "Return ONLY JSON object with key \"prompts\" — array of objects, one per scene in order.\n"
-            "Each object: video_prompt_en.\n"
+            "Each object: video_prompt_en, end_frame_prompt_ru.\n"
+            "END FRAME is opt-in only. Return a delta end_frame_prompt_ru only for scene numbers in "
+            "requested_end_frame_scenes; return `пусто` for every other scene. Never infer an end frame from action, "
+            "payoff, transformation, or a visually different final beat.\n"
             "VIDEO PROMPT must include clip duration, reference style, no on-screen text or subtitles, and no background music/soundtrack. "
             "Visual style must be non-photorealistic/non-realistic cartoon (no realism). "
             "Grandmother must be a cartoon grandmother and the cat must be a cartoon cat; include the exact phrase cartoon cat. "
@@ -1874,12 +1917,15 @@ async def generate_full_production(
             "blenders must have jar, base, and lid; mixers need beaters, bowl, and motor body. "
             "Do not invent extra characters, duplicate animals, extra hands, or unrelated side actions. "
             "If scene has speech, require accurate lip sync with the Russian line. "
+            "For every Russian word copied into video_prompt_en, especially after CHARACTERS SPEAKS, use `ё` when Russian spelling requires `ё`, not `е`. "
             "For scene 1, the spoken phrase in CHARACTERS SPEAKS must happen at the start of the clip and explicitly "
             "name the dish from the scenario; the viewer must hear the dish name in the first scene. "
             "Framing: close-up / medium-close; grandmother's full figure and every other character in the scene "
             "must stay fully visible; camera angle or framing should evolve during the clip (no fixed static "
             "tripod for the entire take).\n"
             + _LLM_VIDEO_CHARACTERS_SPEAKS_RULE
+            + "\n"
+            + _RUSSIAN_YO_RULE
             + "\n"
             "If model is veo3* OR scene needs speech, include exact substring: voice_lock_full: "
             + GRANDMA_VOICE_LOCK_FULL
@@ -1909,10 +1955,22 @@ async def generate_full_production(
             logger.exception("production prompts parse failed; using deterministic fallback", extra={"require_frames": False})
             prompts = _fallback_production_prompts(scenes, require_frames=False)
         enriched: list[dict[str, Any]] = []
-        for scene, p in zip(scenes, prompts):
+        for scene_index, (scene, p) in enumerate(zip(scenes, prompts), start=1):
             scene_out = dict(scene)
             scene_out["model"] = "veo3_fast"
             scene_out["voice_provider"] = "none"
+            if scene_index in requested_end_frames:
+                candidate_end = _normalize_end_frame_prompt_for_stable_generation(p.get("end_frame_prompt_ru"))
+                if candidate_end == "пусто":
+                    candidate_end = _normalize_end_frame_prompt_for_stable_generation(
+                        scene_out.get("end_frame_prompt")
+                    )
+                scene_out["end_frame_prompt"] = candidate_end
+            else:
+                scene_out["end_frame_prompt"] = "пусто"
+            scene_out["end_frame_requested"] = _end_frame_prompt_requests_generation(
+                scene_out["end_frame_prompt"]
+            )
             dialogue_by_lang = await _build_scene_dialogue_by_lang(scene_out, target_languages)
             speech_by_lang = (
                 _speech_by_lang_from_dialogue(dialogue_by_lang)
@@ -1957,8 +2015,9 @@ async def generate_full_production(
                 "обязательно включи способ нарезки, описание блюда/текущего состояния блюда и подробные описания ингредиентов"
             ),
             "end_frame_ru": (
-                "'пусто' только если старт и финал сцены визуально совпадают. Если пользователь явно просит конечный кадр "
-                "или в сцене есть заметный финальный beat, верни только дельту vs старт, без описания кадра с нуля"
+                "END frame is opt-in only. Return a delta vs start only for scene numbers listed in "
+                "requested_end_frame_scenes; for every other scene return 'пусто'. Never infer an END frame "
+                "from a final beat, payoff, transformation, or visible action."
             ),
             "video_prompt_en": (
                 "include exact clip duration, reference style, no on-screen text or subtitles; "
@@ -1998,11 +2057,14 @@ async def generate_full_production(
             "viral_concept_brief": viral_brief,
             "sponsored_content": bool(sponsored_content),
             "brand_context": brand_context or "",
+            "requested_end_frame_scenes": sorted(requested_end_frames),
         },
     }
     prompt = (
         "Return ONLY JSON object with key \"prompts\" — array of objects, one per scene in order.\n"
         "Each object: start_frame_prompt_ru, end_frame_prompt_ru, video_prompt_en.\n"
+        + _RUSSIAN_YO_RULE
+        + "\n"
         "START FRAME must be static and highly detailed, and explicitly include camera angle/viewpoint. "
         "START FRAME must include cutting/slicing method when relevant, dish/current dish-state description, and detailed ingredient descriptions: shape, color, texture, processing state. "
         f"START FRAME Russian mandatory rule: {START_FRAME_RECIPE_VISUAL_DETAIL_RULE} "
@@ -2014,12 +2076,15 @@ async def generate_full_production(
         "blenders must have jar, base, and lid; mixers need beaters, bowl, and motor body. "
         "Do not invent extra characters, duplicate animals, extra hands, or unrelated side actions. "
         "If scene has speech, require accurate lip sync with the Russian line. "
+        "For every Russian word copied into video_prompt_en, especially after CHARACTERS SPEAKS, use `ё` when Russian spelling requires `ё`, not `е`. "
         "For scene 1, the spoken phrase in CHARACTERS SPEAKS must happen at the start of the clip and explicitly "
         "name the dish from the scenario; the viewer must hear the dish name in the first scene. "
         "Framing: close-up / medium-close; grandmother's full figure and every other character in the scene "
         "must stay fully visible; camera angle or framing should evolve during the clip (no fixed static "
         "tripod for the entire take).\n"
         + _LLM_VIDEO_CHARACTERS_SPEAKS_RULE
+        + "\n"
+        + _RUSSIAN_YO_RULE
         + "\n"
         "If model is veo3* OR scene needs speech, include exact substring: voice_lock_full: "
         + GRANDMA_VOICE_LOCK_FULL
@@ -2030,7 +2095,9 @@ async def generate_full_production(
         "Use the cartoon-character and kitchen-physics rules when composing the prompt, but do not append bulky "
         "meta-rule labels like veo3_cartoon_character_rule or kitchen_physics_rule unless they naturally belong in the prompt.\n"
         "Do not mention location names or location references; preserve continuity through recurring props and food state.\n"
-        "If the user explicitly asks for an end frame in a scene, keep a non-empty end_frame_prompt_ru for that scene.\n"
+        "END FRAME is opt-in only. Keep a non-empty end_frame_prompt_ru only for scene numbers listed in "
+        "requested_end_frame_scenes. For every other scene return `пусто`, even when start and finish differ, "
+        "the scene has a payoff, or the final beat is visually notable.\n"
         "Respect the Viral Concept Brief and scene retention fields. First frame must not be boring preparation; "
         "final scene must deliver the visual payoff. If sponsored_content is true, integrate the brand naturally "
         "inside the cooking story, not as an ad break.\n"
@@ -2048,11 +2115,15 @@ async def generate_full_production(
         logger.exception("production prompts parse failed; using deterministic fallback", extra={"require_frames": True})
         prompts = _fallback_production_prompts(scenes, require_frames=True)
     enriched: list[dict[str, Any]] = []
-    for scene, p in zip(scenes, prompts):
+    for scene_index, (scene, p) in enumerate(zip(scenes, prompts), start=1):
         scene_out = dict(scene)
         scene_out["model"] = "veo3_fast"
         scene_out["voice_provider"] = "none"
-        end_frame_prompt = _normalize_end_frame_prompt_for_stable_generation(p.get("end_frame_prompt_ru"))
+        end_frame_prompt = (
+            _normalize_end_frame_prompt_for_stable_generation(p.get("end_frame_prompt_ru"))
+            if scene_index in requested_end_frames
+            else "пусто"
+        )
         scene_out["start_frame_prompt"] = _ensure_image_prompt_framing_requirements(
             append_visual_prop_descriptions(_append_romantic_drama_to_start_prompt(p.get("start_frame_prompt_ru", ""), scene_out)),
             model=str(scene_out.get("model", "")),

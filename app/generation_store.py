@@ -32,11 +32,45 @@ def _scenes_plan_for_session(session: dict[str, Any]) -> list[dict[str, Any]]:
     return []
 
 
+def _human_title_for_session(session: dict[str, Any], scenes_plan: list[dict[str, Any]]) -> str:
+    for key in ("selected_concept", "recipe_title", "recipe_name"):
+        raw = session.get(key)
+        value = raw.strip() if isinstance(raw, str) else ""
+        if value:
+            return value[:180]
+    viral_brief = session.get("viral_concept_brief")
+    if isinstance(viral_brief, dict):
+        for key in ("dish_name", "concept_name", "title", "strongest_first_phrase"):
+            raw = viral_brief.get(key)
+            value = raw.strip() if isinstance(raw, str) else ""
+            if value:
+                return value[:180]
+    script = str(session.get("recipe_full_text") or "").strip()
+    if script:
+        first_line = next((line.strip() for line in script.splitlines() if line.strip()), "")
+        if first_line:
+            return first_line[:180]
+    for scene in scenes_plan:
+        text = str(scene.get("text") or "").strip()
+        if text:
+            return text[:180]
+    return "Content Fabric generation"
+
+
 def ensure_generation_run_for_session(session: dict[str, Any]) -> tuple[str | None, dict[int, str]]:
     """Create a lightweight run+scene snapshot in DB on first persistence."""
     existing = str(session.get("generation_run_id") or "").strip()
     raw_map = session.get("scene_db_ids_by_index")
     if existing and isinstance(raw_map, dict):
+        title = _human_title_for_session(session, _scenes_plan_for_session(session))
+        try:
+            with SessionLocal() as db:
+                run = db.get(GenerationRun, uuid.UUID(existing))
+                if run is not None and not str(run.human_title or "").strip():
+                    run.human_title = title
+                    db.commit()
+        except Exception:
+            pass
         return existing, {int(k): str(v) for k, v in raw_map.items()}
 
     scenes_plan = _scenes_plan_for_session(session)
@@ -52,6 +86,7 @@ def ensure_generation_run_for_session(session: dict[str, Any]) -> tuple[str | No
     with SessionLocal() as db:
         run = GenerationRun(
             status="media_in_progress",
+            human_title=_human_title_for_session(session, scenes_plan),
             language=_language_for_session(session),
             script=script,
         )

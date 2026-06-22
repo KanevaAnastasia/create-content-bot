@@ -22,6 +22,8 @@ from .handlers_media_core import (
     _normalize_character_key,
 )
 from ..llm_utils import gemini_generate_sync
+from ..pipeline_llm_steps import RUSSIAN_YO_RULE
+from ..pipeline_history import record_checkpoint
 from ..vertex_images import generate_image_vertex, generate_image_vertex_result, next_image_generation_model
 from ..visual_props import append_visual_prop_descriptions
 
@@ -46,6 +48,8 @@ NAV_BUTTON_PREVIOUS_STEP = "Предыдущий шаг"
 NAV_BUTTON_START_OVER = "В начало"
 PIXAR_REFERENCE_STYLE_PHRASE = "Пиксаровский стиль референса"
 SCENE_MEDIA_UPGRADE_IMAGE_MODEL_BUTTON = "ПОВЫСИТЬ МОДЕЛЬ"
+SCENE_MEDIA_REQUEST_END_FRAME_BUTTON = "Нужен конечный кадр"
+SCENE_MEDIA_SKIP_END_FRAME_BUTTON = "Без конечного кадра"
 
 
 def _reply_markup_with_rows(*rows: list[str]) -> ReplyKeyboardMarkup:
@@ -78,6 +82,7 @@ def scene_image_approval_markup(*, session: dict | None = None) -> ReplyKeyboard
     return _reply_markup_with_rows(
         ["ОК"],
         _scene_media_mode_row(session),
+        [SCENE_MEDIA_REQUEST_END_FRAME_BUTTON, SCENE_MEDIA_SKIP_END_FRAME_BUTTON],
         ["ПРОМПТ:"],
         ["ФИДБЕК:"],
         ["старт заново"],
@@ -125,6 +130,7 @@ def scene_video_approval_markup(
 def scene_generated_image_approval_markup(
     *,
     include_model_upgrade: bool = False,
+    include_end_frame_choice: bool = False,
     session: dict | None = None,
 ) -> ReplyKeyboardMarkup:
     """Кнопки апрува уже сгенерированного изображения перед следующим шагом."""
@@ -136,6 +142,8 @@ def scene_generated_image_approval_markup(
         ["ФИДБЕК"],
         ["ПЕРЕГЕНЕРИРОВАТЬ"],
     ]
+    if include_end_frame_choice:
+        rows.append([SCENE_MEDIA_REQUEST_END_FRAME_BUTTON, SCENE_MEDIA_SKIP_END_FRAME_BUTTON])
     if include_model_upgrade:
         rows.append([SCENE_MEDIA_UPGRADE_IMAGE_MODEL_BUTTON])
     return _reply_markup_with_rows(*rows)
@@ -374,6 +382,7 @@ async def _rewrite_video_prompt_by_format_instruction(current_prompt: str, forma
         "Верни только один готовый prompt на английском, без пояснений, заголовков и служебных меток.\n"
         "Не копируй в ответ строки `ФИДБЕК ПОЛЬЗОВАТЕЛЯ`, `ТЕКУЩИЙ VIDEO PROMPT` или похожую разметку.\n"
         "Сохрани смысл сцены, действие и предметную непрерывность.\n\n"
+        f"{RUSSIAN_YO_RULE}\n\n"
         f"ФИДБЕК ПОЛЬЗОВАТЕЛЯ:\n{format_instruction.strip()}\n\n"
         f"ТЕКУЩИЙ VIDEO PROMPT:\n{current_prompt.strip()}\n"
     )
@@ -441,6 +450,7 @@ async def _regenerate_end_frame_prompt_from_feedback(scene: dict, feedback: str)
         "Верни один короткий текст на русском: что изменилось к финалу (кто вошёл, положение рук, еда, готовность). "
         "Не описывай весь кадр с нуля. Сохраняй предметную непрерывность: та же посуда, кастрюля/сковорода, "
         "плита или рабочая поверхность, ингредиенты и состояние еды, если они ещё должны быть в кадре.\n\n"
+        f"{RUSSIAN_YO_RULE}\n\n"
         f"CONTINUITY ANCHORS: {anchors or '-'}\n"
         f"СТАРТОВЫЙ КАДР (контекст):\n{start_snapshot}\n\n"
         f"ТЕКУЩАЯ ДЕЛЬТА END:\n{current}\n\n"
@@ -466,6 +476,8 @@ async def _send_next_scene_media_step(update: Update, session: dict) -> None:
     scene = scenes[idx]
     sub = session.get("scene_media_substep", SCENE_MEDIA_SUBSTEP_START)
     total = len(scenes)
+    effective_chat = getattr(update, "effective_chat", None)
+    record_checkpoint(getattr(effective_chat, "id", None), session)
     if session.get(SCENE_MEDIA_AUTO_APPROVE_SESSION_KEY):
         return
     if sub == SCENE_MEDIA_SUBSTEP_START:
@@ -484,6 +496,39 @@ async def _send_next_scene_media_step(update: Update, session: dict) -> None:
         return
     start_img = _decode_b64(str(scene.get("start_frame_image_b64", "")).strip())
     end_img = _decode_b64(str(scene.get("end_frame_image_b64", "")).strip())
+    if sub == SCENE_MEDIA_SUBSTEP_START_IMAGE_APPROVAL:
+        if start_img:
+            b = io.BytesIO(start_img)
+            b.name = f"scene_{idx + 1}_start_approval.png"
+            await update.message.reply_photo(photo=b, caption=f"Сцена {idx + 1}: стартовый кадр.")
+        end_prompt = _raw_end_frame_text(scene)
+        await _reply_text_with_optional_markup(
+            update,
+            "Проверьте стартовый кадр.\n"
+            "«ОК» — перейти дальше.\n"
+            "При необходимости выберите, использовать ли конечный кадр.",
+            reply_markup=scene_generated_image_approval_markup(
+                include_end_frame_choice=bool(end_prompt and end_prompt.lower() != "пусто"),
+                session=session,
+            ),
+        )
+        return
+    if sub == SCENE_MEDIA_SUBSTEP_END_IMAGE_APPROVAL:
+        if start_img:
+            b = io.BytesIO(start_img)
+            b.name = f"scene_{idx + 1}_start_reference.png"
+            await update.message.reply_photo(photo=b, caption=f"Сцена {idx + 1}: стартовый кадр-референс.")
+        if end_img:
+            eb = io.BytesIO(end_img)
+            eb.name = f"scene_{idx + 1}_end_approval.png"
+            await update.message.reply_photo(photo=eb, caption=f"Сцена {idx + 1}: конечный кадр.")
+        await _reply_text_with_optional_markup(
+            update,
+            "Проверьте конечный кадр.\n"
+            "«ОК» — перейти к апруву видео.",
+            reply_markup=scene_generated_image_approval_markup(session=session),
+        )
+        return
     if start_img:
         b = io.BytesIO(start_img)
         b.name = f"scene_{idx + 1}_start_preview.png"

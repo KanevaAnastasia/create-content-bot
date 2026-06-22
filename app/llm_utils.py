@@ -456,7 +456,19 @@ def _truncate_error_text(text: str, *, max_len: int = _MAX_USER_VISIBLE_LLM_ERRO
     return compact[:max_len] + "…"
 
 
-def gemini_generate_sync(prompt: str) -> str:
+def _guess_image_mime_type(data: bytes) -> str:
+    if data.startswith(b"\x89PNG\r\n\x1a\n"):
+        return "image/png"
+    if data.startswith(b"\xff\xd8\xff"):
+        return "image/jpeg"
+    if data.startswith((b"GIF87a", b"GIF89a")):
+        return "image/gif"
+    if data.startswith(b"RIFF") and data[8:12] == b"WEBP":
+        return "image/webp"
+    return "image/jpeg"
+
+
+def gemini_generate_sync(prompt: str, *, images: list[bytes] | None = None) -> str:
     """
     Синхронный вызов Gemini (исполняется из async-кода через ``asyncio.to_thread``).
 
@@ -489,6 +501,7 @@ def gemini_generate_sync(prompt: str) -> str:
             HarmCategory,
             SafetySetting,
         )
+        from vertexai import generative_models as vertex_generative_models  # type: ignore
     except Exception as e:
         raise RuntimeError("Missing dependency. Install with: pip install google-cloud-aiplatform") from e
     vertexai.init(project=project, location=location)
@@ -501,6 +514,7 @@ def gemini_generate_sync(prompt: str) -> str:
             model_ids.append(m)
     transports: list[tuple[str, Any]] = [("vertexai_sdk", None)]
     prompt_snapshot = str(prompt)
+    image_payloads = [image for image in (images or []) if isinstance(image, bytes) and image]
     context_fingerprint = hashlib.sha1(prompt_snapshot.encode("utf-8")).hexdigest()[:10]
 
     last_quota_error: BaseException | None = None
@@ -544,7 +558,17 @@ def gemini_generate_sync(prompt: str) -> str:
                         threshold=HarmBlockThreshold.BLOCK_ONLY_HIGH,
                     ),
                 ]
-                resp = model.generate_content(prompt_snapshot, safety_settings=safety_settings)
+                request: Any = prompt_snapshot
+                if image_payloads:
+                    Part = getattr(vertex_generative_models, "Part", None)
+                    if Part is None:
+                        raise RuntimeError("Vertex Gemini SDK does not support image parts in this version.")
+                    request = [Part.from_text(prompt_snapshot)]
+                    request.extend(
+                        Part.from_data(data=image, mime_type=_guess_image_mime_type(image))
+                        for image in image_payloads
+                    )
+                resp = model.generate_content(request, safety_settings=safety_settings)
                 text = _extract_text_from_vertex_response(resp)
                 if not text:
                     details = _summarize_empty_vertex_response(resp)

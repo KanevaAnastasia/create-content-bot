@@ -21,6 +21,56 @@ def _syntax_test_frame_bytes() -> bytes:
     return _ONE_PIXEL_PNG
 
 
+def test_prepare_long_prompt_uses_local_fallback_when_gemini_fails(monkeypatch):
+    import app.syntax_telethon_fallback as telethon_fallback
+
+    prompt = (
+        "lang:en A grandmother pours orange juice into molds. "
+        + "Detailed camera and visual instruction. " * 100
+        + "voice_lock_full: elderly English female voice. "
+        + "CHARACTERS SPEAKS: We freeze it and insert the sticks."
+    )
+    monkeypatch.setattr(
+        telethon_fallback,
+        "_shorten_prompt_for_syntax_with_gemini_sync",
+        lambda *_args, **_kwargs: None,
+    )
+
+    prepared = telethon_fallback._prepare_prompt_for_syntax(prompt, max_len=2000)
+
+    assert prepared is not None
+    shortened, was_shortened = prepared
+    assert was_shortened is True
+    assert len(shortened) <= 2000
+    assert shortened.startswith("lang:en")
+    assert "voice_lock_full: elderly English female voice." in shortened
+    assert "CHARACTERS SPEAKS: We freeze it and insert the sticks." in shortened
+
+
+def test_prompt_failure_does_not_acquire_syntax_session(monkeypatch):
+    import app.syntax_telethon_fallback as telethon_fallback
+
+    acquired: list[bool] = []
+    monkeypatch.setattr(telethon_fallback, "_prepare_prompt_for_syntax", lambda _prompt: None)
+    monkeypatch.setattr(
+        telethon_fallback,
+        "_acquire_syntax_session_candidate",
+        lambda _timeout: acquired.append(True),
+    )
+    monkeypatch.setenv("TELEGRAM_API_ID", "123")
+    monkeypatch.setenv("TELEGRAM_API_HASH", "hash")
+
+    result = try_generate_via_syntax(
+        prompt="long prompt",
+        model="veo3_fast",
+        duration_sec=6,
+        start_image=_syntax_test_frame_bytes(),
+    )
+
+    assert result.success is False
+    assert acquired == []
+
+
 def test_fallback_result_accepts_bytes_payload():
     result = FallbackResult(
         success=True,
@@ -371,7 +421,7 @@ def test_syntax_prompt_shortens_long_prompt_with_gemini(monkeypatch):
     assert '"max_chars": 120' in seen_prompt["prompt"]
 
 
-def test_syntax_prompt_does_not_cut_when_gemini_returns_too_long(monkeypatch):
+def test_syntax_prompt_uses_local_fallback_when_gemini_returns_too_long(monkeypatch):
     import app.syntax_telethon_fallback as telethon_fallback
 
     monkeypatch.setattr(
@@ -380,7 +430,11 @@ def test_syntax_prompt_does_not_cut_when_gemini_returns_too_long(monkeypatch):
         lambda _prompt: '{"prompt":"' + ("x" * 121) + '"}',
     )
 
-    assert telethon_fallback._prepare_prompt_for_syntax("y" * 200, max_len=120) is None
+    prepared = telethon_fallback._prepare_prompt_for_syntax("y" * 200, max_len=120)
+    assert prepared is not None
+    shortened, was_shortened = prepared
+    assert was_shortened is True
+    assert len(shortened) <= 120
 
 
 def test_syntax_prompt_limit_defaults_to_2000(monkeypatch):
@@ -642,3 +696,102 @@ def test_try_generate_via_syntax_batch_sends_all_requests_before_waiting(monkeyp
         "send_file:start_frame.png",
         "send_message:lang:en prompt",
     ]
+
+
+def test_batch_routes_edited_video_status_to_english_request():
+    import app.syntax_telethon_fallback as telethon_fallback
+
+    class _Request:
+        def __init__(self, token):
+            self.expected_lang_token = token
+
+    class _Message:
+        id = 701
+        out = False
+        reply_to = None
+        raw_text = ""
+        message = ""
+        video = object()
+        document = None
+
+    states = {
+        "ru": {
+            "request": _Request("lang:ru"),
+            "sent_ids": {101, 102},
+            "pending_refetch": {700},
+        },
+        "en": {
+            "request": _Request("lang:en"),
+            "sent_ids": {103, 104},
+            "pending_refetch": {701},
+        },
+    }
+
+    assert telethon_fallback._batch_message_candidate_keys(_Message(), states) == ["en"]
+
+
+def test_batch_does_not_guess_language_for_unmatched_bare_video():
+    import app.syntax_telethon_fallback as telethon_fallback
+
+    class _Request:
+        def __init__(self, token):
+            self.expected_lang_token = token
+
+    class _Message:
+        id = 800
+        out = False
+        reply_to = None
+        raw_text = ""
+        message = ""
+        video = object()
+        document = None
+
+    states = {
+        "ru": {
+            "request": _Request("lang:ru"),
+            "sent_ids": {101, 102},
+            "pending_refetch": set(),
+        },
+        "en": {
+            "request": _Request("lang:en"),
+            "sent_ids": {103, 104},
+            "pending_refetch": set(),
+        },
+    }
+
+    assert telethon_fallback._batch_message_candidate_keys(_Message(), states) == []
+
+
+def test_batch_routes_video_replying_to_english_status():
+    import app.syntax_telethon_fallback as telethon_fallback
+
+    class _Request:
+        def __init__(self, token):
+            self.expected_lang_token = token
+
+    class _ReplyTo:
+        reply_to_msg_id = 701
+
+    class _Message:
+        id = 702
+        out = False
+        reply_to = _ReplyTo()
+        raw_text = ""
+        message = ""
+        video = object()
+        document = None
+
+    states = {
+        "ru": {
+            "request": _Request("lang:ru"),
+            "sent_ids": {101, 102},
+            "pending_refetch": {700},
+        },
+        "en": {
+            "request": _Request("lang:en"),
+            "sent_ids": {103, 104},
+            "pending_refetch": {701},
+        },
+    }
+
+    assert telethon_fallback._batch_message_candidate_keys(_Message(), states) == ["en"]

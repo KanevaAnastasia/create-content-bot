@@ -49,6 +49,69 @@ def test_gemini_generate_sync_uses_vertexai_sdk(monkeypatch):
     assert calls["model"] >= 1
 
 
+def test_gemini_generate_sync_sends_image_parts(monkeypatch):
+    captured = {}
+
+    class _Resp:
+        text = "recipe"
+
+    class _Part:
+        @staticmethod
+        def from_text(text):
+            return {"text": text}
+
+        @staticmethod
+        def from_data(*, data, mime_type):
+            return {"data": data, "mime_type": mime_type}
+
+    class _Model:
+        def __init__(self, _model_name):
+            pass
+
+        def generate_content(self, request, **_kwargs):
+            captured["request"] = request
+            return _Resp()
+
+    monkeypatch.setenv("GOOGLE_CLOUD_PROJECT", "proj")
+    monkeypatch.setenv("GEMINI_MODEL", "gemini-2.5-flash")
+    monkeypatch.setenv("GEMINI_MODEL_FALLBACKS", "")
+    monkeypatch.setattr(llm_utils, "submit_llm", lambda fn: fn())
+
+    import sys
+    import types
+
+    fake_vertexai = types.ModuleType("vertexai")
+    fake_vertexai.init = lambda **_kwargs: None
+    fake_vm = types.ModuleType("vertexai.generative_models")
+    fake_vm.GenerativeModel = _Model
+    fake_vm.Part = _Part
+    fake_vm.SafetySetting = type("SafetySetting", (), {"__init__": lambda self, category, threshold: None})
+    fake_vm.HarmCategory = type(
+        "HarmCategory",
+        (),
+        {
+            "HARM_CATEGORY_HATE_SPEECH": "hs",
+            "HARM_CATEGORY_DANGEROUS_CONTENT": "dc",
+            "HARM_CATEGORY_SEXUALLY_EXPLICIT": "sx",
+            "HARM_CATEGORY_HARASSMENT": "hr",
+        },
+    )
+    fake_vm.HarmBlockThreshold = type("HarmBlockThreshold", (), {"BLOCK_ONLY_HIGH": "high"})
+    monkeypatch.setitem(sys.modules, "vertexai", fake_vertexai)
+    monkeypatch.setitem(sys.modules, "vertexai.generative_models", fake_vm)
+
+    result = llm_utils.gemini_generate_sync(
+        "extract recipe",
+        images=[b"\x89PNG\r\n\x1a\nimage"],
+    )
+
+    assert result == "recipe"
+    assert captured["request"] == [
+        {"text": "extract recipe"},
+        {"data": b"\x89PNG\r\n\x1a\nimage", "mime_type": "image/png"},
+    ]
+
+
 def test_gemini_generate_sync_handles_multipart_candidate_text(monkeypatch):
     class _Part:
         def __init__(self, text):

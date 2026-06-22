@@ -1,0 +1,260 @@
+"""Checkpoint history for restoring previous pipeline steps."""
+
+from __future__ import annotations
+
+import copy
+import logging
+import uuid
+from dataclasses import dataclass
+from datetime import UTC, datetime
+from typing import Any
+
+from sqlalchemy import select
+
+from .constants import (
+    STATE_READY_FOR_PRODUCTION,
+    STATE_WAITING_CONCEPT,
+    STATE_WAITING_FRAME_PROMPTS_APPROVAL,
+    STATE_WAITING_PRODUCTION_BUNDLE_APPROVAL,
+    STATE_WAITING_RECIPE_APPROVAL,
+    STATE_WAITING_SCENE_APPROVAL,
+    STATE_WAITING_SCENE_MEDIA,
+)
+from .db import SessionLocal
+from .models import PipelineStepCheckpoint
+from .session_store import _deserialize_value, _serialize_value, save_session_if_possible
+
+logger = logging.getLogger("bot.history")
+
+TRANSIENT_SESSION_KEYS = {
+    "scene_speech_shorten_pending",
+    "scene_phrase_input_pending",
+    "scene_phrase_translation_pending",
+    "social_descriptions_pending",
+    "scene_image_edit_pending",
+    "scene_video_feedback_pending",
+    "scene_video_speed_pending",
+    "scene_prompt_input_pending",
+    "scene_media_ai_human_review",
+}
+
+TRANSIENT_SCENE_KEYS = {
+    "syntax_fallback_pending",
+    "video_provider_choice_pending",
+    "image_model_choice_pending",
+}
+
+
+@dataclass(frozen=True)
+class StepSignature:
+    step_key: str
+    scene_index: int | None = None
+    substep: str | None = None
+    language: str | None = None
+
+    def as_payload(self) -> dict[str, Any]:
+        return {
+            "step_key": self.step_key,
+            "scene_index": self.scene_index,
+            "substep": self.substep,
+            "language": self.language,
+        }
+
+
+def _safe_int(value: Any) -> int | None:
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _current_language(session: dict[str, Any]) -> str | None:
+    production = session.get("production")
+    scenes = production.get("json_plan") if isinstance(production, dict) else None
+    idx = _safe_int(session.get("image_scene_index"))
+    if not isinstance(scenes, list) or idx is None or not (0 <= idx < len(scenes)):
+        return None
+    scene = scenes[idx]
+    if not isinstance(scene, dict):
+        return None
+    prompt_map = scene.get("video_prompt_by_lang")
+    if not isinstance(prompt_map, dict) or not prompt_map:
+        return str(scene.get("video_prompt_current_language") or "ru").strip().lower() or "ru"
+    langs = [str(key).strip().lower() for key in prompt_map if str(key).strip()]
+    if not langs:
+        return "ru"
+    lang_idx = _safe_int(session.get("scene_media_language_index")) or 0
+    if lang_idx < 0 or lang_idx >= len(langs):
+        lang_idx = 0
+    return langs[lang_idx]
+
+
+def session_step_signature(session: dict[str, Any]) -> StepSignature:
+    """Return the user-visible pipeline position for a session snapshot."""
+    state = str(session.get("state") or "").strip()
+    if state == STATE_WAITING_CONCEPT:
+        return StepSignature("concept")
+    if state == STATE_WAITING_RECIPE_APPROVAL:
+        return StepSignature("recipe")
+    if state == STATE_WAITING_SCENE_APPROVAL:
+        return StepSignature("scenario")
+    if state == STATE_WAITING_FRAME_PROMPTS_APPROVAL:
+        return StepSignature("frame_prompts")
+    if state == STATE_WAITING_PRODUCTION_BUNDLE_APPROVAL:
+        return StepSignature("production_plan")
+    if state == STATE_WAITING_SCENE_MEDIA:
+        return StepSignature(
+            "scene_media",
+            scene_index=_safe_int(session.get("image_scene_index")),
+            substep=str(session.get("scene_media_substep") or "start_prompt"),
+            language=_current_language(session),
+        )
+    if state == STATE_READY_FOR_PRODUCTION:
+        return StepSignature("ready_for_production")
+    return StepSignature(state or "first_step")
+
+
+def _generation_run_uuid(session: dict[str, Any]) -> uuid.UUID | None:
+    raw = str(session.get("generation_run_id") or "").strip()
+    if not raw:
+        return None
+    try:
+        return uuid.UUID(raw)
+    except ValueError:
+        return None
+
+
+def _signature_matches_row(signature: StepSignature, row: PipelineStepCheckpoint) -> bool:
+    return (
+        str(row.step_key or "") == signature.step_key
+        and row.scene_index == signature.scene_index
+        and (row.substep or None) == signature.substep
+        and (row.language or None) == signature.language
+    )
+
+
+def _clean_transient_pending(snapshot: dict[str, Any]) -> dict[str, Any]:
+    cleaned = copy.deepcopy(snapshot)
+    for key in TRANSIENT_SESSION_KEYS:
+        cleaned.pop(key, None)
+    production = cleaned.get("production")
+    scenes = production.get("json_plan") if isinstance(production, dict) else None
+    if isinstance(scenes, list):
+        for scene in scenes:
+            if not isinstance(scene, dict):
+                continue
+            for key in TRANSIENT_SCENE_KEYS:
+                scene.pop(key, None)
+    return cleaned
+
+
+def record_checkpoint(
+    chat_id: int | None,
+    session: dict[str, Any] | None,
+    *,
+    step_key: str | None = None,
+    scene_index: int | None = None,
+    substep: str | None = None,
+    language: str | None = None,
+    payload: dict[str, Any] | None = None,
+) -> None:
+    """Persist a restorable snapshot for the current user-visible step."""
+    if chat_id is None or not isinstance(session, dict):
+        return
+    signature = session_step_signature(session)
+    if step_key is not None:
+        signature = StepSignature(
+            step_key=str(step_key),
+            scene_index=scene_index if scene_index is not None else signature.scene_index,
+            substep=substep if substep is not None else signature.substep,
+            language=language if language is not None else signature.language,
+        )
+    try:
+        snapshot = _serialize_value(session)
+        row_payload = dict(payload or {})
+        row_payload.setdefault("signature", signature.as_payload())
+        with SessionLocal() as db:
+            latest = (
+                db.execute(
+                    select(PipelineStepCheckpoint)
+                    .where(PipelineStepCheckpoint.chat_id == int(chat_id))
+                    .where(PipelineStepCheckpoint.restored_at.is_(None))
+                    .order_by(PipelineStepCheckpoint.created_at.desc(), PipelineStepCheckpoint.id.desc())
+                    .limit(1)
+                )
+                .scalars()
+                .first()
+            )
+            if latest is not None and _signature_matches_row(signature, latest):
+                latest.session_snapshot_json = snapshot
+                latest.payload_json = row_payload
+                latest.created_at = datetime.now(UTC)
+                db.commit()
+                return
+            db.add(
+                PipelineStepCheckpoint(
+                    chat_id=int(chat_id),
+                    generation_run_id=_generation_run_uuid(session),
+                    step_key=signature.step_key,
+                    scene_index=signature.scene_index,
+                    substep=signature.substep,
+                    language=signature.language,
+                    session_snapshot_json=snapshot,
+                    payload_json=row_payload,
+                    created_at=datetime.now(UTC),
+                )
+            )
+            db.commit()
+    except Exception:
+        logger.exception("checkpoint.record_failed chat_id=%s", chat_id)
+
+
+def restore_previous_checkpoint(chat_id: int | None, session: dict[str, Any] | None) -> dict[str, Any] | None:
+    """Restore the closest checkpoint before the current visible step."""
+    if chat_id is None or not isinstance(session, dict):
+        return None
+    current = session_step_signature(session)
+    try:
+        with SessionLocal() as db:
+            rows = (
+                db.execute(
+                    select(PipelineStepCheckpoint)
+                    .where(PipelineStepCheckpoint.chat_id == int(chat_id))
+                    .where(PipelineStepCheckpoint.restored_at.is_(None))
+                    .order_by(PipelineStepCheckpoint.created_at.desc(), PipelineStepCheckpoint.id.desc())
+                    .limit(20)
+                )
+                .scalars()
+                .all()
+            )
+            target: PipelineStepCheckpoint | None = None
+            target_index: int | None = None
+            for index, row in enumerate(rows):
+                if _signature_matches_row(current, row):
+                    continue
+                target = row
+                target_index = index
+                break
+            if target is None or target_index is None:
+                return None
+            restored = _deserialize_value(dict(target.session_snapshot_json or {}))
+            if not isinstance(restored, dict):
+                return None
+            restored = _clean_transient_pending(restored)
+            session.clear()
+            session.update(restored)
+            restored_meta = {
+                "step_key": target.step_key,
+                "scene_index": target.scene_index,
+                "substep": target.substep,
+                "language": target.language,
+            }
+            restored_at = datetime.now(UTC)
+            for newer_row in rows[:target_index]:
+                newer_row.restored_at = restored_at
+            db.commit()
+        save_session_if_possible(int(chat_id), session)
+        return restored_meta
+    except Exception:
+        logger.exception("checkpoint.restore_failed chat_id=%s", chat_id)
+        return None

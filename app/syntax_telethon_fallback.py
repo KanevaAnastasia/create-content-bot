@@ -19,6 +19,7 @@ from uuid import uuid4
 from .syntax_getvideo_download import fetch_mp4_bytes_from_getvideo_page
 from .syntax_image_prepare import prepare_syntax_frame_bytes
 from .llm_utils import extract_json_object, gemini_generate_sync
+from .pipeline_llm_steps import RUSSIAN_YO_RULE
 
 logger = logging.getLogger(__name__)
 
@@ -303,6 +304,7 @@ def _shorten_prompt_for_syntax_with_gemini_sync(prompt: str, *, max_len: int) ->
             "Return a complete Syntax video prompt, not a summary.",
             "Keep the core action, camera/motion, style, safety/physics constraints and voice/lip-sync instructions.",
             "If CHARACTERS SPEAKS is present, preserve that marker and the spoken phrase as accurately as possible.",
+            RUSSIAN_YO_RULE,
             "The returned prompt must be at most max_chars characters.",
         ],
     }
@@ -336,6 +338,38 @@ def _shorten_prompt_for_syntax_with_gemini_sync(prompt: str, *, max_len: int) ->
     return None
 
 
+def _shorten_prompt_for_syntax_locally(prompt: str, *, max_len: int) -> str:
+    """Deterministic network-free fallback that preserves action and speech instructions."""
+    original = re.sub(r"\s+", " ", str(prompt or "")).strip()
+    if len(original) <= max_len:
+        return original
+
+    speech_match = re.search(r"\bCHARACTERS?\s+SPEAKS?\s*:", original, flags=re.IGNORECASE)
+    voice_matches = list(re.finditer(r"\bvoice_lock_full\s*:", original, flags=re.IGNORECASE))
+    voice_match = voice_matches[-1] if voice_matches else None
+    if voice_match and (speech_match is None or voice_match.start() < speech_match.start()):
+        suffix_start = voice_match.start()
+    elif speech_match:
+        suffix_start = speech_match.start()
+    else:
+        suffix_start = max(0, len(original) - min(900, max_len // 2))
+    suffix = original[suffix_start:].strip()
+    suffix_budget = min(len(suffix), max(500, min(1100, max_len * 3 // 5)))
+    if len(suffix) > suffix_budget:
+        suffix = suffix[-suffix_budget:].lstrip()
+
+    separator = " "
+    prefix_budget = max_len - len(separator) - len(suffix)
+    prefix = original[: max(0, prefix_budget)].rstrip()
+    if " " in prefix:
+        prefix = prefix.rsplit(" ", 1)[0].rstrip()
+
+    shortened = f"{prefix}{separator}{suffix}".strip()
+    if len(shortened) > max_len:
+        shortened = shortened[:max_len].rstrip()
+    return shortened
+
+
 def _prepare_prompt_for_syntax(prompt: str, *, max_len: int | None = None) -> tuple[str, bool] | None:
     limit = max_len if max_len is not None else _syntax_prompt_max_chars()
     original = (prompt or "").strip()
@@ -343,6 +377,14 @@ def _prepare_prompt_for_syntax(prompt: str, *, max_len: int | None = None) -> tu
         return original, False
     shortened = _shorten_prompt_for_syntax_with_gemini_sync(original, max_len=limit)
     if shortened is None:
+        shortened = _shorten_prompt_for_syntax_locally(original, max_len=limit)
+        logger.warning(
+            "syntax_prompt_shorten.local_fallback original_chars=%s shortened_chars=%s limit=%s",
+            len(original),
+            len(shortened),
+            limit,
+        )
+    if not shortened or len(shortened) > limit:
         return None
     return shortened, True
 
@@ -535,6 +577,46 @@ def _first_message_from_get_messages(got: Any) -> Any | None:
         return None
 
 
+def _batch_message_candidate_keys(message: Any, pending_states: dict[str, dict[str, Any]]) -> list[str]:
+    """Route a batch reply to the request it can actually be correlated with."""
+    mid = int(getattr(message, "id", 0) or 0)
+    reply_id = getattr(getattr(message, "reply_to", None), "reply_to_msg_id", None)
+    text = _extract_text(message).lower()
+
+    if reply_id:
+        matched = [
+            key
+            for key, state in pending_states.items()
+            if int(reply_id) in state["sent_ids"]
+            or int(reply_id) in state["pending_refetch"]
+        ]
+        if matched:
+            return matched
+
+    edited_status_matches = [
+        key
+        for key, state in pending_states.items()
+        if mid in state["pending_refetch"]
+    ]
+    if edited_status_matches:
+        return edited_status_matches
+
+    token_matches = [
+        key
+        for key, state in pending_states.items()
+        if state["request"].expected_lang_token
+        and state["request"].expected_lang_token in text
+    ]
+    if token_matches:
+        return token_matches
+
+    if len(pending_states) == 1:
+        return list(pending_states)
+
+    # A bare video in a multi-request chat has no reliable language identity.
+    return []
+
+
 async def _poll_syntax_bot_until_video(
     client: Any,
     target: Any,
@@ -666,6 +748,44 @@ async def _run_fallback_async(
             attempt_id=attempt_id,
         )
 
+    if timeout_sec is not None and int(timeout_sec) > 0:
+        timeout = int(timeout_sec)
+    else:
+        env_raw = (os.getenv("SYNTAX_FALLBACK_TIMEOUT_SEC") or "").strip()
+        timeout = int(env_raw) if env_raw.isdigit() and int(env_raw) > 0 else 15 * 60
+    poll = _poll_interval_sec()
+    bot_username = _normalize_username(os.getenv("SYNTAX_BOT_USERNAME", "syntxaibot"))
+
+    try:
+        start_image = prepare_syntax_frame_bytes(start_image)
+        if end_image:
+            end_image = prepare_syntax_frame_bytes(end_image)
+    except Exception as prep_err:
+        return _result(
+            success=False,
+            video_bytes=None,
+            video_uri=None,
+            provider_message=f"Syntax frame prepare failed: {prep_err}",
+            attempt_id=attempt_id,
+        )
+
+    prepared_prompt = await asyncio.to_thread(_prepare_prompt_for_syntax, prompt)
+    if prepared_prompt is None:
+        return _result(
+            success=False,
+            video_bytes=None,
+            video_uri=None,
+            provider_message=(
+                f"Syntax prompt is longer than {_syntax_prompt_max_chars()} chars, "
+                "and Gemini could not shorten it to the Syntax limit."
+            ),
+            attempt_id=attempt_id,
+        )
+    prompt_text, prompt_shortened = prepared_prompt
+    expected_lang_token = _expected_lang_token_from_prompt(prompt_text)
+    sent_ids: set[int] = set()
+    last_info = ""
+
     session_candidate = _acquire_syntax_session_candidate(acquire_timeout_sec)
     if session_candidate is None:
         candidates = _syntax_session_candidates()
@@ -705,48 +825,6 @@ async def _run_fallback_async(
         session_obj = session_candidate.value
 
     try:
-        if timeout_sec is not None and int(timeout_sec) > 0:
-            timeout = int(timeout_sec)
-        else:
-            env_raw = (os.getenv("SYNTAX_FALLBACK_TIMEOUT_SEC") or "").strip()
-            timeout = int(env_raw) if env_raw.isdigit() and int(env_raw) > 0 else 15 * 60
-        poll = _poll_interval_sec()
-        bot_username = _normalize_username(os.getenv("SYNTAX_BOT_USERNAME", "syntxaibot"))
-    except Exception:
-        _release_syntax_session_candidate(session_candidate)
-        raise
-
-    try:
-        start_image = prepare_syntax_frame_bytes(start_image)
-        if end_image:
-            end_image = prepare_syntax_frame_bytes(end_image)
-    except Exception as prep_err:
-        return _result(
-            success=False,
-            video_bytes=None,
-            video_uri=None,
-            provider_message=f"Syntax frame prepare failed: {prep_err}",
-            attempt_id=attempt_id,
-        )
-
-    prepared_prompt = await asyncio.to_thread(_prepare_prompt_for_syntax, prompt)
-    if prepared_prompt is None:
-        return _result(
-            success=False,
-            video_bytes=None,
-            video_uri=None,
-            provider_message=(
-                f"Syntax prompt is longer than {_syntax_prompt_max_chars()} chars, "
-                "and Gemini could not shorten it to the Syntax limit."
-            ),
-            attempt_id=attempt_id,
-        )
-    prompt_text, prompt_shortened = prepared_prompt
-    expected_lang_token = _expected_lang_token_from_prompt(prompt_text)
-    sent_ids: set[int] = set()
-    last_info = ""
-
-    try:
         client = TelegramClient(session_obj, int(api_id_raw), api_hash)
         try:
             await client.connect()
@@ -782,7 +860,7 @@ async def _run_fallback_async(
                 if prompt_shortened:
                     last_info = (
                         f"Prompt exceeded Syntax limit ({_syntax_prompt_max_chars()} chars) "
-                        "and was shortened with Gemini before send."
+                        "and was shortened automatically before send."
                     )
 
                 deadline = time.monotonic() + timeout
@@ -877,41 +955,6 @@ async def _run_batch_fallback_async(
             )
         return results
 
-    session_candidate = _acquire_syntax_session_candidate(acquire_timeout_sec)
-    if session_candidate is None:
-        provider_message = (
-            "Missing Telethon session: set TELETHON_SESSION_PATH / TELETHON_STRING_SESSION "
-            "or multi-session TELETHON_SESSION_PATHS / TELETHON_STRING_SESSIONS."
-            if not _syntax_session_candidates()
-            else "No free Telethon session became available before timeout. "
-            "Add more sessions or increase SYNTAX_FALLBACK_LOCK_TIMEOUT_SEC."
-        )
-        for request in requests:
-            results[str(request.key)] = _result(
-                success=False,
-                video_bytes=None,
-                video_uri=None,
-                provider_message=provider_message,
-                attempt_id=uuid4().hex,
-            )
-        return results
-
-    if session_candidate.kind == "string":
-        if StringSession is None:
-            _release_syntax_session_candidate(session_candidate)
-            for request in requests:
-                results[str(request.key)] = _result(
-                    success=False,
-                    video_bytes=None,
-                    video_uri=None,
-                    provider_message="Telethon StringSession is unavailable in this environment.",
-                    attempt_id=uuid4().hex,
-                )
-            return results
-        session_obj: Any = StringSession(session_candidate.value)
-    else:
-        session_obj = session_candidate.value
-
     if timeout_sec is not None and int(timeout_sec) > 0:
         timeout = int(timeout_sec)
     else:
@@ -963,8 +1006,42 @@ async def _run_batch_fallback_async(
         )
 
     if not ready:
-        _release_syntax_session_candidate(session_candidate)
         return results
+
+    session_candidate = _acquire_syntax_session_candidate(acquire_timeout_sec)
+    if session_candidate is None:
+        provider_message = (
+            "Missing Telethon session: set TELETHON_SESSION_PATH / TELETHON_STRING_SESSION "
+            "or multi-session TELETHON_SESSION_PATHS / TELETHON_STRING_SESSIONS."
+            if not _syntax_session_candidates()
+            else "No free Telethon session became available before timeout. "
+            "Add more sessions or increase SYNTAX_FALLBACK_LOCK_TIMEOUT_SEC."
+        )
+        for request in ready:
+            results[request.key] = _result(
+                success=False,
+                video_bytes=None,
+                video_uri=None,
+                provider_message=provider_message,
+                attempt_id=request.attempt_id,
+            )
+        return results
+
+    if session_candidate.kind == "string":
+        if StringSession is None:
+            _release_syntax_session_candidate(session_candidate)
+            for request in ready:
+                results[request.key] = _result(
+                    success=False,
+                    video_bytes=None,
+                    video_uri=None,
+                    provider_message="Telethon StringSession is unavailable in this environment.",
+                    attempt_id=request.attempt_id,
+                )
+            return results
+        session_obj: Any = StringSession(session_candidate.value)
+    else:
+        session_obj = session_candidate.value
 
     client = TelegramClient(session_obj, int(api_id_raw), api_hash)
     try:
@@ -1005,7 +1082,7 @@ async def _run_batch_fallback_async(
             if request.prompt_shortened:
                 last_info = (
                     f"Prompt exceeded Syntax limit ({_syntax_prompt_max_chars()} chars) "
-                    "and was shortened with Gemini before send."
+                    "and was shortened automatically before send."
                 )
             request_runtime.append((request, reply_anchor, sent_ids, last_info))
 
@@ -1025,7 +1102,15 @@ async def _run_batch_fallback_async(
         async def _consume_for_batch_message(message: Any) -> None:
             if message is None or getattr(message, "out", False):
                 return
-            for key in list(pending_states.keys()):
+            candidate_keys = _batch_message_candidate_keys(message, pending_states)
+            if not candidate_keys and _message_looks_like_video(message):
+                logger.warning(
+                    "syntax_batch.unmatched_video message_id=%s pending_keys=%s",
+                    int(getattr(message, "id", 0) or 0),
+                    ",".join(pending_states),
+                )
+                return
+            for key in candidate_keys:
                 state = pending_states.get(key)
                 if state is None:
                     continue

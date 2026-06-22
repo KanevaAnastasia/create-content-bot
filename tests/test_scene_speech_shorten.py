@@ -8,7 +8,7 @@ from app.scene_speech_shorten import (
     _video_prompt_has_exact_speech_after_marker,
     shorten_scene_speech_and_sync_video_prompt_sync,
 )
-from app.pipeline_llm_steps import FINAL_SCENE_SUBSCRIBE_CTA_VEO3
+from app.pipeline_llm_steps import FINAL_SCENE_SUBSCRIBE_CTA_VEO3, RUSSIAN_YO_RULE
 
 
 def test_replace_speech_in_video_prompt_if_substring() -> None:
@@ -54,3 +54,4 @@ def test_shorten_preserves_final_subscribe_cta(monkeypatch) -> None:
     assert out["text"] == FINAL_SCENE_SUBSCRIBE_CTA_VEO3
     assert out["video_prompt"].endswith(FINAL_SCENE_SUBSCRIBE_CTA_VEO3)
     assert "must_keep_final_subscribe_cta" in calls[0]
+    assert RUSSIAN_YO_RULE in calls[0]

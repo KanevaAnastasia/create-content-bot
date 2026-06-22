@@ -46,7 +46,9 @@ from .handlers_state_deps import (
     logger,
     ServiceUnavailableRetriesExhaustedError,
     SCENE_MEDIA_SUBSTEP_END,
+    SCENE_MEDIA_SUBSTEP_END_IMAGE_APPROVAL,
     SCENE_MEDIA_SUBSTEP_START,
+    SCENE_MEDIA_SUBSTEP_START_IMAGE_APPROVAL,
     SCENE_MEDIA_SUBSTEP_VIDEO,
     _scene_needs_end_frame_step,
     _load_scene_reference_images,
@@ -82,14 +84,16 @@ from .handlers_state_commands import (
 from .handlers_keyboards import reply_text_without_keyboard, safe_reply_text
 from ..assets import ASSETS
 from ..elevenlabs_tts import generate_elevenlabs_speech
+from ..llm_utils import gemini_generate_sync
 from ..scene_media_candidates import resolve_candidate_by_message
 from .handlers_state_start import (
+    _concept_choice_markup,
     _handle_waiting_concept_state,
     _handle_waiting_recipe_approval_state,
     _start_description_with_recipe,
     _start_generation_with_recipe,
 )
-from ..state import save_loaded_session_if_possible
+from ..state import get_loaded_session, save_loaded_session_if_possible
 from .handlers_state_media import (
     STATE_REFINING_SOCIAL_DESCRIPTIONS,
     STATE_WAITING_SOCIAL_DESCRIPTIONS_APPROVAL,
@@ -97,6 +101,7 @@ from .handlers_state_media import (
     _handle_waiting_social_descriptions_approval_state,
 )
 from ..character_catalog import format_character_short_descriptions
+from ..pipeline_history import record_checkpoint, restore_previous_checkpoint, session_step_signature
 from ..scene_media_store import mark_candidate_liked_by_message as persist_mark_candidate_liked_by_message
 from ..session_store import save_session_if_possible
 
@@ -135,6 +140,29 @@ _CUSTOM_REFERENCE_DONE_BUTTON = "больше файлов не нужно"
 _PROJECT_MAIN_CHARACTER_BY_PROJECT = {
     PROJECT_KEY_GRANDMA_CAT_COOKING: "grandma",
 }
+
+
+def keyboard_for_session_state(session: dict):
+    """Return the reply keyboard expected for the current visible state."""
+    state = str((session or {}).get("state") or "")
+    if state == _STATE_WAITING_FIRST_STEP_PROJECT_SELECTION:
+        return project_choice_markup()
+    if state == "":
+        return first_step_menu_markup()
+    if state == STATE_WAITING_CONCEPT:
+        concepts = session.get("concepts")
+        return _concept_choice_markup(concepts if isinstance(concepts, list) else [])
+    if state in {
+        STATE_WAITING_RECIPE_APPROVAL,
+        STATE_WAITING_SCENE_APPROVAL,
+        STATE_WAITING_FRAME_PROMPTS_APPROVAL,
+    }:
+        return ok_only_markup()
+    if state == STATE_WAITING_PRODUCTION_BUNDLE_APPROVAL:
+        return _production_bundle_approval_markup()
+    if state == STATE_READY_FOR_PRODUCTION:
+        return first_step_menu_markup()
+    return None
 
 
 def _is_explicit_veo3_speech_format_request(text: str) -> bool:
@@ -433,6 +461,119 @@ async def _handle_navigation_buttons(
         return False
 
     state = str(session.get("state") or "")
+    if state == STATE_WAITING_SCENE_MEDIA:
+        production = session.get("production") or {}
+        scenes = production.get("json_plan") if isinstance(production, dict) else None
+        idx = int(session.get("image_scene_index", 0) or 0)
+        sub = str(session.get("scene_media_substep") or SCENE_MEDIA_SUBSTEP_START)
+        if not isinstance(scenes, list) or not (0 <= idx < len(scenes)):
+            _drop_step_outputs_from(session, "media")
+            session["state"] = STATE_WAITING_PRODUCTION_BUNDLE_APPROVAL
+            await _reply_text_with_optional_markup(
+                update,
+                "Не нашла текущую сцену медиа-шага. Возвращаю к апруву production-промптов.",
+                reply_markup=_production_bundle_approval_markup(),
+            )
+            return True
+        scene = scenes[idx]
+        if sub == SCENE_MEDIA_SUBSTEP_VIDEO:
+            if _scene_needs_end_frame_step(scene):
+                target_substep = (
+                    SCENE_MEDIA_SUBSTEP_END_IMAGE_APPROVAL
+                    if scene.get("end_frame_image_b64")
+                    else SCENE_MEDIA_SUBSTEP_END
+                )
+            else:
+                target_substep = (
+                    SCENE_MEDIA_SUBSTEP_START_IMAGE_APPROVAL
+                    if scene.get("start_frame_image_b64")
+                    else SCENE_MEDIA_SUBSTEP_START
+                )
+            session["scene_media_substep"] = target_substep
+            logger.info(
+                "chat=%s navigation.previous scene=%s from_substep=%s to_substep=%s",
+                chat_id,
+                idx + 1,
+                sub,
+                target_substep,
+            )
+            await update.message.reply_text(
+                "Вернула на предыдущий фактический подшаг текущей сцены."
+            )
+            await _send_next_scene_media_step(update, session)
+            return True
+        if sub == SCENE_MEDIA_SUBSTEP_END_IMAGE_APPROVAL:
+            session["scene_media_substep"] = SCENE_MEDIA_SUBSTEP_END
+            logger.info(
+                "chat=%s navigation.previous scene=%s from_substep=%s to_substep=%s",
+                chat_id,
+                idx + 1,
+                sub,
+                SCENE_MEDIA_SUBSTEP_END,
+            )
+            await update.message.reply_text("Вернула к промпту конечного кадра текущей сцены.")
+            await _send_next_scene_media_step(update, session)
+            return True
+        if sub == SCENE_MEDIA_SUBSTEP_END:
+            scene.pop("end_frame_image_b64", None)
+            target_substep = (
+                SCENE_MEDIA_SUBSTEP_START_IMAGE_APPROVAL
+                if scene.get("start_frame_image_b64")
+                else SCENE_MEDIA_SUBSTEP_START
+            )
+            session["scene_media_substep"] = target_substep
+            logger.info(
+                "chat=%s navigation.previous scene=%s from_substep=%s to_substep=%s",
+                chat_id,
+                idx + 1,
+                sub,
+                target_substep,
+            )
+            await update.message.reply_text("Вернула к предыдущему этапу стартового кадра текущей сцены.")
+            await _send_next_scene_media_step(update, session)
+            return True
+        if sub == SCENE_MEDIA_SUBSTEP_START_IMAGE_APPROVAL:
+            session["scene_media_substep"] = SCENE_MEDIA_SUBSTEP_START
+            logger.info(
+                "chat=%s navigation.previous scene=%s from_substep=%s to_substep=%s",
+                chat_id,
+                idx + 1,
+                sub,
+                SCENE_MEDIA_SUBSTEP_START,
+            )
+            await update.message.reply_text("Вернула к промпту стартового кадра текущей сцены.")
+            await _send_next_scene_media_step(update, session)
+            return True
+        _drop_step_outputs_from(session, "media")
+        session["state"] = STATE_WAITING_PRODUCTION_BUNDLE_APPROVAL
+        logger.info(
+            "chat=%s navigation.previous scene=%s from_substep=%s to_state=%s",
+            chat_id,
+            idx + 1,
+            sub,
+            STATE_WAITING_PRODUCTION_BUNDLE_APPROVAL,
+        )
+        await _reply_text_with_optional_markup(
+            update,
+            "Это первый медиа-подшаг сцены. Возвращаю к апруву production-промптов.",
+            reply_markup=_production_bundle_approval_markup(),
+        )
+        return True
+
+    restored = restore_previous_checkpoint(chat_id, session)
+    if restored is not None:
+        state_after_restore = str(session.get("state") or "")
+        if state_after_restore == STATE_WAITING_SCENE_MEDIA:
+            await update.message.reply_text("Вернула на предыдущий сохранённый шаг.")
+            await _send_next_scene_media_step(update, session)
+            return True
+        await _reply_text_with_optional_markup(
+            update,
+            "Вернула на предыдущий сохранённый шаг.",
+            reply_markup=keyboard_for_session_state(session),
+        )
+        return True
+
     if state in {"", _STATE_WAITING_FIRST_STEP_PROJECT_SELECTION}:
         await _reply_text_with_optional_markup(
             update,
@@ -487,49 +628,6 @@ async def _handle_navigation_buttons(
             update,
             "Откатила шаг production-промптов. Возвращаю к апруву сценария.",
             reply_markup=ok_only_markup(),
-        )
-        return True
-    if state == STATE_WAITING_SCENE_MEDIA:
-        production = session.get("production") or {}
-        scenes = production.get("json_plan") if isinstance(production, dict) else None
-        idx = int(session.get("image_scene_index", 0) or 0)
-        sub = str(session.get("scene_media_substep") or SCENE_MEDIA_SUBSTEP_START)
-        if not isinstance(scenes, list) or not (0 <= idx < len(scenes)):
-            _drop_step_outputs_from(session, "media")
-            session["state"] = STATE_WAITING_PRODUCTION_BUNDLE_APPROVAL
-            await _reply_text_with_optional_markup(
-                update,
-                "Не нашла текущую сцену медиа-шага. Возвращаю к апруву production-промптов.",
-                reply_markup=_production_bundle_approval_markup(),
-            )
-            return True
-        scene = scenes[idx]
-        if sub == SCENE_MEDIA_SUBSTEP_VIDEO:
-            session["scene_media_substep"] = (
-                SCENE_MEDIA_SUBSTEP_END
-                if _scene_needs_end_frame_step(scene)
-                else SCENE_MEDIA_SUBSTEP_START
-            )
-            await update.message.reply_text(
-                "Вернула на предыдущий подшаг текущей сцены: редактирование промпта изображения."
-            )
-            await _send_next_scene_media_step(update, session)
-            return True
-        if sub == SCENE_MEDIA_SUBSTEP_END:
-            scene.pop("end_frame_image_b64", None)
-            session["scene_media_substep"] = SCENE_MEDIA_SUBSTEP_START
-            await update.message.reply_text(
-                "Вернула на предыдущий подшаг текущей сцены: стартовый промпт изображения."
-            )
-            await _send_next_scene_media_step(update, session)
-            return True
-        # Из стартового промпта этой сцены идём на предыдущий этап пайплайна.
-        _drop_step_outputs_from(session, "media")
-        session["state"] = STATE_WAITING_PRODUCTION_BUNDLE_APPROVAL
-        await _reply_text_with_optional_markup(
-            update,
-            "Это первый медиа-подшаг сцены. Возвращаю к апруву production-промптов.",
-            reply_markup=_production_bundle_approval_markup(),
         )
         return True
     if state == STATE_READY_FOR_PRODUCTION:
@@ -657,6 +755,81 @@ def _frame_prompts_slice_from_production(enriched_scenes: list[dict[str, Any]]) 
     return out
 
 
+_END_FRAME_FEEDBACK_MARKERS = (
+    "конечн",
+    "финальн",
+    "end frame",
+    "end-frame",
+)
+_END_FRAME_REMOVE_MARKERS = (
+    "без конечн",
+    "без финальн",
+    "не нужен конечн",
+    "не нужен финальн",
+    "не нужны конечн",
+    "не нужны финальн",
+    "убрать конечн",
+    "убрать финальн",
+    "удалить конечн",
+    "удалить финальн",
+    "отменить конечн",
+    "отменить финальн",
+)
+_END_FRAME_REMOVE_ACTIONS = ("без", "не нужен", "не нужны", "убрать", "удалить", "отменить")
+
+
+def _scene_numbers_from_end_frame_feedback(text: str, *, total_scenes: int) -> tuple[set[int], set[int]]:
+    """Extract explicit scene-scoped end-frame additions/removals from user feedback."""
+    low = " ".join(str(text or "").lower().replace("ё", "е").split())
+    if not low or not any(marker in low for marker in _END_FRAME_FEEDBACK_MARKERS):
+        return set(), set()
+
+    add: set[int] = set()
+    remove: set[int] = set()
+    chunks = [chunk.strip() for chunk in re.split(r"[\n.;]+", low) if chunk.strip()]
+    for chunk in chunks:
+        if not any(marker in chunk for marker in _END_FRAME_FEEDBACK_MARKERS):
+            continue
+        numbers: set[int] = set()
+        for match in re.finditer(r"сцен(?:а|е|ы|у|ой|ах)?\s*№?\s*([0-9,\sи-]+)", chunk):
+            numbers.update(int(value) for value in re.findall(r"\d+", match.group(1)))
+        numbers.update(
+            int(match.group(1))
+            for match in re.finditer(r"\b(\d+)(?:-?(?:я|й|ая|ой))?\s+сцен(?:а|е|ы|у|ой|ах)?\b", chunk)
+        )
+        if ("все сцен" in chunk or "кажд" in chunk) and total_scenes > 0:
+            numbers.update(range(1, total_scenes + 1))
+        numbers = {number for number in numbers if 1 <= number <= total_scenes}
+        if not numbers:
+            continue
+        is_remove = any(marker in chunk for marker in _END_FRAME_REMOVE_MARKERS) or (
+            any(action in chunk for action in _END_FRAME_REMOVE_ACTIONS)
+            and any(marker in chunk for marker in _END_FRAME_FEEDBACK_MARKERS)
+        )
+        if is_remove:
+            remove.update(numbers)
+        else:
+            add.update(numbers)
+    return add, remove
+
+
+def _update_end_frame_scene_requests(session: dict, feedback: str) -> list[int]:
+    """Apply explicit end-frame feedback and persist the requested scene numbers."""
+    scenes = session.get("scenes_plan")
+    total_scenes = len(scenes) if isinstance(scenes, list) else 0
+    current = {
+        int(value)
+        for value in (session.get("end_frame_scene_requests") or [])
+        if str(value).isdigit() and 1 <= int(value) <= total_scenes
+    }
+    add, remove = _scene_numbers_from_end_frame_feedback(feedback, total_scenes=total_scenes)
+    current.update(add)
+    current.difference_update(remove)
+    result = sorted(current)
+    session["end_frame_scene_requests"] = result
+    return result
+
+
 async def _handle_waiting_scene_approval_state(
     update: Update,
     context: ContextTypes.DEFAULT_TYPE,
@@ -676,6 +849,7 @@ async def _handle_waiting_scene_approval_state(
                 lambda: generate_full_production(
                     session["scenes_plan"],
                     approved_frame_prompts=None,
+                    requested_end_frame_scenes=session.get("end_frame_scene_requests"),
                     viral_concept_brief=session.get("viral_concept_brief"),
                     sponsored_content=bool(session.get("sponsored_content")),
                     brand_context=session.get("brand_context"),
@@ -704,8 +878,8 @@ async def _handle_waiting_scene_approval_state(
         await _reply_text_with_optional_markup(
             update,
             "Нажмите «ОК», чтобы перейти к пошаговой генерации. "
-            "Либо нажмите «Добавь»/«Исправь» и пришлите правки к video prompts — перегенерирую "
-            "(старт/конец кадров зафиксированы).",
+            "Либо нажмите «Добавь»/«Исправь» и пришлите правки. "
+            "Конечный кадр добавлю только для явно названных в правке сцен.",
             reply_markup=_production_bundle_approval_markup(),
         )
         return True
@@ -731,6 +905,7 @@ async def _handle_waiting_frame_prompts_approval_state(
                 lambda: generate_full_production(
                     session["scenes_plan"],
                     approved_frame_prompts=session.get("frame_prompts"),
+                    requested_end_frame_scenes=session.get("end_frame_scene_requests"),
                     viral_concept_brief=session.get("viral_concept_brief"),
                     sponsored_content=bool(session.get("sponsored_content")),
                     brand_context=session.get("brand_context"),
@@ -756,7 +931,8 @@ async def _handle_waiting_frame_prompts_approval_state(
         await _reply_text_with_optional_markup(
             update,
             "Нажмите «ОК», чтобы перейти к пошаговой генерации. "
-            "Либо нажмите «Добавь»/«Исправь» и пришлите правки к video prompts — перегенерирую через нейросеть.",
+            "Либо нажмите «Добавь»/«Исправь» и пришлите правки. "
+            "Конечные кадры используются только для явно названных сцен.",
             reply_markup=_production_bundle_approval_markup(),
         )
         return True
@@ -785,6 +961,7 @@ async def _handle_waiting_production_bundle_approval_state(
         await _send_next_scene_media_step(update, session)
         return True
     session["state"] = STATE_REFINING_PRODUCTION_BUNDLE
+    requested_end_frame_scenes = _update_end_frame_scene_requests(session, text)
     try:
         await reply_text_without_keyboard(update.message, "Перегенерирую production-промпты, ждите.")
         production_new = await _call_with_503_retries(
@@ -797,6 +974,7 @@ async def _handle_waiting_production_bundle_approval_state(
                 approved_frame_prompts=session.get("frame_prompts"),
                 user_feedback=text,
                 previous_enriched_scenes=scenes,
+                requested_end_frame_scenes=requested_end_frame_scenes,
                 viral_concept_brief=session.get("viral_concept_brief"),
                 sponsored_content=bool(session.get("sponsored_content")),
                 brand_context=session.get("brand_context"),
@@ -812,8 +990,12 @@ async def _handle_waiting_production_bundle_approval_state(
         session["state"] = STATE_WAITING_PRODUCTION_BUNDLE_APPROVAL
         return True
     session["production"] = production_new
+    new_plan = production_new.get("json_plan") if isinstance(production_new, dict) else None
+    if isinstance(new_plan, list):
+        session["frame_prompts"] = _frame_prompts_slice_from_production(new_plan)
+        session["frame_prompts_text"] = format_frame_prompts_for_approval(session["frame_prompts"])
     session["state"] = STATE_WAITING_PRODUCTION_BUNDLE_APPROVAL
-    await update.message.reply_text("Обновила video prompts по правкам (нейросеть):")
+    await update.message.reply_text("Обновила production-промпты по правкам:")
     await _reply_text_chunked(update, format_production_bundle_for_approval(production_new["json_plan"]))
     await _reply_text_with_optional_markup(
         update,
@@ -860,6 +1042,7 @@ async def _handle_refining_state(update: Update, state: str) -> bool:
 async def _handle_scene_approval_refine(update: Update, context: ContextTypes.DEFAULT_TYPE, *, chat_id: int, session: dict, text: str) -> bool:
     session["state"] = STATE_REFINING_SCENES
     session["user_feedback"] = text
+    _update_end_frame_scene_requests(session, text)
     low_text = text.lower()
     if _is_explicit_veo3_speech_format_request(text):
         current = session.get("scenes_plan") or []
@@ -944,9 +1127,21 @@ async def _handle_scene_approval_refine(update: Update, context: ContextTypes.DE
 async def _handle_frame_prompts_refine(update: Update, context: ContextTypes.DEFAULT_TYPE, *, chat_id: int, session: dict, text: str) -> bool:
     session["state"] = STATE_REFINING_FRAME_PROMPTS
     session["user_feedback"] = text
+    _update_end_frame_scene_requests(session, text)
     try:
         await reply_text_without_keyboard(update.message, "Дорабатываю frame prompts, ждите.")
-        frames = await _call_with_503_retries(update, context, chat_id, "refine_frame_prompts", lambda: generate_frame_prompts_for_approval(session["scenes_plan"], user_feedback=text, previous_frame_prompts=session.get("frame_prompts")))
+        frames = await _call_with_503_retries(
+            update,
+            context,
+            chat_id,
+            "refine_frame_prompts",
+            lambda: generate_frame_prompts_for_approval(
+                session["scenes_plan"],
+                user_feedback=text,
+                previous_frame_prompts=session.get("frame_prompts"),
+                requested_end_frame_scenes=session.get("end_frame_scene_requests"),
+            ),
+        )
     except ServiceUnavailableRetriesExhaustedError as e:
         await update.message.reply_text(str(e)); session["state"] = STATE_WAITING_FRAME_PROMPTS_APPROVAL; return True
     except Exception as e:
@@ -988,8 +1183,29 @@ async def _extract_any_image_from_update(update: Update, context: ContextTypes.D
     return bytes(data)
 
 
+async def _generation_source_from_image(image_bytes: bytes, caption: str = "") -> str:
+    """Преобразует фото блюда/рецепта в текстовый источник для обычного generate-пайплайна."""
+    prompt = (
+        "Проанализируй изображение как вход для генерации кулинарного ролика.\n"
+        "Если на фото есть рецепт, список ингредиентов, меню, заметка или скриншот, "
+        "точно извлеки полезный текст и шаги. Если показано только блюдо, опиши блюдо "
+        "и предложи наиболее вероятную идею рецепта без выдумывания точных граммовок.\n"
+        "Верни только один связный текст на русском, пригодный как идея или исходный рецепт "
+        "для следующего шага генерации, без пояснений о том, что ты анализировал изображение."
+    )
+    if caption.strip():
+        prompt += f"\n\nПодпись пользователя к фото:\n{caption.strip()}"
+    return (
+        await asyncio.to_thread(
+            gemini_generate_sync,
+            prompt,
+            images=[image_bytes],
+        )
+    ).strip()
+
+
 async def on_photo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Обрабатывает изображения для первого шага: refs для image/project image или source для video."""
+    """Обрабатывает изображения для generate, refs image/project image или source video."""
     if update.message is None or update.effective_chat is None:
         return
     chat_id = update.effective_chat.id
@@ -1010,6 +1226,47 @@ async def on_photo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
                 update,
                 f"Добавила файл #{count}. Можно прислать ещё или нажать «{_CUSTOM_REFERENCE_DONE_BUTTON}».",
                 reply_markup=_custom_reference_markup(),
+            )
+            return
+        if state in {"", _STATE_WAITING_FIRST_STEP_GENERATE_TEXT, STATE_READY_FOR_PRODUCTION}:
+            image_bytes = await _extract_any_image_from_update(update, context)
+            if not image_bytes:
+                await update.message.reply_text("Не удалось прочитать изображение. Пришлите фото ещё раз.")
+                return
+            await reply_text_without_keyboard(
+                update.message,
+                "Распознаю идею или рецепт по фото, затем запущу генерацию.",
+            )
+            try:
+                source = await _call_with_503_retries(
+                    update,
+                    context,
+                    chat_id,
+                    "extract_generation_source_from_image",
+                    lambda: _generation_source_from_image(
+                        image_bytes,
+                        str(getattr(update.message, "caption", "") or ""),
+                    ),
+                )
+            except ServiceUnavailableRetriesExhaustedError as e:
+                await update.message.reply_text(str(e))
+                return
+            except Exception as e:
+                logger.exception("generation source extraction from image failed")
+                await update.message.reply_text(
+                    f"Ошибка распознавания фото: {_user_error_message(e)}"
+                )
+                return
+            if not str(source or "").strip():
+                await update.message.reply_text(
+                    "Не удалось получить идею или рецепт из фото. Добавьте подпись или пришлите текстом."
+                )
+                return
+            await _start_generation_with_recipe(
+                update,
+                context,
+                recipe=str(source).strip(),
+                prefer_vertex_api=False,
             )
             return
         if session.get("state") != _STATE_WAITING_FIRST_STEP_VIDEO_IMAGE:
@@ -1154,7 +1411,7 @@ async def _on_text_impl(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
             }
             await _reply_text_with_optional_markup(
                 update,
-                "Режим «Генерировать». Пришлите идею или рецепт обычным текстом — "
+                "Режим «Генерировать». Пришлите идею или рецепт обычным текстом либо отправьте фото — "
                 "запущу генерацию без команды.",
                 reply_markup=first_step_menu_markup(),
             )
@@ -1361,6 +1618,14 @@ async def _on_text_impl(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
                 update,
                 "Нажмите кнопку проекта или «Назад».",
                 reply_markup=project_choice_markup(),
+            )
+            return
+        if state == "":
+            await _start_generation_with_recipe(
+                update,
+                context,
+                recipe=text.strip(),
+                prefer_vertex_api=False,
             )
             return
     if not session:
@@ -1580,7 +1845,17 @@ async def _on_text_impl(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
 async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     chat = getattr(update, "effective_chat", None)
     chat_id = getattr(chat, "id", None)
+    message = getattr(update, "message", None)
+    message_text = str(getattr(message, "text", "") or "").strip().lower()
+    navigating_previous = message_text == NAV_BUTTON_PREVIOUS_STEP.lower()
+    session_before = get_loaded_session(chat_id)
+    signature_before = session_step_signature(session_before) if isinstance(session_before, dict) else None
     try:
         await _on_text_impl(update, context)
     finally:
-        save_loaded_session_if_possible(chat_id)
+        session_after = get_loaded_session(chat_id)
+        if isinstance(session_after, dict):
+            signature_after = session_step_signature(session_after)
+            if signature_after != signature_before and not navigating_previous:
+                record_checkpoint(chat_id, session_after)
+            save_loaded_session_if_possible(chat_id)

@@ -8,7 +8,10 @@ from app.handlers.handlers_state_scene import (
     _handle_scene_approval_refine,
     _is_explicit_veo3_speech_format_request,
     _frame_prompts_slice_from_production,
+    _scene_numbers_from_end_frame_feedback,
+    _update_end_frame_scene_requests,
     _generate_project_image,
+    keyboard_for_session_state,
     on_photo,
     on_text,
 )
@@ -40,6 +43,34 @@ def test_frame_prompts_slice_empty_strings_become_pusto():
     out = _frame_prompts_slice_from_production(plan)
     assert out[0]["start_frame_prompt_ru"] == "пусто"
     assert out[0]["end_frame_prompt_ru"] == "пусто"
+
+
+def test_end_frame_feedback_extracts_only_named_scenes():
+    add, remove = _scene_numbers_from_end_frame_feedback(
+        "В сценах 2 и 4 нужны конечные кадры; в сцене 3 конечный кадр убрать.",
+        total_scenes=5,
+    )
+    assert add == {2, 4}
+    assert remove == {3}
+
+
+def test_end_frame_feedback_updates_persisted_scene_requests():
+    session = {"scenes_plan": [{"scene": i} for i in range(1, 5)], "end_frame_scene_requests": [2, 3]}
+    assert _update_end_frame_scene_requests(
+        session,
+        "В сцене 4 нужен финальный кадр. В сцене 2 конечный кадр убрать.",
+    ) == [3, 4]
+
+
+def test_restored_concept_state_uses_numbered_concept_keyboard():
+    markup = keyboard_for_session_state(
+        {
+            "state": "waiting_concept",
+            "concepts": [{"name": "one"}, {"name": "two"}, {"name": "three"}],
+        }
+    )
+
+    assert [[button.text for button in row] for row in markup.keyboard][:2] == [["1", "2"], ["3"]]
 
 
 def test_scene_feedback_with_pause_and_scene_numbers_is_not_stress_fix():
@@ -263,6 +294,100 @@ def test_on_text_first_step_generate_text_launches_pipeline(monkeypatch):
     update = SimpleNamespace(message=_Message(), effective_chat=SimpleNamespace(id=1004))
     asyncio.run(on_text(update, context=None))
     assert captured_calls == [("Сырники с клубникой", False)]
+
+
+def test_on_text_without_first_step_selection_defaults_to_generate(monkeypatch):
+    captured_calls: list[tuple[str, bool]] = []
+    SESSIONS.pop(1031, None)
+
+    class _Message:
+        text = "Пирог с вишней"
+
+        async def reply_text(self, text, reply_markup=None):
+            _ = (text, reply_markup)
+
+    async def _fake_start_generation_with_recipe(update, context, *, recipe, prefer_vertex_api):
+        _ = (update, context)
+        captured_calls.append((recipe, prefer_vertex_api))
+
+    monkeypatch.setattr(
+        "app.handlers.handlers_state_scene._start_generation_with_recipe",
+        _fake_start_generation_with_recipe,
+    )
+    update = SimpleNamespace(message=_Message(), effective_chat=SimpleNamespace(id=1031))
+    asyncio.run(on_text(update, context=None))
+    assert captured_calls == [("Пирог с вишней", False)]
+
+
+def test_on_photo_first_step_generate_extracts_source_and_launches_pipeline(monkeypatch):
+    captured_calls: list[tuple[str, bool]] = []
+    replies: list[str] = []
+    SESSIONS.pop(1032, None)
+
+    class _Message:
+        caption = "Сделай ролик по этому блюду"
+
+        async def reply_text(self, text, reply_markup=None):
+            _ = reply_markup
+            replies.append(text)
+
+    async def _fake_extract(update, context):
+        _ = (update, context)
+        return b"photo"
+
+    async def _fake_source(image_bytes, caption=""):
+        assert image_bytes == b"photo"
+        assert caption == "Сделай ролик по этому блюду"
+        return "Рецепт вишнёвого пирога"
+
+    async def _fake_call(_update, _context, _chat_id, _name, fn):
+        return await fn()
+
+    async def _fake_start_generation_with_recipe(update, context, *, recipe, prefer_vertex_api):
+        _ = (update, context)
+        captured_calls.append((recipe, prefer_vertex_api))
+
+    monkeypatch.setattr("app.handlers.handlers_state_scene._extract_any_image_from_update", _fake_extract)
+    monkeypatch.setattr("app.handlers.handlers_state_scene._generation_source_from_image", _fake_source)
+    monkeypatch.setattr("app.handlers.handlers_state_scene._call_with_503_retries", _fake_call)
+    monkeypatch.setattr(
+        "app.handlers.handlers_state_scene._start_generation_with_recipe",
+        _fake_start_generation_with_recipe,
+    )
+
+    update = SimpleNamespace(message=_Message(), effective_chat=SimpleNamespace(id=1032))
+    asyncio.run(on_photo(update, context=None))
+
+    assert captured_calls == [("Рецепт вишнёвого пирога", False)]
+    assert any("Распознаю идею или рецепт по фото" in text for text in replies)
+
+
+def test_on_text_without_choice_on_recipe_step_is_feedback(monkeypatch):
+    captured_feedback: list[str] = []
+    SESSIONS[1033] = {
+        "state": "waiting_recipe_approval",
+        "recipe_full_text": "Старый рецепт",
+    }
+
+    class _Message:
+        text = "Добавь в начинку немного корицы"
+
+        async def reply_text(self, text, reply_markup=None):
+            _ = (text, reply_markup)
+
+    async def _fake_recipe_handler(update, context, *, chat_id, session, text):
+        _ = (update, context, chat_id, session)
+        captured_feedback.append(text)
+        return True
+
+    monkeypatch.setattr(
+        "app.handlers.handlers_state_scene._handle_waiting_recipe_approval_state",
+        _fake_recipe_handler,
+    )
+    update = SimpleNamespace(message=_Message(), effective_chat=SimpleNamespace(id=1033))
+    asyncio.run(on_text(update, context=None))
+
+    assert captured_feedback == ["Добавь в начинку немного корицы"]
 
 
 def test_on_text_first_step_description_text_generates_social_copy(monkeypatch):
@@ -755,7 +880,7 @@ def test_on_text_navigation_previous_moves_from_recipe_to_concept():
     assert "Откатила шаг рецепта" in captured[0][0]
 
 
-def test_on_text_navigation_previous_moves_from_media_video_to_start_prompt(monkeypatch):
+def test_on_text_navigation_previous_moves_from_media_video_to_start_image_approval(monkeypatch):
     captured: list[tuple[str, object | None]] = []
     send_calls = {"count": 0}
     SESSIONS[1022] = {
@@ -789,12 +914,12 @@ def test_on_text_navigation_previous_moves_from_media_video_to_start_prompt(monk
     sess = SESSIONS[1022]
     assert sess["state"] == "waiting_scene_media"
     assert sess["image_scene_index"] == 1
-    assert sess["scene_media_substep"] == "start_prompt"
+    assert sess["scene_media_substep"] == "start_image_approval"
     assert send_calls["count"] == 1
-    assert "предыдущий подшаг текущей сцены" in captured[0][0]
+    assert "предыдущий фактический подшаг текущей сцены" in captured[0][0]
 
 
-def test_on_text_navigation_previous_moves_from_media_video_to_end_prompt_when_available(monkeypatch):
+def test_on_text_navigation_previous_moves_from_media_video_to_end_prompt_when_not_generated(monkeypatch):
     captured: list[tuple[str, object | None]] = []
     send_calls = {"count": 0}
     SESSIONS[1023] = {
@@ -828,3 +953,45 @@ def test_on_text_navigation_previous_moves_from_media_video_to_end_prompt_when_a
     assert sess["state"] == "waiting_scene_media"
     assert sess["scene_media_substep"] == "end_prompt"
     assert send_calls["count"] == 1
+
+
+def test_on_text_navigation_previous_moves_from_media_video_to_end_image_approval(monkeypatch):
+    captured: list[tuple[str, object | None]] = []
+    send_calls = {"count": 0}
+    SESSIONS[1025] = {
+        "state": "waiting_scene_media",
+        "image_scene_index": 0,
+        "scene_media_substep": "video_prompt",
+        "production": {
+            "json_plan": [
+                {
+                    "scene": 1,
+                    "start_frame_image_b64": "c3RhcnQ=",
+                    "end_frame_prompt": "Финальный кадр",
+                    "end_frame_requested": True,
+                    "end_frame_image_b64": "ZW5k",
+                }
+            ]
+        },
+    }
+
+    class _Message:
+        text = NAV_BUTTON_PREVIOUS_STEP
+
+        async def reply_text(self, text, reply_markup=None):
+            captured.append((text, reply_markup))
+
+    async def _fake_send_next_scene_media_step(update, session):
+        _ = (update, session)
+        send_calls["count"] += 1
+
+    monkeypatch.setattr(
+        "app.handlers.handlers_state_scene._send_next_scene_media_step",
+        _fake_send_next_scene_media_step,
+    )
+    update = SimpleNamespace(message=_Message(), effective_chat=SimpleNamespace(id=1025))
+    asyncio.run(on_text(update, context=None))
+
+    assert SESSIONS[1025]["scene_media_substep"] == "end_image_approval"
+    assert send_calls["count"] == 1
+    assert "предыдущий фактический подшаг текущей сцены" in captured[0][0]

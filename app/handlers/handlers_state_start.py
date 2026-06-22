@@ -344,6 +344,7 @@ async def _handle_waiting_concept_state(
         session["scenes_text"] = None
         session["frame_prompts"] = None
         session["frame_prompts_text"] = None
+        session["end_frame_scene_requests"] = []
         session["user_feedback"] = None
         await _reply_text_chunked(update, format_full_recipe_for_approval(recipe_full))
         await _reply_text_with_optional_markup(

@@ -1,6 +1,7 @@
 from ..constants import GEMINI_GENERATE_TIMEOUT_SEC_ENV_NAME
 from ..constants import STATE_WAITING_SCENE_MEDIA
 from ..character_catalog import GRANDMA_KITCHEN_PROJECT_SLUG, GRANDMA_KITCHEN_PROJECT_TITLE
+from ..pipeline_llm_steps import RUSSIAN_YO_RULE
 
 from .handlers_state_deps import (
     Any,
@@ -145,6 +146,7 @@ async def _regenerate_image_prompt_from_feedback(scene: dict, feedback: str) -> 
     prompt = (
         "Ты редактируешь промпт для генерации СТАРТОВОГО кадра.\n"
         "Верни только один готовый промпт на русском, без пояснений.\n"
+        f"{RUSSIAN_YO_RULE}\n"
         "Требования:\n"
         "- промпт максимально конкретный и самодостаточный\n"
         "- если есть еда, перечисляй конкретные ингредиенты\n"
@@ -628,13 +630,13 @@ async def _handle_video_provider_choice_pending_video_command(
         return True
     duration_sec = int(pending.get("duration_for_caption") or pending.get("duration_sec") or 6)
     if choice == "syntax":
-        await update.message.reply_text("Повторяю генерацию через Syntax…")
+        await update.message.reply_text("Готовлю повтор генерации через Syntax…")
         try:
             video_bytes = await run_syntax_fallback_from_session_payload(pending)
         except Exception as fb_err:
             logger.exception("syntax retry execution failed (/video)")
             await update.message.reply_text(
-                f"Ошибка при повторе Syntax: {_user_error_message(fb_err, domain='video')}"
+                f"Не удалось отправить запрос в Syntax: {_user_error_message(fb_err, domain='video')}"
             )
             return True
         if not video_bytes:

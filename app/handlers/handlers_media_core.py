@@ -24,6 +24,7 @@ from ..llm_utils import (
 )
 from ..scene_utils import normalize_recipe_steps, extract_recipe_steps_text
 from ..pipeline import GRANDMA_VOICE_LOCK_FULL, append_veo3_video_framing_constraints
+from ..pipeline_llm_steps import RUSSIAN_YO_RULE
 from ..multilingual import language_name, normalize_language_code
 from .handlers_media_core_recipe import (
     _normalize_user_recipe_steps,
@@ -682,6 +683,10 @@ class VideoProviderChoiceRequired(Exception):
         self.syntax_error_message = syntax_error_message
 
 
+class SyntaxFallbackDispatchError(RuntimeError):
+    """Syntax request could not be dispatched to Telegram."""
+
+
 def encode_syntax_fallback_pending_for_session(exc: SyntaxFallbackPendingConfirmation) -> dict[str, Any]:
     """Serializes a pending Syntax attempt for ``SESSIONS`` / scene JSON (base64 images)."""
     end = exc.end_image
@@ -763,6 +768,7 @@ async def run_syntax_fallback_from_session_payload(payload: dict[str, Any]) -> b
         duration_sec=int(payload["duration_sec"]),
         start_image=base64.b64decode(str(payload["start_image_b64"])),
         end_image=end_im,
+        raise_on_dispatch_failure=True,
     )
 
 
@@ -800,6 +806,7 @@ async def _attempt_syntax_video_fallback_bytes(
     duration_sec: int,
     start_image: bytes,
     end_image: bytes | None,
+    raise_on_dispatch_failure: bool = False,
 ) -> bytes | None:
     """Runs Syntax adapter in a worker thread; returns bytes or None."""
     if not _syntax_fallback_env_enabled():
@@ -828,11 +835,14 @@ async def _attempt_syntax_video_fallback_bytes(
         )
         return None
     if not result.success:
+        provider_message = str(result.provider_message or "")
         logger.warning(
             "video.syntax_fallback not_used attempt_id=%s msg=%s",
             result.attempt_id,
-            (result.provider_message or "")[:400],
+            provider_message[:400],
         )
+        if raise_on_dispatch_failure and _syntax_failure_happened_before_dispatch(provider_message):
+            raise SyntaxFallbackDispatchError(_syntax_dispatch_error_user_message(provider_message))
         return None
     try:
         payload = await asyncio.wait_for(
@@ -859,6 +869,45 @@ async def _attempt_syntax_video_fallback_bytes(
         len(payload),
     )
     return payload
+
+
+def _syntax_failure_happened_before_dispatch(provider_message: str) -> bool:
+    low = str(provider_message or "").lower()
+    return any(
+        marker in low
+        for marker in (
+            "telethon is not installed",
+            "missing telegram_api_id/telegram_api_hash",
+            "missing telethon session",
+            "no free telethon session",
+            "telethon stringsession is unavailable",
+            "telethon session is not authorized",
+            "syntax frame prepare failed",
+            "syntax prompt is longer than",
+        )
+    )
+
+
+def _syntax_dispatch_error_user_message(provider_message: str) -> str:
+    low = str(provider_message or "").lower()
+    if "syntax prompt is longer than" in low:
+        return (
+            "prompt превышает лимит Syntax, а автоматически сократить его сейчас не удалось. "
+            "Сократите prompt вручную и повторите."
+        )
+    if "no free telethon session" in low:
+        return "Telethon-сессия Syntax занята другой попыткой. Дождитесь её завершения и повторите."
+    if "not authorized" in low:
+        return "Telethon-сессия Syntax не авторизована."
+    if "missing telethon session" in low:
+        return "не настроена Telethon-сессия для Syntax."
+    if "missing telegram_api_id/telegram_api_hash" in low:
+        return "не настроены TELEGRAM_API_ID/TELEGRAM_API_HASH для Syntax."
+    if "telethon is not installed" in low or "stringsession is unavailable" in low:
+        return "транспорт Telethon для Syntax сейчас недоступен."
+    if "syntax frame prepare failed" in low:
+        return "не удалось подготовить кадр для отправки в Syntax."
+    return "транспорт Syntax недоступен до отправки запроса."
 
 
 async def _attempt_syntax_video_fallback_batch(
@@ -1109,6 +1158,7 @@ async def _regenerate_video_prompt_from_error(scene: dict, error_text: str) -> s
         "Запрети любые субтитры/текст в кадре и любую фоновую музыку/саундтрек.\n"
         "Если указана реплика сцены выше — твой ответ ДОЛЖЕН содержать подстроку `CHARACTERS SPEAKS: ` + дословная реплика; "
         "код её не допишет.\n"
+        f"{RUSSIAN_YO_RULE}\n"
         "Обязательно включи точный фрагмент: "
         f"voice_lock_full: {GRANDMA_VOICE_LOCK_FULL}\n"
         "Обязательно явно укажи язык озвучки в соответствии с целевым языком сцены.\n"
@@ -1151,6 +1201,7 @@ def _build_video_prompt_rewrite_llm_prompt(
         f"voice_lock_full: {GRANDMA_VOICE_LOCK_FULL}\n"
         "Соблюдай физическую правдоподобность кухни и не добавляй лишних персонажей или лишних параллельных действий.\n"
         "Обязательно явно укажи, что все фразы и озвучка на русском языке.\n"
+        f"{RUSSIAN_YO_RULE}\n"
         "Если в «ФРАЗЫ И РЕПЛИКИ» есть непустой текст — итоговый prompt ОБЯЗАН содержать подстроку "
         "`CHARACTERS SPEAKS: ` + тот же текст дословно (символ в символ); без этого озвучка по сценарию пропадёт; код не дописывает.\n\n"
         f"ИСХОДНЫЙ VIDEO PROMPT:\n{stripped_prompt}\n\n"
@@ -1227,6 +1278,7 @@ async def _regenerate_image_prompt_from_video_error(scene: dict, error_text: str
     prompt = (
         "Перепиши промпт стартового кадра так, чтобы изображение стало валидным для video generator.\n"
         "Верни только один готовый prompt на русском, без пояснений.\n"
+        f"{RUSSIAN_YO_RULE}\n"
         "Сохрани персонажей, основное действие и предметную непрерывность: посуда, кастрюля/сковорода, "
         "плита или рабочая поверхность, ингредиенты и состояние еды должны оставаться узнаваемыми.\n"
         "Избегай сложных артефактов, размытий, лишних объектов, логотипов и текста поверх кадра.\n\n"

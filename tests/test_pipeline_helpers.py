@@ -54,6 +54,7 @@ def test_build_concepts_prompt_requests_simple_and_viral_sets():
     assert "максимально простым рецептом" in prompt
     assert "простыми, доступными ингредиентами" in prompt
     assert "2–3 максимально виральных концепта" in prompt
+    assert pipeline_llm_steps.RUSSIAN_YO_RULE in prompt
 
 
 def test_speaker_voice_params_profiles():
@@ -246,6 +247,7 @@ def test_pipeline_llm_steps_scenes_payload_carries_feedback_and_previous():
     assert "dish_audience_type=child" in prompt
     assert "dish_audience_type=male" in prompt
     assert "dish_audience_type=neutral" in prompt
+    assert pipeline_llm_steps.RUSSIAN_YO_RULE in prompt
     assert "Не добавляй лишних персонажей" in prompt
     assert "не вставляй в результат громоздкие служебные метки" in prompt
     assert "подробные описания внешности" in prompt
@@ -852,6 +854,26 @@ def test_generate_frame_prompts_for_approval_builds_plan(monkeypatch):
     assert '"location"' not in captured_prompt["text"]
 
 
+def test_generate_frame_prompts_discards_unrequested_end_frame(monkeypatch):
+    monkeypatch.setattr(
+        "app.pipeline.gemini_generate_sync",
+        lambda _prompt: json.dumps(
+            [
+                {
+                    "start_frame_prompt_ru": "Бабушка показывает пирог.",
+                    "end_frame_prompt_ru": "Пирог уже разрезан.",
+                }
+            ],
+            ensure_ascii=False,
+        ),
+    )
+    scene = {"scene": 1, "model": "veo3_fast", "duration_sec": 4}
+
+    out = asyncio.run(generate_frame_prompts_for_approval([scene]))
+
+    assert out["json_plan"][0]["end_frame_prompt_ru"] == "пусто"
+
+
 def test_generate_full_production_with_approved_frames(monkeypatch):
     prompts_obj = {"prompts": [{"video_prompt_en": "cinematic shot with Zaya watching Timosha while Markiz waits"}]}
     captured_prompt = {"text": ""}
@@ -926,7 +948,7 @@ def test_generate_full_production_with_approved_frames_marks_end_frame_requested
         }
     ]
 
-    out = asyncio.run(generate_full_production(scenes, approved))
+    out = asyncio.run(generate_full_production(scenes, approved, requested_end_frame_scenes=[1]))
 
     scene = out["json_plan"][0]
     assert scene["end_frame_requested"] is True
@@ -975,7 +997,7 @@ def test_generate_full_production_without_approved_frames_fills_placeholders(mon
     assert '"location"' not in captured_prompt["text"]
 
 
-def test_generate_full_production_without_approved_frames_marks_end_frame_requested(monkeypatch):
+def test_generate_full_production_without_explicit_request_discards_model_end_frame(monkeypatch):
     prompts_obj = {
         "prompts": [
             {
@@ -996,8 +1018,68 @@ def test_generate_full_production_without_approved_frames_marks_end_frame_reques
     out = asyncio.run(generate_full_production(scenes, None))
 
     scene = out["json_plan"][0]
+    assert scene["end_frame_requested"] is False
+    assert scene["end_frame_prompt"] == "пусто"
+
+
+def test_generate_full_production_keeps_end_frame_only_for_explicitly_requested_scene(monkeypatch):
+    prompts_obj = {
+        "prompts": [
+            {
+                "start_frame_prompt_ru": "Бабушка показывает блюдо.",
+                "end_frame_prompt_ru": "Бабушка разрезала блюдо.",
+                "video_prompt_en": "4-second cozy cartoon cooking clip.",
+            },
+            {
+                "start_frame_prompt_ru": "Кот у тарелки.",
+                "end_frame_prompt_ru": "Кот уже держит кусочек.",
+                "video_prompt_en": "4-second cozy cartoon cooking clip.",
+            },
+        ]
+    }
+
+    monkeypatch.setattr(
+        "app.pipeline.gemini_generate_sync",
+        lambda _prompt: json.dumps(prompts_obj, ensure_ascii=False),
+    )
+    monkeypatch.setattr("app.pipeline.target_languages_from_env", lambda: ["ru"])
+    scenes = [
+        {"scene": 1, "model": "veo3_fast", "duration_sec": 4, "text": ""},
+        {"scene": 2, "model": "veo3_fast", "duration_sec": 4, "text": ""},
+    ]
+
+    out = asyncio.run(generate_full_production(scenes, None, requested_end_frame_scenes=[2]))
+
+    assert out["json_plan"][0]["end_frame_prompt"] == "пусто"
+    assert out["json_plan"][0]["end_frame_requested"] is False
+    assert "Кот уже держит кусочек" in out["json_plan"][1]["end_frame_prompt"]
+    assert out["json_plan"][1]["end_frame_requested"] is True
+
+
+def test_generate_full_production_can_add_requested_end_frame_to_approved_starts(monkeypatch):
+    prompts_obj = {
+        "prompts": [
+            {
+                "end_frame_prompt_ru": "Кот уже держит кусочек в лапах.",
+                "video_prompt_en": "4-second cozy cartoon cooking clip.",
+            }
+        ]
+    }
+    monkeypatch.setattr(
+        "app.pipeline.gemini_generate_sync",
+        lambda _prompt: json.dumps(prompts_obj, ensure_ascii=False),
+    )
+    monkeypatch.setattr("app.pipeline.target_languages_from_env", lambda: ["ru"])
+    scenes = [{"scene": 1, "model": "veo3_fast", "duration_sec": 4, "text": ""}]
+    approved = [{"start_frame_prompt_ru": "Кот смотрит на тарелку.", "end_frame_prompt_ru": "пусто"}]
+
+    out = asyncio.run(
+        generate_full_production(scenes, approved, requested_end_frame_scenes=[1], user_feedback="Нужен конец")
+    )
+
+    scene = out["json_plan"][0]
+    assert "Кот уже держит кусочек" in scene["end_frame_prompt"]
     assert scene["end_frame_requested"] is True
-    assert "Мант уже исчез" in scene["end_frame_prompt"]
 
 
 def test_generate_full_production_without_approved_frames_falls_back_on_invalid_prompt_format(monkeypatch):

@@ -1,0 +1,297 @@
+{
+  "schema_version": 1,
+  "change_policy": {
+    "source_of_truth": "app.handlers.handlers_state_media.scene_media_keyboard_snapshot",
+    "required_review": [
+      "Update the exact rows for every affected state.",
+      "Review provider recovery transitions.",
+      "Review pending-state priority.",
+      "Run the full test suite."
+    ]
+  },
+  "states": {
+    "scene_media.start.prompt": [
+      ["ОК"],
+      ["Автоапрув"],
+      ["🤖 ИИ апрув"],
+      ["Нужен конечный кадр"],
+      ["Без конечного кадра"],
+      ["ПРОМПТ:"],
+      ["ФИДБЕК:"],
+      ["старт заново"],
+      ["Предыдущий шаг"],
+      ["В начало"]
+    ],
+    "scene_media.start.image_approval": [
+      ["ОК"],
+      ["Автоапрув"],
+      ["🤖 ИИ апрув"],
+      ["ПРОМПТ:"],
+      ["ИЗМЕНИТЬ"],
+      ["ФИДБЕК"],
+      ["ПЕРЕГЕНЕРИРОВАТЬ"],
+      ["Нужен конечный кадр"],
+      ["Без конечного кадра"],
+      ["Предыдущий шаг"],
+      ["В начало"]
+    ],
+    "scene_media.end.prompt": [
+      ["ОК"],
+      ["Автоапрув"],
+      ["🤖 ИИ апрув"],
+      ["ПРОМПТ:"],
+      ["ФИДБЕК:"],
+      ["старт заново"],
+      ["Предыдущий шаг"],
+      ["В начало"]
+    ],
+    "scene_media.end.image_approval": [
+      ["ОК"],
+      ["Автоапрув"],
+      ["🤖 ИИ апрув"],
+      ["ПРОМПТ:"],
+      ["ИЗМЕНИТЬ"],
+      ["ФИДБЕК"],
+      ["ПЕРЕГЕНЕРИРОВАТЬ"],
+      ["Предыдущий шаг"],
+      ["В начало"]
+    ],
+    "scene_media.video.prompt": [
+      ["ОК"],
+      ["Автоапрув"],
+      ["🤖 ИИ апрув"],
+      ["ИЗМЕНИТЬ СКОРОСТЬ"],
+      ["ПРОМПТ:"],
+      ["ФИДБЕК:"],
+      ["ФРАЗА:"],
+      ["ПРОМПТ ru:"],
+      ["ПРОМПТ en:"],
+      ["ФРАЗА ru:"],
+      ["ФРАЗА en:"],
+      ["старт заново"],
+      ["Предыдущий шаг"],
+      ["В начало"]
+    ],
+    "scene_media.video.provider_choice": [
+      ["Syntax"],
+      ["Vertex"],
+      ["ФИДБЕК:"],
+      ["ПРОМПТ en:"],
+      ["ФРАЗА en:"],
+      ["Предыдущий шаг"],
+      ["В начало"]
+    ],
+    "scene_media.video.syntax_confirmation": [
+      ["да"],
+      ["нет"],
+      ["Предыдущий шаг"],
+      ["В начало"]
+    ],
+    "scene_media.image.model_choice": [
+      ["ПОВТОРИТЬ СИЛЬНУЮ"],
+      ["ПОНИЗИТЬ МОДЕЛЬ"],
+      ["Предыдущий шаг"],
+      ["В начало"]
+    ],
+    "scene_media.video.speech.choice": [
+      ["Автоапрув"],
+      ["Перегенерировать ещё раз"],
+      ["Жду фразу от пользователя"],
+      ["Предыдущий шаг"],
+      ["В начало"]
+    ],
+    "scene_media.video.speech.approval": [
+      ["Автоапрув"],
+      ["ОК, запускай видео"],
+      ["Изменить фразу"],
+      ["Предыдущий шаг"],
+      ["В начало"]
+    ],
+    "scene_media.video.speech.user_long_phrase_choice": [
+      ["Оставить как есть"],
+      ["Укоротить нейросетью"],
+      ["Изменить фразу"],
+      ["Предыдущий шаг"],
+      ["В начало"]
+    ],
+    "scene_media.video.translation.confirm": [
+      ["да"],
+      ["нет"],
+      ["Предыдущий шаг"],
+      ["В начало"]
+    ],
+    "scene_media.video.translation.revision": [
+      ["ФИДБЕК:"],
+      ["ФРАЗА:"],
+      ["Предыдущий шаг"],
+      ["В начало"]
+    ],
+    "scene_media.input.speed_input": [],
+    "scene_media.video.policy_retry": [
+      ["ОК"],
+      ["ПРОМПТ:"],
+      ["ФОРМАТ:"],
+      ["ФИДБЕК:"],
+      ["Предыдущий шаг"],
+      ["В начало"]
+    ],
+    "scene_media.video.language_approval": [
+      ["ОК все"],
+      ["Автоапрув"],
+      ["🤖 ИИ апрув"],
+      ["ОК ru"],
+      ["ОК en"],
+      ["ИЗМЕНИТЬ СКОРОСТЬ"],
+      ["ФИДБЕК:"],
+      ["ПРОМПТ ru:"],
+      ["ПРОМПТ en:"],
+      ["ФРАЗА ru:"],
+      ["ФРАЗА en:"],
+      ["ПЕРЕГЕНЕРИРОВАТЬ ru"],
+      ["ПЕРЕГЕНЕРИРОВАТЬ en"],
+      ["Предыдущий шаг"],
+      ["В начало"]
+    ],
+    "scene_media.complete": [
+      ["Генерировать", "Описание"],
+      ["Изображение", "Изображение проект"],
+      ["Видео", "Звук"],
+      ["Проект"]
+    ]
+  },
+  "state_aliases": {
+    "scene_media.video.speech.manual_phrase": "scene_media.video.speech.choice",
+    "scene_media.video.speech.approval_manual_phrase": "scene_media.input.speed_input",
+    "scene_media.video.translation.approval": "scene_media.video.translation.confirm",
+    "scene_media.input.phrase_input": "scene_media.input.speed_input",
+    "scene_media.input.feedback_input": "scene_media.input.speed_input",
+    "scene_media.input.prompt_input": "scene_media.input.speed_input",
+    "scene_media.input.image_edit_input": "scene_media.input.speed_input"
+  },
+  "variants": {
+    "start_prompt.auto_mode": {
+      "state": "scene_media.start.prompt",
+      "rows": [
+        ["ОК"],
+        ["СТОП"],
+        ["Нужен конечный кадр"],
+        ["Без конечного кадра"],
+        ["ПРОМПТ:"],
+        ["ФИДБЕК:"],
+        ["старт заново"],
+        ["Предыдущий шаг"],
+        ["В начало"]
+      ]
+    },
+    "video_prompt.single_language": {
+      "state": "scene_media.video.prompt",
+      "rows": [
+        ["ОК"],
+        ["Автоапрув"],
+        ["🤖 ИИ апрув"],
+        ["ИЗМЕНИТЬ СКОРОСТЬ"],
+        ["ПРОМПТ:"],
+        ["ФИДБЕК:"],
+        ["ФРАЗА:"],
+        ["старт заново"],
+        ["Предыдущий шаг"],
+        ["В начало"]
+      ]
+    },
+    "provider_choice.single_language": {
+      "state": "scene_media.video.provider_choice",
+      "rows": [
+        ["Syntax"],
+        ["Vertex"],
+        ["ФИДБЕК:"],
+        ["ПРОМПТ ru:"],
+        ["ФРАЗА ru:"],
+        ["Предыдущий шаг"],
+        ["В начало"]
+      ]
+    },
+    "start_image.model_upgrade": {
+      "state": "scene_media.start.image_approval",
+      "rows": [
+        ["ОК"],
+        ["Автоапрув"],
+        ["🤖 ИИ апрув"],
+        ["ПРОМПТ:"],
+        ["ИЗМЕНИТЬ"],
+        ["ФИДБЕК"],
+        ["ПЕРЕГЕНЕРИРОВАТЬ"],
+        ["Нужен конечный кадр"],
+        ["Без конечного кадра"],
+        ["ПОВЫСИТЬ МОДЕЛЬ"],
+        ["Предыдущий шаг"],
+        ["В начало"]
+      ]
+    },
+    "end_image.model_upgrade": {
+      "state": "scene_media.end.image_approval",
+      "rows": [
+        ["ОК"],
+        ["Автоапрув"],
+        ["🤖 ИИ апрув"],
+        ["ПРОМПТ:"],
+        ["ИЗМЕНИТЬ"],
+        ["ФИДБЕК"],
+        ["ПЕРЕГЕНЕРИРОВАТЬ"],
+        ["ПОВЫСИТЬ МОДЕЛЬ"],
+        ["Предыдущий шаг"],
+        ["В начало"]
+      ]
+    },
+    "policy_retry.with_start_restart": {
+      "state": "scene_media.video.policy_retry",
+      "rows": [
+        ["ОК"],
+        ["ПРОМПТ:"],
+        ["ФОРМАТ:"],
+        ["ФИДБЕК:"],
+        ["старт заново"],
+        ["Предыдущий шаг"],
+        ["В начало"]
+      ]
+    },
+    "language_approval.auto_mode": {
+      "state": "scene_media.video.language_approval",
+      "rows": [
+        ["ОК все"],
+        ["СТОП"],
+        ["ОК ru"],
+        ["ОК en"],
+        ["ИЗМЕНИТЬ СКОРОСТЬ"],
+        ["ФИДБЕК:"],
+        ["ПРОМПТ ru:"],
+        ["ПРОМПТ en:"],
+        ["ФРАЗА ru:"],
+        ["ФРАЗА en:"],
+        ["ПЕРЕГЕНЕРИРОВАТЬ ru"],
+        ["ПЕРЕГЕНЕРИРОВАТЬ en"],
+        ["Предыдущий шаг"],
+        ["В начало"]
+      ]
+    }
+  },
+  "provider_recovery_transitions": {
+    "syntax_success_all": "scene_media.video.language_approval_or_advance",
+    "vertex_success_all": "scene_media.video.language_approval_or_advance",
+    "syntax_partial": "scene_media.video.provider_choice",
+    "vertex_partial": "scene_media.video.provider_choice",
+    "syntax_error": "scene_media.video.provider_choice",
+    "vertex_error": "scene_media.video.provider_choice",
+    "prompt_or_phrase_edit": "scene_media.video.provider_choice",
+    "unrelated_text": "scene_media.video.provider_choice"
+  },
+  "previous_step_transitions": {
+    "scene_media.video.prompt:end_image_exists": "scene_media.end.image_approval",
+    "scene_media.video.prompt:end_requested_image_missing": "scene_media.end.prompt",
+    "scene_media.video.prompt:start_image_exists_no_end": "scene_media.start.image_approval",
+    "scene_media.video.prompt:start_image_missing": "scene_media.start.prompt",
+    "scene_media.end.image_approval": "scene_media.end.prompt",
+    "scene_media.end.prompt:start_image_exists": "scene_media.start.image_approval",
+    "scene_media.end.prompt:start_image_missing": "scene_media.start.prompt",
+    "scene_media.start.image_approval": "scene_media.start.prompt"
+  }
+}

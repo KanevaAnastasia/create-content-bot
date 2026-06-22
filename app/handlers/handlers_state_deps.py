@@ -113,6 +113,8 @@ from .handlers_media_scene import (
     SCENE_MEDIA_APPROVE_MODE_MANUAL,
     SCENE_MEDIA_APPROVE_MODE_SESSION_KEY,
     SCENE_MEDIA_CHANGE_SPEED_BUTTON,
+    SCENE_MEDIA_REQUEST_END_FRAME_BUTTON,
+    SCENE_MEDIA_SKIP_END_FRAME_BUTTON,
     SCENE_MEDIA_SUBSTEP_END,
     SCENE_MEDIA_SUBSTEP_END_IMAGE_APPROVAL,
     SCENE_MEDIA_SUBSTEP_START,
@@ -147,6 +149,8 @@ from .handlers_media_scene import (
 )
 
 logger = logging.getLogger("bot")
-DEBOUNCE_DELAY_SEC = 1.5
+# Telegram updates are processed sequentially by default, so a sleep here cannot
+# coalesce messages and only adds fixed latency to every button and text reply.
+DEBOUNCE_DELAY_SEC = 0.0
 _DEBOUNCE_SEQ: dict[int, int] = {}
 TELEGRAM_MAX_TEXT_LEN = 3500

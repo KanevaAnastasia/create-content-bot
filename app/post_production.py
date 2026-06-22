@@ -556,7 +556,11 @@ def _build_burned_subtitle_cues(
     end_sec = float(item.get("end_sec") or start_sec)
     layout = _subtitle_layout_for_dimensions(video_width, video_height)
     pages = _subtitle_pages(str(item.get("text") or ""), video_width=video_width, video_height=video_height)
-    total_steps = sum(len(page) for page in pages)
+    page_lines = [
+        _balanced_subtitle_lines(page, max_line_chars=layout.line_chars)[:SUBTITLE_MAX_LINES]
+        for page in pages
+    ]
+    total_steps = sum(len(lines) for lines in page_lines)
     if total_steps <= 0 or end_sec <= start_sec:
         return [{"start_sec": start_sec, "end_sec": end_sec, "text": " "}]
 
@@ -564,15 +568,17 @@ def _build_burned_subtitle_cues(
     step_duration = duration / float(total_steps)
     cues: list[dict[str, Any]] = []
     step_index = 0
-    for page in pages:
-        for size in range(1, len(page) + 1):
+    for lines in page_lines:
+        for size in range(1, len(lines) + 1):
             cue_start = start_sec + (step_index * step_duration)
             cue_end = end_sec if step_index == total_steps - 1 else start_sec + ((step_index + 1) * step_duration)
+            visible_lines = lines[:size]
+            fixed_height_lines = visible_lines + [SUBTITLE_ASS_INVISIBLE_TOKEN] * (len(lines) - size)
             cues.append(
                 {
                     "start_sec": cue_start,
                     "end_sec": cue_end,
-                    "text": _format_burned_subtitle_block(page[:size], max_line_chars=layout.line_chars),
+                    "text": "\n".join(fixed_height_lines),
                 }
             )
             step_index += 1
