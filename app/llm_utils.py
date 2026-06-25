@@ -640,6 +640,48 @@ def _strip_json_markdown_fence(text: str) -> str:
     return re.sub(r"\s*```$", "", re.sub(r"^```(?:json)?\s*", "", text.strip(), flags=re.IGNORECASE))
 
 
+def _repair_unquoted_pause_tokens_in_json_strings(text: str) -> str:
+    """
+    Repairs a common LLM slip in scene JSON:
+    `"text": "first phrase" [пауза] "second phrase"`.
+
+    The pause token is valid for our spoken text, but it must stay inside the
+    JSON string. Keep this targeted to text-like fields so unrelated arrays are
+    not rewritten.
+    """
+    field_names = (
+        "text",
+        "speech",
+        "recipe_step",
+        "video_prompt",
+        "start_frame_prompt",
+        "start_frame_prompt_ru",
+        "end_frame_prompt",
+        "end_frame_prompt_ru",
+    )
+    fields = "|".join(re.escape(name) for name in field_names)
+    pattern = re.compile(
+        rf'("(?P<field>{fields})"\s*:\s*)"(?P<left>(?:[^"\\]|\\.)*)"\s*'
+        r"(?P<pause>\[\s*пауза\s*\])\s*"
+        r'"(?P<right>(?:[^"\\]|\\.)*)"',
+        flags=re.IGNORECASE,
+    )
+
+    repaired = text
+    while True:
+        updated = pattern.sub(
+            lambda m: (
+                f'{m.group(1)}"'
+                f'{m.group("left").rstrip()} [пауза] {m.group("right").lstrip()}'
+                f'"'
+            ),
+            repaired,
+        )
+        if updated == repaired:
+            return repaired
+        repaired = updated
+
+
 def _extract_first_json_value(cleaned: str, start_char: str, expected_type: type) -> Any:
     decoder = json.JSONDecoder()
     for match in re.finditer(re.escape(start_char), cleaned):
@@ -676,6 +718,14 @@ def extract_json_array(text: str) -> list[dict[str, Any]]:
             return data  # type: ignore[return-value]
     except Exception:
         pass
+    repaired = _repair_unquoted_pause_tokens_in_json_strings(cleaned)
+    if repaired != cleaned:
+        try:
+            data = json.loads(repaired)
+            if isinstance(data, list):
+                return data  # type: ignore[return-value]
+        except Exception:
+            pass
     data = _extract_first_json_value(cleaned, "[", list)
     return data  # type: ignore[return-value]
 

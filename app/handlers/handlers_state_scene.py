@@ -1,4 +1,5 @@
 import re
+from pathlib import Path
 
 from .handlers_state_deps import (
     Any,
@@ -81,29 +82,56 @@ from .handlers_state_commands import (
     first_step_menu_markup,
     project_choice_markup,
 )
-from .handlers_keyboards import reply_text_without_keyboard, safe_reply_text
+from .handlers_keyboards import remove_keyboard_markup, reply_text_without_keyboard, safe_reply_text
 from ..assets import ASSETS
 from ..elevenlabs_tts import generate_elevenlabs_speech
 from ..llm_utils import gemini_generate_sync
 from ..scene_media_candidates import resolve_candidate_by_message
 from .handlers_state_start import (
+    SERIES_CHOICE_CONFIRMED_SESSION_KEY,
+    SERIES_NEXT_OVERLAY_TITLE,
+    SERIES_PENDING_NEXT_SESSION_KEY,
+    STATE_WAITING_SERIES_CHOICE,
+    STATE_WAITING_SERIES_CREATE,
+    _ask_series_choice,
     _concept_choice_markup,
+    _handle_waiting_series_choice_state,
+    _handle_waiting_series_create_state,
     _handle_waiting_concept_state,
     _handle_waiting_recipe_approval_state,
+    _series_choice_markup,
     _start_description_with_recipe,
     _start_generation_with_recipe,
+)
+from .handlers_generation_utils import (
+    OVERLAY_TITLE_BY_LANG_SESSION_KEY,
+    OVERLAY_TITLE_STYLE_SESSION_KEY,
+    OVERLAY_TITLE_SESSION_KEY,
+    OVERLAY_TITLE_TRANSLATION_PENDING_SESSION_KEY,
+    STATE_WAITING_OVERLAY_TITLE_EN_APPROVAL,
+    STATE_WAITING_OVERLAY_TITLE_RU,
+    STATE_WAITING_OVERLAY_TITLE_STYLE_APPROVAL,
 )
 from ..state import get_loaded_session, save_loaded_session_if_possible
 from .handlers_state_media import (
     STATE_REFINING_SOCIAL_DESCRIPTIONS,
     STATE_WAITING_SOCIAL_DESCRIPTIONS_APPROVAL,
+    handle_scene_media_reference_photo,
     _handle_waiting_scene_media_state,
     _handle_waiting_social_descriptions_approval_state,
+    scene_media_reference_images_pending,
 )
 from ..character_catalog import format_character_short_descriptions
 from ..pipeline_history import record_checkpoint, restore_previous_checkpoint, session_step_signature
 from ..scene_media_store import mark_candidate_liked_by_message as persist_mark_candidate_liked_by_message
 from ..session_store import save_session_if_possible
+from ..series_store import (
+    SERIES_COUNTER_BY_LANG_SESSION_KEY,
+    SERIES_SESSION_KEY,
+    SERIES_TITLE_BY_LANG_SESSION_KEY,
+    SERIES_TOTAL_VIDEOS_SESSION_KEY,
+    SERIES_VIDEO_INDEX_SESSION_KEY,
+)
 
 
 async def _reply_text_with_optional_markup(update: Update, text: str, reply_markup=None) -> None:
@@ -120,6 +148,9 @@ _STEP_GUIDED_FEEDBACK_KEY = "guided_step_feedback"
 _STEP_ADD_BUTTONS = {"добавь", "add"}
 _STEP_FIX_BUTTONS = {"исправь", "fix"}
 _STEP_OK_BUTTONS = {"ок", "ok", "okay", "approve"}
+_FRAME_PROMPT_REFERENCE_ADD_BUTTON = "Добавить"
+_FRAME_PROMPT_REFERENCE_IMAGES_SESSION_KEY = "frame_prompt_reference_images"
+_STATE_WAITING_FRAME_PROMPT_REFERENCES = "state_waiting_frame_prompt_references"
 _STATE_WAITING_FIRST_STEP_GENERATE_TEXT = "state_waiting_first_step_generate_text"
 _STATE_WAITING_FIRST_STEP_DESCRIPTION_TEXT = "state_waiting_first_step_description_text"
 _STATE_WAITING_FIRST_STEP_IMAGE_TEXT = "state_waiting_first_step_image_text"
@@ -140,6 +171,607 @@ _CUSTOM_REFERENCE_DONE_BUTTON = "больше файлов не нужно"
 _PROJECT_MAIN_CHARACTER_BY_PROJECT = {
     PROJECT_KEY_GRANDMA_CAT_COOKING: "grandma",
 }
+_DEFAULT_OVERLAY_TITLE_SIDE_MARGIN_RATIO = 0.10
+_DEFAULT_OVERLAY_TITLE_TOP_MARGIN_RATIO = 0.05
+_TITLE_COLOR_BY_WORD = (
+    ("клубнич", "#ff4f7b"),
+    ("strawberry", "#ff4f7b"),
+    ("лимонад", "#ffd84a"),
+    ("lemonade", "#ffd84a"),
+    ("борщ", "#c72638"),
+    ("borscht", "#c72638"),
+    ("щи", "#7dbb5d"),
+    ("сырник", "#f2b84b"),
+    ("морожен", "#ff9fc2"),
+)
+_OVERLAY_PREVIEW_WIDTH = 1080
+_OVERLAY_PREVIEW_HEIGHT = 1920
+_OVERLAY_PREVIEW_SAFE_TOP_HEIGHT = int(_OVERLAY_PREVIEW_HEIGHT * 0.30)
+_OVERLAY_PREVIEW_FONTS_DIR = Path(__file__).resolve().parents[2] / "fonts"
+_OVERLAY_PREVIEW_FONT_BY_LANGUAGE = {
+    "ru": _OVERLAY_PREVIEW_FONTS_DIR / "TD Afisha.otf",
+    "en": _OVERLAY_PREVIEW_FONTS_DIR / "Taller.otf",
+}
+_OVERLAY_PREVIEW_SERIES_FONT_BY_LANGUAGE = {
+    "ru": _OVERLAY_PREVIEW_FONTS_DIR / "Berezka.ttf",
+    "en": _OVERLAY_PREVIEW_FONTS_DIR / "Ravsten Demo.otf",
+}
+_OVERLAY_PREVIEW_SERIES_DAY_FONT = _OVERLAY_PREVIEW_FONTS_DIR / "Marianna.ttf"
+_OVERLAY_PREVIEW_TITLE_STROKE_WIDTH = 2
+_OVERLAY_PREVIEW_TITLE_TRACKING = 0
+_OVERLAY_PREVIEW_TITLE_SHADOW_OFFSET = 7
+_OVERLAY_PREVIEW_TITLE_SPACE_WIDTH_SCALE = 0.24
+_OVERLAY_PREVIEW_SERIES_STROKE_WIDTH = 1
+_OVERLAY_PREVIEW_SERIES_SHADOW_OFFSET = 4
+
+
+def _apply_overlay_title_to_production(session: dict, production: dict) -> None:
+    """Attach user-provided title metadata to the production payload."""
+    if not isinstance(production, dict):
+        return
+    title = str(session.get(OVERLAY_TITLE_SESSION_KEY) or "").strip()
+    title_map = session.get(OVERLAY_TITLE_BY_LANG_SESSION_KEY)
+    if title:
+        production[OVERLAY_TITLE_SESSION_KEY] = title
+    if isinstance(title_map, dict) and title_map:
+        cleaned_titles = {
+            str(key).strip(): str(value).strip()
+            for key, value in title_map.items()
+            if str(key).strip() and str(value).strip()
+        }
+        if cleaned_titles:
+            production[OVERLAY_TITLE_BY_LANG_SESSION_KEY] = cleaned_titles
+    style = session.get(OVERLAY_TITLE_STYLE_SESSION_KEY)
+    if isinstance(style, dict) and style:
+        cleaned_style = {str(key).strip(): value for key, value in style.items() if str(key).strip()}
+        if cleaned_style:
+            production[OVERLAY_TITLE_STYLE_SESSION_KEY] = cleaned_style
+    for key in (
+        SERIES_SESSION_KEY,
+        SERIES_TITLE_BY_LANG_SESSION_KEY,
+        SERIES_VIDEO_INDEX_SESSION_KEY,
+        SERIES_TOTAL_VIDEOS_SESSION_KEY,
+        SERIES_COUNTER_BY_LANG_SESSION_KEY,
+    ):
+        value = session.get(key)
+        if value not in (None, "", {}, []):
+            production[key] = value
+
+
+def _overlay_title_ru_prompt_text() -> str:
+    return "Сценарий утверждён. Теперь введите русский заголовок для верхней надписи."
+
+
+def _clean_translated_title(value: str) -> str:
+    text = " ".join(str(value or "").strip().split())
+    if len(text) >= 2 and text[0] == text[-1] and text[0] in {"'", '"', "«", "»"}:
+        text = text[1:-1].strip()
+    prefixes = ("EN:", "English:", "Английский:")
+    for prefix in prefixes:
+        if text.lower().startswith(prefix.lower()):
+            text = text[len(prefix) :].strip()
+    return text
+
+
+async def _translate_overlay_title_to_en(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+    *,
+    chat_id: int,
+    ru_title: str,
+) -> str:
+    prompt = (
+        "Translate this short social-video title from Russian to natural English.\n"
+        "Keep it concise, catchy, and suitable as an on-video title.\n"
+        "Return only the English title, no quotes and no comments.\n\n"
+        f"Russian title:\n{ru_title.strip()}"
+    )
+    raw = await _call_with_503_retries(
+        update,
+        context,
+        chat_id,
+        "translate_overlay_title_en",
+        lambda: asyncio.to_thread(gemini_generate_sync, prompt),
+    )
+    translated = _clean_translated_title(str(raw or ""))
+    return translated or ru_title.strip()
+
+
+def _store_overlay_titles(session: dict, *, ru_title: str, en_title: str) -> None:
+    ru = " ".join(str(ru_title or "").split())
+    en = " ".join(str(en_title or "").split())
+    session[OVERLAY_TITLE_SESSION_KEY] = ru
+    session[OVERLAY_TITLE_BY_LANG_SESSION_KEY] = {"ru": ru, "en": en or ru}
+    session.pop(OVERLAY_TITLE_TRANSLATION_PENDING_SESSION_KEY, None)
+
+
+def _semantic_overlay_title_color(title: str) -> str:
+    text = str(title or "").casefold()
+    for marker, color in _TITLE_COLOR_BY_WORD:
+        if marker in text:
+            return color
+    return "#fff7e8"
+
+
+def _default_overlay_title_style(session: dict) -> dict[str, object]:
+    title = str(session.get(OVERLAY_TITLE_SESSION_KEY) or "").strip()
+    existing = session.get(OVERLAY_TITLE_STYLE_SESSION_KEY)
+    if isinstance(existing, dict) and existing:
+        return dict(existing)
+    return {
+        "title_color": _semantic_overlay_title_color(title),
+        "top_margin_ratio": _DEFAULT_OVERLAY_TITLE_TOP_MARGIN_RATIO,
+        "side_margin_ratio": _DEFAULT_OVERLAY_TITLE_SIDE_MARGIN_RATIO,
+    }
+
+
+def _format_overlay_title_style(style: dict[str, object]) -> str:
+    color = str(style.get("title_color") or "#fff7e8")
+    top = float(style.get("top_margin_ratio") or _DEFAULT_OVERLAY_TITLE_TOP_MARGIN_RATIO) * 100
+    side = float(style.get("side_margin_ratio") or _DEFAULT_OVERLAY_TITLE_SIDE_MARGIN_RATIO) * 100
+    return (
+        f"Цвет заголовка: {color}\n"
+        f"Отступ сверху: {top:.0f}%\n"
+        f"Боковые поля: {side:.0f}%"
+    )
+
+
+def _normalize_overlay_ratio(value: str, *, default: float) -> float:
+    raw_text = str(value or "")
+    try:
+        raw = float(raw_text.replace(",", ".").replace("%", "").strip())
+    except ValueError:
+        return default
+    ratio = raw / 100.0 if raw > 1 or "%" in raw_text else raw
+    return min(max(ratio, 0.04), 0.22)
+
+
+def _apply_overlay_title_style_feedback(style: dict[str, object], text: str) -> dict[str, object]:
+    updated = dict(style)
+    raw = str(text or "").strip()
+    color_match = re.search(r"#?([0-9a-fA-F]{6})", raw)
+    if color_match:
+        updated["title_color"] = f"#{color_match.group(1).lower()}"
+    top_match = re.search(r"(?:сверху|верх\w*|top)\D{0,16}(\d+(?:[.,]\d+)?\s*%?)", raw, flags=re.IGNORECASE)
+    if top_match:
+        updated["top_margin_ratio"] = _normalize_overlay_ratio(
+            top_match.group(1),
+            default=float(updated.get("top_margin_ratio") or _DEFAULT_OVERLAY_TITLE_TOP_MARGIN_RATIO),
+        )
+    side_match = re.search(
+        r"(?:бок\w*|лев\w*|прав\w*|side|margin)\D{0,16}(\d+(?:[.,]\d+)?\s*%?)",
+        raw,
+        flags=re.IGNORECASE,
+    )
+    if side_match:
+        updated["side_margin_ratio"] = _normalize_overlay_ratio(
+            side_match.group(1),
+            default=float(updated.get("side_margin_ratio") or _DEFAULT_OVERLAY_TITLE_SIDE_MARGIN_RATIO),
+        )
+    return updated
+
+
+def _overlay_preview_ratio(style: dict[str, object], key: str, default: float) -> float:
+    try:
+        value = float(style.get(key) or default)
+    except (TypeError, ValueError):
+        return default
+    if value > 1:
+        value = value / 100.0
+    return min(max(value, 0.04), 0.22)
+
+
+def _overlay_preview_text_bbox(draw, text: str, font):
+    left, top, _right, bottom = draw.textbbox(
+        (0, 0),
+        text,
+        font=font,
+        stroke_width=_OVERLAY_PREVIEW_TITLE_STROKE_WIDTH,
+    )
+    width = _overlay_preview_tracked_line_width(draw, text, font)
+    return (left, top, left + width, bottom)
+
+
+def _overlay_preview_tracked_line_width(draw, text: str, font) -> int:
+    chars = list(str(text or ""))
+    if not chars:
+        return 0
+    width = 0.0
+    for ch in chars:
+        char_width = float(draw.textlength(ch, font=font))
+        width += char_width * _OVERLAY_PREVIEW_TITLE_SPACE_WIDTH_SCALE if ch == " " else char_width
+    width += _OVERLAY_PREVIEW_TITLE_TRACKING * max(0, len(chars) - 1)
+    return int(round(width)) + _OVERLAY_PREVIEW_TITLE_STROKE_WIDTH * 2
+
+
+def _overlay_preview_tracked_multiline_bbox(draw, lines: list[str], font, spacing: int):
+    normal = draw.multiline_textbbox(
+        (0, 0),
+        "\n".join(lines),
+        font=font,
+        spacing=spacing,
+        stroke_width=_OVERLAY_PREVIEW_TITLE_STROKE_WIDTH,
+    )
+    width = max((_overlay_preview_tracked_line_width(draw, line, font) for line in lines), default=0)
+    return (normal[0], normal[1], normal[0] + width, normal[3])
+
+
+def _overlay_preview_draw_tracked_multiline(
+    draw,
+    xy: tuple[int, int],
+    lines: list[str],
+    font,
+    *,
+    fill: str,
+    spacing: int,
+    box_width: int,
+) -> None:
+    x, y = xy
+    line_y = y
+    for line in lines:
+        line_x = x + (box_width - _overlay_preview_tracked_line_width(draw, line, font)) // 2
+        shadow_x = line_x + _OVERLAY_PREVIEW_TITLE_SHADOW_OFFSET
+        for ch in line:
+            advance = int(round(float(draw.textlength(ch, font=font))))
+            if ch == " ":
+                shadow_x += int(round(advance * _OVERLAY_PREVIEW_TITLE_SPACE_WIDTH_SCALE))
+                continue
+            draw.text(
+                (shadow_x, line_y + _OVERLAY_PREVIEW_TITLE_SHADOW_OFFSET),
+                ch,
+                font=font,
+                fill="#000000",
+                stroke_width=0,
+            )
+            shadow_x += advance + _OVERLAY_PREVIEW_TITLE_TRACKING
+        for ch in line:
+            advance = int(round(float(draw.textlength(ch, font=font))))
+            if ch == " ":
+                line_x += int(round(advance * _OVERLAY_PREVIEW_TITLE_SPACE_WIDTH_SCALE))
+                continue
+            draw.text(
+                (line_x, line_y),
+                ch,
+                font=font,
+                fill=fill,
+                stroke_width=_OVERLAY_PREVIEW_TITLE_STROKE_WIDTH,
+                stroke_fill="#000000",
+            )
+            line_x += advance + _OVERLAY_PREVIEW_TITLE_TRACKING
+        line_bbox = draw.textbbox(
+            (0, 0),
+            line or " ",
+            font=font,
+            stroke_width=_OVERLAY_PREVIEW_TITLE_STROKE_WIDTH,
+        )
+        line_y += (line_bbox[3] - line_bbox[1]) + spacing
+
+
+def _overlay_preview_wrap_text(draw, text: str, font, max_width: int) -> list[str]:
+    words = [word for word in str(text or "").split() if word]
+    if not words:
+        return [""]
+    lines: list[str] = []
+    current = words[0]
+    for word in words[1:]:
+        candidate = f"{current} {word}"
+        left, _top, right, _bottom = _overlay_preview_text_bbox(draw, candidate, font)
+        if right - left <= max_width:
+            current = candidate
+            continue
+        lines.append(current)
+        current = word
+    lines.append(current)
+    return lines
+
+
+def _overlay_preview_fit_title(draw, title: str, font_path: Path, *, max_width: int, max_height: int):
+    from PIL import ImageFont
+
+    clean = " ".join(str(title or "").split())
+    start_size = 260 if len(clean) <= 8 else 170
+    for size in range(start_size, 45, -2):
+        font = ImageFont.truetype(str(font_path), size=size)
+        spacing = max(8, int(size * 0.10))
+        lines = _overlay_preview_wrap_text(draw, clean, font, max_width)
+        if len(lines) > 2:
+            continue
+        left, top, right, bottom = _overlay_preview_tracked_multiline_bbox(draw, lines, font, spacing)
+        if right - left <= max_width and bottom - top <= max_height:
+            return font, lines, spacing, (left, top, right, bottom)
+    font = ImageFont.truetype(str(font_path), size=46)
+    lines = _overlay_preview_wrap_text(draw, clean, font, max_width)[:2]
+    spacing = 8
+    bbox = _overlay_preview_tracked_multiline_bbox(draw, lines, font, spacing)
+    return font, lines, spacing, bbox
+
+
+def _overlay_preview_value_for_language(value_by_lang: object, language: str) -> str:
+    if not isinstance(value_by_lang, dict):
+        return ""
+    lang = str(language or "").strip().lower()
+    direct = str(value_by_lang.get(lang) or "").strip()
+    if direct:
+        return direct
+    return str(value_by_lang.get("ru") or value_by_lang.get("en") or "").strip()
+
+
+def _overlay_preview_text_box(draw, text: str, font, *, stroke_width: int) -> tuple[int, int, int, int]:
+    if not text:
+        return (0, 0, 0, 0)
+    return draw.textbbox((0, 0), text, font=font, stroke_width=stroke_width)
+
+
+def _overlay_preview_series_line_metrics(draw, parts: list[tuple[str, object]], *, gap: int) -> tuple[int, int, int]:
+    boxes = [
+        _overlay_preview_text_box(draw, text, font, stroke_width=_OVERLAY_PREVIEW_SERIES_STROKE_WIDTH)
+        for text, font in parts
+        if text
+    ]
+    widths = [right - left for left, _top, right, _bottom in boxes]
+    width = sum(widths) + gap * max(0, len(widths) - 1)
+    top = min((box[1] for box in boxes), default=0)
+    bottom = max((box[3] for box in boxes), default=0)
+    return width, top, bottom
+
+
+def _overlay_preview_fit_series_line(
+    draw,
+    language: str,
+    series_title: str,
+    series_counter: str,
+    *,
+    max_width: int,
+):
+    from PIL import ImageFont
+
+    clean_title = " ".join(str(series_title or "").split())
+    clean_counter = " ".join(str(series_counter or "").split())
+    if not clean_title and not clean_counter:
+        return None
+    title_font_path = _OVERLAY_PREVIEW_SERIES_FONT_BY_LANGUAGE.get(
+        language,
+        _OVERLAY_PREVIEW_SERIES_FONT_BY_LANGUAGE["ru"],
+    )
+    for title_size in range(78, 31, -2):
+        counter_size = max(36, int(round(title_size * 1.44)))
+        title_font = ImageFont.truetype(str(title_font_path), size=title_size)
+        counter_font = ImageFont.truetype(str(_OVERLAY_PREVIEW_SERIES_DAY_FONT), size=counter_size)
+        parts = [(clean_title, title_font), (clean_counter, counter_font)]
+        gap = int(round(counter_size * 0.18)) if clean_title and clean_counter else 0
+        width, top, bottom = _overlay_preview_series_line_metrics(draw, parts, gap=gap)
+        if width <= max_width:
+            return parts, gap, (width, top, bottom)
+    title_font = ImageFont.truetype(str(title_font_path), size=32)
+    counter_font = ImageFont.truetype(str(_OVERLAY_PREVIEW_SERIES_DAY_FONT), size=46)
+    parts = [(clean_title, title_font), (clean_counter, counter_font)]
+    gap = 8 if clean_title and clean_counter else 0
+    width, top, bottom = _overlay_preview_series_line_metrics(draw, parts, gap=gap)
+    return parts, gap, (width, top, bottom)
+
+
+def _overlay_preview_draw_series_line(draw, x: int, y: int, parts: list[tuple[str, object]], *, gap: int) -> None:
+    cursor_x = x
+    for text, font in parts:
+        if not text:
+            continue
+        left, top, right, _bottom = _overlay_preview_text_box(
+            draw,
+            text,
+            font,
+            stroke_width=_OVERLAY_PREVIEW_SERIES_STROKE_WIDTH,
+        )
+        text_x = cursor_x - left
+        text_y = y - top
+        draw.text(
+            (text_x + _OVERLAY_PREVIEW_SERIES_SHADOW_OFFSET, text_y + _OVERLAY_PREVIEW_SERIES_SHADOW_OFFSET),
+            text,
+            font=font,
+            fill="#000000",
+            stroke_width=0,
+        )
+        draw.text(
+            (text_x, text_y),
+            text,
+            font=font,
+            fill="#ffffff",
+            stroke_width=_OVERLAY_PREVIEW_SERIES_STROKE_WIDTH,
+            stroke_fill="#000000",
+        )
+        cursor_x += (right - left) + gap
+
+
+def _render_overlay_title_preview(
+    language: str,
+    title: str,
+    style: dict[str, object],
+    series_title: str = "",
+    series_counter: str = "",
+) -> bytes:
+    from PIL import Image, ImageDraw
+
+    width = _OVERLAY_PREVIEW_WIDTH
+    height = _OVERLAY_PREVIEW_HEIGHT
+    safe_top = _OVERLAY_PREVIEW_SAFE_TOP_HEIGHT
+    side_ratio = _overlay_preview_ratio(style, "side_margin_ratio", _DEFAULT_OVERLAY_TITLE_SIDE_MARGIN_RATIO)
+    top_ratio = _overlay_preview_ratio(style, "top_margin_ratio", _DEFAULT_OVERLAY_TITLE_TOP_MARGIN_RATIO)
+    margin_x = int(width * side_ratio)
+    max_width = width - margin_x * 2
+    top_y = int(height * top_ratio)
+    max_height = max(64, safe_top - top_y - 28)
+    title_color = str(style.get("title_color") or "#fff7e8")
+
+    image = Image.new("RGB", (width, height), "#e5bf94")
+    draw = ImageDraw.Draw(image)
+    for y in range(height):
+        t = y / height
+        r = int(246 + (198 - 246) * t)
+        g = int(215 + (143 - 215) * t)
+        b = int(175 + (94 - 175) * t)
+        draw.line((0, y, width, y), fill=(r, g, b))
+    draw.rectangle((0, int(height * 0.58), width, height), fill="#b87955")
+    draw.ellipse((160, 990, 920, 1660), fill="#8d5745")
+    draw.ellipse((230, 1050, 850, 1580), fill="#efcf9d")
+    draw.ellipse((395, 760, 685, 1055), fill="#f0c7a8")
+    draw.rectangle((355, 1055, 725, 1440), fill="#74aaa9")
+    draw.rounded_rectangle((105, 1240, 280, 1530), radius=20, fill="#ff6b7e", outline="#7f2e3f", width=6)
+    draw.ellipse((780, 1210, 960, 1530), fill="#ffd85a", outline="#8c6722", width=6)
+
+    overlay = Image.new("RGBA", (width, height), (0, 0, 0, 0))
+    overlay_draw = ImageDraw.Draw(overlay)
+    fade_height = int(height * 0.42)
+    for y in range(fade_height):
+        t = y / max(1, fade_height - 1)
+        smooth = t * t * (3 - 2 * t)
+        alpha = int(255 * 0.24 * (1 - smooth))
+        if alpha > 0:
+            overlay_draw.line((0, y, width, y), fill=(0, 0, 0, alpha))
+    image = Image.alpha_composite(image.convert("RGBA"), overlay).convert("RGB")
+    draw = ImageDraw.Draw(image)
+
+    clean_series_title = " ".join(str(series_title or "").split())
+    clean_series_counter = " ".join(str(series_counter or "").split())
+    series_gap = 0
+    series_height = 0
+    series_parts: list[tuple[str, object]] = []
+    series_metrics = None
+    if clean_series_title or clean_series_counter:
+        series_metrics = _overlay_preview_fit_series_line(
+            draw,
+            language,
+            clean_series_title,
+            clean_series_counter,
+            max_width=max_width,
+        )
+    if series_metrics:
+        series_parts, series_gap, (series_width, series_top, series_bottom) = series_metrics
+        series_height = series_bottom - series_top
+        series_x = margin_x + (max_width - series_width) // 2
+        _overlay_preview_draw_series_line(draw, series_x, top_y, series_parts, gap=series_gap)
+
+    title_top_y = top_y + (int(round(series_height * 0.95)) if series_height else 0)
+    if series_height:
+        title_top_y += 12
+    max_height = max(64, safe_top - title_top_y - 28)
+    font_path = _OVERLAY_PREVIEW_FONT_BY_LANGUAGE.get(language, _OVERLAY_PREVIEW_FONT_BY_LANGUAGE["ru"])
+    font, lines, spacing, bbox = _overlay_preview_fit_title(
+        draw,
+        title,
+        font_path,
+        max_width=max_width,
+        max_height=max_height,
+    )
+    left, top, right, bottom = bbox
+    text_width = right - left
+    x = margin_x + (max_width - text_width) // 2 - left
+    y = title_top_y - top
+    _overlay_preview_draw_tracked_multiline(
+        draw,
+        (x, y),
+        lines,
+        font=font,
+        fill=title_color,
+        spacing=spacing,
+        box_width=text_width,
+    )
+    bio = io.BytesIO()
+    image.save(bio, format="PNG")
+    return bio.getvalue()
+
+
+async def _send_overlay_title_previews(update: Update, session: dict, style: dict[str, object]) -> None:
+    message = update.message
+    if message is None or not hasattr(message, "reply_photo"):
+        return
+    titles = session.get(OVERLAY_TITLE_BY_LANG_SESSION_KEY)
+    if not isinstance(titles, dict):
+        return
+    series_titles = session.get(SERIES_TITLE_BY_LANG_SESSION_KEY)
+    series_counters = session.get(SERIES_COUNTER_BY_LANG_SESSION_KEY)
+    for language, label in (("ru", "RU"), ("en", "EN")):
+        title = str(titles.get(language) or titles.get("ru") or "").strip()
+        if not title:
+            continue
+        series_title = _overlay_preview_value_for_language(series_titles, language)
+        series_counter = _overlay_preview_value_for_language(series_counters, language)
+        try:
+            image_bytes = _render_overlay_title_preview(language, title, style, series_title, series_counter)
+        except Exception:
+            logger.exception("overlay title preview render failed language=%s", language)
+            continue
+        bio = io.BytesIO(image_bytes)
+        bio.name = f"overlay_title_preview_{language}.png"
+        await message.reply_photo(photo=bio, caption=f"Превью верхнего заголовка {label}.")
+
+
+async def _ask_overlay_title_style_approval(update: Update, session: dict) -> bool:
+    style = _default_overlay_title_style(session)
+    session[OVERLAY_TITLE_STYLE_SESSION_KEY] = style
+    await _send_overlay_title_previews(update, session, style)
+    await _reply_text_with_optional_markup(
+        update,
+        "Предлагаю настройки верхнего заголовка:\n"
+        f"{_format_overlay_title_style(style)}\n\n"
+        "Если подходит — нажмите «ОК». Если нужно поправить, напишите, например: "
+        "цвет #ff4f7b, сверху 15%, боковые 10%.",
+        reply_markup=ok_only_markup(),
+    )
+    return True
+
+
+async def _generate_production_after_overlay_title(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+    *,
+    chat_id: int,
+    session: dict,
+) -> bool:
+    try:
+        await reply_text_without_keyboard(update.message, "Генерирую production-промпты, ждите.")
+        requested_end_frame_scenes = _ensure_end_frame_scene_requests_from_session_text(session)
+        production = await _call_with_503_retries(
+            update,
+            context,
+            chat_id,
+            "generate_full_production",
+            lambda: generate_full_production(
+                session["scenes_plan"],
+                approved_frame_prompts=None,
+                requested_end_frame_scenes=requested_end_frame_scenes,
+                viral_concept_brief=session.get("viral_concept_brief"),
+                sponsored_content=bool(session.get("sponsored_content")),
+                brand_context=session.get("brand_context"),
+            ),
+        )
+    except ServiceUnavailableRetriesExhaustedError as e:
+        await update.message.reply_text(str(e))
+        return True
+    except Exception as e:
+        logger.exception("production failed after overlay title")
+        await update.message.reply_text(f"Ошибка генерации промптов (кадры + видео): {_user_error_message(e)}")
+        return True
+    plan = production.get("json_plan") if isinstance(production, dict) else None
+    if not isinstance(plan, list) or not plan:
+        await update.message.reply_text("Модель не вернула production-план. Попробуйте ещё раз или начните с /generate.")
+        return True
+    session["state"] = STATE_WAITING_PRODUCTION_BUNDLE_APPROVAL
+    _apply_overlay_title_to_production(session, production)
+    session["production"] = production
+    session["frame_prompts"] = _frame_prompts_slice_from_production(plan)
+    session["frame_prompts_text"] = format_frame_prompts_for_approval(session["frame_prompts"])
+    await update.message.reply_text(
+        "Заголовок утверждён. Ниже — все промпты по сценам: START / END кадры и video. "
+        "После «ОК» пойдём по сценам: старт → картинка → при необходимости конец → video → ролик."
+    )
+    await _reply_text_chunked(update, format_production_bundle_for_approval(plan))
+    await _reply_text_with_optional_markup(
+        update,
+        "Нажмите «ОК», чтобы перейти к пошаговой генерации. "
+        "Либо нажмите «Добавь»/«Исправь» и пришлите правки. "
+        "Конечный кадр добавлю только для явно названных в правке сцен.",
+        reply_markup=_production_bundle_approval_markup(),
+    )
+    return True
 
 
 def keyboard_for_session_state(session: dict):
@@ -149,15 +781,28 @@ def keyboard_for_session_state(session: dict):
         return project_choice_markup()
     if state == "":
         return first_step_menu_markup()
+    if state == STATE_WAITING_OVERLAY_TITLE_RU:
+        return remove_keyboard_markup()
+    if state == STATE_WAITING_OVERLAY_TITLE_EN_APPROVAL:
+        return ok_only_markup()
+    if state == STATE_WAITING_OVERLAY_TITLE_STYLE_APPROVAL:
+        return ok_only_markup()
+    if state == STATE_WAITING_SERIES_CHOICE:
+        return _series_choice_markup(session)
+    if state == STATE_WAITING_SERIES_CREATE:
+        return ok_only_markup()
     if state == STATE_WAITING_CONCEPT:
         concepts = session.get("concepts")
         return _concept_choice_markup(concepts if isinstance(concepts, list) else [])
     if state in {
         STATE_WAITING_RECIPE_APPROVAL,
         STATE_WAITING_SCENE_APPROVAL,
-        STATE_WAITING_FRAME_PROMPTS_APPROVAL,
     }:
         return ok_only_markup()
+    if state == STATE_WAITING_FRAME_PROMPTS_APPROVAL:
+        return _frame_prompts_approval_markup()
+    if state == _STATE_WAITING_FRAME_PROMPT_REFERENCES:
+        return _frame_prompt_reference_markup()
     if state == STATE_WAITING_PRODUCTION_BUNDLE_APPROVAL:
         return _production_bundle_approval_markup()
     if state == STATE_READY_FOR_PRODUCTION:
@@ -232,6 +877,25 @@ def _custom_reference_count_text(session: dict) -> str:
     return f"Добавлено своих файлов: {count}."
 
 
+def _frame_prompt_reference_images_from_session(session: dict) -> list[bytes]:
+    raw = session.get(_FRAME_PROMPT_REFERENCE_IMAGES_SESSION_KEY)
+    if not isinstance(raw, list):
+        return []
+    return [item for item in raw if isinstance(item, bytes) and item]
+
+
+def _append_frame_prompt_reference_image(session: dict, image_bytes: bytes) -> int:
+    refs = _frame_prompt_reference_images_from_session(session)
+    refs.append(image_bytes)
+    session[_FRAME_PROMPT_REFERENCE_IMAGES_SESSION_KEY] = refs
+    return len(refs)
+
+
+def _frame_prompt_reference_count_text(session: dict) -> str:
+    count = len(_frame_prompt_reference_images_from_session(session))
+    return f"Прикреплено изображений к frame prompts: {count}."
+
+
 def _custom_reference_markup():
     try:
         from telegram import ReplyKeyboardMarkup
@@ -239,6 +903,37 @@ def _custom_reference_markup():
         return None
     return ReplyKeyboardMarkup(
         [[_CUSTOM_REFERENCE_DONE_BUTTON], [NAV_BUTTON_START_OVER]],
+        resize_keyboard=True,
+        one_time_keyboard=False,
+    )
+
+
+def _frame_prompt_reference_markup():
+    try:
+        from telegram import ReplyKeyboardMarkup
+    except Exception:
+        return None
+    return ReplyKeyboardMarkup(
+        [[_CUSTOM_REFERENCE_DONE_BUTTON], [NAV_BUTTON_PREVIOUS_STEP], [NAV_BUTTON_START_OVER]],
+        resize_keyboard=True,
+        one_time_keyboard=False,
+    )
+
+
+def _frame_prompts_approval_markup():
+    try:
+        from telegram import ReplyKeyboardMarkup
+    except Exception:
+        return None
+    return ReplyKeyboardMarkup(
+        [
+            ["ОК"],
+            [_FRAME_PROMPT_REFERENCE_ADD_BUTTON],
+            ["Добавь"],
+            ["Исправь"],
+            [NAV_BUTTON_PREVIOUS_STEP],
+            [NAV_BUTTON_START_OVER],
+        ],
         resize_keyboard=True,
         one_time_keyboard=False,
     )
@@ -397,6 +1092,7 @@ def _drop_step_outputs_from(session: dict, step: str) -> None:
         session["scenes_text"] = None
         session["frame_prompts"] = None
         session["frame_prompts_text"] = None
+        session.pop(_FRAME_PROMPT_REFERENCE_IMAGES_SESSION_KEY, None)
         session["production"] = None
         session.pop("image_scene_index", None)
         session.pop("scene_media_substep", None)
@@ -407,12 +1103,14 @@ def _drop_step_outputs_from(session: dict, step: str) -> None:
         session["recipe_steps"] = None
         session["frame_prompts"] = None
         session["frame_prompts_text"] = None
+        session.pop(_FRAME_PROMPT_REFERENCE_IMAGES_SESSION_KEY, None)
         session["production"] = None
         session.pop("image_scene_index", None)
         session.pop("scene_media_substep", None)
         return
     if step == "production":
         session["production"] = None
+        session.pop(_FRAME_PROMPT_REFERENCE_IMAGES_SESSION_KEY, None)
         session.pop("image_scene_index", None)
         session.pop("scene_media_substep", None)
         return
@@ -440,6 +1138,27 @@ def _drop_step_outputs_from(session: dict, step: str) -> None:
         session["scene_media_substep"] = SCENE_MEDIA_SUBSTEP_START
 
 
+def _last_available_scene_media_substep(scene: dict) -> str:
+    """Return the latest meaningful media substep for a previous scene."""
+    video_results = scene.get("video_results_by_lang")
+    video_prompts = scene.get("video_prompt_by_lang")
+    if (
+        (isinstance(video_results, dict) and video_results)
+        or (isinstance(video_prompts, dict) and video_prompts)
+        or str(scene.get("video_prompt") or "").strip()
+    ):
+        return SCENE_MEDIA_SUBSTEP_VIDEO
+    if _scene_needs_end_frame_step(scene):
+        return (
+            SCENE_MEDIA_SUBSTEP_END_IMAGE_APPROVAL
+            if scene.get("end_frame_image_b64")
+            else SCENE_MEDIA_SUBSTEP_END
+        )
+    if scene.get("start_frame_image_b64"):
+        return SCENE_MEDIA_SUBSTEP_START_IMAGE_APPROVAL
+    return SCENE_MEDIA_SUBSTEP_START
+
+
 async def _handle_navigation_buttons(
     update: Update,
     *,
@@ -461,6 +1180,15 @@ async def _handle_navigation_buttons(
         return False
 
     state = str(session.get("state") or "")
+    if state == _STATE_WAITING_FRAME_PROMPT_REFERENCES:
+        session["state"] = STATE_WAITING_FRAME_PROMPTS_APPROVAL
+        SESSIONS[chat_id] = session
+        await _reply_text_with_optional_markup(
+            update,
+            "Вернула к апруву frame prompts.",
+            reply_markup=_frame_prompts_approval_markup(),
+        )
+        return True
     if state == STATE_WAITING_SCENE_MEDIA:
         production = session.get("production") or {}
         scenes = production.get("json_plan") if isinstance(production, dict) else None
@@ -544,6 +1272,28 @@ async def _handle_navigation_buttons(
             await update.message.reply_text("Вернула к промпту стартового кадра текущей сцены.")
             await _send_next_scene_media_step(update, session)
             return True
+        if sub == SCENE_MEDIA_SUBSTEP_START and idx > 0:
+            prev_idx = idx - 1
+            prev_scene = scenes[prev_idx]
+            target_substep = (
+                _last_available_scene_media_substep(prev_scene)
+                if isinstance(prev_scene, dict)
+                else SCENE_MEDIA_SUBSTEP_START
+            )
+            session["image_scene_index"] = prev_idx
+            session["scene_media_language_index"] = 0
+            session["scene_media_substep"] = target_substep
+            logger.info(
+                "chat=%s navigation.previous scene=%s from_substep=%s to_scene=%s to_substep=%s",
+                chat_id,
+                idx + 1,
+                sub,
+                prev_idx + 1,
+                target_substep,
+            )
+            await update.message.reply_text("Вернула к концу предыдущей сцены.")
+            await _send_next_scene_media_step(update, session)
+            return True
         _drop_step_outputs_from(session, "media")
         session["state"] = STATE_WAITING_PRODUCTION_BUNDLE_APPROVAL
         logger.info(
@@ -557,20 +1307,6 @@ async def _handle_navigation_buttons(
             update,
             "Это первый медиа-подшаг сцены. Возвращаю к апруву production-промптов.",
             reply_markup=_production_bundle_approval_markup(),
-        )
-        return True
-
-    restored = restore_previous_checkpoint(chat_id, session)
-    if restored is not None:
-        state_after_restore = str(session.get("state") or "")
-        if state_after_restore == STATE_WAITING_SCENE_MEDIA:
-            await update.message.reply_text("Вернула на предыдущий сохранённый шаг.")
-            await _send_next_scene_media_step(update, session)
-            return True
-        await _reply_text_with_optional_markup(
-            update,
-            "Вернула на предыдущий сохранённый шаг.",
-            reply_markup=keyboard_for_session_state(session),
         )
         return True
 
@@ -637,6 +1373,19 @@ async def _handle_navigation_buttons(
             update,
             "Откатила шаг генерации медиа. Возвращаю к апруву production-промптов.",
             reply_markup=_production_bundle_approval_markup(),
+        )
+        return True
+    restored = restore_previous_checkpoint(chat_id, session)
+    if restored is not None:
+        state_after_restore = str(session.get("state") or "")
+        if state_after_restore == STATE_WAITING_SCENE_MEDIA:
+            await update.message.reply_text("Вернула на предыдущий сохранённый шаг.")
+            await _send_next_scene_media_step(update, session)
+            return True
+        await _reply_text_with_optional_markup(
+            update,
+            "Вернула на предыдущий сохранённый шаг.",
+            reply_markup=keyboard_for_session_state(session),
         )
         return True
     return False
@@ -776,6 +1525,29 @@ _END_FRAME_REMOVE_MARKERS = (
     "отменить финальн",
 )
 _END_FRAME_REMOVE_ACTIONS = ("без", "не нужен", "не нужны", "убрать", "удалить", "отменить")
+_SCENE_ORDINAL_WORDS_RU = {
+    "перв": 1,
+    "втор": 2,
+    "трет": 3,
+    "четверт": 4,
+    "пят": 5,
+    "шест": 6,
+    "седьм": 7,
+    "восьм": 8,
+    "девят": 9,
+    "десят": 10,
+}
+
+
+def _end_frame_chunk_requests_removal(chunk: str) -> bool:
+    """Return True only for explicit remove/cancel wording, not accidental cross-word substrings."""
+    if not any(marker in chunk for marker in _END_FRAME_FEEDBACK_MARKERS):
+        return False
+    if re.search(r"\bне\s+нуж\w*\b", chunk):
+        return True
+    if re.search(r"\b(?:без|убрать|удалить|отменить)\w*\b", chunk):
+        return True
+    return False
 
 
 def _scene_numbers_from_end_frame_feedback(text: str, *, total_scenes: int) -> tuple[set[int], set[int]]:
@@ -797,15 +1569,15 @@ def _scene_numbers_from_end_frame_feedback(text: str, *, total_scenes: int) -> t
             int(match.group(1))
             for match in re.finditer(r"\b(\d+)(?:-?(?:я|й|ая|ой))?\s+сцен(?:а|е|ы|у|ой|ах)?\b", chunk)
         )
+        for word_prefix, number in _SCENE_ORDINAL_WORDS_RU.items():
+            if re.search(rf"\b{word_prefix}\w*\s+сцен(?:а|е|ы|у|ой|ах)?\b", chunk):
+                numbers.add(number)
         if ("все сцен" in chunk or "кажд" in chunk) and total_scenes > 0:
             numbers.update(range(1, total_scenes + 1))
         numbers = {number for number in numbers if 1 <= number <= total_scenes}
         if not numbers:
             continue
-        is_remove = any(marker in chunk for marker in _END_FRAME_REMOVE_MARKERS) or (
-            any(action in chunk for action in _END_FRAME_REMOVE_ACTIONS)
-            and any(marker in chunk for marker in _END_FRAME_FEEDBACK_MARKERS)
-        )
+        is_remove = _end_frame_chunk_requests_removal(chunk)
         if is_remove:
             remove.update(numbers)
         else:
@@ -830,6 +1602,32 @@ def _update_end_frame_scene_requests(session: dict, feedback: str) -> list[int]:
     return result
 
 
+def _ensure_end_frame_scene_requests_from_session_text(session: dict) -> list[int]:
+    """Infer explicit end-frame requests from the original description once scenes are known."""
+    scenes = session.get("scenes_plan")
+    total_scenes = len(scenes) if isinstance(scenes, list) else 0
+    if total_scenes <= 0:
+        return []
+    current = [
+        int(value)
+        for value in (session.get("end_frame_scene_requests") or [])
+        if str(value).isdigit() and 1 <= int(value) <= total_scenes
+    ]
+    if current:
+        session["end_frame_scene_requests"] = sorted(set(current))
+        return session["end_frame_scene_requests"]
+    for key in ("user_input", "recipe_full_text", "selected_concept", "user_feedback"):
+        value = session.get(key)
+        if not isinstance(value, str) or not value.strip():
+            continue
+        add, _remove = _scene_numbers_from_end_frame_feedback(value, total_scenes=total_scenes)
+        if add:
+            session["end_frame_scene_requests"] = sorted(add)
+            return session["end_frame_scene_requests"]
+    session["end_frame_scene_requests"] = []
+    return []
+
+
 async def _handle_waiting_scene_approval_state(
     update: Update,
     context: ContextTypes.DEFAULT_TYPE,
@@ -839,49 +1637,15 @@ async def _handle_waiting_scene_approval_state(
     text: str,
 ) -> bool:
     if text.lower() in {"ок", "ok", "okay", "approve"}:
-        try:
-            await reply_text_without_keyboard(update.message, "Генерирую production-промпты, ждите.")
-            production = await _call_with_503_retries(
-                update,
-                context,
-                chat_id,
-                "generate_full_production",
-                lambda: generate_full_production(
-                    session["scenes_plan"],
-                    approved_frame_prompts=None,
-                    requested_end_frame_scenes=session.get("end_frame_scene_requests"),
-                    viral_concept_brief=session.get("viral_concept_brief"),
-                    sponsored_content=bool(session.get("sponsored_content")),
-                    brand_context=session.get("brand_context"),
-                ),
-            )
-        except ServiceUnavailableRetriesExhaustedError as e:
-            await update.message.reply_text(str(e))
+        if not session.get(SERIES_CHOICE_CONFIRMED_SESSION_KEY) and not session.get(SERIES_SESSION_KEY):
+            session[SERIES_PENDING_NEXT_SESSION_KEY] = SERIES_NEXT_OVERLAY_TITLE
+            SESSIONS[chat_id] = session
+            await _ask_series_choice(update, session)
             return True
-        except Exception as e:
-            logger.exception("production failed after scene approval")
-            await update.message.reply_text(f"Ошибка генерации промптов (кадры + видео): {_user_error_message(e)}")
-            return True
-        plan = production.get("json_plan") if isinstance(production, dict) else None
-        if not isinstance(plan, list) or not plan:
-            await update.message.reply_text("Модель не вернула production-план. Попробуйте ещё раз или начните с /generate.")
-            return True
-        session["state"] = STATE_WAITING_PRODUCTION_BUNDLE_APPROVAL
-        session["production"] = production
-        session["frame_prompts"] = _frame_prompts_slice_from_production(plan)
-        session["frame_prompts_text"] = format_frame_prompts_for_approval(session["frame_prompts"])
-        await update.message.reply_text(
-            "Сценарий утверждён. Ниже — все промпты по сценам: START / END кадры и video (одним запросом к модели). "
-            "После «ОК» пойдём по сценам: старт → картинка → при необходимости конец → video → ролик."
-        )
-        await _reply_text_chunked(update, format_production_bundle_for_approval(plan))
-        await _reply_text_with_optional_markup(
-            update,
-            "Нажмите «ОК», чтобы перейти к пошаговой генерации. "
-            "Либо нажмите «Добавь»/«Исправь» и пришлите правки. "
-            "Конечный кадр добавлю только для явно названных в правке сцен.",
-            reply_markup=_production_bundle_approval_markup(),
-        )
+        session["state"] = STATE_WAITING_OVERLAY_TITLE_RU
+        session.pop(OVERLAY_TITLE_TRANSLATION_PENDING_SESSION_KEY, None)
+        SESSIONS[chat_id] = session
+        await reply_text_without_keyboard(update.message, _overlay_title_ru_prompt_text())
         return True
     return False
 
@@ -894,9 +1658,22 @@ async def _handle_waiting_frame_prompts_approval_state(
     session: dict,
     text: str,
 ) -> bool:
-    if text.lower() in {"ок", "ok", "okay", "approve"}:
+    low = text.lower().strip()
+    if low == _FRAME_PROMPT_REFERENCE_ADD_BUTTON.lower():
+        session["state"] = _STATE_WAITING_FRAME_PROMPT_REFERENCES
+        SESSIONS[chat_id] = session
+        await _reply_text_with_optional_markup(
+            update,
+            "Пришлите одно или несколько изображений для frame prompts. "
+            f"Когда закончите, нажмите «{_CUSTOM_REFERENCE_DONE_BUTTON}».\n"
+            f"{_frame_prompt_reference_count_text(session)}",
+            reply_markup=_frame_prompt_reference_markup(),
+        )
+        return True
+    if low in {"ок", "ok", "okay", "approve"}:
         try:
             await reply_text_without_keyboard(update.message, "Генерирую production-промпты, ждите.")
+            requested_end_frame_scenes = _ensure_end_frame_scene_requests_from_session_text(session)
             production = await _call_with_503_retries(
                 update,
                 context,
@@ -905,7 +1682,7 @@ async def _handle_waiting_frame_prompts_approval_state(
                 lambda: generate_full_production(
                     session["scenes_plan"],
                     approved_frame_prompts=session.get("frame_prompts"),
-                    requested_end_frame_scenes=session.get("end_frame_scene_requests"),
+                    requested_end_frame_scenes=requested_end_frame_scenes,
                     viral_concept_brief=session.get("viral_concept_brief"),
                     sponsored_content=bool(session.get("sponsored_content")),
                     brand_context=session.get("brand_context"),
@@ -919,6 +1696,7 @@ async def _handle_waiting_frame_prompts_approval_state(
             await update.message.reply_text(f"Ошибка production-генерации: {_user_error_message(e)}")
             return True
         session["state"] = STATE_WAITING_PRODUCTION_BUNDLE_APPROVAL
+        _apply_overlay_title_to_production(session, production)
         session["production"] = production
         session["image_scene_index"] = 0
         session["scene_media_language_index"] = 0
@@ -937,6 +1715,33 @@ async def _handle_waiting_frame_prompts_approval_state(
         )
         return True
     return False
+
+
+async def _handle_waiting_frame_prompt_references_state(
+    update: Update,
+    *,
+    chat_id: int,
+    session: dict,
+    text: str,
+) -> bool:
+    low = text.lower().strip()
+    if low == _CUSTOM_REFERENCE_DONE_BUTTON.lower():
+        session["state"] = STATE_WAITING_FRAME_PROMPTS_APPROVAL
+        SESSIONS[chat_id] = session
+        await _reply_text_with_optional_markup(
+            update,
+            "Готово. "
+            f"{_frame_prompt_reference_count_text(session)} "
+            "Кнопки апрува и фидбэка снова доступны.",
+            reply_markup=_frame_prompts_approval_markup(),
+        )
+        return True
+    await _reply_text_with_optional_markup(
+        update,
+        "Жду изображения для frame prompts. Можно прислать ещё файл или завершить добавление.",
+        reply_markup=_frame_prompt_reference_markup(),
+    )
+    return True
 
 
 async def _handle_waiting_production_bundle_approval_state(
@@ -989,6 +1794,7 @@ async def _handle_waiting_production_bundle_approval_state(
         await update.message.reply_text(f"Ошибка перегенерации video prompts: {_user_error_message(e)}")
         session["state"] = STATE_WAITING_PRODUCTION_BUNDLE_APPROVAL
         return True
+    _apply_overlay_title_to_production(session, production_new)
     session["production"] = production_new
     new_plan = production_new.get("json_plan") if isinstance(production_new, dict) else None
     if isinstance(new_plan, list):
@@ -1003,6 +1809,141 @@ async def _handle_waiting_production_bundle_approval_state(
         "Или нажмите «Добавь»/«Исправь» и отправьте новую правку.",
         reply_markup=_production_bundle_approval_markup(),
     )
+    return True
+
+
+async def _handle_waiting_overlay_title_ru_state(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+    *,
+    chat_id: int,
+    session: dict,
+    text: str,
+) -> bool:
+    ru_title = " ".join(str(text or "").split())
+    if not ru_title or ru_title.lower() in {"ок", "ok", "okay", "approve"}:
+        await _reply_text_with_optional_markup(
+            update,
+            "Введите русский заголовок текстом.",
+            reply_markup=ok_only_markup(),
+        )
+        return True
+    try:
+        await reply_text_without_keyboard(update.message, "Перевожу заголовок на английский, ждите.")
+        en_title = await _translate_overlay_title_to_en(
+            update,
+            context,
+            chat_id=chat_id,
+            ru_title=ru_title,
+        )
+    except ServiceUnavailableRetriesExhaustedError as e:
+        await update.message.reply_text(str(e))
+        return True
+    except Exception as e:
+        logger.exception("overlay title translation failed")
+        await update.message.reply_text(f"Ошибка перевода заголовка: {_user_error_message(e)}")
+        return True
+    session["state"] = STATE_WAITING_OVERLAY_TITLE_EN_APPROVAL
+    session[OVERLAY_TITLE_TRANSLATION_PENDING_SESSION_KEY] = {"ru": ru_title, "en": en_title}
+    SESSIONS[chat_id] = session
+    await _reply_text_with_optional_markup(
+        update,
+        "Предлагаю английский заголовок:\n"
+        f"RU: {ru_title}\n"
+        f"EN: {en_title}\n\n"
+        "Если подходит — нажмите «ОК». Если нужно исправить английский, пришлите правильный EN-текст.",
+        reply_markup=ok_only_markup(),
+    )
+    return True
+
+
+async def _handle_waiting_overlay_title_en_approval_state(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+    *,
+    chat_id: int,
+    session: dict,
+    text: str,
+) -> bool:
+    pending = session.get(OVERLAY_TITLE_TRANSLATION_PENDING_SESSION_KEY)
+    if not isinstance(pending, dict) or not str(pending.get("ru") or "").strip():
+        session["state"] = STATE_WAITING_OVERLAY_TITLE_RU
+        SESSIONS[chat_id] = session
+        await _reply_text_with_optional_markup(
+            update,
+            "Не вижу сохранённого русского заголовка. Введите русский заголовок ещё раз.",
+            reply_markup=ok_only_markup(),
+        )
+        return True
+
+    low = str(text or "").strip().lower()
+    ru_title = " ".join(str(pending.get("ru") or "").split())
+    en_title = " ".join(str(pending.get("en") or "").split())
+    if low in {"ок", "ok", "okay", "approve"}:
+        _store_overlay_titles(session, ru_title=ru_title, en_title=en_title)
+        session["state"] = STATE_WAITING_OVERLAY_TITLE_STYLE_APPROVAL
+        SESSIONS[chat_id] = session
+        return await _ask_overlay_title_style_approval(update, session)
+    if low in {"исправь", "fix"}:
+        await _reply_text_with_optional_markup(
+            update,
+            "Пришлите правильный английский заголовок одним сообщением.",
+            reply_markup=ok_only_markup(),
+        )
+        return True
+
+    corrected = str(text or "").strip()
+    for prefix in ("EN:", "English:", "Английский:"):
+        if corrected.lower().startswith(prefix.lower()):
+            corrected = corrected[len(prefix) :].strip()
+            break
+    corrected = " ".join(corrected.split())
+    if not corrected:
+        await _reply_text_with_optional_markup(
+            update,
+            "Пришлите непустой английский заголовок или нажмите «ОК».",
+            reply_markup=ok_only_markup(),
+        )
+        return True
+    _store_overlay_titles(session, ru_title=ru_title, en_title=corrected)
+    await update.message.reply_text("Английский заголовок исправила.")
+    session["state"] = STATE_WAITING_OVERLAY_TITLE_STYLE_APPROVAL
+    SESSIONS[chat_id] = session
+    return await _ask_overlay_title_style_approval(update, session)
+
+
+async def _handle_waiting_overlay_title_style_approval_state(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+    *,
+    chat_id: int,
+    session: dict,
+    text: str,
+) -> bool:
+    style = _default_overlay_title_style(session)
+    low = str(text or "").strip().lower()
+    if low in {"ок", "ok", "okay", "approve"}:
+        session[OVERLAY_TITLE_STYLE_SESSION_KEY] = style
+        SESSIONS[chat_id] = session
+        return await _generate_production_after_overlay_title(
+            update,
+            context,
+            chat_id=chat_id,
+            session=session,
+        )
+    updated = _apply_overlay_title_style_feedback(style, text)
+    session[OVERLAY_TITLE_STYLE_SESSION_KEY] = updated
+    session["state"] = STATE_WAITING_OVERLAY_TITLE_STYLE_APPROVAL
+    SESSIONS[chat_id] = session
+    await _send_overlay_title_previews(update, session, updated)
+    await _reply_text_with_optional_markup(
+        update,
+        "Обновила настройки верхнего заголовка:\n"
+        f"{_format_overlay_title_style(updated)}\n\n"
+        "Если теперь подходит — нажмите «ОК». Или пришлите ещё правку цвет/отступов.",
+        reply_markup=ok_only_markup(),
+    )
+    _ = context
     return True
 
 
@@ -1140,6 +2081,7 @@ async def _handle_frame_prompts_refine(update: Update, context: ContextTypes.DEF
                 user_feedback=text,
                 previous_frame_prompts=session.get("frame_prompts"),
                 requested_end_frame_scenes=session.get("end_frame_scene_requests"),
+                reference_images=_frame_prompt_reference_images_from_session(session),
             ),
         )
     except ServiceUnavailableRetriesExhaustedError as e:
@@ -1153,8 +2095,9 @@ async def _handle_frame_prompts_refine(update: Update, context: ContextTypes.DEF
     await _reply_text_with_optional_markup(
         update,
         "Если всё ок — нажми «ОК». "
-        "Если нужно доработать — нажми «Добавь»/«Исправь» и отправь новую правку.",
-        reply_markup=ok_only_markup(),
+        "Если нужно прикрепить изображения — нажми «Добавить». "
+        "Если нужно доработать текстом — нажми «Добавь»/«Исправь» и отправь новую правку.",
+        reply_markup=_frame_prompts_approval_markup(),
     )
     return True
 
@@ -1212,13 +2155,34 @@ async def on_photo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     session = SESSIONS.get(chat_id) or {}
     try:
         state = str(session.get("state") or "")
+        if state == STATE_WAITING_SCENE_MEDIA and scene_media_reference_images_pending(session):
+            image_bytes = await _extract_any_image_from_update(update, context)
+            handled = await handle_scene_media_reference_photo(
+                update,
+                session=session,
+                image_bytes=image_bytes,
+            )
+            if handled:
+                SESSIONS[chat_id] = session
+                return
         if state in {
             _STATE_WAITING_FIRST_STEP_IMAGE_REFERENCES,
             _STATE_WAITING_FIRST_STEP_PROJECT_IMAGE_REFERENCES,
+            _STATE_WAITING_FRAME_PROMPT_REFERENCES,
         }:
             image_bytes = await _extract_any_image_from_update(update, context)
             if not image_bytes:
                 await update.message.reply_text("Не удалось прочитать изображение. Пришлите фото или image-файл еще раз.")
+                return
+            if state == _STATE_WAITING_FRAME_PROMPT_REFERENCES:
+                count = _append_frame_prompt_reference_image(session, image_bytes)
+                SESSIONS[chat_id] = session
+                await _reply_text_with_optional_markup(
+                    update,
+                    f"Добавила изображение #{count} к frame prompts. "
+                    f"Можно прислать ещё или нажать «{_CUSTOM_REFERENCE_DONE_BUTTON}».",
+                    reply_markup=_frame_prompt_reference_markup(),
+                )
                 return
             count = _append_custom_reference_image(session, image_bytes)
             SESSIONS[chat_id] = session
@@ -1645,6 +2609,51 @@ async def _on_text_impl(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
             prefer_vertex_api=False,
         )
         return
+    if session.get("state") == STATE_WAITING_SERIES_CHOICE:
+        await _handle_waiting_series_choice_state(
+            update,
+            context,
+            chat_id=chat_id,
+            session=session,
+            text=text,
+        )
+        return
+    if session.get("state") == STATE_WAITING_SERIES_CREATE:
+        await _handle_waiting_series_create_state(
+            update,
+            context,
+            chat_id=chat_id,
+            session=session,
+            text=text,
+        )
+        return
+    if session.get("state") == STATE_WAITING_OVERLAY_TITLE_RU:
+        await _handle_waiting_overlay_title_ru_state(
+            update,
+            context,
+            chat_id=chat_id,
+            session=session,
+            text=text,
+        )
+        return
+    if session.get("state") == STATE_WAITING_OVERLAY_TITLE_EN_APPROVAL:
+        await _handle_waiting_overlay_title_en_approval_state(
+            update,
+            context,
+            chat_id=chat_id,
+            session=session,
+            text=text,
+        )
+        return
+    if session.get("state") == STATE_WAITING_OVERLAY_TITLE_STYLE_APPROVAL:
+        await _handle_waiting_overlay_title_style_approval_state(
+            update,
+            context,
+            chat_id=chat_id,
+            session=session,
+            text=text,
+        )
+        return
     if session.get("state") == _STATE_WAITING_FIRST_STEP_DESCRIPTION_TEXT:
         if not text.strip():
             await _reply_text_with_optional_markup(
@@ -1800,6 +2809,14 @@ async def _on_text_impl(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         return
     state = session.get("state")
     logger.info("chat=%s incoming_state=%s text=%s", chat_id, state, text[:80])
+    if state == _STATE_WAITING_FRAME_PROMPT_REFERENCES:
+        await _handle_waiting_frame_prompt_references_state(
+            update,
+            chat_id=chat_id,
+            session=session,
+            text=text,
+        )
+        return
     handled, normalized_text = await _handle_guided_feedback_buttons(
         update,
         session=session,

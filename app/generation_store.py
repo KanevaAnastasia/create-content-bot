@@ -32,7 +32,34 @@ def _scenes_plan_for_session(session: dict[str, Any]) -> list[dict[str, Any]]:
     return []
 
 
+def _russian_overlay_title_for_session(session: dict[str, Any]) -> str:
+    candidates = [session.get("overlay_title_by_lang")]
+    production = session.get("production")
+    if isinstance(production, dict):
+        candidates.append(production.get("overlay_title_by_lang"))
+    for candidate in candidates:
+        if not isinstance(candidate, dict):
+            continue
+        direct = candidate.get("ru")
+        if not isinstance(direct, str):
+            direct = next(
+                (
+                    item
+                    for key, item in candidate.items()
+                    if str(key or "").strip().lower().replace("_", "-").startswith("ru")
+                ),
+                "",
+            )
+        value = " ".join(str(direct or "").split())
+        if value:
+            return value[:180]
+    return ""
+
+
 def _human_title_for_session(session: dict[str, Any], scenes_plan: list[dict[str, Any]]) -> str:
+    overlay_title = _russian_overlay_title_for_session(session)
+    if overlay_title:
+        return overlay_title
     for key in ("selected_concept", "recipe_title", "recipe_name"):
         raw = session.get(key)
         value = raw.strip() if isinstance(raw, str) else ""
@@ -57,17 +84,45 @@ def _human_title_for_session(session: dict[str, Any], scenes_plan: list[dict[str
     return "Content Fabric generation"
 
 
+def _series_fields_for_session(session: dict[str, Any]) -> dict[str, Any]:
+    series = session.get("series")
+    if not isinstance(series, dict):
+        return {"series_id": None, "series_video_index": None, "series_total_videos": None}
+    raw_id = str(series.get("id") or "").strip()
+    series_id: uuid.UUID | None = None
+    if raw_id:
+        try:
+            series_id = uuid.UUID(raw_id)
+        except ValueError:
+            series_id = None
+    return {
+        "series_id": series_id,
+        "series_video_index": int(series.get("video_index") or series.get("current_video_index") or 0) or None,
+        "series_total_videos": int(series.get("total_videos") or 0) or None,
+    }
+
+
 def ensure_generation_run_for_session(session: dict[str, Any]) -> tuple[str | None, dict[int, str]]:
     """Create a lightweight run+scene snapshot in DB on first persistence."""
     existing = str(session.get("generation_run_id") or "").strip()
     raw_map = session.get("scene_db_ids_by_index")
     if existing and isinstance(raw_map, dict):
         title = _human_title_for_session(session, _scenes_plan_for_session(session))
+        series_fields = _series_fields_for_session(session)
         try:
             with SessionLocal() as db:
                 run = db.get(GenerationRun, uuid.UUID(existing))
                 if run is not None and not str(run.human_title or "").strip():
                     run.human_title = title
+                    changed = True
+                else:
+                    changed = False
+                if run is not None and series_fields["series_id"] and not run.series_id:
+                    run.series_id = series_fields["series_id"]
+                    run.series_video_index = series_fields["series_video_index"]
+                    run.series_total_videos = series_fields["series_total_videos"]
+                    changed = True
+                if changed:
                     db.commit()
         except Exception:
             pass
@@ -84,10 +139,12 @@ def ensure_generation_run_for_session(session: dict[str, Any]) -> tuple[str | No
             script = "content_fabric_generation"
 
     with SessionLocal() as db:
+        series_fields = _series_fields_for_session(session)
         run = GenerationRun(
             status="media_in_progress",
             human_title=_human_title_for_session(session, scenes_plan),
             language=_language_for_session(session),
+            **series_fields,
             script=script,
         )
         db.add(run)

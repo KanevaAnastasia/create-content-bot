@@ -149,3 +149,31 @@ def test_loose_mode_with_lang_token_accepts_when_not_first_word(
 
     out = asyncio.run(_run())
     assert out is not None
+
+
+def test_loose_mode_with_lang_token_rejects_bare_video_without_token(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv("SYNTAX_STRICT_REPLY_MATCH", raising=False)
+
+    class _M:
+        id = 703
+        out = False
+        reply_to = None
+        raw_text = ""
+        message = ""
+        entities: list = []
+        video = object()
+        document = None
+
+    async def _run() -> object:
+        client = MagicMock()
+        client.download_media.return_value = b"video"
+        return await stf._process_bot_message(
+            client,
+            message=_M(),
+            sent_ids={100, 200},
+            expected_lang_token="lang:en",
+        )
+
+    assert asyncio.run(_run()) is None

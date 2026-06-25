@@ -2,6 +2,7 @@ import asyncio
 import re
 import subprocess
 from dataclasses import dataclass
+from datetime import timedelta, timezone
 from pathlib import Path
 from types import SimpleNamespace
 from telegram import ReplyKeyboardMarkup, ReplyKeyboardRemove
@@ -15,6 +16,7 @@ from .handlers_state_deps import (
     add_scene_language_cost,
     add_scene_shared_cost,
     SCENE_MEDIA_AI_APPROVE_BUTTON,
+    SCENE_MEDIA_ADD_REFERENCE_IMAGES_BUTTON,
     SCENE_MEDIA_APPROVE_MODE_AI,
     SCENE_MEDIA_APPROVE_MODE_AUTO,
     SCENE_MEDIA_APPROVE_MODE_MANUAL,
@@ -22,6 +24,8 @@ from .handlers_state_deps import (
     SCENE_MEDIA_AUTO_APPROVE_BUTTON,
     SCENE_MEDIA_AUTO_APPROVE_SESSION_KEY,
     SCENE_MEDIA_CHANGE_SPEED_BUTTON,
+    SCENE_MEDIA_CLEAR_REFERENCE_IMAGES_BUTTON,
+    SCENE_MEDIA_DONE_REFERENCE_IMAGES_BUTTON,
     SCENE_MEDIA_REQUEST_END_FRAME_BUTTON,
     SCENE_MEDIA_SKIP_END_FRAME_BUTTON,
     SCENE_MEDIA_STOP_BUTTON,
@@ -31,6 +35,7 @@ from .handlers_state_deps import (
     SCENE_MEDIA_SUBSTEP_START_IMAGE_APPROVAL,
     SCENE_MEDIA_SUBSTEP_VIDEO,
     SCENE_MEDIA_UPGRADE_IMAGE_MODEL_BUTTON,
+    SCENE_USER_REFERENCE_IMAGES_KEY,
     STATE_READY_FOR_PRODUCTION,
     SyntaxFallbackPendingConfirmation,
     VideoProviderChoiceRequired,
@@ -73,6 +78,7 @@ from .handlers_state_deps import (
     scene_end_approval_markup,
     scene_generated_image_approval_markup,
     scene_image_approval_markup,
+    scene_reference_images_markup,
     scene_language_approval_markup,
     scene_video_approval_markup,
     video_policy_retry_markup,
@@ -107,7 +113,15 @@ from .handlers_keyboards import first_step_menu_markup, reply_text_without_keybo
 from ..llm_utils import extract_json_object
 from ..multilingual import normalize_language_code
 from ..post_production import build_post_production, probe_video_bytes_dimensions
-from ..publications import publication_jobs_summary, queue_publication_bundle
+from ..publications import (
+    DEFAULT_PUBLICATION_VIDEO_VARIANT,
+    PUBLICATION_VIDEO_VARIANT_LABELS,
+    build_publication_targets,
+    normalize_publication_scheduled_at,
+    publication_jobs_summary,
+    publication_target_label,
+    queue_publication_bundle,
+)
 from ..scene_media_candidates import (
     DEFAULT_SCENE_VIDEO_SPEED_COEF,
     image_candidates_for_kind,
@@ -139,6 +153,11 @@ from ..scene_speech_budget import (
     speech_chars_excluding_pauses,
 )
 from ..scene_speech_shorten import shorten_scene_speech_and_sync_video_prompt_sync
+from ..series_store import (
+    SERIES_COUNTER_BY_LANG_SESSION_KEY,
+    SERIES_TITLE_BY_LANG_SESSION_KEY,
+    advance_series_after_successful_render,
+)
 from ..syntax_video_fallback import BatchFallbackRequest
 from ..db import SessionLocal
 from ..vertex_images import primary_image_generation_model
@@ -159,7 +178,11 @@ SOCIAL_DESCRIPTIONS_SENT_KEY = "social_descriptions_sent"
 STATE_WAITING_SOCIAL_DESCRIPTIONS_APPROVAL = "waiting_social_descriptions_approval"
 STATE_REFINING_SOCIAL_DESCRIPTIONS = "refining_social_descriptions"
 SOCIAL_DESCRIPTIONS_PENDING_KEY = "social_descriptions_pending"
+SOCIAL_PUBLISH_TARGETS_KEY = "selected_target_keys"
+SOCIAL_PUBLISH_VIDEO_VARIANT_KEY = "video_variant"
+SOCIAL_PUBLISH_SCHEDULED_AT_KEY = "scheduled_at"
 SCENE_IMAGE_EDIT_PENDING_KEY = "scene_image_edit_pending"
+SCENE_IMAGE_REFERENCE_PENDING_KEY = "scene_image_reference_pending"
 SCENE_VIDEO_FEEDBACK_PENDING_KEY = "scene_video_feedback_pending"
 SCENE_VIDEO_SPEED_PENDING_KEY = "scene_video_speed_pending"
 SCENE_PROMPT_INPUT_PENDING_KEY = "scene_prompt_input_pending"
@@ -230,6 +253,7 @@ SCENE_MEDIA_KEYBOARD_STATE_NAMES = frozenset(
         "scene_media.input.speed_input",
         "scene_media.input.prompt_input",
         "scene_media.input.image_edit_input",
+        "scene_media.input.reference_images",
         "scene_media.video.policy_retry",
         "scene_media.video.language_approval",
         "scene_media.complete",
@@ -347,8 +371,15 @@ def scene_media_keyboard_snapshot(session: dict) -> SceneMediaKeyboardSnapshot:
                 [["да"], ["нет"], [NAV_BUTTON_PREVIOUS_STEP], [NAV_BUTTON_START_OVER]],
                 resize_keyboard=True,
                 one_time_keyboard=False,
-            )
+        )
         return _keyboard_snapshot(f"scene_media.video.translation.{stage}", markup)
+
+    reference_pending = session.get(SCENE_IMAGE_REFERENCE_PENDING_KEY)
+    if isinstance(reference_pending, dict) and int(reference_pending.get("scene_idx", -1)) == idx:
+        return _keyboard_snapshot(
+            "scene_media.input.reference_images",
+            scene_reference_images_markup(),
+        )
 
     text_input_pending_keys = (
         (SCENE_PHRASE_INPUT_PENDING_KEY, "phrase_input"),
@@ -544,16 +575,6 @@ def _strip_post_production_inline_video_payloads(value):
     return value
 
 
-def _is_request_entity_too_large_error(exc: Exception) -> bool:
-    low = str(exc or "").lower()
-    return (
-        "request entity too large" in low
-        or "413" in low
-        or "payload too large" in low
-        or "entity too large" in low
-    )
-
-
 async def _reply_final_master_document(
     message,
     *,
@@ -563,7 +584,7 @@ async def _reply_final_master_document(
     label: str,
     video_path: str | None = None,
 ):
-    document_caption = f"{caption}\nОтправляю как файл: Telegram не принял video payload."
+    document_caption = f"{caption}\nОтправляю как файл, чтобы сохранить качество без Telegram video-compression."
     path = Path(video_path).expanduser() if video_path else None
 
     if path is not None and path.exists() and path.is_file():
@@ -596,47 +617,28 @@ async def _reply_final_master_video(
     label: str,
     video_path: str | None = None,
 ) -> None:
-    stream = io.BytesIO(video_bytes)
-    stream.name = filename
     try:
-        await _safe_reply_video(
+        return await _reply_final_master_document(
             message,
-            video=stream,
+            video_bytes=video_bytes,
+            filename=filename,
             caption=caption,
             label=label,
+            video_path=video_path,
         )
-    except (NetworkError, TimedOut) as exc:
-        if not _is_request_entity_too_large_error(exc):
-            raise
-        logger.warning(
-            "telegram.final_master_too_large label=%s filename=%s bytes=%s path=%s",
+    except Exception:
+        logger.exception(
+            "telegram.final_master_document_send_failed label=%s filename=%s path=%s",
             label,
             filename,
-            len(video_bytes),
             video_path or "",
         )
-        try:
-            return await _reply_final_master_document(
-                message,
-                video_bytes=video_bytes,
-                filename=filename,
-                caption=caption,
-                label=label,
-                video_path=video_path,
-            )
-        except Exception:
-            logger.exception(
-                "telegram.final_master_document_fallback_failed label=%s filename=%s path=%s",
-                label,
-                filename,
-                video_path or "",
-            )
         path_note = f"\nПуть к файлу: `{video_path}`" if video_path else ""
         await _safe_reply_text(
             message,
             (
                 f"{caption}\n"
-                "Файл собран, но Telegram не принял его как video: размер payload слишком большой."
+                "Файл собран, но Telegram не принял отправку документа."
                 f"{path_note}"
             ),
             parse_mode="Markdown",
@@ -651,16 +653,46 @@ async def _build_post_production_with_retries(
     scenes: list[dict],
 ) -> dict:
     project_slug = str(session.get("selected_project_key") or "").strip() or None
+    overlay_title_by_lang = production.get("overlay_title_by_lang")
+    if not isinstance(overlay_title_by_lang, dict) or not overlay_title_by_lang:
+        overlay_title_by_lang = session.get("overlay_title_by_lang")
+    if not isinstance(overlay_title_by_lang, dict) or not overlay_title_by_lang:
+        overlay_title_by_lang = None
+    overlay_title_style = production.get("overlay_title_style")
+    if not isinstance(overlay_title_style, dict) or not overlay_title_style:
+        overlay_title_style = session.get("overlay_title_style")
+    if not isinstance(overlay_title_style, dict) or not overlay_title_style:
+        overlay_title_style = None
+    overlay_series_title_by_lang = production.get(SERIES_TITLE_BY_LANG_SESSION_KEY)
+    if not isinstance(overlay_series_title_by_lang, dict) or not overlay_series_title_by_lang:
+        overlay_series_title_by_lang = session.get(SERIES_TITLE_BY_LANG_SESSION_KEY)
+    if not isinstance(overlay_series_title_by_lang, dict) or not overlay_series_title_by_lang:
+        overlay_series_title_by_lang = None
+    overlay_series_counter_by_lang = production.get(SERIES_COUNTER_BY_LANG_SESSION_KEY)
+    if not isinstance(overlay_series_counter_by_lang, dict) or not overlay_series_counter_by_lang:
+        overlay_series_counter_by_lang = session.get(SERIES_COUNTER_BY_LANG_SESSION_KEY)
+    if not isinstance(overlay_series_counter_by_lang, dict) or not overlay_series_counter_by_lang:
+        overlay_series_counter_by_lang = None
     last_exc: Exception | None = None
     for attempt in range(1, _POST_PRODUCTION_RETRY_ATTEMPTS + 1):
         try:
+            post_kwargs = {"project_slug": project_slug}
+            if overlay_title_by_lang:
+                post_kwargs["overlay_title_by_lang"] = overlay_title_by_lang
+            if overlay_title_style:
+                post_kwargs["overlay_title_style"] = overlay_title_style
+            if overlay_series_title_by_lang:
+                post_kwargs["overlay_series_title_by_lang"] = overlay_series_title_by_lang
+            if overlay_series_counter_by_lang:
+                post_kwargs["overlay_series_counter_by_lang"] = overlay_series_counter_by_lang
             post = await asyncio.to_thread(
                 build_post_production,
                 scenes,
-                project_slug=project_slug,
+                **post_kwargs,
             )
             production["post_production"] = _strip_post_production_inline_video_payloads(post)
             persist_post_production_artifacts(session, post)
+            advance_series_after_successful_render(session)
             return post
         except Exception as exc:
             last_exc = exc
@@ -850,14 +882,186 @@ def _dedupe_image_reference_bytes(items: list[bytes | None]) -> list[bytes]:
     return out
 
 
+def _image_reference_target_for_substep(substep: str) -> str | None:
+    if substep in {SCENE_MEDIA_SUBSTEP_END, SCENE_MEDIA_SUBSTEP_END_IMAGE_APPROVAL}:
+        return "end"
+    if substep in {SCENE_MEDIA_SUBSTEP_START, SCENE_MEDIA_SUBSTEP_START_IMAGE_APPROVAL}:
+        return "start"
+    return None
+
+
+def _scene_user_reference_images(scene: dict, target: str) -> list[bytes]:
+    mapping = scene.get(SCENE_USER_REFERENCE_IMAGES_KEY)
+    if not isinstance(mapping, dict):
+        return []
+    raw_items = mapping.get(str(target or "start"))
+    if not isinstance(raw_items, list):
+        return []
+    out: list[bytes] = []
+    for item in raw_items:
+        data = _decode_b64(str(item or "").strip())
+        if data:
+            out.append(data)
+    return out
+
+
+def _scene_user_reference_count(scene: dict, target: str) -> int:
+    return len(_scene_user_reference_images(scene, target))
+
+
+def _append_scene_user_reference_image(scene: dict, target: str, image_bytes: bytes) -> int:
+    key = "end" if target == "end" else "start"
+    mapping = scene.get(SCENE_USER_REFERENCE_IMAGES_KEY)
+    if not isinstance(mapping, dict):
+        mapping = {}
+        scene[SCENE_USER_REFERENCE_IMAGES_KEY] = mapping
+    items = mapping.get(key)
+    if not isinstance(items, list):
+        items = []
+        mapping[key] = items
+    items.append(_encode_b64(image_bytes))
+    return len(items)
+
+
+def _clear_scene_user_reference_images(scene: dict, target: str) -> None:
+    mapping = scene.get(SCENE_USER_REFERENCE_IMAGES_KEY)
+    if isinstance(mapping, dict):
+        mapping["end" if target == "end" else "start"] = []
+
+
+def scene_media_reference_images_pending(session: dict) -> bool:
+    return isinstance(session.get(SCENE_IMAGE_REFERENCE_PENDING_KEY), dict)
+
+
+def _set_scene_reference_images_pending(session: dict, *, scene_idx: int, target: str) -> None:
+    session[SCENE_IMAGE_REFERENCE_PENDING_KEY] = {
+        "scene_idx": int(scene_idx),
+        "target": "end" if target == "end" else "start",
+    }
+
+
+def _get_scene_reference_images_pending(session: dict, *, scene_idx: int) -> dict | None:
+    pending = session.get(SCENE_IMAGE_REFERENCE_PENDING_KEY)
+    if isinstance(pending, dict) and int(pending.get("scene_idx", -1)) == int(scene_idx):
+        return pending
+    return None
+
+
+def _pop_scene_reference_images_pending(session: dict) -> dict | None:
+    pending = session.get(SCENE_IMAGE_REFERENCE_PENDING_KEY)
+    if isinstance(pending, dict):
+        session.pop(SCENE_IMAGE_REFERENCE_PENDING_KEY, None)
+        return pending
+    return None
+
+
+async def _start_scene_reference_images_collection(
+    update: Update,
+    session: dict,
+    scene: dict,
+    *,
+    idx: int,
+    target: str,
+) -> bool:
+    _set_scene_reference_images_pending(session, scene_idx=idx, target=target)
+    count = _scene_user_reference_count(scene, target)
+    label = "конечного" if target == "end" else "стартового"
+    await _reply_text_with_optional_markup(
+        update,
+        f"Пришлите одно или несколько изображений для {label} кадра. "
+        f"Сейчас добавлено: {count}. Когда закончите — нажмите «{SCENE_MEDIA_DONE_REFERENCE_IMAGES_BUTTON}».",
+        reply_markup=scene_reference_images_markup(),
+    )
+    return True
+
+
+async def _handle_scene_reference_images_pending_text(
+    update: Update,
+    session: dict,
+    scene: dict,
+    *,
+    idx: int,
+    text: str,
+) -> bool:
+    pending = _get_scene_reference_images_pending(session, scene_idx=idx)
+    if pending is None:
+        return False
+    target = "end" if str(pending.get("target") or "start") == "end" else "start"
+    low = str(text or "").strip().lower()
+    if low == SCENE_MEDIA_DONE_REFERENCE_IMAGES_BUTTON.lower():
+        _pop_scene_reference_images_pending(session)
+        await _reply_text_with_optional_markup(
+            update,
+            f"Готово, добавлено изображений: {_scene_user_reference_count(scene, target)}. "
+            "Они уйдут в следующую генерацию этого кадра.",
+            reply_markup=scene_media_keyboard_snapshot(session).markup,
+        )
+        return True
+    if low == SCENE_MEDIA_CLEAR_REFERENCE_IMAGES_BUTTON.lower():
+        _clear_scene_user_reference_images(scene, target)
+        await _reply_text_with_optional_markup(
+            update,
+            "Очистила добавленные изображения для этого кадра. Можно прислать новые или нажать «Готово».",
+            reply_markup=scene_reference_images_markup(),
+        )
+        return True
+    await _reply_text_with_optional_markup(
+        update,
+        "Жду фото или image-файл. Можно прислать несколько изображений, затем нажать «Готово».",
+        reply_markup=scene_reference_images_markup(),
+    )
+    return True
+
+
+async def handle_scene_media_reference_photo(
+    update: Update,
+    *,
+    session: dict,
+    image_bytes: bytes | None,
+) -> bool:
+    production = session.get("production") if isinstance(session, dict) else None
+    scenes = production.get("json_plan") if isinstance(production, dict) else None
+    idx = int(session.get("image_scene_index", 0) or 0) if isinstance(session, dict) else 0
+    if not isinstance(scenes, list) or idx >= len(scenes) or not isinstance(scenes[idx], dict):
+        return False
+    pending = _get_scene_reference_images_pending(session, scene_idx=idx)
+    if pending is None:
+        return False
+    if not image_bytes:
+        await update.message.reply_text("Не удалось прочитать изображение. Пришлите фото или image-файл ещё раз.")
+        return True
+    target = "end" if str(pending.get("target") or "start") == "end" else "start"
+    count = _append_scene_user_reference_image(scenes[idx], target, image_bytes)
+    label = "конечного" if target == "end" else "стартового"
+    await _reply_text_with_optional_markup(
+        update,
+        f"Добавила изображение #{count} для {label} кадра. Можно прислать ещё или нажать «Готово».",
+        reply_markup=scene_reference_images_markup(),
+    )
+    return True
+
+
 def _end_frame_reference_images(session: dict, scene: dict, start_bytes: bytes) -> list[bytes]:
     refs: list[bytes | None] = [start_bytes]
     production = session.get("production") if isinstance(session, dict) else None
     scenes = production.get("json_plan") if isinstance(production, dict) else None
     first_scene = scenes[0] if isinstance(scenes, list) and scenes and isinstance(scenes[0], dict) else None
     if isinstance(first_scene, dict):
-        refs.extend(_load_scene_reference_images(first_scene, include_location=False))
-    refs.extend(_load_scene_reference_images(scene, include_location=False))
+        refs.extend(
+            _load_scene_reference_images(
+                first_scene,
+                include_location=False,
+                prompt_keys=("end_frame_prompt", "end_frame_prompt_ru", "video_prompt"),
+            )
+        )
+    refs.extend(
+        _load_scene_reference_images(
+            scene,
+            include_location=False,
+            prompt_keys=("end_frame_prompt", "end_frame_prompt_ru", "video_prompt"),
+        )
+    )
+    refs.extend(_scene_user_reference_images(scene, "end"))
     return _dedupe_image_reference_bytes(refs)
 
 
@@ -1303,7 +1507,11 @@ async def _run_ai_start_frame_check(
         scene_description=_scene_description(scene),
         recipe_text=_scene_recipe_text(session, scene),
         scene_number=scene.get("scene") or idx + 1,
-        previous_reference_images=_load_scene_reference_images(scene, include_location=False),
+        previous_reference_images=_load_scene_reference_images(
+            scene,
+            include_location=False,
+            prompt_keys=("start_frame_prompt", "start_frame_prompt_ru"),
+        ),
         expected_characters=[str(x) for x in (scene.get("characters") or [])],
         expected_objects=[],
         style_requirements="colorful cartoon style, soft stylized shading, non realistic rendering, warm cozy lighting",
@@ -1663,17 +1871,122 @@ async def _generate_social_copy_from_recipe(recipe: str) -> dict[str, str]:
     return out
 
 
-def _social_descriptions_approval_markup() -> ReplyKeyboardMarkup:
+def _social_target_button_label(target_key: str, selected: set[str]) -> str:
+    mark = "✅" if target_key in selected else "☐"
+    return f"{mark} {publication_target_label(target_key)}"
+
+
+def _social_video_variant_button_label(variant: str, selected_variant: str) -> str:
+    mark = "✅" if variant == selected_variant else "☐"
+    return f"{mark} video: {PUBLICATION_VIDEO_VARIANT_LABELS.get(variant, variant)}"
+
+
+def _social_scheduled_at_label(pending: dict) -> str:
+    raw = str(pending.get(SOCIAL_PUBLISH_SCHEDULED_AT_KEY) or "").strip()
+    if not raw:
+        return "сразу после ОК"
+    try:
+        scheduled = normalize_publication_scheduled_at(raw)
+    except ValueError:
+        return raw
+    moscow = scheduled.astimezone(timezone(timedelta(hours=3)))
+    return moscow.strftime("%Y-%m-%d %H:%M MSK")
+
+
+def _social_publish_target_keys_for_copy(copy: dict[str, str]) -> list[str]:
+    return [target.key for target in build_publication_targets(copy)]
+
+
+def _social_selected_target_keys(pending: dict) -> set[str]:
+    copy = pending.get("copy") if isinstance(pending.get("copy"), dict) else {}
+    available = set(_social_publish_target_keys_for_copy(copy))
+    raw = pending.get(SOCIAL_PUBLISH_TARGETS_KEY)
+    if isinstance(raw, list):
+        selected = {str(item) for item in raw if str(item) in available}
+    else:
+        selected = set(available)
+    return selected
+
+
+def _social_descriptions_approval_markup(pending: dict | None = None) -> ReplyKeyboardMarkup:
+    keyboard = [["ОК"], ["ФИДБЕК"], ["Исправь"]]
+    if isinstance(pending, dict):
+        copy = pending.get("copy") if isinstance(pending.get("copy"), dict) else {}
+        available = _social_publish_target_keys_for_copy(copy)
+        selected = _social_selected_target_keys(pending)
+        for idx in range(0, len(available), 2):
+            keyboard.append([
+                _social_target_button_label(key, selected)
+                for key in available[idx : idx + 2]
+            ])
+        selected_variant = str(pending.get(SOCIAL_PUBLISH_VIDEO_VARIANT_KEY) or DEFAULT_PUBLICATION_VIDEO_VARIANT)
+        for variant in PUBLICATION_VIDEO_VARIANT_LABELS:
+            keyboard.append([_social_video_variant_button_label(variant, selected_variant)])
+        keyboard.append(["Время: сейчас"])
+    keyboard.append([NAV_BUTTON_START_OVER])
     return ReplyKeyboardMarkup(
-        keyboard=[
-            ["ОК"],
-            ["ФИДБЕК"],
-            ["Исправь"],
-            [NAV_BUTTON_START_OVER],
-        ],
+        keyboard=keyboard,
         resize_keyboard=True,
         one_time_keyboard=False,
     )
+
+
+def _social_publication_selection_summary(pending: dict) -> str:
+    copy = pending.get("copy") if isinstance(pending.get("copy"), dict) else {}
+    selected = _social_selected_target_keys(pending)
+    targets = build_publication_targets(copy)
+    lines = ["Куда публикуем:"]
+    for target in targets:
+        title_flag = "title" if target.title else "no title"
+        desc_len = len(str(target.description or ""))
+        lines.append(
+            f"{'✅' if target.key in selected else '☐'} {publication_target_label(target)} "
+            f"({target.language.upper()}, {title_flag}, {desc_len} chars)"
+        )
+    variant = str(pending.get(SOCIAL_PUBLISH_VIDEO_VARIANT_KEY) or DEFAULT_PUBLICATION_VIDEO_VARIANT)
+    lines.append(f"Версия видео: {PUBLICATION_VIDEO_VARIANT_LABELS.get(variant, variant)}")
+    lines.append(f"Время публикации: {_social_scheduled_at_label(pending)}")
+    return "\n".join(lines)
+
+
+def _toggle_social_publication_selection(pending: dict, text: str) -> bool:
+    normalized = str(text or "").replace("✅", "").replace("☐", "").strip()
+    copy = pending.get("copy") if isinstance(pending.get("copy"), dict) else {}
+    available = _social_publish_target_keys_for_copy(copy)
+    selected = _social_selected_target_keys(pending)
+    for target_key in available:
+        if normalized == publication_target_label(target_key):
+            if target_key in selected:
+                selected.remove(target_key)
+            else:
+                selected.add(target_key)
+            pending[SOCIAL_PUBLISH_TARGETS_KEY] = [key for key in available if key in selected]
+            return True
+    prefix = "video:"
+    if normalized.lower().startswith(prefix):
+        label = normalized[len(prefix):].strip()
+        for variant, variant_label in PUBLICATION_VIDEO_VARIANT_LABELS.items():
+            if label == variant_label:
+                pending[SOCIAL_PUBLISH_VIDEO_VARIANT_KEY] = variant
+                return True
+    if normalized.lower() == "время: сейчас":
+        pending.pop(SOCIAL_PUBLISH_SCHEDULED_AT_KEY, None)
+        return True
+    return False
+
+
+def _apply_social_publication_time(pending: dict, text: str) -> bool:
+    raw = str(text or "").strip()
+    match = re.match(r"^(?:время|публикация|schedule|time)\s*:?\s*(.+)$", raw, flags=re.IGNORECASE)
+    if not match:
+        return False
+    value = match.group(1).strip()
+    if value.lower() in {"сейчас", "now", "нет", "no", "-"}:
+        pending.pop(SOCIAL_PUBLISH_SCHEDULED_AT_KEY, None)
+        return True
+    scheduled = normalize_publication_scheduled_at(value, default_timezone=timezone(timedelta(hours=3)))
+    pending[SOCIAL_PUBLISH_SCHEDULED_AT_KEY] = scheduled.isoformat()
+    return True
 
 
 def _social_copy_messages(copy: dict[str, str]) -> list[tuple[str, str]]:
@@ -1708,18 +2021,23 @@ async def _send_social_copy_for_approval(
     copy: dict[str, str],
     *,
     video_targets: list[dict[str, str]] | None = None,
+    pending: dict | None = None,
 ) -> None:
     mapping = _social_copy_video_targets(video_targets)
     if mapping:
         await _reply_text_with_optional_markup(update, mapping)
     for title, body in _social_copy_messages(copy):
         await _send_copyable_message(update, title, body)
+    if isinstance(pending, dict):
+        await _reply_text_with_optional_markup(update, _social_publication_selection_summary(pending))
     await _reply_text_with_optional_markup(
         update,
         "Проверьте описания.\n"
+        "Кнопками ниже можно снять/поставить площадки и выбрать версию финального видео.\n"
+        "Время можно задать сообщением «Время 2026-06-24 18:30»; без времени публикация уйдет сразу после ОК.\n"
         "«ОК» — утвердить.\n"
         "«ФИДБЕК» или «Исправь» — пришлите, что поменять, и я перепишу описания.",
-        reply_markup=_social_descriptions_approval_markup(),
+        reply_markup=_social_descriptions_approval_markup(pending),
     )
 
 
@@ -1772,13 +2090,16 @@ async def _start_social_descriptions_approval(
     video_targets: list[dict[str, str]] | None = None,
 ) -> None:
     session["state"] = STATE_WAITING_SOCIAL_DESCRIPTIONS_APPROVAL
-    session[SOCIAL_DESCRIPTIONS_PENDING_KEY] = {
+    pending = {
         "recipe": recipe,
         "copy": copy,
         "origin": origin,
         "video_targets": video_targets or [],
+        SOCIAL_PUBLISH_TARGETS_KEY: _social_publish_target_keys_for_copy(copy),
+        SOCIAL_PUBLISH_VIDEO_VARIANT_KEY: DEFAULT_PUBLICATION_VIDEO_VARIANT,
     }
-    await _send_social_copy_for_approval(update, copy, video_targets=video_targets)
+    session[SOCIAL_DESCRIPTIONS_PENDING_KEY] = pending
+    await _send_social_copy_for_approval(update, copy, video_targets=video_targets, pending=pending)
 
 
 async def _send_copyable_message(update: Update, title: str, body: str) -> None:
@@ -1881,6 +2202,18 @@ async def _finish_scene_media_production(update: Update, session: dict, *, messa
                             label=f"reply_video:final_clean_master:{language}",
                             video_path=str(clean_payload.get("video_path") or "").strip() or None,
                         )
+                    upscaled_payload = payload.get("upscaled_4k") or {}
+                    upscaled_b64 = str((upscaled_payload.get("video_b64")) or "")
+                    upscaled_bytes = _decode_b64(upscaled_b64)
+                    if upscaled_bytes:
+                        await _reply_final_master_video(
+                            update.message,
+                            video_bytes=upscaled_bytes,
+                            filename=f"final_upscaled_4k_master_{language}.mp4",
+                            caption=f"Финальный 4K upscaled master готов для языка {language}.",
+                            label=f"reply_video:final_upscaled_4k_master:{language}",
+                            video_path=str(upscaled_payload.get("video_path") or "").strip() or None,
+                        )
                     subtitled_payload = payload.get("subtitled_music") or {}
                     subtitled_b64 = str((subtitled_payload.get("video_b64")) or "")
                     subtitled_bytes = _decode_b64(subtitled_b64)
@@ -1893,11 +2226,30 @@ async def _finish_scene_media_production(update: Update, session: dict, *, messa
                             label=f"reply_video:final_subtitled_master:{language}",
                             video_path=str(subtitled_payload.get("video_path") or "").strip() or None,
                         )
+                    titled_payload = payload.get("titled_subtitled_music") or {}
+                    titled_b64 = str((titled_payload.get("video_b64")) or "")
+                    titled_bytes = _decode_b64(titled_b64)
+                    if titled_bytes:
+                        await _reply_final_master_video(
+                            update.message,
+                            video_bytes=titled_bytes,
+                            filename=f"final_titled_subtitled_music_master_{language}.mp4",
+                            caption=(
+                                "Финальный master с субтитрами, музыкой и верхним заголовком "
+                                f"готов для языка {language}."
+                            ),
+                            label=f"reply_video:final_titled_subtitled_master:{language}",
+                            video_path=str(titled_payload.get("video_path") or "").strip() or None,
+                        )
             else:
                 clean_payload = post.get("final_clean_video") or {}
+                upscaled_payload = post.get("final_upscaled_4k_video") or {}
                 subtitled_payload = post.get("final_subtitled_music_video") or {}
+                titled_payload = post.get("final_titled_subtitled_music_video") or {}
                 clean_b64 = str((clean_payload.get("video_b64")) or "")
+                upscaled_b64 = str((upscaled_payload.get("video_b64")) or "")
                 subtitled_b64 = str((subtitled_payload.get("video_b64")) or "")
+                titled_b64 = str((titled_payload.get("video_b64")) or "")
                 clean_bytes = _decode_b64(clean_b64)
                 if clean_bytes:
                     await _reply_final_master_video(
@@ -1908,6 +2260,16 @@ async def _finish_scene_media_production(update: Update, session: dict, *, messa
                         label="reply_video:final_clean_master",
                         video_path=str(clean_payload.get("video_path") or "").strip() or None,
                     )
+                upscaled_bytes = _decode_b64(upscaled_b64)
+                if upscaled_bytes:
+                    await _reply_final_master_video(
+                        update.message,
+                        video_bytes=upscaled_bytes,
+                        filename="final_upscaled_4k_master.mp4",
+                        caption="Финальный 4K upscaled master готов.",
+                        label="reply_video:final_upscaled_4k_master",
+                        video_path=str(upscaled_payload.get("video_path") or "").strip() or None,
+                    )
                 subtitled_bytes = _decode_b64(subtitled_b64)
                 if subtitled_bytes:
                     await _reply_final_master_video(
@@ -1917,6 +2279,16 @@ async def _finish_scene_media_production(update: Update, session: dict, *, messa
                         caption="Финальный master с субтитрами и музыкой готов.",
                         label="reply_video:final_subtitled_master",
                         video_path=str(subtitled_payload.get("video_path") or "").strip() or None,
+                    )
+                titled_bytes = _decode_b64(titled_b64)
+                if titled_bytes:
+                    await _reply_final_master_video(
+                        update.message,
+                        video_bytes=titled_bytes,
+                        filename="final_titled_subtitled_music_master.mp4",
+                        caption="Финальный master с субтитрами, музыкой и верхним заголовком готов.",
+                        label="reply_video:final_titled_subtitled_master",
+                        video_path=str(titled_payload.get("video_path") or "").strip() or None,
                     )
         except Exception as e:
             logger.exception("post production build failed")
@@ -1956,9 +2328,38 @@ async def _handle_waiting_social_descriptions_approval_state(
         )
         return True
     low = (text or "").strip().lower()
+    try:
+        time_changed = _apply_social_publication_time(pending, text)
+    except ValueError as exc:
+        await update.message.reply_text(
+            f"Не поняла время публикации: {exc}\nНапример: Время 2026-06-24 18:30",
+            reply_markup=_social_descriptions_approval_markup(pending),
+        )
+        return True
+    if time_changed:
+        session[SOCIAL_DESCRIPTIONS_PENDING_KEY] = pending
+        await update.message.reply_text(
+            _social_publication_selection_summary(pending),
+            reply_markup=_social_descriptions_approval_markup(pending),
+        )
+        return True
+    if _toggle_social_publication_selection(pending, text):
+        session[SOCIAL_DESCRIPTIONS_PENDING_KEY] = pending
+        await update.message.reply_text(
+            _social_publication_selection_summary(pending),
+            reply_markup=_social_descriptions_approval_markup(pending),
+        )
+        return True
     if low in {"ок", "ok", "okay", "approve", "утвердить"}:
         origin = str(pending.get("origin") or "description_mode")
         copy = pending.get("copy")
+        selected_target_keys = sorted(_social_selected_target_keys(pending))
+        if origin == "production_final" and not selected_target_keys:
+            await update.message.reply_text(
+                "Не выбрана ни одна площадка. Отметьте хотя бы одну кнопку или пришлите «ФИДБЕК».",
+                reply_markup=_social_descriptions_approval_markup(pending),
+            )
+            return True
         if origin == "production_final" and isinstance(copy, dict):
             production = session.get("production")
             post_production = production.get("post_production") if isinstance(production, dict) else None
@@ -1973,6 +2374,9 @@ async def _handle_waiting_social_descriptions_approval_state(
                             copy={str(k): str(v) for k, v in copy.items()},
                             post_production=post_production,
                             origin=origin,
+                            selected_target_keys=selected_target_keys,
+                            video_variant=str(pending.get(SOCIAL_PUBLISH_VIDEO_VARIANT_KEY) or ""),
+                            scheduled_at=pending.get(SOCIAL_PUBLISH_SCHEDULED_AT_KEY),
                         )
                         db.commit()
                     if jobs:
@@ -2023,12 +2427,13 @@ async def _handle_waiting_social_descriptions_approval_state(
         feedback=feedback,
     )
     session["state"] = STATE_WAITING_SOCIAL_DESCRIPTIONS_APPROVAL
-    session[SOCIAL_DESCRIPTIONS_PENDING_KEY] = {
+    next_pending = {
         **pending,
         "copy": copy,
         "last_feedback": feedback,
     }
-    await _send_social_copy_for_approval(update, copy, video_targets=pending.get("video_targets"))
+    session[SOCIAL_DESCRIPTIONS_PENDING_KEY] = next_pending
+    await _send_social_copy_for_approval(update, copy, video_targets=pending.get("video_targets"), pending=next_pending)
     return True
 
 
@@ -2314,6 +2719,10 @@ _DIALOGUE_SPEAKER_ALIASES = {
     "внук": "grandson",
     "granddaughter": "granddaughter",
     "внучка": "granddaughter",
+    "banana": "banana",
+    "банан": "banana",
+    "strawberry": "strawberry",
+    "клубника": "strawberry",
 }
 
 _DIALOGUE_SPEAKER_PROMPT_LABELS = {
@@ -2321,6 +2730,8 @@ _DIALOGUE_SPEAKER_PROMPT_LABELS = {
     "grandfather": "GRANDFATHER",
     "grandson": "GRANDSON",
     "granddaughter": "GRANDDAUGHTER",
+    "banana": "BANANA",
+    "strawberry": "STRAWBERRY",
 }
 
 
@@ -3337,7 +3748,16 @@ async def _scene_media_start_ok(
     except Exception as e:
         await update.message.reply_text(f"Ошибка подготовки промпта: {e}")
         return True
-    scene_refs = _load_scene_reference_images(scene, include_location=False)
+    scene_refs = _dedupe_image_reference_bytes(
+        [
+            *_load_scene_reference_images(
+                scene,
+                include_location=False,
+                prompt_keys=("start_frame_prompt", "start_frame_prompt_ru"),
+            ),
+            *_scene_user_reference_images(scene, "start"),
+        ]
+    )
     raw_mode = bool(scene.get(START_PROMPT_RAW_MODE_KEY))
     if raw_mode:
         prompt = str(base_prompt or "").strip()
@@ -3471,6 +3891,14 @@ async def _scene_media_end_not_ok(
     scene: dict,
     text: str,
 ) -> bool:
+    low = str(text or "").strip().lower()
+    if low in {"перегенерировать", "regen", "regenerate"}:
+        return await _scene_media_end_ok(
+            update,
+            session=session,
+            scene=scene,
+            idx=int(session.get("image_scene_index", 0) or 0),
+        )
     pending_prompt = _pop_scene_prompt_input_pending(
         session,
         scene_idx=int(session.get("image_scene_index", 0) or 0),
@@ -5911,6 +6339,28 @@ async def _handle_waiting_scene_media_state(
     if idx >= len(scenes):
         return await _finish_scene_media_production(update, session, message="Все сцены обработаны.")
     scene = scenes[idx]
+    if await _handle_scene_reference_images_pending_text(
+        update,
+        session,
+        scene,
+        idx=idx,
+        text=text,
+    ):
+        return True
+    if text.strip().lower() == SCENE_MEDIA_ADD_REFERENCE_IMAGES_BUTTON.lower():
+        target = _image_reference_target_for_substep(
+            str(session.get("scene_media_substep") or SCENE_MEDIA_SUBSTEP_START)
+        )
+        if target is None:
+            await update.message.reply_text("Изображения можно добавить на шаге стартового или конечного кадра.")
+            return True
+        return await _start_scene_reference_images_collection(
+            update,
+            session,
+            scene,
+            idx=idx,
+            target=target,
+        )
     image_edit_pending = _pop_scene_image_edit_pending(session, scene_idx=idx)
     if image_edit_pending is not None:
         target = str(image_edit_pending.get("target") or "start")

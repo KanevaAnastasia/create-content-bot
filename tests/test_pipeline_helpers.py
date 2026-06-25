@@ -96,6 +96,46 @@ def test_tts_payload_keeps_multi_speaker_dialogue(monkeypatch):
     assert payload["dialogue_ru"][0]["speaker"] == "grandfather"
 
 
+def test_dialogue_feedback_hint_keeps_anthropomorphic_ingredient_dialogue():
+    hint = pipeline_llm_steps._dialogue_feedback_hint(
+        "В первой сцене нужен конечный кадр, начинается крупно как клубника разговаривает "
+        "с бананом в офисе и банан говорит клубнике: может сбежим сегодня и дальше "
+        "отдаляется кадр. Бабушка говорит: сомневаюсь и включает блендер. "
+        "Сегодня у нас бананово-клубничный коктейль! И внук отпивает из стакана и говорит: Ммм, как вкусно!"
+    )
+
+    assert hint == {
+        "scene": 1,
+        "dialogue_mode": "multi",
+        "dialogue": [
+            {"speaker": "banana", "text": "может сбежим сегодня"},
+            {"speaker": "grandma", "text": "сомневаюсь"},
+            {"speaker": "grandson", "text": "Ммм, как вкусно!"},
+        ],
+    }
+
+
+def test_tts_payload_keeps_ingredient_speakers_when_present(monkeypatch):
+    monkeypatch.setenv("ELEVENLABS_VOICE_ID", "voice123")
+    payload = _tts_payload_for_scene(
+        {
+            "voice_provider": "elevenlabs",
+            "text": "может сбежим сегодня [пауза] сомневаюсь [пауза] ммм как вкусно",
+            "characters": ["grandma", "cat", "banana", "strawberry", "grandson"],
+            "dialogue_mode": "multi",
+            "dialogue": [
+                {"speaker": "banana", "text": "может сбежим сегодня"},
+                {"speaker": "grandma", "text": "сомневаюсь"},
+                {"speaker": "grandson", "text": "Ммм, как вкусно!"},
+            ],
+        }
+    )
+
+    assert payload["speaking_characters_order"] == ["banana", "grandma", "grandson"]
+    assert payload["speaker_profiles"]["banana"]["voice_profile"] == "ru_neutral_default"
+    assert payload["speaker_profiles"]["grandson"]["voice_profile"] == "male_ru_child_bright"
+
+
 def test_humanize_scene_errors():
     errs = _humanize_scene_errors(["scene_2: no_food", "banned_abstraction"])
     assert "сцена 2: не видно еды/ингредиентов" in errs
@@ -655,6 +695,35 @@ def test_generate_scenes_plan_with_previous_bypasses_cache(monkeypatch):
     assert out["json_plan"][0]["text"] != "старый кэш"
 
 
+def test_generate_scenes_plan_coerces_string_scene_array(monkeypatch):
+    scenes_payload = [
+        "показываю готовые сырники крупно",
+        "смешиваю творог с яйцом и мукой",
+        "обжариваю сырники до румяной корочки",
+    ]
+
+    monkeypatch.setattr(pipeline, "get_scenes_plan", lambda *a, **k: None)
+    monkeypatch.setattr(pipeline, "set_scenes_plan", lambda *a, **k: None)
+    monkeypatch.setattr(
+        "app.pipeline_llm_steps.gemini_generate_sync",
+        lambda _prompt: json.dumps(scenes_payload, ensure_ascii=False),
+    )
+
+    out = asyncio.run(
+        pipeline.generate_scenes_plan(
+            "сырники",
+            full_recipe_text="Смешать творог с яйцом и мукой. Обжарить сырники.",
+            user_feedback="сделай сцены живее",
+            previous_scenes=[{"scene": 1, "text": "предыдущая версия"}],
+        )
+    )
+
+    assert len(out["json_plan"]) == 3
+    assert all(isinstance(scene, dict) for scene in out["json_plan"])
+    assert out["json_plan"][0]["text"] == "показываю готовые сырники крупно"
+    assert out["json_plan"][1]["action"].startswith("смешиваю творог")
+
+
 def test_generate_scenes_plan_caps_steps_to_six(monkeypatch):
     scenes_payload = [
         {
@@ -766,6 +835,28 @@ def test_ensure_image_prompt_framing_requirements_adds_full_visibility_for_veo3(
     assert "Бабушка и кот должны быть видны полностью в кадре." in out
 
 
+def test_ensure_image_prompt_framing_allows_fruit_only_first_moment_exception():
+    out = pipeline._ensure_image_prompt_framing_requirements(
+        "Крупный план: только банан и клубника разговаривают как в офисе, без бабушки и кота.",
+        "kitchen",
+        model="veo3_fast",
+    )
+    assert "Крупный план" in out
+    assert "Бабушка и кот должны быть видны полностью в кадре." not in out
+
+
+def test_ensure_image_prompt_framing_requirements_adds_title_safe_top_for_first_scene():
+    out = pipeline._ensure_image_prompt_framing_requirements(
+        "Бабушка показывает борщ",
+        "kitchen",
+        model="veo3_fast",
+        title_safe_top=True,
+    )
+    assert "верхние примерно 30% кадра должны оставаться свободными" in out
+    assert "Не обрезай кадр" in out
+    assert "без крупных объектов" in out
+
+
 def test_ensure_image_prompt_framing_requirements_skips_full_visibility_for_non_veo3():
     out = pipeline._ensure_image_prompt_framing_requirements(
         "Бабушка перемешивает тесто",
@@ -825,6 +916,7 @@ def test_normalize_frame_prompts_adds_scene_metadata_and_framing():
     assert "Крупный план" in out[0]["start_frame_prompt_ru"]
     assert "Фоновая драма этой сцены: Белая кошка машет рыжему коту за окном" in out[0]["start_frame_prompt_ru"]
     assert "Бабушка и кот должны быть видны полностью в кадре." in out[0]["start_frame_prompt_ru"]
+    assert "верхние примерно 30% кадра должны оставаться свободными" in out[0]["start_frame_prompt_ru"]
     assert START_FRAME_RECIPE_VISUAL_DETAIL_RULE not in out[0]["start_frame_prompt_ru"]
     assert out[0]["end_frame_prompt_ru"] == "пусто"
 
@@ -837,7 +929,8 @@ def test_generate_frame_prompts_for_approval_builds_plan(monkeypatch):
         ensure_ascii=False,
     )
 
-    def _fake_gemini(prompt: str) -> str:
+    def _fake_gemini(prompt: str, *, images=None) -> str:
+        assert images is None
         captured_prompt["text"] = prompt
         return model_answer
 
@@ -850,6 +943,9 @@ def test_generate_frame_prompts_for_approval_builds_plan(monkeypatch):
     assert "подробные описания ингредиентов" in captured_prompt["text"]
     assert "romantic_drama_beat" in captured_prompt["text"]
     assert "using concrete pose, distance, gaze, blocking or object interaction" in captured_prompt["text"]
+    assert "верхние примерно 30% кадра должны оставаться свободными" in captured_prompt["text"]
+    assert "не делай пустую искусственную полосу сверху" in captured_prompt["text"]
+    assert "fruit-only first-moment exception" in captured_prompt["text"]
     assert "text_plan" in out
     assert '"location"' not in captured_prompt["text"]
 
@@ -857,7 +953,7 @@ def test_generate_frame_prompts_for_approval_builds_plan(monkeypatch):
 def test_generate_frame_prompts_discards_unrequested_end_frame(monkeypatch):
     monkeypatch.setattr(
         "app.pipeline.gemini_generate_sync",
-        lambda _prompt: json.dumps(
+        lambda _prompt, *, images=None: json.dumps(
             [
                 {
                     "start_frame_prompt_ru": "Бабушка показывает пирог.",
@@ -872,6 +968,35 @@ def test_generate_frame_prompts_discards_unrequested_end_frame(monkeypatch):
     out = asyncio.run(generate_frame_prompts_for_approval([scene]))
 
     assert out["json_plan"][0]["end_frame_prompt_ru"] == "пусто"
+
+
+def test_generate_frame_prompts_for_approval_passes_reference_images(monkeypatch):
+    scene = {"scene": 1, "model": "veo3_fast", "duration_sec": 4}
+    captured: dict[str, object] = {}
+    model_answer = json.dumps(
+        [{"start_frame_prompt_ru": "Бабушка держит тарелку как на референсе", "end_frame_prompt_ru": "пусто"}],
+        ensure_ascii=False,
+    )
+
+    def _fake_gemini(prompt: str, *, images=None) -> str:
+        captured["prompt"] = prompt
+        captured["images"] = images
+        return model_answer
+
+    monkeypatch.setattr("app.pipeline.gemini_generate_sync", _fake_gemini)
+    out = asyncio.run(
+        generate_frame_prompts_for_approval(
+            [scene],
+            "учти приложенные изображения",
+            [],
+            reference_images=[b"ref-1", b"", b"ref-2"],
+        )
+    )
+
+    assert out["json_plan"][0]["start_frame_prompt_ru"]
+    assert captured["images"] == [b"ref-1", b"ref-2"]
+    assert "user_reference_images_count" in str(captured["prompt"])
+    assert "attached user reference images" in str(captured["prompt"])
 
 
 def test_generate_full_production_with_approved_frames(monkeypatch):
@@ -903,6 +1028,7 @@ def test_generate_full_production_with_approved_frames(monkeypatch):
     assert scene["start_frame_prompt"]
     assert "Фоновая драма этой сцены: белая кошка машет рыжий кот за окном" in scene["start_frame_prompt"]
     assert "voice_lock_full:" in scene["video_prompt"]
+    assert "title_safe_top_30:" in scene["video_prompt"]
     assert "background romantic drama beat: белая кошка машет рыжий кот за окном" in scene["video_prompt"]
     assert "Zaya" not in scene["video_prompt"]
     assert "Timosha" not in scene["video_prompt"]
@@ -923,6 +1049,7 @@ def test_generate_full_production_with_approved_frames(monkeypatch):
     assert "do not invent extra characters" in captured_prompt["text"].lower()
     assert "scene1_spoken_dish_name_rule" in captured_prompt["text"]
     assert "viewer must hear the dish name in the first scene" in captured_prompt["text"]
+    assert "title_safe_top_30" in captured_prompt["text"]
     assert "romantic_drama_rule" in captured_prompt["text"]
     assert "character_identity_rule:" not in scene["video_prompt"]
     assert "character_descriptions" not in captured_prompt["text"]
@@ -984,6 +1111,7 @@ def test_generate_full_production_without_approved_frames_fills_placeholders(mon
     assert scene["start_frame_prompt"] == "пусто"
     assert scene["end_frame_prompt"] == "пусто"
     assert scene["video_prompt"]
+    assert "title_safe_top_30:" in scene["video_prompt"]
     assert "cartoon cat" not in scene["video_prompt"]
     assert "speech_by_lang" in scene
     assert "speech_plan_by_lang" in scene
@@ -993,6 +1121,7 @@ def test_generate_full_production_without_approved_frames_fills_placeholders(mon
     assert "speech_timing_plan:" in scene["video_prompt_by_lang"]["ru"]
     assert "подробные описания ингредиентов" in captured_prompt["text"]
     assert "kitchen_physics_rule" in captured_prompt["text"]
+    assert "title_safe_top_30" in captured_prompt["text"]
     assert "do not invent extra characters" in captured_prompt["text"].lower()
     assert '"location"' not in captured_prompt["text"]
 

@@ -356,6 +356,25 @@ def test_extract_json_array_uses_first_complete_array_when_model_returns_extra_j
     assert llm_utils.extract_json_array(raw) == [{"scene": 1}]
 
 
+def test_extract_json_array_repairs_unquoted_pause_token_inside_text():
+    raw = """
+    [
+      {
+        "scene_id": "scene_1",
+        "characters": ["grandma", "cat"],
+        "text": "Бабуля, а это что за ягодки?" [пауза] "О, это секретный ингредиент!"
+      }
+    ]
+    """
+    assert llm_utils.extract_json_array(raw) == [
+        {
+            "scene_id": "scene_1",
+            "characters": ["grandma", "cat"],
+            "text": "Бабуля, а это что за ягодки? [пауза] О, это секретный ингредиент!",
+        }
+    ]
+
+
 def test_extract_json_object_uses_first_complete_object_when_model_returns_extra_json():
     raw = '```json\n{"prompts": ["ok"]}\n```\n{"ignored": true}'
     assert llm_utils.extract_json_object(raw) == {"prompts": ["ok"]}

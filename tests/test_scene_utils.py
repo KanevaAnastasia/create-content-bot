@@ -1,3 +1,5 @@
+import pytest
+
 from app.scene_utils import (
     apply_veo3_speech_format,
     extract_recipe_steps_text,
@@ -38,6 +40,11 @@ def test_normalize_scenes_for_pipeline_adds_contract_fields():
     assert all(s.get("voice_needed") is True for s in scenes)
     assert all("grandma" in s.get("characters", []) for s in scenes)
     assert all("cat" in s.get("characters", []) for s in scenes)
+
+
+def test_normalize_scenes_for_pipeline_rejects_non_object_items():
+    with pytest.raises(ValueError, match="must contain JSON objects"):
+        normalize_scenes_for_pipeline(["grandma", "cat"])  # type: ignore[arg-type]
 
 
 def test_normalize_scenes_for_pipeline_preserves_existing_references():

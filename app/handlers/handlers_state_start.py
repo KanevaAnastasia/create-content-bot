@@ -37,8 +37,40 @@ from .handlers_state_commands import _reply_text_chunked
 from .handlers_state_commands import NAV_BUTTON_START_OVER
 from .handlers_keyboards import reply_text_without_keyboard, safe_reply_text
 from .handlers_state_media import send_social_descriptions_for_recipe
+from ..series_store import (
+    SERIES_PENDING_PREFER_VERTEX_SESSION_KEY,
+    SERIES_PENDING_RECIPE_SESSION_KEY,
+    SERIES_COUNTER_BY_LANG_SESSION_KEY,
+    SERIES_SESSION_KEY,
+    SERIES_TITLE_BY_LANG_SESSION_KEY,
+    SERIES_TOTAL_VIDEOS_SESSION_KEY,
+    SERIES_VIDEO_INDEX_SESSION_KEY,
+    attach_series_to_session,
+    create_series,
+    format_series_label,
+    list_active_series,
+    select_series_payload,
+)
 
 _PROJECT_KEY_SESSION = "selected_project_key"
+STATE_WAITING_SERIES_CHOICE = "waiting_series_choice"
+STATE_WAITING_SERIES_CREATE = "waiting_series_create"
+_SERIES_CHOICE_IDS_SESSION_KEY = "series_choice_ids"
+SERIES_CHOICE_CONFIRMED_SESSION_KEY = "series_choice_confirmed"
+SERIES_PENDING_NEXT_SESSION_KEY = "series_pending_next"
+SERIES_NEXT_GENERATION = "generation"
+SERIES_NEXT_OVERLAY_TITLE = "overlay_title"
+_SERIES_BUTTON_NEW = "Создать серию"
+_SERIES_BUTTON_SKIP = "Без серии"
+_SERIES_BUTTON_BACK = "Назад"
+_SERIES_SESSION_KEYS = (
+    SERIES_SESSION_KEY,
+    SERIES_TITLE_BY_LANG_SESSION_KEY,
+    SERIES_VIDEO_INDEX_SESSION_KEY,
+    SERIES_TOTAL_VIDEOS_SESSION_KEY,
+    SERIES_COUNTER_BY_LANG_SESSION_KEY,
+    SERIES_CHOICE_CONFIRMED_SESSION_KEY,
+)
 
 
 async def _start_description_with_recipe(
@@ -123,6 +155,71 @@ def _parse_concept_choice(text: str) -> int | None:
     return int(match.group(1))
 
 
+def _series_choice_markup(session: dict) -> object | None:
+    try:
+        from telegram import ReplyKeyboardMarkup
+    except Exception:
+        return None
+    rows = [[str(i)] for i in range(1, len(session.get(_SERIES_CHOICE_IDS_SESSION_KEY) or []) + 1)]
+    rows.append([_SERIES_BUTTON_NEW])
+    rows.append([_SERIES_BUTTON_SKIP])
+    return ReplyKeyboardMarkup(rows, resize_keyboard=True, one_time_keyboard=False)
+
+
+def _format_series_choice_text(series_items) -> str:
+    if not series_items:
+        return (
+            "Можно привязать это видео к серии.\n"
+            "Активных серий для проекта пока нет: создайте новую или выберите «Без серии»."
+        )
+    lines = ["Можно привязать это видео к серии. Выберите номер:"]
+    for idx, item in enumerate(series_items, start=1):
+        lines.append(f"{idx}. {format_series_label(item)}")
+    return "\n".join(lines)
+
+
+async def _ask_series_choice(update: Update, session: dict) -> None:
+    project_slug = str(session.get(_PROJECT_KEY_SESSION) or "").strip() or None
+    series_items = list_active_series(project_slug)
+    session[_SERIES_CHOICE_IDS_SESSION_KEY] = [item.id for item in series_items]
+    session["state"] = STATE_WAITING_SERIES_CHOICE
+    await _reply_text_with_optional_markup(
+        update,
+        _format_series_choice_text(series_items),
+        reply_markup=_series_choice_markup(session),
+    )
+
+
+def _parse_series_create_text(text: str) -> tuple[str, str | None, int] | None:
+    raw = " ".join(str(text or "").strip().split())
+    if not raw:
+        return None
+    parts = [part.strip() for part in raw.split("|")]
+    if len(parts) == 2:
+        title = parts[0]
+        days_text = parts[1]
+        if not title or not re.fullmatch(r"\d+", days_text):
+            return None
+        return title, None, int(days_text)
+    if len(parts) < 3:
+        return None
+    ru_title = parts[0]
+    en_title = parts[1]
+    days_text = parts[2]
+    days_match = re.fullmatch(r"\d+", days_text)
+    legacy_match = re.fullmatch(r"\d+\s*(?:/|из|of)\s*(\d+)", days_text, flags=re.IGNORECASE)
+    if not ru_title or not en_title or not (days_match or legacy_match):
+        return None
+    total_videos = int(days_match.group(0) if days_match else legacy_match.group(1))
+    return ru_title, en_title, total_videos
+
+
+def _copy_series_context(source: dict, target: dict) -> None:
+    for key in _SERIES_SESSION_KEYS:
+        if key in source:
+            target[key] = source[key]
+
+
 async def generate(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Команда ``/generate <текст>``: обычный старт пайплайна (без fastpath)."""
     await _start_generation(update, context, prefer_vertex_api=False)
@@ -194,6 +291,32 @@ async def _start_generation_with_recipe(
     existing_session = SESSIONS.get(chat_id) or {}
     selected_project_key = str(existing_session.get(_PROJECT_KEY_SESSION) or "").strip()
     await _announce_generation_mode(update, chat_id=chat_id, prefer_vertex_api=prefer_vertex_api)
+    session = {
+        **existing_session,
+        "state": STATE_WAITING_SERIES_CHOICE,
+        SERIES_PENDING_NEXT_SESSION_KEY: SERIES_NEXT_GENERATION,
+        SERIES_PENDING_RECIPE_SESSION_KEY: recipe,
+        SERIES_PENDING_PREFER_VERTEX_SESSION_KEY: prefer_vertex_api,
+    }
+    if selected_project_key:
+        session[_PROJECT_KEY_SESSION] = selected_project_key
+    SESSIONS[chat_id] = session
+    await _ask_series_choice(update, session)
+    return
+
+
+async def _continue_generation_with_recipe(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+    *,
+    recipe: str,
+    prefer_vertex_api: bool,
+) -> None:
+    if update.message is None or update.effective_chat is None:
+        return
+    chat_id = update.effective_chat.id
+    existing_session = SESSIONS.get(chat_id) or {}
+    selected_project_key = str(existing_session.get(_PROJECT_KEY_SESSION) or "").strip()
     source_url = _extract_first_http_url(recipe)
     if source_url:
         try:
@@ -236,6 +359,7 @@ async def _start_generation_with_recipe(
         )
         if selected_project_key:
             new_session[_PROJECT_KEY_SESSION] = selected_project_key
+        _copy_series_context(existing_session, new_session)
         SESSIONS[chat_id] = new_session
         logger.info(
             "chat=%s state=%s (recipe provided directly%s)",
@@ -286,6 +410,7 @@ async def _start_generation_with_recipe(
     )
     if selected_project_key:
         new_session[_PROJECT_KEY_SESSION] = selected_project_key
+    _copy_series_context(existing_session, new_session)
     SESSIONS[chat_id] = new_session
     logger.info("chat=%s state=%s", chat_id, STATE_WAITING_CONCEPT)
     await _reply_text_chunked(update, result["text_plan"])
@@ -295,6 +420,129 @@ async def _start_generation_with_recipe(
         "Либо нажмите «Добавь»/«Исправь» и отправьте правку для нейросети.",
         reply_markup=_concept_choice_markup(result["concepts"]),
     )
+
+
+async def _continue_generation_after_series(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+    *,
+    chat_id: int,
+    session: dict,
+) -> bool:
+    next_step = str(session.pop(SERIES_PENDING_NEXT_SESSION_KEY, "") or "").strip()
+    session.pop(_SERIES_CHOICE_IDS_SESSION_KEY, None)
+    if next_step == SERIES_NEXT_OVERLAY_TITLE:
+        session["state"] = "state_waiting_overlay_title_ru"
+        SESSIONS[chat_id] = session
+        await reply_text_without_keyboard(
+            update.message,
+            "Теперь введите русский заголовок для верхней надписи.",
+        )
+        return True
+    recipe = str(session.get(SERIES_PENDING_RECIPE_SESSION_KEY) or "").strip()
+    prefer_vertex_api = bool(session.get(SERIES_PENDING_PREFER_VERTEX_SESSION_KEY))
+    if not recipe:
+        await update.message.reply_text("Не вижу исходный рецепт или идею. Начните генерацию заново.")
+        session["state"] = ""
+        SESSIONS[chat_id] = session
+        return True
+    session.pop(SERIES_PENDING_RECIPE_SESSION_KEY, None)
+    session.pop(SERIES_PENDING_PREFER_VERTEX_SESSION_KEY, None)
+    SESSIONS[chat_id] = session
+    await _continue_generation_with_recipe(
+        update,
+        context,
+        recipe=recipe,
+        prefer_vertex_api=prefer_vertex_api,
+    )
+    return True
+
+
+async def _handle_waiting_series_choice_state(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+    *,
+    chat_id: int,
+    session: dict,
+    text: str,
+) -> bool:
+    low = str(text or "").strip().lower()
+    if low == _SERIES_BUTTON_SKIP.lower():
+        attach_series_to_session(session, None)
+        session[SERIES_CHOICE_CONFIRMED_SESSION_KEY] = True
+        await update.message.reply_text("Ок, это видео будет без серии.")
+        return await _continue_generation_after_series(update, context, chat_id=chat_id, session=session)
+    if low == _SERIES_BUTTON_NEW.lower():
+        session["state"] = STATE_WAITING_SERIES_CREATE
+        SESSIONS[chat_id] = session
+        await _reply_text_with_optional_markup(
+            update,
+            "Пришлите серию в формате:\n"
+            "название | дней\n\n"
+            "Например: летние напитки | 10\n"
+            "Если нужен отдельный английский заголовок: летние напитки | summer drinks | 10",
+            reply_markup=ok_only_markup(),
+        )
+        return True
+    choice = _parse_concept_choice(text)
+    ids = session.get(_SERIES_CHOICE_IDS_SESSION_KEY) or []
+    if choice is not None and 1 <= choice <= len(ids):
+        payload = select_series_payload(str(ids[choice - 1]))
+        if payload is None:
+            await update.message.reply_text(
+                "Не нашла активную серию или она уже закончилась. Выберите заново или создайте новую."
+            )
+            await _ask_series_choice(update, session)
+            SESSIONS[chat_id] = session
+            return True
+        attach_series_to_session(session, payload)
+        session[SERIES_CHOICE_CONFIRMED_SESSION_KEY] = True
+        await update.message.reply_text(f"Серия выбрана: {format_series_label(payload)}.")
+        return await _continue_generation_after_series(update, context, chat_id=chat_id, session=session)
+    await _reply_text_with_optional_markup(
+        update,
+        "Выберите номер серии, «Создать серию» или «Без серии».",
+        reply_markup=_series_choice_markup(session),
+    )
+    return True
+
+
+async def _handle_waiting_series_create_state(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+    *,
+    chat_id: int,
+    session: dict,
+    text: str,
+) -> bool:
+    if str(text or "").strip().lower() == _SERIES_BUTTON_BACK.lower():
+        await _ask_series_choice(update, session)
+        SESSIONS[chat_id] = session
+        return True
+    parsed = _parse_series_create_text(text)
+    if parsed is None:
+        await _reply_text_with_optional_markup(
+            update,
+            "Не смогла разобрать серию. Формат: название | дней",
+            reply_markup=ok_only_markup(),
+        )
+        return True
+    ru_title, en_title, total_videos = parsed
+    try:
+        payload = create_series(
+            title_ru=ru_title,
+            title_en=en_title,
+            total_videos=total_videos,
+            project_slug=str(session.get(_PROJECT_KEY_SESSION) or "").strip() or None,
+        )
+    except Exception as e:
+        logger.exception("content series creation failed")
+        await update.message.reply_text(f"Ошибка создания серии: {_user_error_message(e)}")
+        return True
+    attach_series_to_session(session, payload)
+    session[SERIES_CHOICE_CONFIRMED_SESSION_KEY] = True
+    await update.message.reply_text(f"Серия создана: {format_series_label(payload)}.")
+    return await _continue_generation_after_series(update, context, chat_id=chat_id, session=session)
 
 
 async def _handle_waiting_concept_state(

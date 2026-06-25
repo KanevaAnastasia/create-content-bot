@@ -3,6 +3,7 @@
 import asyncio
 import base64
 import contextvars
+import hashlib
 import io
 import os
 import re
@@ -943,6 +944,7 @@ async def _attempt_syntax_video_fallback_batch(
         return {}
 
     output: dict[str, bytes] = {}
+    payload_hashes: dict[str, str] = {}
     for key, result in results.items():
         if not getattr(result, "success", False):
             logger.warning(
@@ -965,7 +967,20 @@ async def _attempt_syntax_video_fallback_batch(
                 str(e)[:400],
             )
             continue
-        output[str(key)] = payload
+        digest = hashlib.sha256(payload).hexdigest()
+        duplicate_key = payload_hashes.get(digest)
+        if duplicate_key is not None:
+            logger.warning(
+                "video.syntax_batch duplicate_payload_discarded key=%s first_key=%s attempt_id=%s sha256=%s",
+                key,
+                duplicate_key,
+                getattr(result, "attempt_id", ""),
+                digest[:16],
+            )
+            continue
+        normalized_key = str(key)
+        payload_hashes[digest] = normalized_key
+        output[normalized_key] = payload
     return output
 
 

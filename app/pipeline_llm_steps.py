@@ -27,6 +27,12 @@ RUSSIAN_YO_RULE = (
     "тёртый, свёкла, мёд, рёбра, запечённый, сгущёнка, берёт, идёт). Не заменяй нужную `ё` "
     "на `е`; если в исходном тексте пользователя уже есть корректная `ё`, сохраняй её."
 )
+FRUIT_ONLY_FIRST_MOMENT_RULE = (
+    "If the user explicitly asks scene 1 to start with a close-up of anthropomorphic banana and strawberry talking "
+    "or says the start frame is only banana/strawberry and without grandma/cats, keep the START frame to that first "
+    "moment only. Do not add grandma, cats, grandson/granddaughter, blender reveal, or later payoff into the start "
+    "frame; put those later beats into action/micro_events/video/end frame."
+)
 
 
 async def gemini_text(prompt: str) -> str:
@@ -64,6 +70,67 @@ def _quoted_variants(text: str) -> list[str]:
     return out
 
 
+_DIALOGUE_ROLE_PATTERNS: tuple[tuple[str, tuple[str, ...]], ...] = (
+    ("grandfather", (r"дедушк[аиуе]?", r"grandfather", r"grandpa")),
+    ("grandma", (r"бабушк[аиуе]?", r"grandma")),
+    ("grandson", (r"внук[ауе]?", r"grandson")),
+    ("granddaughter", (r"внучк[аиуе]?", r"granddaughter")),
+    ("banana", (r"банан\w*", r"banana")),
+    ("strawberry", (r"клубник\w*", r"strawberry")),
+)
+
+
+def _dialogue_speaker_from_prefix(prefix: str) -> str:
+    for canonical, patterns in _DIALOGUE_ROLE_PATTERNS:
+        if any(re.search(pattern, prefix, flags=re.IGNORECASE) for pattern in patterns):
+            return canonical
+    return ""
+
+
+def _clean_dialogue_colon_line(value: str) -> str:
+    text = " ".join(str(value or "").strip().split())
+    if not text:
+        return ""
+    cut_markers = (
+        " и дальше ",
+        " дальше ",
+        " и потом ",
+        " потом ",
+        " и включает ",
+        " включает ",
+        " и отдаляется ",
+        " отдаляется ",
+    )
+    low = text.lower()
+    cut_positions = [low.find(marker) for marker in cut_markers if low.find(marker) > 0]
+    if cut_positions:
+        text = text[: min(cut_positions)].strip()
+    return text.strip(" .")
+
+
+def _colon_dialogue_variants(text: str) -> list[dict[str, str]]:
+    raw = str(text or "")
+    if ":" not in raw:
+        return []
+    role_union = "|".join(pattern for _canonical, patterns in _DIALOGUE_ROLE_PATTERNS for pattern in patterns)
+    colon_pattern = re.compile(
+        rf"(?P<prefix>(?:{role_union})[^:\n]{{0,90}}?):",
+        flags=re.IGNORECASE,
+    )
+    matches = list(colon_pattern.finditer(raw))
+    out: list[dict[str, str]] = []
+    for index, match in enumerate(matches):
+        speaker = _dialogue_speaker_from_prefix(match.group("prefix"))
+        if not speaker:
+            continue
+        start = match.end()
+        end = matches[index + 1].start() if index + 1 < len(matches) else len(raw)
+        phrase = _clean_dialogue_colon_line(raw[start:end])
+        if phrase:
+            out.append({"speaker": speaker, "text": phrase})
+    return out
+
+
 def _dialogue_feedback_hint(feedback: str) -> dict[str, Any]:
     raw = (feedback or "").strip()
     if not raw:
@@ -73,29 +140,27 @@ def _dialogue_feedback_hint(feedback: str) -> dict[str, Any]:
         return {"scene": 1, "dialogue_mode": "single", "dialogue": []}
     if "первая сцен" not in low and "сцена 1" not in low and "в первой" not in low:
         return {}
-    if "диалог" not in low:
+    if "диалог" not in low and "говорит" not in low and "разговарива" not in low:
         return {}
     quotes = _quoted_variants(raw)
     if not quotes:
+        colon_dialogue = _colon_dialogue_variants(raw)
+        if colon_dialogue:
+            return {"scene": 1, "dialogue_mode": "multi", "dialogue": colon_dialogue}
+    if not quotes:
         return {"scene": 1, "dialogue_mode": "multi", "dialogue": []}
-    role_patterns = (
-        ("grandfather", (r"дедушк[аиуе]?", r"grandfather", r"grandpa")),
-        ("grandma", (r"бабушк[аиуе]?", r"grandma")),
-        ("grandson", (r"внук[ауе]?", r"grandson")),
-        ("granddaughter", (r"внучк[аиуе]?", r"granddaughter")),
-    )
     dialogue: list[dict[str, str]] = []
     for quote in quotes:
         quote_low = quote.lower()
         speaker = ""
-        for canonical, patterns in role_patterns:
+        for canonical, patterns in _DIALOGUE_ROLE_PATTERNS:
             if any(re.search(p + r".{0,40}$", raw[: raw.lower().find(quote_low)] if quote_low in low else "", flags=re.IGNORECASE) for p in patterns):
                 speaker = canonical
                 break
         if not speaker:
             idx = low.find(quote_low)
             prefix = raw[:idx] if idx >= 0 else raw
-            for canonical, patterns in role_patterns:
+            for canonical, patterns in _DIALOGUE_ROLE_PATTERNS:
                 if any(re.search(p + r"[^«\"]{0,60}$", prefix, flags=re.IGNORECASE) for p in patterns):
                     speaker = canonical
                     break
@@ -282,6 +347,7 @@ def scenes_plan_requirements() -> dict[str, Any]:
         "frame_framing_rule": (
             "EVERY scene, for start/end frame generation: composition is always close-up or medium-close on grandma, "
             "cat, and the hands-on food action (faces, paws, ingredients, utensils readable). "
+            f"Exception: {FRUIT_ONLY_FIRST_MOMENT_RULE} "
             "Grandmother's full figure must remain visible (at least head through torso), never a face-only crop; "
             "every other character listed for the scene must also stay fully visible in frame. "
             "No wide/establishing shots where characters are small. "
@@ -413,6 +479,12 @@ def build_scenes_plan_prompt(payload: dict[str, Any]) -> str:
         "- Если dish_audience_type=neutral, не добавляй дедушку, внука или внучку без прямой просьбы пользователя.\n"
         "- Для child допустим короткий живой диалог или реакция выбранного внука/внучки в первой сцене и/или финале, но готовка всё равно остаётся у бабушки.\n"
         "- Для male в первой сцене допустим короткий диалог: дедушка пробует/реагирует, бабушка отвечает.\n"
+        "ANTHROPOMORPHIC INGREDIENT DIALOGUE RULE: если пользователь явно просит, чтобы еда/ингредиенты говорили "
+        "(например банан и клубника разговаривают в сцене 1), не заменяй эти реплики на бабушку/внука/внучку. "
+        "Добавь таких говорящих ингредиентов в scene.characters как простые canonical keys (`banana`, `strawberry`) "
+        "только для нужной сцены, сохрани их реплики в dialogue, а бабушка/внук/внучка могут говорить только свои "
+        "отдельно заданные реплики.\n"
+        f"FIRST MOMENT VISIBILITY RULE: {FRUIT_ONLY_FIRST_MOMENT_RULE}\n"
         "CHARACTER KEYS AND SHORT DESCRIPTIONS: canonical keys остаются служебными id, а в любых не-диалоговых "
         "полях используй только короткие описания из payload.character_short_descriptions: `cat` = рыжий кот, "
         "`zaya` = белая кошка, `markiz` = черно-белый кот, остальные аналогично. Имена персонажей можно использовать "
@@ -453,7 +525,8 @@ def build_scenes_plan_prompt(payload: dict[str, Any]) -> str:
         "СЦЕНА 1: сильный хук с первого кадра. По умолчанию это аппетитная витрина с блюдом, "
         "НО если пользователь явно попросил другой первый кадр/другой хук для сцены 1, следуй запросу пользователя; "
         "короткая hook-first реплика с обязательным названием блюда в `text` (зритель должен услышать название в первом кадре). "
-        "Только в сцене 1 можно использовать dialogue_mode=multi: короткий диалог 2-3 реплики максимум суммарно между бабушкой и дедушкой/ребёнком. "
+        "Только в сцене 1 можно использовать dialogue_mode=multi: короткий диалог 2-3 реплики максимум суммарно между бабушкой и дедушкой/ребёнком "
+        "или явно указанными пользователем антропоморфными ингредиентами. "
         "Диалог должен усиливать hook, а не заменять блюдо и визуальный payoff. "
         "Если payload.dialogue_feedback_hint не пустой, перенеси указанные реплики и роли максимально дословно.\n"
         "Если concept выглядит служебно или обобщенно, возьми конкретное название блюда из full_recipe_text. "

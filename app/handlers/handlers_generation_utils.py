@@ -13,6 +13,14 @@ import requests
 from ..constants import STATE_WAITING_CONCEPT, STATE_WAITING_RECIPE_APPROVAL
 from ..multilingual import target_languages_from_env
 
+OVERLAY_TITLE_SESSION_KEY = "overlay_title"
+OVERLAY_TITLE_BY_LANG_SESSION_KEY = "overlay_title_by_lang"
+OVERLAY_TITLE_STYLE_SESSION_KEY = "overlay_title_style"
+OVERLAY_TITLE_TRANSLATION_PENDING_SESSION_KEY = "overlay_title_translation_pending"
+STATE_WAITING_OVERLAY_TITLE_RU = "state_waiting_overlay_title_ru"
+STATE_WAITING_OVERLAY_TITLE_EN_APPROVAL = "state_waiting_overlay_title_en_approval"
+STATE_WAITING_OVERLAY_TITLE_STYLE_APPROVAL = "state_waiting_overlay_title_style_approval"
+
 _URL_RE = re.compile(r"https?://[^\s<>\"]+", re.IGNORECASE)
 _RECIPE_SECTION_MARKERS = (
     "ингредиенты",

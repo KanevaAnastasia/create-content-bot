@@ -1666,6 +1666,22 @@ def test_image_identity_can_skip_location_for_video_images():
     assert "локацию не менять" not in prompt.lower()
 
 
+def test_image_identity_keeps_fruit_only_closeup_visible_cast():
+    scene = {
+        "characters": ["grandma", "cat", "zaya", "banana", "strawberry", "grandson"],
+        "romantic_drama_beat": "Белая кошка напряжённо следит за рыжим котом.",
+    }
+    prompt = _append_scene_identity_to_image_prompt(
+        "Крупный план: только банан и клубника разговаривают как в офисе, без бабушки и кота.",
+        scene,
+        include_location=False,
+    )
+    assert "Персонажи в кадре: banana, strawberry" in prompt
+    assert "бабушка, рыжий кот" not in prompt
+    assert "белая кошка" not in prompt
+    assert "Фоновая драма этой сцены" not in prompt
+
+
 def test_reference_keys_pick_character_mentioned_in_prompt():
     scene = {
         "shot_type": "medium",
@@ -1700,6 +1716,55 @@ def test_reference_keys_pick_zaya_and_markiz_mentioned_in_prompt():
     assert keys == ["grandma", "cat", "zaya", "markiz"]
 
 
+def test_reference_keys_skip_scene_cast_for_fruit_only_closeup():
+    scene = {
+        "characters": ["grandma", "cat", "zaya", "banana", "strawberry", "grandson"],
+        "start_frame_prompt_ru": "Крупный план: только банан и клубника разговаривают как в офисе, без бабушки и кота.",
+    }
+    refs = {
+        "grandma": "g.png",
+        "cat": "c.png",
+        "zaya": "z.png",
+        "grandson": "gs.png",
+        "banana": "b.png",
+        "strawberry": "s.png",
+    }
+
+    keys = _reference_keys_for_scene(scene, refs)
+
+    assert keys == ["banana", "strawberry"]
+
+
+def test_reference_keys_use_target_prompt_for_fruit_start_and_reveal_end():
+    scene = {
+        "characters": ["grandma", "cat", "banana", "strawberry"],
+        "start_frame_prompt_ru": "Крупный план: только банан и клубника разговаривают как в офисе, без бабушки и кота.",
+        "end_frame_prompt_ru": "Камера отъехала: банан и клубника внутри прозрачной чаши блендера, бабушка рядом у кнопки.",
+    }
+    refs = {
+        "grandma": "g.png",
+        "cat": "c.png",
+        "banana": "b.png",
+        "strawberry": "s.png",
+    }
+
+    start_keys = _reference_keys_for_scene(
+        scene,
+        refs,
+        prompt_keys=("start_frame_prompt", "start_frame_prompt_ru"),
+    )
+    end_keys = _reference_keys_for_scene(
+        scene,
+        refs,
+        prompt_keys=("end_frame_prompt", "end_frame_prompt_ru", "video_prompt"),
+    )
+
+    assert start_keys == ["banana", "strawberry"]
+    assert end_keys[:2] == ["grandma", "cat"]
+    assert "banana" in end_keys
+    assert "strawberry" in end_keys
+
+
 def test_reference_keys_normalize_russian_character_aliases():
     scene = {
         "shot_type": "medium",
@@ -1713,6 +1778,27 @@ def test_reference_keys_normalize_russian_character_aliases():
     }
     keys = _reference_keys_for_scene(scene, refs)
     assert keys[:3] == ["grandma", "cat", "granddaughter"]
+
+
+def test_prompt_mentioned_russian_granddaughter_gets_identity_and_reference():
+    scene = {
+        "shot_type": "medium",
+        "characters": ["grandma", "cat", "zaya"],
+        "start_frame_prompt_ru": "Бабушка ставит стакан, а радостная внучка заглядывает из-за стола.",
+        "references": {
+            "grandma": "g.png",
+            "cat": "c.png",
+            "zaya": "z.png",
+        },
+    }
+
+    refs = _resolve_scene_references(scene)
+    keys = _reference_keys_for_scene(scene, refs)
+    prompt = _append_scene_identity_to_image_prompt(scene["start_frame_prompt_ru"], scene)
+
+    assert refs["granddaughter"].endswith("assets/characters/granddaughter/base.png")
+    assert keys == ["grandma", "cat", "zaya", "granddaughter"]
+    assert "внучка" in prompt
 
 
 def test_end_frame_delta_instruction_mentions_delta_and_references():
@@ -1792,7 +1878,28 @@ def test_resolve_scene_references_without_embedded_references():
     refs = _resolve_scene_references(scene)
     assert "grandma" in refs
     assert "cat" in refs
+    assert "granddaughter" in refs
     assert "location" not in refs
+
+
+def test_resolve_scene_references_skips_default_cast_for_fruit_only_closeup():
+    scene = {
+        "characters": ["grandma", "cat", "zaya", "banana", "strawberry", "grandson"],
+        "start_frame_prompt_ru": "Крупный план: только банан и клубника разговаривают как в офисе, без бабушки и кота.",
+        "references": {
+            "grandma": "assets/characters/grandma/base.png",
+            "cat": "assets/characters/cat/base.png",
+            "zaya": "assets/characters/zaya/base.jpeg",
+            "grandson": "assets/characters/grandson/base.png",
+            "banana": "assets/characters/banana/base.png",
+            "strawberry": "assets/characters/strawberry/base.png",
+        },
+    }
+    refs = _resolve_scene_references(scene)
+    assert refs == {
+        "banana": "assets/characters/banana/base.png",
+        "strawberry": "assets/characters/strawberry/base.png",
+    }
 
 
 def test_resolve_scene_references_normalizes_russian_location():
@@ -2304,6 +2411,72 @@ def test_ai_approve_start_skips_prompt_check_before_generating_image(monkeypatch
     assert "start_frame_image_b64" in scene
 
 
+def test_start_frame_generation_includes_user_reference_images(monkeypatch):
+    calls: list[dict] = []
+
+    async def _gen_image(prompt, *, reference_images=None, model=None):
+        calls.append({"prompt": prompt, "reference_images": reference_images, "model": model})
+        return SimpleNamespace(data=b"image", model=model)
+
+    async def _fake_reply_photo(_message, *, photo, caption):
+        return None
+
+    monkeypatch.setattr(handlers_state_media, "_generate_scene_image_result", _gen_image)
+    monkeypatch.setattr(handlers_state_media, "_safe_reply_photo", _fake_reply_photo)
+    monkeypatch.setattr(handlers_state_media, "_load_scene_reference_images", lambda *_args, **_kwargs: [b"char-ref"])
+
+    class _Msg:
+        async def reply_text(self, _text, **kwargs):
+            return None
+
+    scene = {
+        "start_frame_prompt": "grandma cooks",
+        "characters": ["grandma", "cat"],
+        "scene_user_reference_images_by_kind": {"start": [_encode_b64(b"user-ref")]},
+    }
+
+    out = asyncio.run(
+        handlers_state_media._scene_media_start_ok(
+            SimpleNamespace(message=_Msg()),
+            context=None,
+            chat_id=1,
+            session={"target_languages": ["ru"]},
+            scene=scene,
+            idx=0,
+        )
+    )
+
+    assert out is True
+    assert calls[0]["reference_images"] == [b"char-ref", b"user-ref"]
+
+
+def test_scene_media_reference_photo_adds_image_to_current_scene():
+    messages: list[str] = []
+
+    class _Msg:
+        async def reply_text(self, text, **kwargs):
+            messages.append(text)
+
+    scene = {"start_frame_prompt": "grandma cooks"}
+    session = {
+        "production": {"json_plan": [scene]},
+        "image_scene_index": 0,
+        "scene_image_reference_pending": {"scene_idx": 0, "target": "start"},
+    }
+
+    handled = asyncio.run(
+        handlers_state_media.handle_scene_media_reference_photo(
+            SimpleNamespace(message=_Msg()),
+            session=session,
+            image_bytes=b"user-ref",
+        )
+    )
+
+    assert handled is True
+    assert _decode_b64(scene["scene_user_reference_images_by_kind"]["start"][0]) == b"user-ref"
+    assert "Добавила изображение #1" in messages[-1]
+
+
 def test_ai_approve_reject_uses_primary_image_model(monkeypatch):
     calls: list[str] = []
     messages: list[str] = []
@@ -2768,6 +2941,41 @@ def test_end_prompt_manual_override_regenerates_immediately(monkeypatch):
     assert any("Сразу генерирую конечный кадр" in text for text in messages)
 
 
+def test_end_prompt_plain_regenerate_generates_current_delta(monkeypatch):
+    calls: list[str] = []
+
+    async def _fake_end_ok(update, *, session, scene, idx):
+        _ = (update, session, idx)
+        calls.append(scene.get("end_frame_prompt"))
+        return True
+
+    async def _fail_call(*_args, **_kwargs):
+        raise AssertionError("plain regenerate must not be treated as end-frame feedback")
+
+    monkeypatch.setattr(handlers_state_media, "_scene_media_end_ok", _fake_end_ok)
+    monkeypatch.setattr(handlers_state_media, "_call_with_503_retries", _fail_call)
+
+    class _Msg:
+        async def reply_text(self, _text, **kwargs):
+            _ = kwargs
+
+    scene = {"end_frame_prompt": "current end delta"}
+    out = asyncio.run(
+        handlers_state_media._scene_media_end_not_ok(
+            SimpleNamespace(message=_Msg()),
+            context=None,
+            chat_id=1,
+            session={"image_scene_index": 0},
+            scene=scene,
+            text="ПЕРЕГЕНЕРИРОВАТЬ",
+        )
+    )
+
+    assert out is True
+    assert calls == ["current end delta"]
+    assert scene["end_frame_prompt"] == "current end delta"
+
+
 def test_video_prompt_manual_override_uses_raw_prompt_and_generates(monkeypatch):
     calls: list[str] = []
     messages: list[str] = []
@@ -3128,6 +3336,29 @@ def test_finish_scene_media_production_sends_copyable_social_descriptions(monkey
     assert any("Проверьте описания" in m for m in messages)
 
 
+def test_social_descriptions_selection_toggles_targets_and_video_variant():
+    copy = handlers_state_media._fallback_social_copy("Картофель натереть и пожарить.")
+    pending = {
+        "copy": copy,
+        handlers_state_media.SOCIAL_PUBLISH_TARGETS_KEY: [
+            target.key for target in handlers_state_media.build_publication_targets(copy)
+        ],
+        handlers_state_media.SOCIAL_PUBLISH_VIDEO_VARIANT_KEY: handlers_state_media.DEFAULT_PUBLICATION_VIDEO_VARIANT,
+    }
+
+    assert handlers_state_media._toggle_social_publication_selection(pending, "✅ TikTok RU") is True
+    assert "tiktok:ru" not in pending[handlers_state_media.SOCIAL_PUBLISH_TARGETS_KEY]
+    assert handlers_state_media._toggle_social_publication_selection(pending, "☐ video: clean master") is True
+    assert pending[handlers_state_media.SOCIAL_PUBLISH_VIDEO_VARIANT_KEY] == "clean"
+    assert handlers_state_media._apply_social_publication_time(pending, "Время 2026-06-24 18:30") is True
+
+    summary = handlers_state_media._social_publication_selection_summary(pending)
+
+    assert "☐ TikTok RU" in summary
+    assert "Версия видео: clean master" in summary
+    assert "Время публикации: 2026-06-24 18:30 MSK" in summary
+
+
 def test_finish_scene_media_production_retries_post_production_timeout(monkeypatch):
     raw = """
     {
@@ -3174,6 +3405,65 @@ def test_finish_scene_media_production_retries_post_production_timeout(monkeypat
     assert not any("Финальную сборку ролика пока не удалось завершить: Timed out" in m for m in messages)
 
 
+def test_build_post_production_with_retries_passes_overlay_title(monkeypatch):
+    captured: dict[str, object] = {}
+    advanced: list[dict] = []
+
+    def _fake_build(
+        _scenes,
+        *,
+        project_slug=None,
+        overlay_title_by_lang=None,
+        overlay_title_style=None,
+        overlay_series_title_by_lang=None,
+        overlay_series_counter_by_lang=None,
+    ):
+        captured["project_slug"] = project_slug
+        captured["overlay_title_by_lang"] = overlay_title_by_lang
+        captured["overlay_title_style"] = overlay_title_style
+        captured["overlay_series_title_by_lang"] = overlay_series_title_by_lang
+        captured["overlay_series_counter_by_lang"] = overlay_series_counter_by_lang
+        return {"ok": True}
+
+    class _Msg:
+        async def reply_text(self, text, **kwargs):
+            _ = (text, kwargs)
+
+    update = SimpleNamespace(message=_Msg())
+    session = {"selected_project_key": "grandma_kitchen"}
+    production = {
+        "overlay_title_by_lang": {"ru": "Борщ", "en": "Borscht"},
+        "overlay_title_style": {"title_color": "#c72638", "top_margin_ratio": 0.15},
+        "series_title_by_lang": {"ru": "Супы у бабушки", "en": "Grandma's Soups"},
+        "series_counter_by_lang": {"ru": "день 2 из 7", "en": "day 2 of 7"},
+    }
+
+    monkeypatch.setattr(handlers_state_media, "build_post_production", _fake_build)
+    monkeypatch.setattr(handlers_state_media, "persist_post_production_artifacts", lambda _session, _post: None)
+    monkeypatch.setattr(
+        handlers_state_media,
+        "advance_series_after_successful_render",
+        lambda session: advanced.append(session),
+    )
+
+    out = asyncio.run(
+        handlers_state_media._build_post_production_with_retries(
+            update,
+            session=session,
+            production=production,
+            scenes=[{"scene": 1}],
+        )
+    )
+
+    assert out == {"ok": True}
+    assert captured["project_slug"] == "grandma_kitchen"
+    assert captured["overlay_title_by_lang"] == {"ru": "Борщ", "en": "Borscht"}
+    assert captured["overlay_title_style"] == {"title_color": "#c72638", "top_margin_ratio": 0.15}
+    assert captured["overlay_series_title_by_lang"] == {"ru": "Супы у бабушки", "en": "Grandma's Soups"}
+    assert captured["overlay_series_counter_by_lang"] == {"ru": "день 2 из 7", "en": "day 2 of 7"}
+    assert advanced == [session]
+
+
 def test_finish_scene_media_production_hides_raw_timeout_after_retries(monkeypatch):
     raw = """
     {
@@ -3204,7 +3494,7 @@ def test_finish_scene_media_production_hides_raw_timeout_after_retries(monkeypat
     assert not any("Timed out" in m for m in messages)
 
 
-def test_finish_scene_media_production_handles_final_video_too_large(monkeypatch):
+def test_finish_scene_media_production_sends_final_videos_as_documents(monkeypatch):
     raw = """
     {
       "youtube_ru_title": "Драники как у бабушки",
@@ -3218,9 +3508,17 @@ def test_finish_scene_media_production_handles_final_video_too_large(monkeypatch
                     "video_b64": _encode_b64(b"large-clean"),
                     "video_path": "/tmp/final_clean_master_ru.mp4",
                 },
+                "upscaled_4k": {
+                    "video_b64": _encode_b64(b"large-4k"),
+                    "video_path": "/tmp/final_upscaled_4k_master_ru.mp4",
+                },
                 "subtitled_music": {
                     "video_b64": _encode_b64(b"large-subtitled"),
                     "video_path": "/tmp/final_subtitled_music_master_ru.mp4",
+                },
+                "titled_subtitled_music": {
+                    "video_b64": _encode_b64(b"large-titled"),
+                    "video_path": "/tmp/final_titled_subtitled_music_master_ru.mp4",
                 },
             }
         }
@@ -3228,11 +3526,6 @@ def test_finish_scene_media_production_handles_final_video_too_large(monkeypatch
 
     monkeypatch.setattr(handlers_state_media, "gemini_generate_sync", lambda _prompt: raw)
     monkeypatch.setattr(handlers_state_media, "build_post_production", lambda *_args, **_kwargs: post)
-
-    async def _too_large(*_args, **_kwargs):
-        raise handlers_state_media.NetworkError("Request Entity Too Large")
-
-    monkeypatch.setattr(handlers_state_media, "_safe_reply_video", _too_large)
 
     messages: list[str] = []
     documents: list[tuple[bytes, str, str]] = []
@@ -3259,10 +3552,18 @@ def test_finish_scene_media_production_handles_final_video_too_large(monkeypatch
     saved_post = session["production"]["post_production"]
     assert "video_b64" not in str(saved_post)
     assert saved_post["renders_by_language"]["ru"]["clean"]["video_path"] == "/tmp/final_clean_master_ru.mp4"
-    assert [payload for payload, _name, _caption in documents] == [b"large-clean", b"large-subtitled"]
+    assert saved_post["renders_by_language"]["ru"]["upscaled_4k"]["video_path"] == "/tmp/final_upscaled_4k_master_ru.mp4"
+    assert [payload for payload, _name, _caption in documents] == [
+        b"large-clean",
+        b"large-4k",
+        b"large-subtitled",
+        b"large-titled",
+    ]
     assert documents[0][1] == "final_clean_master_ru.mp4"
-    assert documents[1][1] == "final_subtitled_music_master_ru.mp4"
-    assert all("Telegram не принял video payload" in caption for _payload, _name, caption in documents)
+    assert documents[1][1] == "final_upscaled_4k_master_ru.mp4"
+    assert documents[2][1] == "final_subtitled_music_master_ru.mp4"
+    assert documents[3][1] == "final_titled_subtitled_music_master_ru.mp4"
+    assert all("сохранить качество без Telegram video-compression" in caption for _payload, _name, caption in documents)
     assert not any("Финальную сборку ролика пока не удалось завершить" in m for m in messages)
 
 
@@ -3912,6 +4213,50 @@ def test_scene_media_video_ok_preserves_partial_syntax_batch_and_retries_missing
     assert any("Автоматически в Vertex не ухожу" in text for text in messages)
 
 
+def test_attempt_syntax_video_fallback_batch_discards_duplicate_language_payloads(monkeypatch):
+    def _fake_batch(**_kwargs):
+        return {
+            "ru": FallbackResult(
+                success=True,
+                video_bytes=b"same-video",
+                video_uri=None,
+                provider_message="ok",
+                attempt_id="ru-attempt",
+            ),
+            "en": FallbackResult(
+                success=True,
+                video_bytes=b"same-video",
+                video_uri=None,
+                provider_message="ok",
+                attempt_id="en-attempt",
+            ),
+        }
+
+    monkeypatch.setattr(handlers_media_core, "_syntax_fallback_env_enabled", lambda: True)
+    monkeypatch.setattr(handlers_media_core, "try_generate_via_syntax_batch", _fake_batch)
+
+    out = asyncio.run(
+        handlers_media_core._attempt_syntax_video_fallback_batch(
+            requests=[
+                handlers_media_core.BatchFallbackRequest(
+                    key="ru",
+                    prompt="lang:ru prompt",
+                    start_image=b"start",
+                ),
+                handlers_media_core.BatchFallbackRequest(
+                    key="en",
+                    prompt="lang:en prompt",
+                    start_image=b"start",
+                ),
+            ],
+            model="veo3_fast",
+            duration_sec=6,
+        )
+    )
+
+    assert out == {"ru": b"same-video"}
+
+
 def test_handle_scene_video_provider_choice_pending_batch_syntax_retries_all_languages(monkeypatch):
     batch_requests_seen: list[str] = []
     captions: list[str] = []
@@ -4157,6 +4502,13 @@ def test_scene_media_keyboard_snapshot_covers_each_visible_state(monkeypatch):
             _session(
                 {},
                 scene_image_edit_pending={"scene_idx": 0, "target": "start"},
+            ),
+        ),
+        (
+            "scene_media.input.reference_images",
+            _session(
+                {},
+                scene_image_reference_pending={"scene_idx": 0, "target": "start"},
             ),
         ),
         (

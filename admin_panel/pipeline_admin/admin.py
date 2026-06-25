@@ -1,23 +1,87 @@
 from __future__ import annotations
 
 import base64
+import copy
+from datetime import timedelta
+import mimetypes
+import os
+from pathlib import Path
+import subprocess
+import sys
+import threading
+from typing import Any
+from urllib.parse import quote, unquote, urlparse
 
-from django.contrib import admin
-from django.http import Http404, HttpResponse
-from django.urls import path, reverse
+from django import forms as django_forms
+from django.contrib import admin, messages
+from django.db import close_old_connections, connection, transaction
+from django.http import FileResponse, Http404, HttpResponse, HttpResponseRedirect, StreamingHttpResponse
+from django.middleware.csrf import get_token
+from django.urls import NoReverseMatch, path, reverse
+from django.utils import timezone
+from django.utils.dateparse import parse_datetime
 from django.utils.html import escape, format_html
 from django.utils.safestring import mark_safe
+
+from app.artifact_store import persist_post_production_artifacts
+from app.db import SessionLocal
+from app.post_production import (
+    build_post_production,
+    build_subtitled_post_production_from_upscaled_master,
+    build_titled_post_production_from_subtitled_master,
+    build_upscaled_post_production_from_clean_master,
+)
+from app.publications import (
+    DEFAULT_PUBLICATION_VIDEO_VARIANT,
+    PUBLICATION_VIDEO_VARIANT_LABELS,
+    build_publication_targets,
+    publication_jobs_summary,
+    publication_target_label,
+    queue_publication_bundle,
+)
+from app.scene_media_store import rebuild_production_session, rebuild_scene_db_ids_for_session
 
 from .forms import ChatSessionAdminForm, SceneImageCandidateAdminForm, SceneVideoCandidateAdminForm
 from .models import (
     ChatSession,
+    ContentSeries,
     GenerationArtifact,
     GenerationRun,
     PipelineStepCheckpoint,
+    Project,
+    ProjectPublishAccount,
+    PublicationJob,
     Scene,
     SceneImageCandidate,
     SceneVideoCandidate,
     VideoOverview,
+)
+
+
+FINAL_VIDEO_VARIANT_LABELS = {
+    "clean": "clean",
+    "upscaled_4k": "4K upscale",
+    "subtitled_music": "subtitled/music",
+    "titled_subtitled_music": "title/subtitled/music",
+}
+FINAL_VIDEO_ARTIFACT_TYPES = tuple(f"final_{key}" for key in FINAL_VIDEO_VARIANT_LABELS)
+FINAL_BUILD_STATUS_ARTIFACT_TYPE = "final_build_status"
+FINAL_BUILD_ACTIVE_STATUSES = {"pending", "running"}
+FINAL_BUILD_STALE_AFTER = timedelta(minutes=30)
+FINAL_BUILD_HEARTBEAT_INTERVAL_SEC = 15
+FINAL_BUILD_WORKER_KICK_DEBOUNCE_SEC = 10
+_FINAL_BUILD_WORKER_KICKED_AT_BY_RUN: dict[str, Any] = {}
+SOCIAL_COPY_FIELD_LABELS = (
+    ("youtube_ru_title", "YouTube Shorts RU title"),
+    ("youtube_ru_description", "YouTube Shorts RU description"),
+    ("rutube_ru_title", "RuTube RU title"),
+    ("rutube_ru_description", "RuTube RU description"),
+    ("instagram_ru", "Instagram RU description"),
+    ("vk_ru", "VK RU description"),
+    ("tiktok_ru", "TikTok RU description"),
+    ("instagram_en", "Instagram EN description"),
+    ("youtube_en_title", "YouTube Shorts EN title"),
+    ("youtube_en_description", "YouTube Shorts EN description"),
 )
 
 
@@ -89,6 +153,105 @@ def _artifact_link(uri: str, label: str | None = None) -> str:
     return raw
 
 
+def _artifact_media_url(obj: GenerationArtifact) -> str:
+    pk = getattr(obj, "pk", None)
+    if not pk:
+        return ""
+    try:
+        return reverse("admin:pipeline_admin_generationartifact_media", args=[pk])
+    except NoReverseMatch:
+        return f"/admin/pipeline_admin/generationartifact/{pk}/media/"
+
+
+def _generation_artifact_link(obj: GenerationArtifact, label: str | None = None) -> str:
+    raw = str(obj.uri or "")
+    text = label or raw
+    if raw.startswith(("file://", "db://scene_image_candidates/", "db://scene_video_candidates/")):
+        media_url = _artifact_media_url(obj)
+        if media_url:
+            return format_html('<a href="{}" target="_blank" rel="noopener">{}</a>', media_url, text)
+    return _artifact_link(raw, text)
+
+
+def _artifact_local_path(obj: GenerationArtifact) -> Path | None:
+    raw = str(obj.uri or "").strip()
+    if raw.startswith("file://"):
+        parsed = urlparse(raw)
+        return Path(unquote(parsed.path))
+    return None
+
+
+def _artifact_finder_link(obj: GenerationArtifact | None) -> str:
+    if obj is None:
+        return ""
+    path_obj = _artifact_local_path(obj)
+    if path_obj is None:
+        return ""
+    folder = path_obj.parent
+    folder_uri = folder.as_uri() if folder.is_absolute() else f"file://{quote(str(folder), safe='/')}"
+    return format_html(
+        '<a href="{}" target="_blank" rel="noopener" title="{}">open folder in Finder</a>',
+        folder_uri,
+        str(folder),
+    )
+
+
+def _parse_http_range(range_header: str, file_size: int) -> tuple[int, int] | None:
+    raw = str(range_header or "").strip()
+    if not raw.startswith("bytes=") or file_size <= 0:
+        return None
+    spec = raw.removeprefix("bytes=").split(",", 1)[0].strip()
+    if "-" not in spec:
+        return None
+    start_raw, end_raw = spec.split("-", 1)
+    try:
+        if start_raw == "":
+            suffix = int(end_raw)
+            if suffix <= 0:
+                return None
+            start = max(0, file_size - suffix)
+            end = file_size - 1
+        else:
+            start = int(start_raw)
+            end = int(end_raw) if end_raw else file_size - 1
+    except ValueError:
+        return None
+    if start < 0 or start >= file_size or end < start:
+        return None
+    return start, min(end, file_size - 1)
+
+
+def _iter_file_range(path_obj: Path, start: int, end: int, chunk_size: int = 1024 * 1024):
+    with path_obj.open("rb") as handle:
+        handle.seek(start)
+        remaining = end - start + 1
+        while remaining > 0:
+            chunk = handle.read(min(chunk_size, remaining))
+            if not chunk:
+                break
+            remaining -= len(chunk)
+            yield chunk
+
+
+def _local_file_response(path_obj: Path, *, content_type: str, request) -> HttpResponse:
+    file_size = path_obj.stat().st_size
+    range_pair = _parse_http_range(request.headers.get("Range", ""), file_size)
+    if range_pair is None:
+        response = FileResponse(path_obj.open("rb"), content_type=content_type, filename=path_obj.name)
+        response["Accept-Ranges"] = "bytes"
+        return response
+    start, end = range_pair
+    response = StreamingHttpResponse(
+        _iter_file_range(path_obj, start, end),
+        status=206,
+        content_type=content_type,
+    )
+    response["Accept-Ranges"] = "bytes"
+    response["Content-Length"] = str(end - start + 1)
+    response["Content-Range"] = f"bytes {start}-{end}/{file_size}"
+    return response
+
+
 def _image_preview(obj: SceneImageCandidate | None, *, large: bool = True) -> str:
     if obj is None:
         return ""
@@ -129,6 +292,1640 @@ def _video_preview(obj: SceneVideoCandidate | None) -> str:
     )
 
 
+def _status_badge(value: bool, true_label: str = "approved", false_label: str = "not approved") -> str:
+    color = "#1f8f3a" if value else "#b42318"
+    background = "#e7f6ec" if value else "#fdeaea"
+    label = true_label if value else false_label
+    return format_html(
+        '<span style="display:inline-block;padding:2px 7px;border-radius:10px;background:{};color:{};font-weight:600;">{}</span>',
+        background,
+        color,
+        label,
+    )
+
+
+INLINE_MEDIA_JSON_KEYS = {"image_b64", "video_b64"}
+
+
+def _is_inline_media_json_key(key: Any) -> bool:
+    text = str(key)
+    return text in INLINE_MEDIA_JSON_KEYS or text.endswith("_image_b64") or text.endswith("_video_b64")
+
+
+def _strip_inline_media_payloads(value: Any):
+    if isinstance(value, dict):
+        return {
+            str(key): _strip_inline_media_payloads(item)
+            for key, item in value.items()
+            if not _is_inline_media_json_key(key)
+        }
+    if isinstance(value, list):
+        return [_strip_inline_media_payloads(item) for item in value]
+    return value
+
+
+def _title_from_run(run: GenerationRun) -> str:
+    return " ".join(str(run.human_title or "").split())
+
+
+def _default_overlay_title(run: GenerationRun) -> dict[str, str]:
+    title = _title_from_run(run)
+    return {"ru": title, "en": title} if title else {}
+
+
+def _overlay_series_title_for_admin_render(
+    run: GenerationRun,
+    session: dict[str, Any],
+    production: dict[str, Any],
+) -> dict[str, str]:
+    for source in (production, session):
+        value = source.get("series_title_by_lang") if isinstance(source, dict) else None
+        if isinstance(value, dict) and any(str(item or "").strip() for item in value.values()):
+            return {str(key): str(item) for key, item in value.items() if str(item or "").strip()}
+    series = getattr(run, "series", None)
+    if series is None:
+        return {}
+    title_ru = " ".join(str(getattr(series, "title_ru", "") or "").split())
+    title_en = " ".join(str(getattr(series, "title_en", "") or "").split())
+    return {key: value for key, value in {"ru": title_ru, "en": title_en}.items() if value}
+
+
+def _overlay_series_counter_for_admin_render(
+    run: GenerationRun,
+    session: dict[str, Any],
+    production: dict[str, Any],
+) -> dict[str, str]:
+    for source in (production, session):
+        value = source.get("series_counter_by_lang") if isinstance(source, dict) else None
+        if isinstance(value, dict) and any(str(item or "").strip() for item in value.values()):
+            return {str(key): str(item) for key, item in value.items() if str(item or "").strip()}
+    series = getattr(run, "series", None)
+    index = getattr(run, "series_video_index", None) or (
+        getattr(series, "current_video_index", None) if series is not None else None
+    )
+    total = getattr(run, "series_total_videos", None) or (
+        getattr(series, "total_videos", None) if series is not None else None
+    )
+    if not index or not total:
+        return {}
+    return {"ru": f"день {int(index)} из {int(total)}", "en": f"day {int(index)} of {int(total)}"}
+
+
+def _russian_overlay_title(value: Any) -> str:
+    if not isinstance(value, dict):
+        return ""
+    direct = value.get("ru")
+    if not isinstance(direct, str):
+        direct = next(
+            (
+                item
+                for key, item in value.items()
+                if str(key or "").strip().lower().replace("_", "-").startswith("ru")
+            ),
+            "",
+        )
+    return " ".join(str(direct or "").split())
+
+
+def _scene_db_ids_for_run(run_id) -> dict[int, str]:
+    rows = Scene.objects.filter(run_id=run_id).order_by("scene_order")
+    return {idx: str(row.id) for idx, row in enumerate(rows)}
+
+
+def _production_scenes_from_db(run: GenerationRun) -> list[dict[str, Any]]:
+    scenes = list(Scene.objects.filter(run_id=run.id).order_by("scene_order"))
+    scene_ids = [scene.id for scene in scenes]
+    videos_by_scene: dict[str, list[SceneVideoCandidate]] = {str(scene_id): [] for scene_id in scene_ids}
+    for row in SceneVideoCandidate.objects.filter(scene_id__in=scene_ids).order_by("created_at", "candidate_id"):
+        videos_by_scene.setdefault(str(row.scene_id), []).append(row)
+
+    out: list[dict[str, Any]] = []
+    for scene in scenes:
+        by_lang: dict[str, list[dict[str, Any]]] = {}
+        for row in videos_by_scene.get(str(scene.id), []):
+            lang = str(row.language or "ru").strip().lower() or "ru"
+            by_lang.setdefault(lang, []).append(
+                {
+                    "candidate_id": row.candidate_id,
+                    "language": lang,
+                    "video_b64": base64.b64encode(bytes(row.video_blob)).decode("ascii"),
+                    "created_at": row.created_at.isoformat() if row.created_at else "",
+                    "liked": bool(row.liked),
+                    "approved_for_production": bool(row.approved_for_production),
+                    "speed_coef": float(row.speed_coef),
+                    "source_image_candidate_id": row.source_image_candidate_id,
+                }
+            )
+        out.append(
+            {
+                "scene": int(scene.scene_order),
+                "text": scene.text,
+                "duration_sec": float(scene.duration_sec),
+                "speech_by_lang": {},
+                "video_candidates_by_lang": by_lang,
+            }
+        )
+    return out
+
+
+def _checkpoint_session_for_admin_render(run: GenerationRun) -> dict[str, Any]:
+    checkpoints = PipelineStepCheckpoint.objects.filter(generation_run_id=run.id).order_by("-created_at")
+    for checkpoint in checkpoints:
+        snapshot = checkpoint.session_snapshot_json
+        if isinstance(snapshot, dict) and snapshot:
+            return copy.deepcopy(snapshot)
+    return {}
+
+
+def _run_session_for_admin_render(run: GenerationRun) -> tuple[ChatSession | None, dict[str, Any], dict[str, Any]]:
+    chat_session = ChatSession.objects.filter(generation_run_id=run.id).order_by("-updated_at").first()
+    if chat_session is not None:
+        session = copy.deepcopy(chat_session.session_json or {})
+    else:
+        session = _checkpoint_session_for_admin_render(run)
+    session["generation_run_id"] = str(run.id)
+    if not isinstance(session.get("scene_db_ids_by_index"), dict) or not session["scene_db_ids_by_index"]:
+        session["scene_db_ids_by_index"] = rebuild_scene_db_ids_for_session(
+            session,
+            str(run.id),
+        ) or _scene_db_ids_for_run(run.id)
+
+    production = session.get("production")
+    if not isinstance(production, dict):
+        production = {}
+    if not isinstance(production.get("json_plan"), list) or not production["json_plan"]:
+        production["json_plan"] = _production_scenes_from_db(run)
+    session["production"] = production
+    rebuild_production_session(session, str(run.id))
+    production = session.get("production") if isinstance(session.get("production"), dict) else production
+    return chat_session, session, production
+
+
+def _overlay_title_for_admin_render(
+    run: GenerationRun,
+    session: dict[str, Any],
+    production: dict[str, Any],
+) -> dict[str, Any]:
+    title = _title_overlay_by_lang_from_post_sources(session, production)
+    for source in (production, session):
+        value = source.get("overlay_title_by_lang") if isinstance(source, dict) else None
+        if isinstance(value, dict) and any(str(item or "").strip() for item in value.values()):
+            source_title = {str(key): str(item) for key, item in value.items() if str(item or "").strip()}
+            if _looks_like_default_overlay_title(source_title, run) and title:
+                return title
+            title.update(source_title)
+    return title or _default_overlay_title(run)
+
+
+def _post_production_sources(session: dict[str, Any], production: dict[str, Any]):
+    for source in (production, session, session.get("production") if isinstance(session, dict) else None):
+        post = source.get("post_production") if isinstance(source, dict) else None
+        if isinstance(post, dict):
+            yield post
+
+
+def _title_overlay_by_lang_from_post_sources(
+    session: dict[str, Any],
+    production: dict[str, Any],
+) -> dict[str, str]:
+    recovered: dict[str, str] = {}
+    for post in _post_production_sources(session, production):
+        by_language = post.get("title_overlay_by_language")
+        if not isinstance(by_language, dict):
+            continue
+        for language, payload in by_language.items():
+            if isinstance(payload, dict):
+                raw = payload.get("title")
+            else:
+                raw = payload
+            title = " ".join(str(raw or "").split())
+            if title:
+                recovered[str(language).strip().lower() or "ru"] = title
+    return recovered
+
+
+def _looks_like_default_overlay_title(value: dict[str, Any], run: GenerationRun) -> bool:
+    default = _title_from_run(run)
+    if not default or not value:
+        return False
+    titles = {" ".join(str(item or "").split()) for item in value.values() if str(item or "").strip()}
+    return bool(titles) and titles == {default}
+
+
+def _project_slug_for_admin_render(run: GenerationRun, session: dict[str, Any]) -> str | None:
+    raw = str(session.get("selected_project_key") or "").strip()
+    if raw:
+        return raw
+    return None
+
+
+def _overlay_title_style_for_admin_render(session: dict[str, Any], production: dict[str, Any]) -> dict[str, Any]:
+    style: dict[str, Any] = {}
+    for post in _post_production_sources(session, production):
+        value = post.get("title_overlay_style")
+        if isinstance(value, dict):
+            style.update(copy.deepcopy(value))
+    for source in (session, production):
+        value = source.get("overlay_title_style") if isinstance(source, dict) else None
+        if isinstance(value, dict):
+            style.update(copy.deepcopy(value))
+    raw_top = style.get("top_margin_ratio")
+    try:
+        top = float(raw_top)
+    except (TypeError, ValueError):
+        top = None
+    if top is None or abs(top - 0.15) < 0.000001:
+        style["top_margin_ratio"] = 0.05
+    return style
+
+
+def _merge_post_production(existing: Any, update: dict[str, Any]) -> dict[str, Any]:
+    merged = copy.deepcopy(existing) if isinstance(existing, dict) else {}
+    for key, value in update.items():
+        if key in {"renders_by_language", "subtitle_entries_by_language", "title_overlay_by_language",
+                   "series_overlay_by_language", "speech_budget_by_language", "original_audio_preserved_by_language"}:
+            current = merged.get(key)
+            if not isinstance(current, dict):
+                current = {}
+            if isinstance(value, dict):
+                for language, payload in value.items():
+                    if isinstance(payload, dict) and isinstance(current.get(language), dict):
+                        current[language].update(payload)
+                    else:
+                        current[language] = copy.deepcopy(payload)
+            merged[key] = current
+            continue
+        if value not in (None, {}, []):
+            merged[key] = copy.deepcopy(value)
+    return merged
+
+
+def _build_final_videos_for_run(
+    run: GenerationRun,
+    *,
+    target_language: str | None = None,
+    target_variant: str | None = None,
+    target_variants: list[str] | tuple[str, ...] | set[str] | None = None,
+    progress_callback: Any | None = None,
+    source_clean_video_path: str | Path | None = None,
+    source_upscaled_video_path: str | Path | None = None,
+    source_subtitled_video_path: str | Path | None = None,
+) -> dict[str, Any]:
+    chat_session, session, production = _run_session_for_admin_render(run)
+    scenes = production.get("json_plan") if isinstance(production, dict) else None
+    if not isinstance(scenes, list) or not scenes:
+        raise RuntimeError("No production scenes are available for this run.")
+
+    overlay_title_by_lang = _overlay_title_for_admin_render(run, session, production)
+    if not overlay_title_by_lang:
+        raise RuntimeError("Set human_title or overlay_title_by_lang before rendering the titled final master.")
+    overlay_title_style = _overlay_title_style_for_admin_render(session, production)
+    overlay_series_title_by_lang = _overlay_series_title_for_admin_render(run, session, production)
+    overlay_series_counter_by_lang = _overlay_series_counter_for_admin_render(run, session, production)
+
+    requested_variants = list(target_variants) if target_variants else ([target_variant] if target_variant else None)
+    project_slug = _project_slug_for_admin_render(run, session)
+    if (
+        source_clean_video_path
+        and target_language
+        and requested_variants == ["upscaled_4k"]
+    ):
+        post = build_upscaled_post_production_from_clean_master(
+            clean_video_path=source_clean_video_path,
+            language=target_language,
+            project_slug=project_slug,
+            progress_callback=progress_callback,
+        )
+    elif (
+        source_upscaled_video_path
+        and target_language
+        and requested_variants == ["subtitled_music"]
+    ):
+        post = build_subtitled_post_production_from_upscaled_master(
+            scenes,
+            upscaled_video_path=source_upscaled_video_path,
+            language=target_language,
+            project_slug=project_slug,
+            progress_callback=progress_callback,
+        )
+    elif (
+        source_subtitled_video_path
+        and target_language
+        and requested_variants == ["titled_subtitled_music"]
+    ):
+        post = build_titled_post_production_from_subtitled_master(
+            scenes,
+            subtitled_video_path=source_subtitled_video_path,
+            language=target_language,
+            project_slug=project_slug,
+            overlay_title_by_lang=overlay_title_by_lang,
+            overlay_title_style=overlay_title_style,
+            overlay_series_title_by_lang=overlay_series_title_by_lang,
+            overlay_series_counter_by_lang=overlay_series_counter_by_lang,
+            progress_callback=progress_callback,
+        )
+    else:
+        post = build_post_production(
+            scenes,
+            project_slug=project_slug,
+            overlay_title_by_lang=overlay_title_by_lang,
+            overlay_title_style=overlay_title_style,
+            overlay_series_title_by_lang=overlay_series_title_by_lang,
+            overlay_series_counter_by_lang=overlay_series_counter_by_lang,
+            target_languages=[target_language] if target_language else None,
+            target_variants=requested_variants,
+            progress_callback=progress_callback,
+        )
+    production["overlay_title_by_lang"] = overlay_title_by_lang
+    ru_title = _russian_overlay_title(overlay_title_by_lang)
+    if ru_title:
+        run.human_title = ru_title
+        run.save(update_fields=["human_title"])
+    if overlay_title_style:
+        production["overlay_title_style"] = overlay_title_style
+    if overlay_series_title_by_lang:
+        production["series_title_by_lang"] = overlay_series_title_by_lang
+    if overlay_series_counter_by_lang:
+        production["series_counter_by_lang"] = overlay_series_counter_by_lang
+    production["post_production"] = _strip_inline_media_payloads(
+        _merge_post_production(production.get("post_production"), post)
+    )
+    session["production"] = production
+    session["overlay_title_by_lang"] = overlay_title_by_lang
+    if overlay_title_style:
+        session["overlay_title_style"] = overlay_title_style
+    persist_post_production_artifacts(session, post)
+
+    if chat_session is not None:
+        chat_session.session_json = _strip_inline_media_payloads(session)
+        chat_session.generation_run_id = run.id
+        chat_session.updated_at = timezone.now()
+        chat_session.save(update_fields=["session_json", "generation_run_id", "updated_at"])
+    return post
+
+
+def _final_build_status_uri(run_id: Any, language: str, variant: str) -> str:
+    return f"admin://final-build/{run_id}/{language}/{variant}"
+
+
+def _final_build_status_label(language: str, variant: str) -> str:
+    return f"Final build status {FINAL_VIDEO_VARIANT_LABELS.get(variant, variant)} ({language})"
+
+
+def _set_final_build_status(
+    run: GenerationRun,
+    *,
+    language: str,
+    variant: str,
+    status: str,
+    message: str = "",
+    artifact_id: str | None = None,
+    extra_payload: dict[str, Any] | None = None,
+) -> GenerationArtifact:
+    now = timezone.now()
+    uri = _final_build_status_uri(run.id, language, variant)
+    row = (
+        GenerationArtifact.objects.filter(
+            run_id=run.id,
+            artifact_type=FINAL_BUILD_STATUS_ARTIFACT_TYPE,
+            uri=uri,
+            language=language,
+        )
+        .order_by("-created_at")
+        .first()
+    )
+    payload = dict(row.payload_json) if row is not None and isinstance(row.payload_json, dict) else {}
+    payload.update(
+        {
+            "status": status,
+            "language": language,
+            "variant": variant,
+            "message": str(message or "")[:4000],
+            "updated_at": now.isoformat(),
+        }
+    )
+    if status == "pending":
+        payload["enqueued_at"] = now.isoformat()
+        payload.pop("started_at", None)
+        payload.pop("finished_at", None)
+        payload.pop("heartbeat_at", None)
+        payload.pop("worker_id", None)
+        payload.pop("artifact_id", None)
+        payload["progress"] = _final_build_progress_payload("queued", "Queued for final_build_worker", percent=5)
+    elif status == "running":
+        payload.setdefault("started_at", now.isoformat())
+        payload["heartbeat_at"] = now.isoformat()
+        payload.pop("finished_at", None)
+        payload.pop("artifact_id", None)
+        payload.setdefault(
+            "progress",
+            _final_build_progress_payload("running", "Building final video", percent=50),
+        )
+    elif status in {"success", "failed"}:
+        payload["finished_at"] = now.isoformat()
+        payload.pop("heartbeat_at", None)
+        payload["progress"] = _final_build_progress_payload(status, status, percent=100)
+    if artifact_id:
+        payload["artifact_id"] = artifact_id
+    if extra_payload:
+        payload.update({key: value for key, value in extra_payload.items() if value is not None})
+    if row is None:
+        row = GenerationArtifact(
+            run_id=run.id,
+            scene_id=None,
+            artifact_type=FINAL_BUILD_STATUS_ARTIFACT_TYPE,
+            label=_final_build_status_label(language, variant),
+            uri=uri,
+            language=language,
+            mime_type="application/json",
+            payload_json=payload,
+            created_at=now,
+        )
+        row.save(force_insert=True)
+    else:
+        row.label = _final_build_status_label(language, variant)
+        row.mime_type = "application/json"
+        row.payload_json = payload
+        row.save(update_fields=["label", "mime_type", "payload_json"])
+    return row
+
+
+def _latest_final_build_statuses(run_id: Any) -> dict[tuple[str, str], dict[str, Any]]:
+    rows = GenerationArtifact.objects.filter(
+        run_id=run_id,
+        artifact_type=FINAL_BUILD_STATUS_ARTIFACT_TYPE,
+    ).order_by("-created_at")
+    out: dict[tuple[str, str], dict[str, Any]] = {}
+    for row in rows:
+        payload = row.payload_json if isinstance(row.payload_json, dict) else {}
+        language = str(payload.get("language") or row.language or "").strip().lower()
+        variant = str(payload.get("variant") or "").strip()
+        if not language or not variant or (language, variant) in out:
+            continue
+        out[(language, variant)] = dict(payload)
+    return out
+
+
+def _final_build_updated_at(status: dict[str, Any]) -> Any:
+    raw = status.get("updated_at") if isinstance(status, dict) else None
+    if not raw:
+        return None
+    parsed = parse_datetime(str(raw))
+    if parsed is None:
+        return None
+    if timezone.is_naive(parsed):
+        parsed = timezone.make_aware(parsed, timezone.get_current_timezone())
+    return parsed
+
+
+def _final_build_time_value(status: dict[str, Any], key: str) -> Any:
+    raw = status.get(key) if isinstance(status, dict) else None
+    if not raw:
+        return None
+    parsed = parse_datetime(str(raw))
+    if parsed is None:
+        return None
+    if timezone.is_naive(parsed):
+        parsed = timezone.make_aware(parsed, timezone.get_current_timezone())
+    return parsed
+
+
+def _final_build_activity_at(status: dict[str, Any]) -> Any:
+    return _final_build_time_value(status, "heartbeat_at") or _final_build_time_value(status, "updated_at")
+
+
+def _final_build_status_is_stale(status: dict[str, Any]) -> bool:
+    state = str((status or {}).get("status") or "").strip().lower()
+    if state not in FINAL_BUILD_ACTIVE_STATUSES:
+        return False
+    if state == "running" and not status.get("heartbeat_at") and not status.get("worker_id"):
+        return True
+    activity_at = _final_build_activity_at(status or {})
+    if activity_at is None:
+        return False
+    return timezone.now() - activity_at > FINAL_BUILD_STALE_AFTER
+
+
+def _final_build_progress_payload(step: str, label: str, **extra: Any) -> dict[str, Any]:
+    payload = {"step": step, "label": label}
+    payload.update({key: value for key, value in extra.items() if value is not None})
+    return payload
+
+
+FINAL_BUILD_VARIANT_STAGE_PROGRESS: dict[str, dict[str, tuple[int, str]]] = {
+    "clean": {
+        "normalizing": (12, "Preparing scene clips"),
+        "clean_building": (35, "Building clean master"),
+        "clean_ready": (72, "Clean master ready"),
+        "upscale_building": (82, "Clean master ready; 4K is running"),
+        "upscale_ready": (84, "Clean master ready; 4K master ready"),
+        "subtitles_building": (86, "Clean master ready; subtitles/music is running"),
+        "subtitles_ready": (88, "Clean master ready; subtitles/music ready"),
+        "title_building": (90, "Clean master ready; title overlay is running"),
+        "title_ready": (92, "Clean master ready; title overlay ready"),
+        "persisting": (96, "Saving clean artifact"),
+    },
+    "upscaled_4k": {
+        "normalizing": (8, "Waiting for clean master"),
+        "clean_building": (14, "Waiting for clean master"),
+        "clean_ready": (28, "Clean master ready; waiting for 4K upscale"),
+        "reuse_clean": (34, "Using existing clean master"),
+        "upscale_building": (52, "Upscaling to 4K"),
+        "upscale_ready": (78, "4K master ready"),
+        "subtitles_building": (82, "4K master ready; subtitles/music is running"),
+        "subtitles_ready": (86, "4K master ready; subtitles/music ready"),
+        "title_building": (88, "4K master ready; title overlay is running"),
+        "title_ready": (90, "4K master ready; title overlay ready"),
+        "persisting": (96, "Saving 4K artifact"),
+    },
+    "subtitled_music": {
+        "normalizing": (6, "Waiting for clean and 4K masters"),
+        "clean_building": (10, "Waiting for clean master"),
+        "clean_ready": (20, "Clean master ready; waiting for 4K"),
+        "upscale_building": (32, "Waiting for 4K upscale"),
+        "upscale_ready": (48, "4K master ready; preparing subtitles/music"),
+        "reuse_upscaled": (52, "Using existing 4K master"),
+        "subtitles_building": (68, "Rendering subtitles and music"),
+        "subtitles_ready": (88, "Subtitled/music master ready"),
+        "title_building": (90, "Subtitled/music ready; title overlay is running"),
+        "title_ready": (92, "Subtitled/music ready; title overlay ready"),
+        "persisting": (96, "Saving subtitled/music artifact"),
+    },
+    "titled_subtitled_music": {
+        "normalizing": (4, "Waiting for clean, 4K, subtitles, and title overlay"),
+        "clean_building": (8, "Waiting for clean master"),
+        "clean_ready": (16, "Clean master ready; waiting for 4K"),
+        "upscale_building": (26, "Waiting for 4K upscale"),
+        "upscale_ready": (42, "4K master ready; waiting for subtitles/music"),
+        "subtitles_building": (58, "Waiting for subtitled/music master"),
+        "subtitles_ready": (74, "Subtitled/music ready; waiting for title overlay"),
+        "reuse_subtitled": (80, "Using existing subtitled/music master"),
+        "title_building": (88, "Burning title overlay"),
+        "title_ready": (94, "Title overlay master ready"),
+        "persisting": (97, "Saving title/subtitled/music artifact"),
+    },
+}
+
+
+def _final_build_stage_progress(stage: str, variant: str) -> dict[str, Any]:
+    normalized_stage = str(stage or "").strip()
+    normalized_variant = str(variant or "").strip()
+    percent, label = FINAL_BUILD_VARIANT_STAGE_PROGRESS.get(normalized_variant, {}).get(
+        normalized_stage,
+        (50, "Building final video"),
+    )
+    return _final_build_progress_payload(
+        normalized_stage or "building",
+        label,
+        percent=percent,
+    )
+
+
+def _initial_final_build_progress(variant: str) -> dict[str, Any]:
+    return _final_build_stage_progress("normalizing", variant)
+
+
+def _final_build_required_variants(variants: list[str] | tuple[str, ...] | set[str]) -> list[str]:
+    requested = {str(item).strip() for item in variants if str(item).strip()}
+    indexes = [index for index, variant in enumerate(FINAL_VIDEO_VARIANT_LABELS) if variant in requested]
+    if not indexes:
+        return []
+    return list(FINAL_VIDEO_VARIANT_LABELS)[: max(indexes) + 1]
+
+
+def _kick_final_build_worker(run_id: Any) -> bool:
+    run_key = str(run_id)
+    now = timezone.now()
+    last_kick = _FINAL_BUILD_WORKER_KICKED_AT_BY_RUN.get(run_key)
+    if last_kick is not None and now - last_kick < timedelta(seconds=FINAL_BUILD_WORKER_KICK_DEBOUNCE_SEC):
+        return False
+    _FINAL_BUILD_WORKER_KICKED_AT_BY_RUN[run_key] = now
+
+    project_root = Path(__file__).resolve().parents[2]
+    admin_dir = Path(__file__).resolve().parents[1]
+    log_dir = project_root / "logs"
+    log_dir.mkdir(parents=True, exist_ok=True)
+    log_path = log_dir / "final_build_worker.log"
+    worker_id = f"admin-kick-{os.getpid()}"
+    cmd = [
+        sys.executable,
+        str(admin_dir / "manage.py"),
+        "final_build_worker",
+        "--once",
+        f"--run-id={run_key}",
+        f"--worker-id={worker_id}",
+    ]
+    with log_path.open("ab", buffering=0) as log_handle:
+        subprocess.Popen(
+            cmd,
+            cwd=str(project_root),
+            stdin=subprocess.DEVNULL,
+            stdout=log_handle,
+            stderr=subprocess.STDOUT,
+            start_new_session=True,
+            close_fds=True,
+        )
+    return True
+
+
+def _latest_final_artifact(run_id: Any, language: str, variant: str) -> GenerationArtifact | None:
+    return (
+        GenerationArtifact.objects.filter(
+            run_id=run_id,
+            artifact_type=f"final_{variant}",
+            language=language,
+        )
+        .order_by("-created_at")
+        .first()
+    )
+
+
+def _heartbeat_final_build_job(run: GenerationRun, language: str, variant: str, worker_id: str, stop_event: threading.Event) -> None:
+    while not stop_event.wait(FINAL_BUILD_HEARTBEAT_INTERVAL_SEC):
+        close_old_connections()
+        try:
+            current = _latest_final_build_statuses(run.id).get((language, variant), {})
+            if str(current.get("status") or "").strip().lower() in {"success", "failed"}:
+                continue
+            _set_final_build_status(
+                run,
+                language=language,
+                variant=variant,
+                status="running",
+                extra_payload={
+                    "worker_id": worker_id,
+                },
+            )
+        finally:
+            close_old_connections()
+
+
+def _heartbeat_final_build_batch(
+    run: GenerationRun,
+    language: str,
+    variants: list[str],
+    worker_id: str,
+    stop_event: threading.Event,
+) -> None:
+    while not stop_event.wait(FINAL_BUILD_HEARTBEAT_INTERVAL_SEC):
+        close_old_connections()
+        try:
+            current_statuses = _latest_final_build_statuses(run.id)
+            for variant in variants:
+                current = current_statuses.get((language, variant), {})
+                if str(current.get("status") or "").strip().lower() in {"success", "failed"}:
+                    continue
+                _set_final_build_status(
+                    run,
+                    language=language,
+                    variant=variant,
+                    status="running",
+                    extra_payload={
+                        "worker_id": worker_id,
+                    },
+                )
+        finally:
+            close_old_connections()
+
+
+def _run_final_build_batch(
+    run_id: str,
+    language: str,
+    variants: list[str] | tuple[str, ...] | set[str],
+    *,
+    worker_id: str = "manual",
+) -> None:
+    close_old_connections()
+    normalized_variants = [
+        variant
+        for variant in FINAL_VIDEO_VARIANT_LABELS
+        if variant in {str(item).strip() for item in variants if str(item).strip()}
+    ]
+    if not normalized_variants:
+        return
+    stop_event = threading.Event()
+    heartbeat_thread: threading.Thread | None = None
+    plan_variants: list[str] = []
+    try:
+        run = GenerationRun.objects.get(id=run_id)
+        requested_variants = set(normalized_variants)
+        required_variants = _final_build_required_variants(normalized_variants)
+
+        def latest_variant_path(variant: str) -> Path | None:
+            artifact = _latest_final_artifact(run.id, language, variant)
+            path = _artifact_local_path(artifact) if artifact is not None else None
+            return path if path is not None and path.exists() else None
+
+        latest_paths: dict[str, Path | None] = {
+            variant: latest_variant_path(variant)
+            for variant in FINAL_VIDEO_VARIANT_LABELS
+        }
+        for variant in required_variants:
+            if variant in requested_variants or latest_paths.get(variant) is None:
+                plan_variants.append(variant)
+        if not plan_variants:
+            plan_variants = normalized_variants
+        current_statuses = _latest_final_build_statuses(run.id)
+        for variant in plan_variants:
+            current = current_statuses.get((language, variant), {})
+            attempts = int(current.get("attempt_count") or 0) + 1
+            _set_final_build_status(
+                run,
+                language=language,
+                variant=variant,
+                status="running",
+                extra_payload={
+                    "worker_id": worker_id,
+                    "attempt_count": attempts,
+                    "batch_variants": plan_variants,
+                    "requested_variants": normalized_variants,
+                    "progress": _initial_final_build_progress(variant),
+                },
+            )
+        heartbeat_thread = threading.Thread(
+            target=_heartbeat_final_build_batch,
+            args=(run, language, plan_variants, worker_id, stop_event),
+            daemon=True,
+            name=f"final-build-heartbeat-{run.id}-{language}-batch",
+        )
+        heartbeat_thread.start()
+
+        for active_variant in plan_variants:
+            source_clean_video_path = latest_paths.get("clean") if active_variant == "upscaled_4k" else None
+            source_upscaled_video_path = latest_paths.get("upscaled_4k") if active_variant == "subtitled_music" else None
+            source_subtitled_video_path = (
+                latest_paths.get("subtitled_music") if active_variant == "titled_subtitled_music" else None
+            )
+            if active_variant == "upscaled_4k" and source_clean_video_path is None:
+                raise RuntimeError("Cannot build 4K upscale because clean master is missing.")
+            if active_variant == "subtitled_music" and source_upscaled_video_path is None:
+                raise RuntimeError("Cannot build subtitled/music master because 4K master is missing.")
+            if active_variant == "titled_subtitled_music" and source_subtitled_video_path is None:
+                raise RuntimeError("Cannot build title/subtitled/music master because subtitled/music master is missing.")
+
+            def progress_callback(event: dict[str, Any], *, variant: str = active_variant) -> None:
+                event_language = str(event.get("language") or "").strip().lower()
+                if event_language and event_language != language:
+                    return
+                stage = str(event.get("stage") or "").strip()
+                close_old_connections()
+                try:
+                    _set_final_build_status(
+                        run,
+                        language=language,
+                        variant=variant,
+                        status="running",
+                        extra_payload={
+                            "worker_id": worker_id,
+                            "batch_variants": plan_variants,
+                            "requested_variants": normalized_variants,
+                            "progress": _final_build_stage_progress(stage, variant),
+                        },
+                    )
+                finally:
+                    close_old_connections()
+
+            _build_final_videos_for_run(
+                run,
+                target_language=language,
+                target_variants=[active_variant],
+                progress_callback=progress_callback,
+                source_clean_video_path=source_clean_video_path,
+                source_upscaled_video_path=source_upscaled_video_path,
+                source_subtitled_video_path=source_subtitled_video_path,
+            )
+            artifact = _latest_final_artifact(run.id, language, active_variant)
+            latest_paths[active_variant] = latest_variant_path(active_variant)
+            _set_final_build_status(
+                run,
+                language=language,
+                variant=active_variant,
+                status="success",
+                artifact_id=str(artifact.id) if artifact else None,
+                extra_payload={
+                    "worker_id": worker_id,
+                    "batch_variants": plan_variants,
+                    "requested_variants": normalized_variants,
+                    "progress": _final_build_progress_payload("success", "Final video built", percent=100),
+                },
+            )
+        stop_event.set()
+        if heartbeat_thread is not None:
+            heartbeat_thread.join(timeout=5)
+    except Exception as exc:
+        stop_event.set()
+        if heartbeat_thread is not None:
+            heartbeat_thread.join(timeout=5)
+        try:
+            run = GenerationRun.objects.get(id=run_id)
+            for variant in (plan_variants or normalized_variants):
+                _set_final_build_status(
+                    run,
+                    language=language,
+                    variant=variant,
+                    status="failed",
+                    message=str(exc),
+                    extra_payload={
+                        "worker_id": worker_id,
+                        "batch_variants": plan_variants or normalized_variants,
+                        "requested_variants": normalized_variants,
+                        "progress": _final_build_progress_payload("failed", "Final build failed", percent=100),
+                    },
+                )
+        except Exception:
+            pass
+    finally:
+        close_old_connections()
+
+
+def _run_final_build_job(run_id: str, language: str, variant: str, *, worker_id: str = "manual") -> None:
+    _run_final_build_batch(run_id, language, [variant], worker_id=worker_id)
+
+
+def _queue_final_build(run: GenerationRun, *, language: str, variant: str, kick_worker: bool = True) -> str:
+    normalized_language = str(language or "").strip().lower()
+    normalized_variant = str(variant or "").strip()
+    if not normalized_language:
+        raise RuntimeError("Choose a language for final render.")
+    if normalized_variant not in FINAL_VIDEO_VARIANT_LABELS:
+        raise RuntimeError(f"Unknown final render variant: {variant}")
+    current = _latest_final_build_statuses(run.id).get((normalized_language, normalized_variant), {})
+    if (
+        str(current.get("status") or "") in FINAL_BUILD_ACTIVE_STATUSES
+        and not _final_build_status_is_stale(current)
+    ):
+        return str(current.get("status"))
+    _set_final_build_status(
+        run,
+        language=normalized_language,
+        variant=normalized_variant,
+        status="pending",
+    )
+    if kick_worker:
+        _kick_final_build_worker(run.id)
+    return "pending"
+
+
+def _claim_next_final_build(worker_id: str, *, run_id: str | None = None) -> GenerationArtifact | None:
+    now = timezone.now().isoformat()
+    with transaction.atomic():
+        rows = GenerationArtifact.objects.filter(artifact_type=FINAL_BUILD_STATUS_ARTIFACT_TYPE)
+        if run_id:
+            rows = rows.filter(run_id=run_id)
+        if connection.features.has_select_for_update:
+            rows = rows.select_for_update(skip_locked=getattr(connection.features, "has_select_for_update_skip_locked", False))
+        for row in rows.order_by("created_at", "id"):
+            payload = row.payload_json if isinstance(row.payload_json, dict) else {}
+            state = str(payload.get("status") or "").strip().lower()
+            if state != "pending" and not _final_build_status_is_stale(payload):
+                continue
+            language = str(payload.get("language") or row.language or "").strip().lower()
+            variant = str(payload.get("variant") or "").strip()
+            if not language or variant not in FINAL_VIDEO_VARIANT_LABELS:
+                continue
+            run = GenerationRun.objects.get(id=row.run_id)
+            _set_final_build_status(
+                run,
+                language=language,
+                variant=variant,
+                status="running",
+                extra_payload={
+                    "claimed_at": now,
+                    "worker_id": worker_id,
+                    "progress": _final_build_progress_payload("claimed", "Claimed by final_build_worker", percent=20),
+                },
+            )
+            row.refresh_from_db()
+            return row
+    return None
+
+
+def _claim_next_final_build_batch(worker_id: str, *, run_id: str | None = None) -> list[dict[str, Any]]:
+    with transaction.atomic():
+        rows = GenerationArtifact.objects.filter(artifact_type=FINAL_BUILD_STATUS_ARTIFACT_TYPE)
+        if run_id:
+            rows = rows.filter(run_id=run_id)
+        if connection.features.has_select_for_update:
+            rows = rows.select_for_update(skip_locked=getattr(connection.features, "has_select_for_update_skip_locked", False))
+        selected_run_id = None
+        selected_language = ""
+        for row in rows.order_by("created_at", "id"):
+            payload = row.payload_json if isinstance(row.payload_json, dict) else {}
+            state = str(payload.get("status") or "").strip().lower()
+            if state != "pending" and not _final_build_status_is_stale(payload):
+                continue
+            language = str(payload.get("language") or row.language or "").strip().lower()
+            variant = str(payload.get("variant") or "").strip()
+            if not language or variant not in FINAL_VIDEO_VARIANT_LABELS:
+                continue
+            selected_run_id = row.run_id
+            selected_language = language
+            break
+        if selected_run_id is None:
+            return []
+
+        claimed: list[dict[str, Any]] = []
+        now = timezone.now().isoformat()
+        run = GenerationRun.objects.get(id=selected_run_id)
+        batch_rows = GenerationArtifact.objects.filter(
+            run_id=selected_run_id,
+            artifact_type=FINAL_BUILD_STATUS_ARTIFACT_TYPE,
+            language=selected_language,
+        ).order_by("created_at", "id")
+        if connection.features.has_select_for_update:
+            batch_rows = batch_rows.select_for_update(skip_locked=getattr(connection.features, "has_select_for_update_skip_locked", False))
+        for row in batch_rows:
+            payload = row.payload_json if isinstance(row.payload_json, dict) else {}
+            state = str(payload.get("status") or "").strip().lower()
+            if state != "pending" and not _final_build_status_is_stale(payload):
+                continue
+            variant = str(payload.get("variant") or "").strip()
+            if variant not in FINAL_VIDEO_VARIANT_LABELS:
+                continue
+            _set_final_build_status(
+                run,
+                language=selected_language,
+                variant=variant,
+                status="running",
+                extra_payload={
+                    "claimed_at": now,
+                    "worker_id": worker_id,
+                    "progress": _final_build_progress_payload(
+                        "claimed",
+                        "Claimed by final_build_worker batch",
+                        percent=20,
+                    ),
+                },
+            )
+            claimed.append(
+                {
+                    "run_id": str(selected_run_id),
+                    "language": selected_language,
+                    "variant": variant,
+                }
+            )
+    return claimed
+
+
+def _rendered_variants_summary(post: dict[str, Any]) -> str:
+    renders = post.get("renders_by_language")
+    if not isinstance(renders, dict):
+        return "no render payload"
+    parts: list[str] = []
+    for language, variants in renders.items():
+        if not isinstance(variants, dict):
+            continue
+        labels = [FINAL_VIDEO_VARIANT_LABELS.get(str(key), str(key)) for key in variants]
+        parts.append(f"{language}: {', '.join(labels)}")
+    return "; ".join(parts) or "no variants"
+
+
+class PublicationQueueAdminForm(django_forms.Form):
+    target_keys = django_forms.MultipleChoiceField(
+        required=True,
+        widget=django_forms.CheckboxSelectMultiple,
+        label="Publish targets",
+    )
+    video_variant = django_forms.ChoiceField(
+        choices=tuple((key, label) for key, label in PUBLICATION_VIDEO_VARIANT_LABELS.items()),
+        initial=DEFAULT_PUBLICATION_VIDEO_VARIANT,
+        label="Video version",
+    )
+    scheduled_at = django_forms.DateTimeField(
+        required=False,
+        input_formats=("%Y-%m-%dT%H:%M", "%Y-%m-%d %H:%M", "%Y-%m-%d %H:%M:%S"),
+        widget=django_forms.DateTimeInput(attrs={"type": "datetime-local"}),
+        label="Publication time",
+        help_text="Leave empty to publish as soon as the job is approved by the delivery flow.",
+    )
+
+    def __init__(self, *args, copy: dict[str, str], **kwargs):
+        super().__init__(*args, **kwargs)
+        targets = build_publication_targets(copy)
+        self.fields["target_keys"].choices = tuple((target.key, publication_target_label(target)) for target in targets)
+        self.fields["target_keys"].initial = [target.key for target in targets if target.description]
+        for key, label in SOCIAL_COPY_FIELD_LABELS:
+            is_title = key.endswith("_title")
+            self.fields[key] = django_forms.CharField(
+                required=False,
+                label=label,
+                initial=copy.get(key, ""),
+                widget=django_forms.Textarea(attrs={"rows": 2 if is_title else 5, "style": "width:100%;"}),
+            )
+
+    def clean(self):
+        cleaned = super().clean()
+        if not cleaned.get("target_keys"):
+            self.add_error("target_keys", "Choose at least one publish target.")
+        return cleaned
+
+    def copy_payload(self) -> dict[str, str]:
+        return {key: str(self.cleaned_data.get(key) or "") for key, _label in SOCIAL_COPY_FIELD_LABELS}
+
+
+def _latest_chat_session_for_run(run: GenerationRun) -> tuple[ChatSession | None, dict[str, Any]]:
+    row = ChatSession.objects.filter(generation_run_id=run.id).order_by("-updated_at").first()
+    session = row.session_json if row is not None and isinstance(row.session_json, dict) else {}
+    return row, session
+
+
+def _publication_copy_from_run(run: GenerationRun) -> dict[str, str]:
+    _row, session = _latest_chat_session_for_run(run)
+    pending = session.get("social_descriptions_pending")
+    if isinstance(pending, dict) and isinstance(pending.get("copy"), dict):
+        return {key: str(pending["copy"].get(key) or "") for key, _label in SOCIAL_COPY_FIELD_LABELS}
+    title = _title_from_run(run) or _short(run.script, 80)
+    description = str(run.script or "").strip()
+    return {
+        "youtube_ru_title": title,
+        "youtube_ru_description": description,
+        "rutube_ru_title": title,
+        "rutube_ru_description": description,
+        "instagram_ru": description,
+        "vk_ru": description,
+        "tiktok_ru": description,
+        "instagram_en": description,
+        "youtube_en_title": title,
+        "youtube_en_description": description,
+    }
+
+
+def _project_slug_for_publication_run(run: GenerationRun) -> str | None:
+    _row, session = _latest_chat_session_for_run(run)
+    slug = str(session.get("selected_project_key") or "").strip()
+    return slug or None
+
+
+def _publication_post_production_from_final_artifacts(run: GenerationRun) -> dict[str, Any]:
+    renders: dict[str, dict[str, dict[str, str]]] = {}
+    for artifact in _final_artifacts_for_run(run.id):
+        language = str(artifact.language or "").strip().lower()
+        variant = str(artifact.artifact_type or "").removeprefix("final_")
+        if not language or variant not in PUBLICATION_VIDEO_VARIANT_LABELS:
+            continue
+        raw = str(artifact.uri or "").strip()
+        payload: dict[str, str] = {}
+        if raw.startswith("file://"):
+            parsed = urlparse(raw)
+            payload["video_path"] = unquote(parsed.path)
+        elif raw and Path(raw).exists():
+            payload["video_path"] = raw
+        elif raw.startswith(("http://", "https://")):
+            payload["video_url"] = raw
+        if payload:
+            renders.setdefault(language, {})[variant] = payload
+    return {"renders_by_language": renders}
+
+
+def _publication_project_for_run(run: GenerationRun) -> Project | None:
+    slug = _project_slug_for_publication_run(run)
+    if slug:
+        project = Project.objects.filter(slug=slug).first()
+        if project is not None:
+            return project
+    return Project.objects.filter(is_default=True).first()
+
+
+def _publication_account_index(run: GenerationRun) -> dict[tuple[str, str], ProjectPublishAccount]:
+    project = _publication_project_for_run(run)
+    if project is None:
+        return {}
+    rows = ProjectPublishAccount.objects.filter(project_id=project.id, is_active=True)
+    return {(row.platform, row.language): row for row in rows}
+
+
+def _publication_queue_form_html(form: PublicationQueueAdminForm, run: GenerationRun, copy_payload: dict[str, str]) -> str:
+    targets = build_publication_targets(copy_payload)
+    selected_raw = form["target_keys"].value() or []
+    selected = set(selected_raw if isinstance(selected_raw, list) else [selected_raw])
+    variant = str(form["video_variant"].value() or DEFAULT_PUBLICATION_VIDEO_VARIANT)
+    post = _publication_post_production_from_final_artifacts(run)
+    renders = post.get("renders_by_language") if isinstance(post, dict) else {}
+    accounts = _publication_account_index(run)
+    css = """
+    <style>
+      .cf-pub-grid{display:grid;grid-template-columns:minmax(360px,1.2fr) minmax(320px,.8fr);gap:18px;align-items:start}
+      .cf-pub-card{border:1px solid var(--border-color);border-radius:6px;padding:14px;background:var(--body-bg)}
+      .cf-pub-card h2{margin:0 0 10px;font-size:16px}
+      .cf-pub-target{display:grid;grid-template-columns:28px 1fr auto;gap:10px;padding:10px 0;border-top:1px solid var(--border-color)}
+      .cf-pub-target:first-of-type{border-top:0}
+      .cf-pub-target input{width:18px;height:18px}
+      .cf-pub-muted{color:var(--body-quiet-color)}
+      .cf-pub-badge{display:inline-block;padding:2px 7px;border-radius:10px;font-weight:600;font-size:12px}
+      .cf-pub-ok{background:#dcfce7;color:#166534}
+      .cf-pub-warn{background:#fff4d8;color:#7a4b00}
+      .cf-pub-bad{background:#fee2e2;color:#991b1b}
+      .cf-pub-fields textarea{font-family:var(--font-family-primary);min-height:76px}
+      .cf-pub-fields label{font-weight:600}
+      @media(max-width:900px){.cf-pub-grid{grid-template-columns:1fr}}
+    </style>
+    """
+    target_rows = []
+    for target in targets:
+        account = accounts.get((target.platform, target.language))
+        video_ready = bool(isinstance(renders, dict) and isinstance(renders.get(target.language), dict) and renders[target.language].get(variant))
+        desc_ready = bool(target.description)
+        account_ready = bool(account and account.external_account_id)
+        badges = [
+            ('<span class="cf-pub-badge cf-pub-ok">description</span>' if desc_ready else '<span class="cf-pub-badge cf-pub-bad">no description</span>'),
+            ('<span class="cf-pub-badge cf-pub-ok">video</span>' if video_ready else '<span class="cf-pub-badge cf-pub-bad">no video</span>'),
+            ('<span class="cf-pub-badge cf-pub-ok">account</span>' if account_ready else '<span class="cf-pub-badge cf-pub-warn">manual account</span>'),
+        ]
+        title_line = escape(target.title or "No separate title")
+        account_line = escape(account.external_account_id if account and account.external_account_id else "no active account mapping")
+        checked = " checked" if target.key in selected else ""
+        target_rows.append(
+            f'<label class="cf-pub-target">'
+            f'<input type="checkbox" name="target_keys" value="{escape(target.key)}"{checked}>'
+            f'<span><strong>{escape(publication_target_label(target))}</strong><br>'
+            f'<span class="cf-pub-muted">{escape(target.language.upper())} · {title_line}<br>{account_line}</span></span>'
+            f'<span>{" ".join(badges)}</span></label>'
+        )
+    text_fields = []
+    for key, _label in SOCIAL_COPY_FIELD_LABELS:
+        text_fields.append(f"<p>{form[key].label_tag()}{form[key]}</p>")
+    error_html = f'<div class="errornote">{escape(form.errors.as_text())}</div>' if form.errors else ""
+    return mark_safe(
+        css
+        + error_html
+        + '<div class="cf-pub-grid">'
+        + '<section class="cf-pub-card"><h2>Targets</h2>'
+        + "".join(target_rows)
+        + '</section><section class="cf-pub-card"><h2>Delivery</h2>'
+        + f'<p>{form["video_variant"].label_tag()}{form["video_variant"]}</p>'
+        + f'<p>{form["scheduled_at"].label_tag()}{form["scheduled_at"]}<br><span class="cf-pub-muted">{escape(form.fields["scheduled_at"].help_text)}</span></p>'
+        + '<p class="cf-pub-muted">Jobs with ready account + publication time become scheduled; missing account stays manual but keeps the chosen time.</p>'
+        + '</section></div>'
+        + '<section class="cf-pub-card cf-pub-fields" style="margin-top:18px;"><h2>Copy</h2>'
+        + "".join(text_fields)
+        + "</section>"
+    )
+
+
+def _publication_prep_panel(run: GenerationRun) -> str:
+    copy_payload = _publication_copy_from_run(run)
+    targets = build_publication_targets(copy_payload)
+    artifacts = _final_artifacts_for_run(run.id)
+    try:
+        recent_jobs = PublicationJob.objects.order_by("-created_at")[:100]
+        jobs = [
+            job for job in recent_jobs
+            if isinstance(job.payload_json, dict) and str(job.payload_json.get("run_id") or "") == str(run.id)
+        ][:10]
+    except Exception:
+        jobs = []
+    parts = ['<div class="cf-publication-prep">']
+    parts.append(
+        format_html(
+            '<p style="margin:0 0 12px;"><a class="button" href="{}">Queue publications</a></p>',
+            reverse("admin:pipeline_admin_generationrun_queue_publications", args=[run.pk]),
+        )
+    )
+    if not artifacts:
+        parts.append('<p style="margin:0 0 12px;color:var(--body-quiet-color);">No final video artifacts yet.</p>')
+    parts.append("<p style='margin:0 0 6px;'><strong>Targets from current copy</strong></p><ul style='margin-top:0;'>")
+    for target in targets:
+        parts.append(
+            format_html(
+                "<li>{} - {} {}</li>",
+                publication_target_label(target),
+                target.video_label,
+                "ready" if target.description else "missing description",
+            )
+        )
+    parts.append("</ul>")
+    if jobs:
+        parts.append("<p style='margin:8px 0 6px;'><strong>Recent publication jobs</strong></p><ul style='margin-top:0;'>")
+        for job in jobs:
+            parts.append(
+                format_html(
+                    "<li>{} <code>{}</code> {} {}</li>",
+                    job.created_at.strftime("%Y-%m-%d %H:%M:%S") if job.created_at else "",
+                    f"{job.platform}:{job.language}",
+                    job.status,
+                    _admin_change_link(job, "open"),
+                )
+            )
+        parts.append("</ul>")
+    parts.append("</div>")
+    return mark_safe("".join(str(part) for part in parts))
+
+
+@admin.action(description="Build final title + 4 final video versions")
+def build_final_title_and_videos(modeladmin, request, queryset):
+    queued = 0
+    queued_runs: set[Any] = set()
+    for selected in queryset:
+        if isinstance(selected, ChatSession):
+            if not selected.generation_run_id:
+                modeladmin.message_user(
+                    request,
+                    f"{selected}: no generation_run_id; cannot render final videos.",
+                    level=messages.ERROR,
+                )
+                continue
+            run = GenerationRun.objects.filter(id=selected.generation_run_id).first()
+            if run is None:
+                modeladmin.message_user(
+                    request,
+                    f"{selected}: generation run {selected.generation_run_id} not found.",
+                    level=messages.ERROR,
+                )
+                continue
+        else:
+            run = selected
+        artifacts = _final_artifacts_for_run(run.id)
+        statuses = _latest_final_build_statuses(run.id)
+        languages = _final_target_languages_for_run(run, artifacts, statuses)
+        if not languages:
+            modeladmin.message_user(request, f"{run}: no renderable languages found.", level=messages.ERROR)
+            continue
+        for language in languages:
+            for variant in FINAL_VIDEO_VARIANT_LABELS:
+                try:
+                    _queue_final_build(run, language=language, variant=variant, kick_worker=False)
+                except Exception as exc:
+                    modeladmin.message_user(
+                        request,
+                        f"{run}: final build was not queued for {language}/{variant}: {exc}",
+                        level=messages.ERROR,
+                    )
+                    continue
+                queued += 1
+                queued_runs.add(run.id)
+    for run_id in queued_runs:
+        _kick_final_build_worker(run_id)
+    if queued:
+        modeladmin.message_user(request, f"Queued {queued} final render job(s). Refresh run page for status.", level=messages.SUCCESS)
+
+
+def _media_approval_overview(run_id) -> str:
+    scenes = list(Scene.objects.filter(run_id=run_id).order_by("scene_order"))
+    if not scenes:
+        return "No scenes yet."
+
+    scene_ids = [scene.id for scene in scenes]
+    images_by_scene: dict[str, list[SceneImageCandidate]] = {str(scene_id): [] for scene_id in scene_ids}
+    videos_by_scene: dict[str, list[SceneVideoCandidate]] = {str(scene_id): [] for scene_id in scene_ids}
+    for row in SceneImageCandidate.objects.filter(scene_id__in=scene_ids).order_by("created_at", "candidate_id"):
+        images_by_scene.setdefault(str(row.scene_id), []).append(row)
+    for row in SceneVideoCandidate.objects.filter(scene_id__in=scene_ids).order_by("created_at", "candidate_id"):
+        videos_by_scene.setdefault(str(row.scene_id), []).append(row)
+
+    parts = [
+        '<table style="width:100%;border-collapse:collapse;">'
+        "<thead><tr>"
+        '<th style="text-align:left;border-bottom:1px solid var(--border-color);padding:6px;">Scene</th>'
+        '<th style="text-align:left;border-bottom:1px solid var(--border-color);padding:6px;">Images</th>'
+        '<th style="text-align:left;border-bottom:1px solid var(--border-color);padding:6px;">Videos</th>'
+        "</tr></thead><tbody>"
+    ]
+    for scene in scenes:
+        image_rows = images_by_scene.get(str(scene.id), [])
+        video_rows = videos_by_scene.get(str(scene.id), [])
+        image_items = []
+        for image in image_rows:
+            media_url = reverse("admin:pipeline_admin_sceneimagecandidate_media", args=[image.candidate_id])
+            image_items.append(
+                format_html(
+                    '<li><code>{}</code> {} {} {} <a href="{}" target="_blank" rel="noopener">open</a></li>',
+                    image.candidate_id,
+                    image.kind,
+                    _status_badge(bool(image.approved_for_video)),
+                    "liked" if image.liked else "not liked",
+                    media_url,
+                )
+                + " "
+                + _admin_change_link(image, "edit")
+            )
+        video_items = []
+        for video in video_rows:
+            media_url = reverse("admin:pipeline_admin_scenevideocandidate_media", args=[video.candidate_id])
+            video_items.append(
+                format_html(
+                    '<li><code>{}</code> lang={} speed={} {} {} <a href="{}" target="_blank" rel="noopener">open</a></li>',
+                    video.candidate_id,
+                    video.language,
+                    video.speed_coef,
+                    _status_badge(bool(video.approved_for_production)),
+                    "liked" if video.liked else "not liked",
+                    media_url,
+                )
+                + " "
+                + _admin_change_link(video, "edit")
+            )
+
+        parts.append(
+            format_html(
+                '<tr><td style="vertical-align:top;padding:8px;border-bottom:1px solid var(--border-color);">'
+                "<strong>Scene {}</strong><br>{}</td>"
+                '<td style="vertical-align:top;padding:8px;border-bottom:1px solid var(--border-color);">{}</td>'
+                '<td style="vertical-align:top;padding:8px;border-bottom:1px solid var(--border-color);">{}</td></tr>',
+                scene.scene_order,
+                _short(scene.text, 140),
+                mark_safe("<ul style='margin:0;padding-left:18px;'>" + "".join(str(item) for item in image_items) + "</ul>")
+                if image_items
+                else "No images.",
+                mark_safe("<ul style='margin:0;padding-left:18px;'>" + "".join(str(item) for item in video_items) + "</ul>")
+                if video_items
+                else "No videos.",
+            )
+        )
+    parts.append("</tbody></table>")
+    return mark_safe("".join(str(part) for part in parts))
+
+
+def _final_artifacts_for_run(run_id) -> list[GenerationArtifact]:
+    rows = GenerationArtifact.objects.filter(
+        run_id=run_id,
+        artifact_type__in=FINAL_VIDEO_ARTIFACT_TYPES,
+    ).order_by("language", "artifact_type", "-created_at")
+    return _latest_final_artifacts(rows)
+
+
+def _latest_final_artifacts(rows) -> list[GenerationArtifact]:
+    latest: dict[tuple[str, str], GenerationArtifact] = {}
+    for row in rows:
+        key = (str(row.language or "").strip().lower(), str(row.artifact_type or ""))
+        if key not in latest:
+            latest[key] = row
+    return list(latest.values())
+
+
+def _final_artifact_changelist_url(
+    run_id: Any,
+    *,
+    language: str | None = None,
+    variant: str | None = None,
+) -> str:
+    base = reverse("admin:pipeline_admin_generationartifact_changelist")
+    params = [f"q={run_id}", "final_builds=1"]
+    if language:
+        params.append(f"language__exact={language}")
+    if variant:
+        params.append(f"artifact_type__exact=final_{variant}")
+    return f"{base}?{'&'.join(params)}"
+
+
+def _final_target_languages_for_run(
+    run: GenerationRun,
+    artifacts: list[GenerationArtifact],
+    statuses: dict[tuple[str, str], dict[str, Any]],
+) -> list[str]:
+    languages = {
+        str(artifact.language or "").strip().lower()
+        for artifact in artifacts
+        if str(artifact.language or "").strip()
+    }
+    languages.update(language for language, _variant in statuses)
+    chat_session = ChatSession.objects.filter(generation_run_id=run.id).order_by("-updated_at").first()
+    session = chat_session.session_json if chat_session is not None and isinstance(chat_session.session_json, dict) else {}
+    targets = session.get("target_languages")
+    if isinstance(targets, list):
+        languages.update(str(item).strip().lower() for item in targets if str(item).strip())
+    production = session.get("production")
+    post = production.get("post_production") if isinstance(production, dict) else None
+    post_langs = post.get("languages") if isinstance(post, dict) else None
+    if isinstance(post_langs, list):
+        languages.update(str(item).strip().lower() for item in post_langs if str(item).strip())
+    scene_ids = list(Scene.objects.filter(run_id=run.id).values_list("id", flat=True))
+    if scene_ids:
+        languages.update(
+            str(item).strip().lower()
+            for item in SceneVideoCandidate.objects.filter(scene_id__in=scene_ids).values_list("language", flat=True).distinct()
+            if str(item).strip()
+        )
+    if not languages and run.language:
+        languages.add(str(run.language).strip().lower())
+    return sorted(language for language in languages if language)
+
+
+def _final_build_url(run: GenerationRun, language: str, variant: str) -> str:
+    try:
+        return reverse("admin:pipeline_admin_generationrun_queue_final", args=[run.pk, language, variant])
+    except NoReverseMatch:
+        return f"/admin/pipeline_admin/generationrun/{run.pk}/queue-final/{language}/{variant}/"
+
+
+def _status_badge_html(status: str, message: str = "") -> str:
+    normalized = str(status or "").strip().lower()
+    palette = {
+        "pending": ("#7a4b00", "#fff4d8", "pending"),
+        "running": ("#075985", "#e0f2fe", "running"),
+        "stale": ("#92400e", "#fef3c7", "stale"),
+        "success": ("#166534", "#dcfce7", "success"),
+        "failed": ("#991b1b", "#fee2e2", "failed"),
+    }
+    color, background, label = palette.get(normalized, ("#374151", "#f3f4f6", normalized or "idle"))
+    title = str(message or "")
+    return format_html(
+        '<span title="{}" style="display:inline-block;padding:2px 7px;border-radius:10px;background:{};color:{};font-weight:600;">{}</span>',
+        title,
+        background,
+        color,
+        label,
+    )
+
+
+def _final_build_progress_html(status: dict[str, Any], display_state: str) -> str:
+    progress = status.get("progress") if isinstance(status.get("progress"), dict) else {}
+    raw_percent = progress.get("percent")
+    try:
+        percent = int(float(raw_percent))
+    except (TypeError, ValueError):
+        defaults = {
+            "idle": 0,
+            "pending": 5,
+            "running": 50,
+            "stale": 100,
+            "success": 100,
+            "failed": 100,
+        }
+        percent = defaults.get(str(display_state or "").strip().lower(), 0)
+    percent = max(0, min(100, percent))
+    state = str(display_state or "").strip().lower()
+    color = {
+        "pending": "#d97706",
+        "running": "#0284c7",
+        "stale": "#d97706",
+        "success": "#16a34a",
+        "failed": "#dc2626",
+    }.get(state, "#6b7280")
+    return format_html(
+        '<div style="margin-top:6px;width:180px;max-width:100%;">'
+        '<div style="height:7px;border-radius:999px;background:#e5e7eb;overflow:hidden;">'
+        '<div style="height:7px;width:{}%;background:{};"></div>'
+        "</div>"
+        '<div style="margin-top:2px;color:var(--body-quiet-color);font-size:11px;">{}%</div>'
+        "</div>",
+        percent,
+        color,
+        percent,
+    )
+
+
+def _artifact_video_preview(artifact: GenerationArtifact) -> str:
+    raw = str(artifact.uri or "")
+    media_url = _artifact_media_url(artifact)
+    if not media_url and not raw.startswith(("http://", "https://")):
+        return ""
+    if not str(artifact.mime_type or "").startswith("video/"):
+        return ""
+    return format_html(
+        '<video src="{}" controls preload="metadata" '
+        'style="display:block;max-width:340px;width:100%;margin:6px 0;border:1px solid var(--border-color);border-radius:4px;"></video>',
+        media_url or raw,
+    )
+
+
+def _final_videos_panel(run: GenerationRun) -> str:
+    artifacts = _final_artifacts_for_run(run.id)
+    artifact_by_key = {
+        (
+            str(artifact.language or "").strip().lower(),
+            str(artifact.artifact_type or "").removeprefix("final_"),
+        ): artifact
+        for artifact in artifacts
+    }
+    statuses = _latest_final_build_statuses(run.id)
+    languages = _final_target_languages_for_run(run, artifacts, statuses)
+    parts = ['<div class="cf-final-videos">']
+    parts.append(
+        format_html(
+            '<p style="margin:0 0 12px;"><a class="button" href="{}">Rebuild all final videos</a> '
+            '<a href="{}" style="margin-left:8px;">open all final builds</a></p>',
+            reverse("admin:pipeline_admin_generationrun_build_final", args=[run.pk]),
+            _final_artifact_changelist_url(run.id),
+        )
+    )
+    if not languages:
+        parts.append(
+            '<p style="margin:0;color:var(--body-quiet-color);">'
+            "No renderable final video languages found yet.</p>"
+        )
+        parts.append("</div>")
+        return mark_safe("".join(str(part) for part in parts))
+
+    parts.append(
+        '<table style="width:100%;border-collapse:collapse;margin:0 0 14px;">'
+        "<thead><tr>"
+        '<th style="text-align:left;border-bottom:1px solid var(--border-color);padding:6px;">Language</th>'
+        '<th style="text-align:left;border-bottom:1px solid var(--border-color);padding:6px;">Variant</th>'
+        '<th style="text-align:left;border-bottom:1px solid var(--border-color);padding:6px;">Latest video</th>'
+        '<th style="text-align:left;border-bottom:1px solid var(--border-color);padding:6px;">Build status</th>'
+        '<th style="text-align:left;border-bottom:1px solid var(--border-color);padding:6px;">Links</th>'
+        "</tr></thead><tbody>"
+    )
+    for language in languages:
+        for variant, label in FINAL_VIDEO_VARIANT_LABELS.items():
+            artifact = artifact_by_key.get((language, variant))
+            payload = artifact.payload_json if artifact is not None and isinstance(artifact.payload_json, dict) else {}
+            size = f'{payload.get("width")}x{payload.get("height")}' if payload.get("width") and payload.get("height") else ""
+            artifact_created = artifact.created_at.strftime("%Y-%m-%d %H:%M:%S") if artifact is not None and artifact.created_at else ""
+            latest_video = (
+                format_html(
+                    "{}<div style='margin-top:4px;'><code>{}</code>{}<br>{}</div>",
+                    _artifact_video_preview(artifact),
+                    artifact.artifact_type,
+                    format_html(" · {}", size) if size else "",
+                    format_html(
+                        '<span style="color:var(--body-quiet-color);">{}</span>',
+                        artifact_created,
+                    )
+                    if artifact_created
+                    else "",
+                )
+                if artifact is not None
+                else mark_safe(
+                    '<span style="color:var(--body-quiet-color);">No latest video yet.</span>'
+                )
+            )
+            status = statuses.get((language, variant), {})
+            state = str(status.get("status") or "idle")
+            status_message = str(status.get("message") or "")
+            updated_at = _final_build_updated_at(status)
+            heartbeat_at = _final_build_time_value(status, "heartbeat_at")
+            stale = _final_build_status_is_stale(status)
+            active = state in FINAL_BUILD_ACTIVE_STATUSES and not stale
+            display_state = "stale" if stale else state
+            progress = status.get("progress") if isinstance(status.get("progress"), dict) else {}
+            detail_lines: list[str] = []
+            if progress.get("label"):
+                detail_lines.append(str(progress.get("label")))
+            if status.get("worker_id"):
+                detail_lines.append(f"worker {status.get('worker_id')}")
+            if status.get("attempt_count"):
+                detail_lines.append(f"attempt {status.get('attempt_count')}")
+            if heartbeat_at is not None:
+                detail_lines.append(f"heartbeat {heartbeat_at.isoformat(timespec='seconds')}")
+            elif updated_at is not None:
+                detail_lines.append(f"updated {updated_at.isoformat(timespec='seconds')}")
+            status_detail = (
+                format_html(
+                    '<div style="margin-top:4px;color:var(--body-quiet-color);font-size:12px;">{}</div>',
+                    " · ".join(detail_lines),
+                )
+                if detail_lines
+                else ""
+            )
+            visible_message = (
+                format_html(
+                    '<div style="max-width:520px;margin-top:4px;color:#991b1b;white-space:pre-wrap;">{}</div>',
+                    status_message,
+                )
+                if state == "failed" and status_message
+                else ""
+            )
+            if stale:
+                visible_message = format_html(
+                    '<div style="max-width:520px;margin-top:4px;color:#92400e;white-space:pre-wrap;">{}</div>',
+                    "No recent heartbeat from final_build_worker. Rebuild is available.",
+                )
+            build_link = (
+                format_html(
+                    '<span style="color:var(--body-quiet-color);">{}</span>',
+                    "Queued; waiting for final_build_worker." if state == "pending" else "Build is running in final_build_worker; refresh for status.",
+                )
+                if active
+                else format_html(
+                    '<a class="button" href="{}">Build/rebuild this video</a>',
+                    _final_build_url(run, language, variant),
+                )
+            )
+            latest_link = _generation_artifact_link(artifact, "open latest video") if artifact is not None else ""
+            finder_link = _artifact_finder_link(artifact)
+            links = format_html(
+                "{}{}{}<div style='margin-top:6px;'><a href='{}'>all builds</a></div>",
+                build_link,
+                format_html("<div style='margin-top:6px;'>{}</div>", latest_link) if latest_link else "",
+                format_html("<div style='margin-top:6px;'>{}</div>", finder_link) if finder_link else "",
+                _final_artifact_changelist_url(run.id, language=language, variant=variant),
+            )
+            parts.append(
+                format_html(
+                    '<tr><td style="vertical-align:top;padding:8px;border-bottom:1px solid var(--border-color);"><code>{}</code></td>'
+                    '<td style="vertical-align:top;padding:8px;border-bottom:1px solid var(--border-color);">{}</td>'
+                    '<td style="vertical-align:top;padding:8px;border-bottom:1px solid var(--border-color);">{}</td>'
+                    '<td style="vertical-align:top;padding:8px;border-bottom:1px solid var(--border-color);">{} {} {}</td>'
+                    '<td style="vertical-align:top;padding:8px;border-bottom:1px solid var(--border-color);">{}</td></tr>',
+                    language,
+                    label,
+                    latest_video,
+                    _status_badge_html(display_state, status_message),
+                    str(status.get("updated_at") or "")[:19],
+                    format_html(
+                        "{}{}{}",
+                        _final_build_progress_html(status, display_state),
+                        status_detail,
+                        visible_message,
+                    ),
+                    links,
+                )
+            )
+    parts.append("</tbody></table></div>")
+    return mark_safe("".join(str(part) for part in parts))
+
+
 class SceneInline(admin.TabularInline):
     model = Scene
     extra = 0
@@ -158,17 +1955,170 @@ class GenerationArtifactInline(admin.TabularInline):
 
     @admin.display(description="URI")
     def uri_link(self, obj: GenerationArtifact) -> str:
-        return _artifact_link(obj.uri, "open")
+        return _generation_artifact_link(obj, "open")
 
 
 @admin.register(GenerationRun)
 class GenerationRunAdmin(admin.ModelAdmin):
-    list_display = ("display_title", "status", "language", "created_at", "artifact_count")
-    search_fields = ("human_title", "script", "id")
-    list_filter = ("status", "language")
-    readonly_fields = ("id", "created_at", "script")
-    fields = ("id", "human_title", "status", "language", "script", "created_at")
+    list_display = (
+        "display_title",
+        "status",
+        "language",
+        "series",
+        "series_video_index",
+        "series_total_videos",
+        "created_at",
+        "artifact_count",
+    )
+    list_editable = ("series", "series_video_index", "series_total_videos")
+    search_fields = ("human_title", "script", "id", "series__title_ru", "series__title_en")
+    list_filter = ("status", "language", "series")
+    autocomplete_fields = ("series",)
+    actions = (build_final_title_and_videos,)
+    readonly_fields = ("id", "created_at", "script", "final_videos", "publication_prep", "media_approval_overview")
+    fields = (
+        "id",
+        "human_title",
+        "status",
+        "language",
+        "series",
+        "series_video_index",
+        "series_total_videos",
+        "created_at",
+        "final_videos",
+        "publication_prep",
+        "media_approval_overview",
+        "script",
+    )
     inlines = (SceneInline, GenerationArtifactInline)
+
+    def get_urls(self):
+        urls = super().get_urls()
+        custom = [
+            path(
+                "<path:object_id>/build-final/",
+                self.admin_site.admin_view(self.build_final_view),
+                name="pipeline_admin_generationrun_build_final",
+            ),
+            path(
+                "<path:object_id>/queue-final/<str:language>/<str:variant>/",
+                self.admin_site.admin_view(self.queue_final_view),
+                name="pipeline_admin_generationrun_queue_final",
+            ),
+            path(
+                "<path:object_id>/queue-publications/",
+                self.admin_site.admin_view(self.queue_publications_view),
+                name="pipeline_admin_generationrun_queue_publications",
+            ),
+        ]
+        return custom + urls
+
+    def build_final_view(self, request, object_id):
+        run = self.get_object(request, object_id)
+        if run is None:
+            raise Http404("Generation run not found.")
+        queued = 0
+        artifacts = _final_artifacts_for_run(run.id)
+        statuses = _latest_final_build_statuses(run.id)
+        languages = _final_target_languages_for_run(run, artifacts, statuses)
+        for language in languages:
+            for variant in FINAL_VIDEO_VARIANT_LABELS:
+                try:
+                    _queue_final_build(run, language=language, variant=variant, kick_worker=False)
+                except Exception as exc:
+                    self.message_user(
+                        request,
+                        f"{run}: final build was not queued for {language}/{variant}: {exc}",
+                        level=messages.ERROR,
+                    )
+                    continue
+                queued += 1
+        if queued:
+            _kick_final_build_worker(run.id)
+            self.message_user(
+                request,
+                f"{run}: queued {queued} final render job(s). final_build_worker was started automatically; refresh for worker status.",
+                level=messages.SUCCESS,
+            )
+        else:
+            self.message_user(request, f"{run}: no final render jobs were queued.", level=messages.WARNING)
+        return HttpResponseRedirect(reverse("admin:pipeline_admin_generationrun_change", args=[run.pk]))
+
+    def queue_final_view(self, request, object_id, language, variant):
+        run = self.get_object(request, object_id)
+        if run is None:
+            raise Http404("Generation run not found.")
+        try:
+            status = _queue_final_build(run, language=language, variant=variant)
+        except Exception as exc:
+            self.message_user(request, f"{run}: final build was not queued: {exc}", level=messages.ERROR)
+        else:
+            self.message_user(
+                request,
+                f"{run}: queued {FINAL_VIDEO_VARIANT_LABELS.get(variant, variant)} ({language}); current status: {status}. final_build_worker was started automatically; refresh for worker status.",
+                level=messages.SUCCESS,
+            )
+        return HttpResponseRedirect(reverse("admin:pipeline_admin_generationrun_change", args=[run.pk]))
+
+    def queue_publications_view(self, request, object_id):
+        run = self.get_object(request, object_id)
+        if run is None:
+            raise Http404("Generation run not found.")
+        initial_copy = _publication_copy_from_run(run)
+        form = PublicationQueueAdminForm(
+            request.POST or None,
+            copy=initial_copy,
+            initial={
+                "target_keys": [target.key for target in build_publication_targets(initial_copy) if target.description],
+                "video_variant": DEFAULT_PUBLICATION_VIDEO_VARIANT,
+                **initial_copy,
+            },
+        )
+        if request.method == "POST" and form.is_valid():
+            post_production = _publication_post_production_from_final_artifacts(run)
+            try:
+                with SessionLocal() as db:
+                    jobs = queue_publication_bundle(
+                        db,
+                        project_slug=_project_slug_for_publication_run(run),
+                        recipe=f"{run.id}\n\n{run.script}",
+                        copy=form.copy_payload(),
+                        post_production=post_production,
+                        origin="admin_generation_run",
+                        selected_target_keys=form.cleaned_data["target_keys"],
+                        video_variant=str(form.cleaned_data["video_variant"]),
+                        scheduled_at=form.cleaned_data.get("scheduled_at"),
+                    )
+                    for job in jobs:
+                        job.payload_json = {**(job.payload_json or {}), "run_id": str(run.id)}
+                    db.commit()
+            except Exception as exc:
+                self.message_user(request, f"{run}: publication jobs were not queued: {exc}", level=messages.ERROR)
+            else:
+                self.message_user(request, publication_jobs_summary(jobs), level=messages.SUCCESS if jobs else messages.WARNING)
+                return HttpResponseRedirect(reverse("admin:pipeline_admin_generationrun_change", args=[run.pk]))
+        csrf = get_token(request)
+        back_url = reverse("admin:pipeline_admin_generationrun_change", args=[run.pk])
+        display_copy = {
+            key: str(form.data.get(key) if form.is_bound else initial_copy.get(key) or "")
+            for key, _label in SOCIAL_COPY_FIELD_LABELS
+        }
+        html = format_html(
+            '<!doctype html><html><head><title>Queue publications</title></head>'
+            '<body class="app-pipeline_admin model-generationrun change-form">'
+            '<div id="container"><div id="content" class="colM">'
+            '<h1>Queue publications for {}</h1>'
+            '<p><a href="{}">Back to video</a></p>'
+            '<form method="post"><input type="hidden" name="csrfmiddlewaretoken" value="{}">'
+            '{}'
+            '<div class="submit-row"><input type="submit" value="Queue publication jobs" class="default"></div>'
+            '</form></div></div></body></html>',
+            run.human_title or run.id,
+            back_url,
+            csrf,
+            _publication_queue_form_html(form, run, display_copy),
+        )
+        return HttpResponse(html)
 
     @admin.display(description="Title", ordering="human_title")
     def display_title(self, obj: GenerationRun) -> str:
@@ -178,14 +2128,163 @@ class GenerationRunAdmin(admin.ModelAdmin):
     def artifact_count(self, obj: GenerationRun) -> int:
         return GenerationArtifact.objects.filter(run_id=obj.id).count()
 
+    @admin.display(description="Approved media by scene")
+    def media_approval_overview(self, obj: GenerationRun) -> str:
+        return _media_approval_overview(obj.id)
+
+    @admin.display(description="Final videos")
+    def final_videos(self, obj: GenerationRun) -> str:
+        return _final_videos_panel(obj)
+
+    @admin.display(description="Publication prep")
+    def publication_prep(self, obj: GenerationRun) -> str:
+        return _publication_prep_panel(obj)
+
+
+@admin.register(ContentSeries)
+class ContentSeriesAdmin(admin.ModelAdmin):
+    list_display = (
+        "title_ru",
+        "title_en",
+        "current_video_index",
+        "total_videos",
+        "is_active",
+        "updated_at",
+        "run_count",
+    )
+    list_editable = ("current_video_index", "total_videos", "is_active")
+    list_filter = ("is_active",)
+    search_fields = ("title_ru", "title_en", "slug", "notes")
+    readonly_fields = ("id", "created_at", "updated_at", "generation_runs")
+    fields = (
+        "id",
+        "project_id",
+        "slug",
+        "title_ru",
+        "title_en",
+        "current_video_index",
+        "total_videos",
+        "is_active",
+        "notes",
+        "meta_json",
+        "generation_runs",
+        "created_at",
+        "updated_at",
+    )
+
+    @admin.display(description="Episode")
+    def episode(self, obj: ContentSeries) -> str:
+        return f"{obj.current_video_index}/{obj.total_videos}"
+
+    @admin.display(description="Runs")
+    def run_count(self, obj: ContentSeries) -> int:
+        return GenerationRun.objects.filter(series_id=obj.id).count()
+
+    @admin.display(description="Generation runs")
+    def generation_runs(self, obj: ContentSeries) -> str:
+        rows = GenerationRun.objects.filter(series_id=obj.id).order_by("-created_at")[:25]
+        if not rows:
+            return "No generation runs yet."
+        items = [
+            format_html(
+                "<li>{} {} {}</li>",
+                row.created_at.strftime("%Y-%m-%d %H:%M:%S"),
+                _admin_change_link(row, row.human_title or str(row.id)),
+                f"({row.series_video_index}/{row.series_total_videos})"
+                if row.series_video_index and row.series_total_videos
+                else "",
+            )
+            for row in rows
+        ]
+        return format_html("<ul>{}</ul>", mark_safe("".join(str(item) for item in items)))
+
+
+@admin.register(Project)
+class ProjectAdmin(admin.ModelAdmin):
+    list_display = ("slug", "title", "is_default", "is_active", "updated_at")
+    list_editable = ("is_default", "is_active")
+    list_filter = ("is_default", "is_active")
+    search_fields = ("slug", "title", "description")
+    readonly_fields = ("id", "created_at", "updated_at")
+
+
+@admin.register(ProjectPublishAccount)
+class ProjectPublishAccountAdmin(admin.ModelAdmin):
+    list_display = (
+        "project",
+        "platform",
+        "language",
+        "account_key",
+        "external_account_id",
+        "publish_policy",
+        "is_active",
+        "updated_at",
+    )
+    list_editable = ("external_account_id", "publish_policy", "is_active")
+    list_filter = ("platform", "language", "is_active", "publish_policy")
+    search_fields = ("project__slug", "project__title", "platform", "language", "account_key", "external_account_id")
+    raw_id_fields = ("project",)
+    readonly_fields = ("id", "created_at", "updated_at")
+
+
+@admin.register(PublicationJob)
+class PublicationJobAdmin(admin.ModelAdmin):
+    list_display = (
+        "created_at",
+        "platform",
+        "language",
+        "status",
+        "video_label",
+        "title_short",
+        "project",
+        "attempt_count",
+    )
+    list_editable = ("status",)
+    list_filter = ("status", "platform", "language", "publish_policy")
+    search_fields = ("bundle_key", "title", "description", "video_path", "external_post_id", "publish_error")
+    raw_id_fields = ("project",)
+    readonly_fields = ("id", "created_at", "updated_at", "payload_json")
+    fields = (
+        "id",
+        "project",
+        "bundle_key",
+        "origin",
+        "platform",
+        "language",
+        "account_key",
+        "external_account_id",
+        "status",
+        "video_path",
+        "video_label",
+        "title",
+        "description",
+        "hashtags_json",
+        "recipe",
+        "publish_policy",
+        "payload_json",
+        "scheduled_at",
+        "approved_at",
+        "published_at",
+        "external_post_id",
+        "publish_error",
+        "attempt_count",
+        "created_at",
+        "updated_at",
+    )
+
+    @admin.display(description="Title")
+    def title_short(self, obj: PublicationJob) -> str:
+        return _short(obj.title or obj.description, 80)
+
 
 @admin.register(VideoOverview)
 class VideoOverviewAdmin(admin.ModelAdmin):
-    list_display = ("display_title", "status", "language", "created_at", "scene_count", "artifact_count")
-    search_fields = ("human_title", "script", "id")
-    list_filter = ("status", "language")
-    readonly_fields = ("id", "created_at", "script", "video_map")
-    fields = ("id", "human_title", "status", "language", "created_at", "script", "video_map")
+    list_display = ("display_title", "status", "language", "series", "created_at", "scene_count", "artifact_count")
+    search_fields = ("human_title", "script", "id", "series__title_ru", "series__title_en")
+    list_filter = ("status", "language", "series")
+    actions = (build_final_title_and_videos,)
+    readonly_fields = ("id", "created_at", "script", "media_approval_overview", "video_map")
+    fields = ("id", "human_title", "status", "language", "created_at", "media_approval_overview", "script", "video_map")
 
     @admin.display(description="Video")
     def display_title(self, obj: VideoOverview) -> str:
@@ -198,6 +2297,10 @@ class VideoOverviewAdmin(admin.ModelAdmin):
     @admin.display(description="Artifacts")
     def artifact_count(self, obj: VideoOverview) -> int:
         return GenerationArtifact.objects.filter(run_id=obj.id).count()
+
+    @admin.display(description="Approved media by scene")
+    def media_approval_overview(self, obj: VideoOverview) -> str:
+        return _media_approval_overview(obj.id)
 
     @admin.display(description="Scenes and artifacts")
     def video_map(self, obj: VideoOverview) -> str:
@@ -225,7 +2328,7 @@ class VideoOverviewAdmin(admin.ModelAdmin):
                         "<li>"
                         f"{escape(artifact.label)} "
                         f"<code>{escape(artifact.artifact_type)}</code> "
-                        f"{_artifact_link(artifact.uri, 'open')}"
+                        f"{_generation_artifact_link(artifact, 'open')}"
                         "</li>"
                     )
                 parts.append("</ul>")
@@ -241,7 +2344,7 @@ class VideoOverviewAdmin(admin.ModelAdmin):
                     "<li>"
                     f"{escape(artifact.label)} "
                     f"<code>{escape(artifact.artifact_type)}</code> "
-                    f"{_artifact_link(artifact.uri, 'open')}"
+                    f"{_generation_artifact_link(artifact, 'open')}"
                     "</li>"
                 )
             parts.append("</ul>")
@@ -254,11 +2357,22 @@ class ChatSessionAdmin(admin.ModelAdmin):
     form = ChatSessionAdminForm
     list_display = ("chat_id", "state", "generation_run_id", "updated_at")
     search_fields = ("chat_id", "state", "generation_run_id")
+    actions = (build_final_title_and_videos,)
     readonly_fields = ("created_at", "updated_at", "checkpoint_timeline")
     fieldsets = (
         ("Session", {"fields": ("chat_id", "state", "generation_run_id", "created_at", "updated_at")}),
         ("Pipeline text", {"fields": ("selected_concept", "viral_concept_brief", "recipe_full_text")}),
-        ("Plans", {"fields": ("scenes_plan_json", "production_plan_json")}),
+        (
+            "Plans",
+            {
+                "fields": (
+                    "scenes_plan_json",
+                    "production_plan_json",
+                    "overlay_title_by_lang_json",
+                    "overlay_title_style_json",
+                )
+            },
+        ),
         (
             "Scene editor",
             {
@@ -272,6 +2386,21 @@ class ChatSessionAdmin(admin.ModelAdmin):
                     "speech_by_lang_json",
                     "syntax_retry_context_json",
                     "video_approvals_by_lang_json",
+                ),
+            },
+        ),
+        (
+            "Current media step",
+            {
+                "description": (
+                    "To move the bot to a concrete scene step, fill these fields, check "
+                    '"Apply media step override", then save. Scene number is 1-based.'
+                ),
+                "fields": (
+                    "apply_media_step_override",
+                    "media_scene_number",
+                    "media_substep",
+                    "media_language_index",
                 ),
             },
         ),
@@ -337,7 +2466,12 @@ class SceneAdmin(admin.ModelAdmin):
         if not rows:
             return "No artifacts yet."
         items = [
-            format_html("<li>{} <code>{}</code> {}</li>", row.label, row.artifact_type, _artifact_link(row.uri, "open"))
+            format_html(
+                "<li>{} <code>{}</code> {}</li>",
+                row.label,
+                row.artifact_type,
+                _generation_artifact_link(row, "open"),
+            )
             for row in rows
         ]
         return format_html("<ul>{}</ul>", mark_safe("".join(str(item) for item in items)))
@@ -359,9 +2493,21 @@ class SceneAdmin(admin.ModelAdmin):
 
 @admin.register(GenerationArtifact)
 class GenerationArtifactAdmin(admin.ModelAdmin):
+    class FinalBuildsFilter(admin.SimpleListFilter):
+        title = "final builds"
+        parameter_name = "final_builds"
+
+        def lookups(self, request, model_admin):
+            return (("1", "Final builds only"),)
+
+        def queryset(self, request, queryset):
+            if self.value() == "1":
+                return queryset.filter(artifact_type__in=FINAL_VIDEO_ARTIFACT_TYPES)
+            return queryset
+
     list_display = ("label", "artifact_type", "language", "run", "scene", "uri_link", "created_at")
-    list_filter = ("artifact_type", "language", "mime_type")
-    search_fields = ("label", "uri", "run__human_title", "run__script")
+    list_filter = (FinalBuildsFilter, "artifact_type", "language", "mime_type")
+    search_fields = ("label", "uri", "run__id", "run__human_title", "run__script")
     readonly_fields = ("created_at", "uri_link", "media_preview")
     raw_id_fields = ("run", "scene")
     fields = (
@@ -378,9 +2524,45 @@ class GenerationArtifactAdmin(admin.ModelAdmin):
         "created_at",
     )
 
+    def get_urls(self):
+        urls = super().get_urls()
+        custom = [
+            path(
+                "<path:object_id>/media/",
+                self.admin_site.admin_view(self.media_view),
+                name="pipeline_admin_generationartifact_media",
+            )
+        ]
+        return custom + urls
+
+    def media_view(self, request, object_id):
+        obj = self.get_object(request, object_id)
+        if obj is None:
+            raise Http404("Artifact not found.")
+        raw = str(obj.uri or "")
+        if raw.startswith("db://scene_image_candidates/"):
+            candidate_id = raw.rsplit("/", 1)[-1]
+            row = SceneImageCandidate.objects.filter(candidate_id=candidate_id).first()
+            if row is None:
+                raise Http404("Image candidate not found.")
+            return HttpResponse(bytes(row.image_blob), content_type="image/png")
+        if raw.startswith("db://scene_video_candidates/"):
+            candidate_id = raw.rsplit("/", 1)[-1]
+            row = SceneVideoCandidate.objects.filter(candidate_id=candidate_id).first()
+            if row is None:
+                raise Http404("Video candidate not found.")
+            return HttpResponse(bytes(row.video_blob), content_type="video/mp4")
+        if raw.startswith(("http://", "https://")):
+            return HttpResponseRedirect(raw)
+        path_obj = _artifact_local_path(obj)
+        if path_obj is None or not path_obj.is_file():
+            raise Http404("Artifact file not found.")
+        content_type = obj.mime_type or mimetypes.guess_type(path_obj.name)[0] or "application/octet-stream"
+        return _local_file_response(path_obj, content_type=content_type, request=request)
+
     @admin.display(description="URI")
     def uri_link(self, obj: GenerationArtifact) -> str:
-        return _artifact_link(obj.uri)
+        return _generation_artifact_link(obj)
 
     @admin.display(description="Preview")
     def media_preview(self, obj: GenerationArtifact) -> str:
@@ -393,10 +2575,11 @@ class GenerationArtifactAdmin(admin.ModelAdmin):
             candidate_id = raw.rsplit("/", 1)[-1]
             row = SceneVideoCandidate.objects.filter(candidate_id=candidate_id).first()
             return _video_preview(row) if row else "Video candidate not found."
-        if str(obj.mime_type or "").startswith("image/") and raw.startswith(("http://", "https://", "file://")):
-            return format_html('<img src="{}" style="max-width:420px;max-height:320px;border-radius:4px;">', raw)
-        if str(obj.mime_type or "").startswith("video/") and raw.startswith(("http://", "https://", "file://")):
-            return format_html('<video src="{}" controls preload="metadata" style="max-width:520px;width:100%;"></video>', raw)
+        media_url = _artifact_media_url(obj)
+        if str(obj.mime_type or "").startswith("image/") and media_url:
+            return format_html('<img src="{}" style="max-width:420px;max-height:320px;border-radius:4px;">', media_url)
+        if str(obj.mime_type or "").startswith("video/") and media_url:
+            return format_html('<video src="{}" controls preload="metadata" style="max-width:520px;width:100%;"></video>', media_url)
         return "No inline preview for this artifact."
 
 

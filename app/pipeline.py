@@ -123,6 +123,61 @@ START_FRAME_RECIPE_VISUAL_DETAIL_RULE = (
     "(кубик, соломка, ломтики, кольца, тёрка и т.д.); описание блюда или текущего состояния блюда; "
     "подробное описание видимых ингредиентов, их форму, цвет, фактуру и состояние обработки."
 )
+TITLE_SAFE_FIRST_SCENE_START_FRAME_RULE = (
+    "Композиция под заголовок: в первой сцене верхние примерно 30% кадра должны оставаться свободными "
+    "от персонажей, лиц, рук, посуды, еды и крупных деталей; важное действие размещай ниже этой зоны. "
+    "Не обрезай кадр и не делай пустую искусственную полосу сверху: верхняя зона должна выглядеть как естественное "
+    "продолжение сцены с тем же фоном, светом, столешницей или интерьером, только без крупных объектов."
+)
+TITLE_SAFE_FIRST_SCENE_VIDEO_RULE = (
+    "title_safe_top_30: for scene 1, keep roughly the top 30% of the frame clear of characters, faces, "
+    "hands, cookware, food, and large visual details for an added title overlay; keep the main action below that zone. "
+    "Do not crop the frame or create an artificial blank band at the top; the top area must remain a natural continuation "
+    "of the same scene with background, lighting, tabletop or interior texture, just without large objects."
+)
+FRUIT_ONLY_FIRST_MOMENT_RULE = (
+    "If the user explicitly asks scene 1 to start with a close-up of anthropomorphic banana and strawberry talking "
+    "or says the start frame is only banana/strawberry and without grandma/cats, the START frame must show only that "
+    "first moment. Do not add grandma, cats, grandson/granddaughter, blender reveal, or later payoff into the start "
+    "frame; place those later beats in video_prompt_en or requested end_frame_prompt_ru."
+)
+
+
+def _fruit_only_closeup_prompt(prompt: str) -> bool:
+    low = str(prompt or "").lower()
+    has_banana = "banana" in low or "банан" in low
+    has_strawberry = "strawberry" in low or "клубник" in low
+    if not (has_banana and has_strawberry):
+        return False
+    blender_reveal = any(
+        x in low
+        for x in (
+            "внутри прозрачной чаш",
+            "чаша-кувшин",
+            "моторная база",
+            "кнопки теперь хорошо видны",
+            "раскрыл",
+        )
+    )
+    if blender_reveal:
+        return False
+    explicit_only = any(x in low for x in ("только банан", "только клубник", "only banana", "only strawberry"))
+    explicit_without_cast = any(
+        x in low
+        for x in (
+            "без бабуш",
+            "без кот",
+            "ни бабуш",
+            "ни кот",
+            "no grandma",
+            "no grandmother",
+            "no cat",
+        )
+    )
+    closeup = any(x in low for x in ("крупный план", "крупно", "close-up", "close up"))
+    talking_food = any(x in low for x in ("говор", "разговарива", "шепч", "talk", "speak", "whisper"))
+    office_bit = "офис" in low or "office" in low
+    return explicit_without_cast or explicit_only or (closeup and talking_food and office_bit)
 
 
 def _strip_location_context_for_llm(value: Any) -> Any:
@@ -263,6 +318,7 @@ def _ensure_image_prompt_framing_requirements(
     location: str | None = None,
     *,
     model: str | None = None,
+    title_safe_top: bool = False,
 ) -> str:
     """
     Добавляет обязательные маркеры для image prompt:
@@ -288,12 +344,25 @@ def _ensure_image_prompt_framing_requirements(
         if not has_closeup:
             parts.append("Крупный план.")
     model_name = (model or "").strip().lower()
-    if model_name.startswith("veo3"):
+    if model_name.startswith("veo3") and not _fruit_only_closeup_prompt(p):
         cast_rule = "Бабушка и кот должны быть видны полностью в кадре."
         joined = " ".join(parts).lower()
         if "бабушка и кот должны быть видны полностью" not in joined:
             parts.append(cast_rule)
+    if title_safe_top:
+        joined = " ".join(parts).lower()
+        if "верхние примерно 30%" not in joined and "title_safe_top_30" not in joined:
+            parts.append(TITLE_SAFE_FIRST_SCENE_START_FRAME_RULE)
     return " ".join(x.strip() for x in parts if x.strip()).strip()
+
+
+def _append_first_scene_title_safe_video_rule(video_prompt: str, *, scene_index: int) -> str:
+    out = str(video_prompt or "").strip()
+    if scene_index != 1:
+        return out
+    if "title_safe_top_30:" in out.lower():
+        return out
+    return f"{out} {TITLE_SAFE_FIRST_SCENE_VIDEO_RULE}".strip()
 
 
 def append_veo3_video_framing_constraints(
@@ -462,6 +531,10 @@ _DIALOGUE_SPEAKER_ALIASES = {
     "daughter": "daughter",
     "дочь": "daughter",
     "дочка": "daughter",
+    "banana": "banana",
+    "банан": "banana",
+    "strawberry": "strawberry",
+    "клубника": "strawberry",
 }
 
 
@@ -1151,6 +1224,47 @@ def _ensure_scene_block_len(
     return out[:max_n]
 
 
+def _coerce_llm_scene_items_to_objects(raw_items: list[Any], *, concept: str) -> list[dict[str, Any]]:
+    """
+    Adapts loose LLM scene arrays before strict pipeline normalization.
+
+    Gemini sometimes regresses from the scene-object contract to a JSON array of
+    strings. Treat those strings as minimal scene drafts instead of surfacing a
+    technical validation error to the user.
+    """
+    out: list[dict[str, Any]] = []
+    coerced: list[str] = []
+    for idx, item in enumerate(raw_items, start=1):
+        if isinstance(item, dict):
+            out.append(dict(item))
+            continue
+        if isinstance(item, list):
+            text = " ".join(str(part).strip() for part in item if str(part).strip())
+        else:
+            text = str(item or "").strip()
+        if not text:
+            text = f"{concept}: кулинарный шаг {idx}".strip(": ")
+        out.append(
+            {
+                "scene": idx,
+                "shot_type": "closeup",
+                "characters": ["grandma", "cat"],
+                "action": text,
+                "text": text,
+                "recipe_step": text,
+                "dialogue_mode": "single",
+                "dialogue": [],
+            }
+        )
+        coerced.append(f"#{idx}: {type(item).__name__}")
+    if coerced:
+        logger.warning(
+            "coerced non-object scene items from LLM output: %s",
+            ", ".join(coerced[:10]),
+        )
+    return out
+
+
 def _bind_recipe_steps(scenes: list[dict[str, Any]], recipe_steps: list[str]) -> list[dict[str, Any]]:
     """
     Привязывает канонический шаг к сцене по индексу.
@@ -1219,6 +1333,13 @@ def _pick_family_child_character(
         for key in ("grandson", "granddaughter"):
             if key in normalized:
                 return key
+        dialogue = scene.get("dialogue") if isinstance(scene.get("dialogue"), list) else []
+        for item in dialogue:
+            if not isinstance(item, dict):
+                continue
+            speaker = _normalize_dialogue_speaker(item.get("speaker"))
+            if speaker in {"grandson", "granddaughter"}:
+                return speaker
     family_plan = str(brief.get("family_cast_plan") or "").lower()
     if "внуч" in family_plan or "granddaughter" in family_plan:
         return "granddaughter"
@@ -1459,7 +1580,9 @@ async def generate_scenes_plan(
         )
         raise
 
-    arr = normalize_scenes_for_pipeline(extract_json_array(raw_once))
+    arr = normalize_scenes_for_pipeline(
+        _coerce_llm_scene_items_to_objects(extract_json_array(raw_once), concept=concept)
+    )
     arr = _ensure_scene_block_len(arr)
     raw_scenes = _postprocess_scenes_output(
         arr,
@@ -1510,7 +1633,7 @@ def _normalize_frame_prompts(
     if len(raw) != len(scenes_plan):
         raise RuntimeError("Frame prompts count mismatch with scenes.")
     out: list[dict[str, Any]] = []
-    for scene, item in zip(scenes_plan, raw):
+    for scene_index, (scene, item) in enumerate(zip(scenes_plan, raw), start=1):
         if not isinstance(item, dict):
             raise RuntimeError("Frame prompt item is not an object.")
         out.append(
@@ -1531,6 +1654,7 @@ def _normalize_frame_prompts(
                         )
                     ),
                     model=str(scene.get("model", "")),
+                    title_safe_top=scene_index == 1,
                 ),
                 "end_frame_prompt_ru": _ensure_image_prompt_framing_requirements(
                     append_visual_prop_descriptions(
@@ -1712,6 +1836,7 @@ async def generate_frame_prompts_for_approval(
     user_feedback: str | None = None,
     previous_frame_prompts: list[dict[str, Any]] | None = None,
     requested_end_frame_scenes: list[int] | set[int] | tuple[int, ...] | None = None,
+    reference_images: list[bytes] | None = None,
 ) -> dict[str, Any]:
     """
     Отдельный этап перед production: готовит и возвращает START/END frame промпты на апрув.
@@ -1724,6 +1849,9 @@ async def generate_frame_prompts_for_approval(
             int(value)
             for value in (requested_end_frame_scenes or [])
             if str(value).isdigit() and 1 <= int(value) <= len(scenes_plan)
+        ),
+        "user_reference_images_count": len(
+            [image for image in (reference_images or []) if isinstance(image, bytes) and image]
         ),
         "rules": {
             "start_frame_ru": (
@@ -1738,19 +1866,26 @@ async def generate_frame_prompts_for_approval(
             ),
             "same_view_can_use_empty_start": True,
             "style": "style must follow provided references",
+            "user_reference_images_rule": (
+                "if user_reference_images_count > 0, use the attached user reference images as visual context "
+                "for the frame prompts: preserve relevant objects, packaging, composition, texture, color palette "
+                "or dish appearance requested by the user, while still obeying every scene requirement"
+            ),
             "ingredients_rule": "если в кадре есть еда, явно перечисляй конкретные ингредиенты",
             "labels_rule": "если есть надписи в кадре, указывай: все надписи на русском",
-                "continuity_rule": (
-                    "repeat and update continuity_anchors in every start/video prompt: same cookware, plate, "
-                    "cutting board, stovetop surface, utensils, ingredient state, food texture and cat position "
-                    "whenever they still belong to the recipe moment"
-                ),
-                "romantic_drama_rule": (
-                    "If scene.romantic_drama_beat is non-empty, every start_frame_prompt_ru must explicitly describe "
-                    "that background drama beat as visible action in the frame, using concrete pose, distance, gaze, "
-                    "blocking or object interaction rather than abstract labels. Do not leave subplot characters only "
-                    "in scene.characters; if a subplot character is listed, they must be described in the frame."
-                ),
+            "title_safe_scene1_rule": TITLE_SAFE_FIRST_SCENE_START_FRAME_RULE,
+            "fruit_only_first_moment_rule": FRUIT_ONLY_FIRST_MOMENT_RULE,
+            "continuity_rule": (
+                "repeat and update continuity_anchors in every start/video prompt: same cookware, plate, "
+                "cutting board, stovetop surface, utensils, ingredient state, food texture and cat position "
+                "whenever they still belong to the recipe moment"
+            ),
+            "romantic_drama_rule": (
+                "If scene.romantic_drama_beat is non-empty, every start_frame_prompt_ru must explicitly describe "
+                "that background drama beat as visible action in the frame, using concrete pose, distance, gaze, "
+                "blocking or object interaction rather than abstract labels. Do not leave subplot characters only "
+                "in scene.characters; if a subplot character is listed, they must be described in the frame."
+            ),
             "no_text_overlay": True,
         },
     }
@@ -1767,15 +1902,24 @@ async def generate_frame_prompts_for_approval(
         "START FRAME must be self-contained and maximally specific: props, cookware, working surface, character pose, food details.\n"
         "START FRAME must include cutting/slicing method when relevant, dish/current dish-state description, and detailed ingredient descriptions: shape, color, texture, processing state.\n"
         f"START FRAME Russian mandatory rule: {START_FRAME_RECIPE_VISUAL_DETAIL_RULE}\n"
+        f"SCENE 1 title-safe mandatory rule: {TITLE_SAFE_FIRST_SCENE_START_FRAME_RULE}\n"
+        f"SCENE 1 fruit-only first-moment exception: {FRUIT_ONLY_FIRST_MOMENT_RULE}\n"
         "If food is present, explicitly list concrete ingredients.\n"
         "If any labels/signs/text appear in frame, explicitly state: all labels are in Russian.\n"
         "Use reference style; do not invent an explicit art style.\n"
+        "If user reference images are attached, inspect them and fold their relevant visual details into "
+        "start_frame_prompt_ru/end_frame_prompt_ru.\n"
         "Do not use location names or location references. Preserve continuity through continuity_anchors and continuity_state.\n"
         "Do not reference other scenes; each prompt must be independent.\n"
         "If a scene contains romantic_drama_beat, include it visibly and clearly in start_frame_prompt_ru for that exact scene.\n"
         + json.dumps(payload, ensure_ascii=False, indent=2)
     )
-    raw = await asyncio.to_thread(gemini_generate_sync, prompt)
+    image_payloads = [image for image in (reference_images or []) if isinstance(image, bytes) and image]
+    raw = await asyncio.to_thread(
+        gemini_generate_sync,
+        prompt,
+        images=image_payloads or None,
+    )
     arr = extract_json_array(raw)
     normalized = _normalize_frame_prompts(scenes_plan, arr)
     requested_end_frames = {
@@ -1834,6 +1978,7 @@ async def generate_full_production(
                     _append_romantic_drama_to_start_prompt(str(p.get("start_frame_prompt_ru", "пусто")), scene)
                 ),
                 model=str(scene.get("model", "")),
+                title_safe_top=scene_number == 1,
             )
             scene["end_frame_prompt"] = _ensure_image_prompt_framing_requirements(
                 append_visual_prop_descriptions(
@@ -1865,6 +2010,8 @@ async def generate_full_production(
                     "For scene 1, video_prompt_en must place CHARACTERS SPEAKS early in the clip and the exact "
                     "spoken phrase from scene.text must explicitly name the dish from concept/full_recipe_text."
                 ),
+                "scene1_title_safe_rule": TITLE_SAFE_FIRST_SCENE_VIDEO_RULE,
+                "fruit_only_first_moment_rule": FRUIT_ONLY_FIRST_MOMENT_RULE,
                 "veo3_framing_rule": VEO3_FAST_VIDEO_FRAMING_RULE,
                 "continuity_rule": (
                     "video_prompt_en must preserve continuity_anchors and continuity_state: same cookware, "
@@ -1920,6 +2067,8 @@ async def generate_full_production(
             "For every Russian word copied into video_prompt_en, especially after CHARACTERS SPEAKS, use `ё` when Russian spelling requires `ё`, not `е`. "
             "For scene 1, the spoken phrase in CHARACTERS SPEAKS must happen at the start of the clip and explicitly "
             "name the dish from the scenario; the viewer must hear the dish name in the first scene. "
+            "For scene 1, include title_safe_top_30 and keep the top 30% clear for a title overlay. "
+            f"Scene 1 fruit-only first-moment exception: {FRUIT_ONLY_FIRST_MOMENT_RULE} "
             "Framing: close-up / medium-close; grandmother's full figure and every other character in the scene "
             "must stay fully visible; camera angle or framing should evolve during the clip (no fixed static "
             "tripod for the entire take).\n"
@@ -1981,7 +2130,10 @@ async def generate_full_production(
                 speech_by_lang,
                 dialogue_by_lang=dialogue_by_lang or _dialogue_by_lang_for_scene(scene_out, speech_by_lang),
             )
-            base_prompt = _finalize_scene_video_prompt(str(p.get("video_prompt_en", "")), scene_out)
+            base_prompt = _finalize_scene_video_prompt(
+                _append_first_scene_title_safe_video_rule(str(p.get("video_prompt_en", "")), scene_index=scene_index),
+                scene_out,
+            )
             scene_out["speech_by_lang"] = speech_by_lang
             scene_out["dialogue_by_lang"] = dialogue_by_lang
             scene_out["speech_plan_by_lang"] = speech_plan_by_lang
@@ -2037,6 +2189,11 @@ async def generate_full_production(
                 "For scene 1, video_prompt_en must place CHARACTERS SPEAKS early in the clip and the exact "
                 "spoken phrase from scene.text must explicitly name the dish from concept/full_recipe_text."
             ),
+            "scene1_title_safe_rule": {
+                "start_frame_ru": TITLE_SAFE_FIRST_SCENE_START_FRAME_RULE,
+                "video_prompt_en": TITLE_SAFE_FIRST_SCENE_VIDEO_RULE,
+            },
+            "fruit_only_first_moment_rule": FRUIT_ONLY_FIRST_MOMENT_RULE,
             "veo3_framing_rule": VEO3_FAST_VIDEO_FRAMING_RULE,
                 "continuity_rule": (
                     "start_frame_ru and video_prompt_en must preserve continuity_anchors and continuity_state: "
@@ -2068,6 +2225,8 @@ async def generate_full_production(
         "START FRAME must be static and highly detailed, and explicitly include camera angle/viewpoint. "
         "START FRAME must include cutting/slicing method when relevant, dish/current dish-state description, and detailed ingredient descriptions: shape, color, texture, processing state. "
         f"START FRAME Russian mandatory rule: {START_FRAME_RECIPE_VISUAL_DETAIL_RULE} "
+        f"SCENE 1 title-safe mandatory rule: {TITLE_SAFE_FIRST_SCENE_START_FRAME_RULE} "
+        f"SCENE 1 fruit-only first-moment exception: {FRUIT_ONLY_FIRST_MOMENT_RULE} "
         "VIDEO PROMPT must include clip duration, reference style, "
         "no on-screen text or subtitles, and no background music/soundtrack. "
         "Visual style must be non-photorealistic/non-realistic cartoon (no realism). "
@@ -2079,6 +2238,8 @@ async def generate_full_production(
         "For every Russian word copied into video_prompt_en, especially after CHARACTERS SPEAKS, use `ё` when Russian spelling requires `ё`, not `е`. "
         "For scene 1, the spoken phrase in CHARACTERS SPEAKS must happen at the start of the clip and explicitly "
         "name the dish from the scenario; the viewer must hear the dish name in the first scene. "
+        "For scene 1, include title_safe_top_30 and keep the top 30% clear for a title overlay. "
+        f"Scene 1 fruit-only first-moment exception: {FRUIT_ONLY_FIRST_MOMENT_RULE} "
         "Framing: close-up / medium-close; grandmother's full figure and every other character in the scene "
         "must stay fully visible; camera angle or framing should evolve during the clip (no fixed static "
         "tripod for the entire take).\n"
@@ -2127,6 +2288,7 @@ async def generate_full_production(
         scene_out["start_frame_prompt"] = _ensure_image_prompt_framing_requirements(
             append_visual_prop_descriptions(_append_romantic_drama_to_start_prompt(p.get("start_frame_prompt_ru", ""), scene_out)),
             model=str(scene_out.get("model", "")),
+            title_safe_top=scene_index == 1,
         )
         scene_out["end_frame_prompt"] = _ensure_image_prompt_framing_requirements(
             append_visual_prop_descriptions(
@@ -2147,7 +2309,10 @@ async def generate_full_production(
             speech_by_lang,
             dialogue_by_lang=dialogue_by_lang or _dialogue_by_lang_for_scene(scene_out, speech_by_lang),
         )
-        base_prompt = _finalize_scene_video_prompt(str(p.get("video_prompt_en", "")), scene_out)
+        base_prompt = _finalize_scene_video_prompt(
+            _append_first_scene_title_safe_video_rule(str(p.get("video_prompt_en", "")), scene_index=scene_index),
+            scene_out,
+        )
         scene_out["speech_by_lang"] = speech_by_lang
         scene_out["dialogue_by_lang"] = dialogue_by_lang
         scene_out["speech_plan_by_lang"] = speech_plan_by_lang

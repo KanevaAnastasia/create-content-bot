@@ -55,6 +55,43 @@ class Project(Base):
         back_populates="project",
         cascade="all, delete-orphan",
     )
+    content_series: Mapped[list["ContentSeries"]] = relationship(
+        back_populates="project",
+        cascade="all, delete-orphan",
+    )
+
+
+class ContentSeries(Base):
+    """Named short-form content series with localized titles and episode counter."""
+
+    __tablename__ = "content_series"
+    __table_args__ = (UniqueConstraint("project_id", "slug", name="uq_content_series_project_slug"),)
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
+    project_id: Mapped[uuid.UUID | None] = mapped_column(
+        Uuid,
+        ForeignKey("projects.id", ondelete="SET NULL"),
+        nullable=True,
+        index=True,
+    )
+    slug: Mapped[str] = mapped_column(String(128), nullable=False)
+    title_ru: Mapped[str] = mapped_column(Text, nullable=False)
+    title_en: Mapped[str] = mapped_column(Text, nullable=False)
+    current_video_index: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
+    total_videos: Mapped[int] = mapped_column(Integer, nullable=False, default=10)
+    is_active: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
+    notes: Mapped[str | None] = mapped_column(Text, nullable=True)
+    meta_json: Mapped[dict] = mapped_column(JSON, nullable=False, default=dict)
+    created_at: Mapped[DateTime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
+    updated_at: Mapped[DateTime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        server_default=func.now(),
+        onupdate=func.now(),
+    )
+
+    project: Mapped["Project | None"] = relationship(back_populates="content_series")
+    generation_runs: Mapped[list["GenerationRun"]] = relationship(back_populates="series")
 
 
 class Character(Base):
@@ -272,9 +309,18 @@ class GenerationRun(Base):
         Enum("ru", "en", name="generation_language"),
         nullable=False,
     )
+    series_id: Mapped[uuid.UUID | None] = mapped_column(
+        Uuid,
+        ForeignKey("content_series.id", ondelete="SET NULL"),
+        nullable=True,
+        index=True,
+    )
+    series_video_index: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    series_total_videos: Mapped[int | None] = mapped_column(Integer, nullable=True)
     script: Mapped[str] = mapped_column(Text, nullable=False)
     created_at: Mapped[DateTime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
 
+    series: Mapped["ContentSeries | None"] = relationship(back_populates="generation_runs")
     scenes: Mapped[list["Scene"]] = relationship(back_populates="run", cascade="all, delete-orphan")
     video_results: Mapped[list["VideoResult"]] = relationship(back_populates="run", cascade="all, delete-orphan")
     artifacts: Mapped[list["GenerationArtifact"]] = relationship(back_populates="run", cascade="all, delete-orphan")

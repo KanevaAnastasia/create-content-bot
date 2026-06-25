@@ -108,11 +108,13 @@ def persist_post_production_artifacts(session: dict[str, Any], post: dict[str, A
             video_path = str(payload.get("video_path") or "").strip()
             if not video_path:
                 continue
-            label = (
-                f"Final clean master ({language})"
-                if str(variant_key) == "clean"
-                else f"Final subtitled/music master ({language})"
-            )
+            label_by_variant = {
+                "clean": f"Final clean master ({language})",
+                "upscaled_4k": f"Final 4K upscaled master ({language})",
+                "subtitled_music": f"Final subtitled/music master ({language})",
+                "titled_subtitled_music": f"Final titled/subtitled/music master ({language})",
+            }
+            label = label_by_variant.get(str(variant_key), f"Final {variant_key} master ({language})")
             persist_generation_artifact(
                 session,
                 artifact_type=f"final_{variant_key}",
@@ -242,11 +244,13 @@ def backfill_generation_artifacts() -> int:
                     video_path = str(payload.get("video_path") or "").strip()
                     if not video_path:
                         continue
-                    label = (
-                        f"Final clean master ({language})"
-                        if str(variant_key) == "clean"
-                        else f"Final subtitled/music master ({language})"
-                    )
+                    label_by_variant = {
+                        "clean": f"Final clean master ({language})",
+                        "upscaled_4k": f"Final 4K upscaled master ({language})",
+                        "subtitled_music": f"Final subtitled/music master ({language})",
+                        "titled_subtitled_music": f"Final titled/subtitled/music master ({language})",
+                    }
+                    label = label_by_variant.get(str(variant_key), f"Final {variant_key} master ({language})")
                     _upsert_artifact_row(
                         db,
                         run_id=chat_session.generation_run_id,

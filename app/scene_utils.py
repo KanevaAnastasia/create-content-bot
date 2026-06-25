@@ -302,6 +302,16 @@ def normalize_scenes_for_pipeline(scenes: list[dict[str, Any]]) -> list[dict[str
     Важно: длина списка потом может быть урезана до ``len(recipe_steps)`` в ``pipeline.generate_scenes_plan``.
     """
     scenes = scenes[:6]
+    invalid_items = [
+        f"#{idx}: {type(scene).__name__}"
+        for idx, scene in enumerate(scenes, start=1)
+        if not isinstance(scene, dict)
+    ]
+    if invalid_items:
+        raise ValueError(
+            "Model output scene array must contain JSON objects, got "
+            + ", ".join(invalid_items[:5])
+        )
     if len(scenes) < 3:
         while len(scenes) < 3:
             scenes.append(dict(scenes[-1] if scenes else {}))

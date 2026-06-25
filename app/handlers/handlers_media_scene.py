@@ -50,6 +50,10 @@ PIXAR_REFERENCE_STYLE_PHRASE = "Пиксаровский стиль рефере
 SCENE_MEDIA_UPGRADE_IMAGE_MODEL_BUTTON = "ПОВЫСИТЬ МОДЕЛЬ"
 SCENE_MEDIA_REQUEST_END_FRAME_BUTTON = "Нужен конечный кадр"
 SCENE_MEDIA_SKIP_END_FRAME_BUTTON = "Без конечного кадра"
+SCENE_MEDIA_ADD_REFERENCE_IMAGES_BUTTON = "Добавить изображения"
+SCENE_MEDIA_DONE_REFERENCE_IMAGES_BUTTON = "Готово"
+SCENE_MEDIA_CLEAR_REFERENCE_IMAGES_BUTTON = "Очистить изображения"
+SCENE_USER_REFERENCE_IMAGES_KEY = "scene_user_reference_images_by_kind"
 
 
 def _reply_markup_with_rows(*rows: list[str]) -> ReplyKeyboardMarkup:
@@ -83,6 +87,7 @@ def scene_image_approval_markup(*, session: dict | None = None) -> ReplyKeyboard
         ["ОК"],
         _scene_media_mode_row(session),
         [SCENE_MEDIA_REQUEST_END_FRAME_BUTTON, SCENE_MEDIA_SKIP_END_FRAME_BUTTON],
+        [SCENE_MEDIA_ADD_REFERENCE_IMAGES_BUTTON],
         ["ПРОМПТ:"],
         ["ФИДБЕК:"],
         ["старт заново"],
@@ -94,6 +99,7 @@ def scene_end_approval_markup(*, session: dict | None = None) -> ReplyKeyboardMa
     return _reply_markup_with_rows(
         ["ОК"],
         _scene_media_mode_row(session),
+        [SCENE_MEDIA_ADD_REFERENCE_IMAGES_BUTTON],
         ["ПРОМПТ:"],
         ["ФИДБЕК:"],
         ["старт заново"],
@@ -137,6 +143,7 @@ def scene_generated_image_approval_markup(
     rows = [
         ["ОК"],
         _scene_media_mode_row(session),
+        [SCENE_MEDIA_ADD_REFERENCE_IMAGES_BUTTON],
         ["ПРОМПТ:"],
         ["ИЗМЕНИТЬ"],
         ["ФИДБЕК"],
@@ -147,6 +154,14 @@ def scene_generated_image_approval_markup(
     if include_model_upgrade:
         rows.append([SCENE_MEDIA_UPGRADE_IMAGE_MODEL_BUTTON])
     return _reply_markup_with_rows(*rows)
+
+
+def scene_reference_images_markup() -> ReplyKeyboardMarkup:
+    """Кнопки режима добавления пользовательских референсов к фрейму."""
+    return _reply_markup_with_rows(
+        [SCENE_MEDIA_DONE_REFERENCE_IMAGES_BUTTON],
+        [SCENE_MEDIA_CLEAR_REFERENCE_IMAGES_BUTTON],
+    )
 
 
 def scene_language_approval_markup(languages: list[str], *, session: dict | None = None) -> ReplyKeyboardMarkup:
@@ -664,6 +679,47 @@ _IMAGE_REFERENCE_STYLE_BLOCK = (
 )
 
 
+def _fruit_only_closeup_prompt(prompt: str) -> bool:
+    """
+    Узкое исключение для первого момента сцены: говорящие банан и клубника крупно.
+    Общий cast сцены может появиться позже в клипе или в end frame.
+    """
+    low = sanitize_character_names_and_keys(prompt or "").lower()
+    has_banana = "banana" in low or "банан" in low
+    has_strawberry = "strawberry" in low or "клубник" in low
+    if not (has_banana and has_strawberry):
+        return False
+    blender_reveal = any(
+        x in low
+        for x in (
+            "внутри прозрачной чаш",
+            "чаша-кувшин",
+            "моторная база",
+            "кнопки теперь хорошо видны",
+            "раскрыл",
+        )
+    )
+    if blender_reveal:
+        return False
+    explicit_only = any(x in low for x in ("только банан", "только клубник", "only banana", "only strawberry"))
+    explicit_without_cast = any(
+        x in low
+        for x in (
+            "без бабуш",
+            "без кот",
+            "ни бабуш",
+            "ни кот",
+            "no grandma",
+            "no grandmother",
+            "no cat",
+        )
+    )
+    closeup = any(x in low for x in ("крупный план", "крупно", "close-up", "close up"))
+    talking_food = any(x in low for x in ("говор", "разговарива", "шепч", "talk", "speak", "whisper"))
+    office_bit = "офис" in low or "office" in low
+    return explicit_without_cast or explicit_only or (closeup and talking_food and office_bit)
+
+
 def _append_reference_style_to_image_prompt(base_prompt: str, attach_style_instruction: bool) -> str:
     text = sanitize_character_names_and_keys(base_prompt).strip()
     if not attach_style_instruction:
@@ -688,16 +744,29 @@ def _append_scene_identity_to_image_prompt(
         char_list = [str(c).strip() for c in chars if str(c).strip()]
     else:
         char_list = []
-    if "grandma" not in [c.lower() for c in char_list]:
+    fruit_only_closeup = _fruit_only_closeup_prompt(text)
+    if fruit_only_closeup:
+        normalized = [_normalize_character_key(c) for c in char_list]
+        char_list = [c for c in ("banana", "strawberry") if c in normalized or c in text.lower()]
+        if not char_list:
+            char_list = ["banana", "strawberry"]
+    if not fruit_only_closeup and "grandma" not in [c.lower() for c in char_list]:
         char_list.insert(0, "grandma")
-    if "cat" not in [c.lower() for c in char_list]:
+    if not fruit_only_closeup and "cat" not in [c.lower() for c in char_list]:
         char_list.append("cat")
+    prompt_blob = text.lower()
+    for key in (ASSETS.get("characters") or {}):
+        ch_norm = _normalize_character_key(str(key))
+        if ch_norm in {_normalize_character_key(c) for c in char_list}:
+            continue
+        if _prompt_mentions_character(ch_norm, prompt_blob):
+            char_list.append(ch_norm)
     chars_text = format_character_short_descriptions(char_list) or ", ".join(char_list)
     _ = include_location
     normalized_keys = [_normalize_character_key(c) for c in char_list]
     character_lines = character_identity_lines(normalized_keys)
     descriptions = "\n".join(character_lines)
-    drama_beat = sanitize_character_names_and_keys(scene.get("romantic_drama_beat") or "").strip()
+    drama_beat = "" if fruit_only_closeup else sanitize_character_names_and_keys(scene.get("romantic_drama_beat") or "").strip()
     identity_block = (
         f"Персонажи в кадре: {chars_text}. Состав персонажей не менять.\n"
         "Описание персонажей обязательно соблюдать; если персонаж есть в prompt, он должен выглядеть согласно описанию."
@@ -711,11 +780,50 @@ def _append_scene_identity_to_image_prompt(
     return append_visual_prop_descriptions(f"{text}\n\n{identity_block}")
 
 
+_IMAGE_PROMPT_REFERENCE_KEYS = ("start_frame_prompt", "start_frame_prompt_ru", "end_frame_prompt", "end_frame_prompt_ru", "video_prompt")
+_START_IMAGE_PROMPT_REFERENCE_KEYS = ("start_frame_prompt", "start_frame_prompt_ru")
+_END_IMAGE_PROMPT_REFERENCE_KEYS = ("end_frame_prompt", "end_frame_prompt_ru", "video_prompt")
+
+
+_CHARACTER_PROMPT_ALIASES: dict[str, tuple[str, ...]] = {
+    "zaya": ("зая", "заю", "заи", "белая кошка", "белая кошечка"),
+    "markiz": ("маркиз", "маркиза", "черно-белый кот", "чёрно-белый кот"),
+    "dog": ("пёс", "пес"),
+}
+_CHARACTER_PROMPT_PATTERNS: dict[str, tuple[str, ...]] = {
+    "grandma": (r"\bбабушк\w*",),
+    "cat": (r"\bкот(?:а|у|ом|е)?\b",),
+    "granddaughter": (r"\bвнучк\w*",),
+    "grandson": (r"\bвнук(?:а|у|ом|е)?\b",),
+    "grandfather": (r"\bдедушк\w*",),
+    "daughter": (r"\bдочь\b", r"\bдоч(?:ка|ку|ке|кой|ери|ерью)\b"),
+    "dog": (r"\bсобак\w*",),
+}
+
+
+def _prompt_mentions_character(character_key: str, prompt_blob: str) -> bool:
+    ch_norm = _normalize_character_key(character_key)
+    text = str(prompt_blob or "").lower()
+    if not ch_norm or not text:
+        return False
+    if ch_norm in text:
+        return True
+    if any(re.search(pattern, text, flags=re.IGNORECASE) for pattern in _CHARACTER_PROMPT_PATTERNS.get(ch_norm, ())):
+        return True
+    return any(alias in text for alias in _CHARACTER_PROMPT_ALIASES.get(ch_norm, ()))
+
+
+def _scene_prompt_blob(scene: dict, prompt_keys: tuple[str, ...] | None = None) -> str:
+    keys = prompt_keys or _IMAGE_PROMPT_REFERENCE_KEYS
+    return " ".join(str(scene.get(k, "")).lower() for k in keys)
+
+
 def _reference_keys_for_scene(
     scene: dict,
     refs: dict[str, Any],
     *,
     include_location: bool = False,
+    prompt_keys: tuple[str, ...] | None = None,
 ) -> list[str]:
     """
     Определяет порядок ключей референсов для image generation.
@@ -726,11 +834,16 @@ def _reference_keys_for_scene(
     _ = include_location
     keys_order: list[str] = []
     chars = scene.get("characters")
-    ch_list = [_normalize_character_key(str(c)) for c in chars] if isinstance(chars, list) else []
-    prompt_blob = " ".join(
-        str(scene.get(k, "")).lower()
-        for k in ("start_frame_prompt", "start_frame_prompt_ru", "end_frame_prompt", "end_frame_prompt_ru", "video_prompt")
-    )
+    prompt_blob = _scene_prompt_blob(scene, prompt_keys)
+    fruit_only_closeup = _fruit_only_closeup_prompt(prompt_blob)
+    if fruit_only_closeup:
+        ch_list = [
+            ch
+            for ch in ([_normalize_character_key(str(c)) for c in chars] if isinstance(chars, list) else [])
+            if ch in {"banana", "strawberry"}
+        ]
+    else:
+        ch_list = [_normalize_character_key(str(c)) for c in chars] if isinstance(chars, list) else []
     # Если в тексте промпта упоминаются персонажи, добавляем их в список референсов.
     for ch_key, ref_path in refs.items():
         if ch_key in {"location", "location_top_view"}:
@@ -738,24 +851,19 @@ def _reference_keys_for_scene(
         if not isinstance(ref_path, str) or not ref_path.strip():
             continue
         ch_norm = _normalize_character_key(ch_key)
-        mention = ch_norm in prompt_blob
-        if ch_norm == "grandma":
-            mention = mention or ("бабушк" in prompt_blob)
-        if ch_norm == "cat":
-            mention = mention or ("кот" in prompt_blob)
-        if ch_norm == "zaya":
-            mention = mention or any(x in prompt_blob for x in ("зая", "заю", "заи", "белая кошка", "белая кошечка"))
-        if ch_norm == "markiz":
-            mention = mention or any(x in prompt_blob for x in ("маркиз", "маркиза", "черно-белый кот", "чёрно-белый кот"))
+        if fruit_only_closeup and ch_norm not in {"banana", "strawberry"}:
+            continue
+        mention = _prompt_mentions_character(ch_norm, prompt_blob)
         if mention and ch_norm not in ch_list:
             ch_list.append(ch_norm)
     # Базовый минимум по продуктовым требованиям.
-    for fixed in ("grandma", "cat"):
-        if fixed not in ch_list:
-            ch_list.append(fixed)
+    if not fruit_only_closeup:
+        for fixed in ("grandma", "cat"):
+            if fixed not in ch_list:
+                ch_list.append(fixed)
     # Стабильный порядок: grandma, cat, потом остальные.
     for fixed in ("grandma", "cat"):
-        if fixed in ch_list:
+        if not fruit_only_closeup and fixed in ch_list:
             keys_order.append(fixed)
     for ch in ch_list:
         if ch not in keys_order and isinstance(refs.get(ch), str) and refs.get(ch, "").strip():
@@ -763,42 +871,39 @@ def _reference_keys_for_scene(
     return keys_order
 
 
-def _resolve_scene_references(scene: dict) -> dict[str, str]:
+def _resolve_scene_references(scene: dict, *, prompt_keys: tuple[str, ...] | None = None) -> dict[str, str]:
     """
     Возвращает полный набор референсов для сцены даже если `scene["references"]` отсутствует.
     """
     out: dict[str, str] = {}
     refs = scene.get("references")
+    prompt_blob = _scene_prompt_blob(scene, prompt_keys)
+    fruit_only_closeup = _fruit_only_closeup_prompt(prompt_blob)
     if isinstance(refs, dict):
         for k, v in refs.items():
             if isinstance(v, str) and v.strip():
                 if str(k) in {"location", "location_top_view"}:
+                    continue
+                if fruit_only_closeup and _normalize_character_key(str(k)) not in {"banana", "strawberry"}:
                     continue
                 out[str(k)] = v.strip()
 
     # Минимальный обязательный набор персонажей: grandma + cat.
     chars = scene.get("characters")
     ch_list = [_normalize_character_key(str(c)) for c in chars] if isinstance(chars, list) else []
-    for fixed in ("grandma", "cat"):
-        if fixed not in ch_list:
-            ch_list.append(fixed)
+    if fruit_only_closeup:
+        ch_list = [ch for ch in ch_list if ch in {"banana", "strawberry"}]
+    else:
+        for fixed in ("grandma", "cat"):
+            if fixed not in ch_list:
+                ch_list.append(fixed)
     # Персонажи, упомянутые в промптах, тоже учитываем.
-    prompt_blob = " ".join(
-        str(scene.get(k, "")).lower()
-        for k in ("start_frame_prompt", "start_frame_prompt_ru", "end_frame_prompt", "end_frame_prompt_ru", "video_prompt")
-    )
     all_char_refs = ASSETS.get("characters") or {}
     for key, cfg in all_char_refs.items():
         k = _normalize_character_key(str(key))
-        if k in prompt_blob and k not in ch_list:
-            ch_list.append(k)
-        if k == "grandma" and "бабушк" in prompt_blob and k not in ch_list:
-            ch_list.append(k)
-        if k == "cat" and "кот" in prompt_blob and k not in ch_list:
-            ch_list.append(k)
-        if k == "zaya" and any(x in prompt_blob for x in ("зая", "заю", "заи", "белая кошка", "белая кошечка")) and k not in ch_list:
-            ch_list.append(k)
-        if k == "markiz" and any(x in prompt_blob for x in ("маркиз", "маркиза", "черно-белый кот", "чёрно-белый кот")) and k not in ch_list:
+        if fruit_only_closeup and k not in {"banana", "strawberry"}:
+            continue
+        if _prompt_mentions_character(k, prompt_blob) and k not in ch_list:
             ch_list.append(k)
         if k in ch_list and isinstance(cfg, dict):
             base = cfg.get("base")
@@ -808,15 +913,20 @@ def _resolve_scene_references(scene: dict) -> dict[str, str]:
     return out
 
 
-def _load_scene_reference_images(scene: dict, *, include_location: bool = False) -> list[bytes]:
+def _load_scene_reference_images(
+    scene: dict,
+    *,
+    include_location: bool = False,
+    prompt_keys: tuple[str, ...] | None = None,
+) -> list[bytes]:
     """
     Загружает референсы для генерации: только персонажи, если явно не включить локацию.
     Раньше брался только первый ключ (локация), из-за чего character sheets не попадали в запрос.
     """
-    refs = _resolve_scene_references(scene)
+    refs = _resolve_scene_references(scene, prompt_keys=prompt_keys)
     if not refs:
         return []
-    keys_order = _reference_keys_for_scene(scene, refs, include_location=include_location)
+    keys_order = _reference_keys_for_scene(scene, refs, include_location=include_location, prompt_keys=prompt_keys)
     out: list[bytes] = []
     seen_paths: set[str] = set()
     for key in keys_order:
@@ -837,6 +947,14 @@ def _load_scene_reference_images(scene: dict, *, include_location: bool = False)
         seen_paths.add(candidate)
         out.append(data)
     return out
+
+
+def _user_reference_images_count(scene: dict, target: str) -> int:
+    mapping = scene.get(SCENE_USER_REFERENCE_IMAGES_KEY)
+    if not isinstance(mapping, dict):
+        return 0
+    items = mapping.get(str(target or "start"))
+    return len([item for item in items if str(item or "").strip()]) if isinstance(items, list) else 0
 
 
 def _loaded_reference_paths(scene: dict, *, include_location: bool = False) -> list[str]:
@@ -930,9 +1048,13 @@ def _image_approval_text(scene: dict, scene_index: int, total: int) -> str:
         prompt = _append_reference_style_to_image_prompt(base_prompt, bool(ref_files))
         prompt = _append_scene_identity_to_image_prompt(prompt, scene, include_location=False)
     ref_note = (
-        f"Референсы в запрос: персонажи ({len(ref_files)} файл(ов)); локация не отправляется."
+        f"Референсы в запрос: персонажи ({len(ref_files)} файл(ов)); "
+        f"добавленные изображения ({_user_reference_images_count(scene, 'start')} файл(ов)); локация не отправляется."
         if ref_files
-        else "Референсы из файлов не загрузились — только текст промпта."
+        else (
+            "Референсы персонажей из файлов не загрузились — "
+            f"добавленные изображения: {_user_reference_images_count(scene, 'start')} файл(ов)."
+        )
     )
     planned_chars, _planned_location, planned_paths = _planned_reference_summary(scene, include_location=False)
     loaded_paths = _loaded_reference_paths(scene, include_location=False)

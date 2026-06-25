@@ -78,6 +78,9 @@ class GenerationRun(models.Model):
     status = models.CharField(max_length=64)
     human_title = models.TextField(blank=True, null=True)
     language = models.CharField(max_length=8)
+    series = models.ForeignKey("ContentSeries", db_column="series_id", blank=True, null=True, on_delete=models.DO_NOTHING)
+    series_video_index = models.IntegerField(blank=True, null=True)
+    series_total_videos = models.IntegerField(blank=True, null=True)
     script = models.TextField()
     created_at = models.DateTimeField()
 
@@ -90,6 +93,123 @@ class GenerationRun(models.Model):
 
     def __str__(self) -> str:
         return self.human_title or self.script[:120] or str(self.id)
+
+
+class ContentSeries(models.Model):
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4)
+    project_id = models.UUIDField(blank=True, null=True)
+    slug = models.CharField(max_length=128)
+    title_ru = models.TextField()
+    title_en = models.TextField()
+    current_video_index = models.IntegerField(default=1)
+    total_videos = models.IntegerField(default=10)
+    is_active = models.BooleanField(default=True)
+    notes = models.TextField(blank=True, null=True)
+    meta_json = LenientJSONField(default=dict)
+    created_at = models.DateTimeField()
+    updated_at = models.DateTimeField()
+
+    class Meta:
+        managed = False
+        db_table = "content_series"
+        ordering = ("title_ru",)
+        verbose_name = "Content series / серия"
+        verbose_name_plural = "Content series / серии"
+
+    def __str__(self) -> str:
+        return f"{self.title_ru} / {self.title_en} ({self.current_video_index} из {self.total_videos})"
+
+
+class Project(models.Model):
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4)
+    slug = models.CharField(max_length=128, unique=True)
+    title = models.TextField()
+    description = models.TextField(blank=True, null=True)
+    is_default = models.BooleanField(default=False)
+    is_active = models.BooleanField(default=True)
+    final_scene_prompt = models.TextField(blank=True, null=True)
+    title_preset = models.TextField(blank=True, null=True)
+    hashtags_fixed_ru = LenientJSONField(default=list)
+    hashtags_fixed_en = LenientJSONField(default=list)
+    default_video_provider = models.CharField(max_length=64, blank=True, null=True)
+    allowed_video_models = LenientJSONField(blank=True, null=True)
+    background_music_asset_uri = models.TextField(blank=True, null=True)
+    background_music_volume = models.FloatField(blank=True, null=True)
+    created_at = models.DateTimeField()
+    updated_at = models.DateTimeField()
+
+    class Meta:
+        managed = False
+        db_table = "projects"
+        ordering = ("slug",)
+        verbose_name = "Project / проект"
+        verbose_name_plural = "Projects / проекты"
+
+    def __str__(self) -> str:
+        return self.title or self.slug
+
+
+class ProjectPublishAccount(models.Model):
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4)
+    project = models.ForeignKey(Project, db_column="project_id", on_delete=models.DO_NOTHING)
+    platform = models.CharField(max_length=64)
+    language = models.CharField(max_length=8)
+    account_key = models.CharField(max_length=128, default="default")
+    external_account_id = models.TextField(blank=True, null=True)
+    publish_policy = models.CharField(max_length=64, default="auto_after_copy_approval")
+    is_active = models.BooleanField(default=True)
+    meta_json = LenientJSONField(default=dict)
+    created_at = models.DateTimeField()
+    updated_at = models.DateTimeField()
+
+    class Meta:
+        managed = False
+        db_table = "project_publish_accounts"
+        ordering = ("project", "platform", "language", "account_key")
+        verbose_name = "Publish account / аккаунт публикации"
+        verbose_name_plural = "Publish accounts / аккаунты публикации"
+
+    def __str__(self) -> str:
+        state = "active" if self.is_active else "inactive"
+        return f"{self.project_id} {self.platform}:{self.language}/{self.account_key} ({state})"
+
+
+class PublicationJob(models.Model):
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4)
+    project = models.ForeignKey(Project, db_column="project_id", on_delete=models.DO_NOTHING)
+    bundle_key = models.CharField(max_length=128)
+    origin = models.CharField(max_length=64, default="production_final")
+    platform = models.CharField(max_length=64)
+    language = models.CharField(max_length=8)
+    account_key = models.CharField(max_length=128, default="default")
+    external_account_id = models.TextField(blank=True, null=True)
+    status = models.CharField(max_length=64, default="draft")
+    video_path = models.TextField()
+    video_label = models.CharField(max_length=128, blank=True, null=True)
+    title = models.TextField(blank=True, null=True)
+    description = models.TextField(blank=True, null=True)
+    hashtags_json = LenientJSONField(default=list)
+    recipe = models.TextField(blank=True, null=True)
+    publish_policy = models.CharField(max_length=64, default="auto_after_copy_approval")
+    payload_json = LenientJSONField(default=dict)
+    scheduled_at = models.DateTimeField(blank=True, null=True)
+    approved_at = models.DateTimeField(blank=True, null=True)
+    published_at = models.DateTimeField(blank=True, null=True)
+    external_post_id = models.TextField(blank=True, null=True)
+    publish_error = models.TextField(blank=True, null=True)
+    attempt_count = models.IntegerField(default=0)
+    created_at = models.DateTimeField()
+    updated_at = models.DateTimeField()
+
+    class Meta:
+        managed = False
+        db_table = "publication_jobs"
+        ordering = ("-created_at",)
+        verbose_name = "Publication job / публикация"
+        verbose_name_plural = "Publication jobs / публикации"
+
+    def __str__(self) -> str:
+        return f"{self.platform}:{self.language} {self.status}"
 
 
 class VideoOverview(GenerationRun):

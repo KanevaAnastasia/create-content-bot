@@ -47,6 +47,14 @@ def test_prepare_long_prompt_uses_local_fallback_when_gemini_fails(monkeypatch):
     assert "CHARACTERS SPEAKS: We freeze it and insert the sticks." in shortened
 
 
+def test_expected_lang_token_from_prompt_finds_token_anywhere():
+    import app.syntax_telethon_fallback as telethon_fallback
+
+    assert telethon_fallback._expected_lang_token_from_prompt("Render lang:en scene") == "lang:en"
+    assert telethon_fallback._expected_lang_token_from_prompt("Render LANG=RU scene") == "lang:ru"
+    assert telethon_fallback._expected_lang_token_from_prompt("Render scene") is None
+
+
 def test_prompt_failure_does_not_acquire_syntax_session(monkeypatch):
     import app.syntax_telethon_fallback as telethon_fallback
 
@@ -730,6 +738,44 @@ def test_batch_routes_edited_video_status_to_english_request():
     assert telethon_fallback._batch_message_candidate_keys(_Message(), states) == ["en"]
 
 
+def test_batch_routes_bare_pending_statuses_in_request_order():
+    import app.syntax_telethon_fallback as telethon_fallback
+
+    class _Request:
+        def __init__(self, token):
+            self.expected_lang_token = token
+
+    class _Message:
+        def __init__(self, msg_id: int):
+            self.id = msg_id
+            self.out = False
+            self.reply_to = None
+            self.raw_text = "Запрос ожидает выполнения в очереди."
+            self.message = self.raw_text
+            self.entities = []
+            self.video = None
+            self.document = None
+
+    states = {
+        "ru": {
+            "request": _Request("lang:ru"),
+            "reply_anchor": 102,
+            "sent_ids": {101, 102},
+            "pending_refetch": set(),
+        },
+        "en": {
+            "request": _Request("lang:en"),
+            "reply_anchor": 104,
+            "sent_ids": {103, 104},
+            "pending_refetch": set(),
+        },
+    }
+
+    assert telethon_fallback._batch_message_candidate_keys(_Message(201), states) == ["ru"]
+    states["ru"]["pending_refetch"].add(201)
+    assert telethon_fallback._batch_message_candidate_keys(_Message(202), states) == ["en"]
+
+
 def test_batch_does_not_guess_language_for_unmatched_bare_video():
     import app.syntax_telethon_fallback as telethon_fallback
 
@@ -760,6 +806,212 @@ def test_batch_does_not_guess_language_for_unmatched_bare_video():
     }
 
     assert telethon_fallback._batch_message_candidate_keys(_Message(), states) == []
+
+
+def test_batch_routes_edited_hard_reject_to_the_right_language(monkeypatch):
+    import app.syntax_telethon_fallback as telethon_fallback
+
+    class _ReplyTo:
+        def __init__(self, msg_id: int):
+            self.reply_to_msg_id = msg_id
+
+    class _IncomingMessage:
+        def __init__(
+            self,
+            msg_id: int,
+            *,
+            text: str = "",
+            reply_to: int | None = None,
+            video: bool = False,
+        ):
+            self.id = msg_id
+            self.out = False
+            self.reply_to = _ReplyTo(reply_to) if reply_to is not None else None
+            self.raw_text = text
+            self.message = text
+            self.entities = []
+            self.video = object() if video else None
+            self.document = None
+
+    class _SentMessage:
+        def __init__(self, msg_id: int):
+            self.id = msg_id
+
+    class _Entity:
+        id = 999
+
+    class _FakeClient:
+        def __init__(self, *_args, **_kwargs):
+            self._sent_count = 0
+            self._iter_count = 0
+
+        async def connect(self):
+            return None
+
+        async def disconnect(self):
+            return None
+
+        async def is_user_authorized(self):
+            return True
+
+        async def get_entity(self, _username):
+            return _Entity()
+
+        async def send_file(self, _target, file, caption=None, force_document=False):
+            del file, caption, force_document
+            self._sent_count += 1
+            return _SentMessage(101 if self._sent_count == 1 else 103)
+
+        async def send_message(self, _target, text, reply_to=None):
+            del reply_to
+            self._sent_count += 1
+            return _SentMessage(102 if "lang:ru" in text else 104)
+
+        async def get_messages(self, _target, limit=None, ids=None):
+            del _target, limit
+            if ids == 201 and self._iter_count >= 2:
+                return _IncomingMessage(201, text="still waiting")
+            if ids == 202 and self._iter_count >= 2:
+                return _IncomingMessage(
+                    202,
+                    text="❌ Произошла ошибка. Пожалуйста, попробуйте еще раз.",
+                )
+            return None
+
+        async def iter_messages(self, _target, limit=40):
+            del _target, limit
+            self._iter_count += 1
+            if self._iter_count == 1:
+                yield _IncomingMessage(202, text="Запрос ожидает выполнения в очереди.")
+                yield _IncomingMessage(201, text="Запрос ожидает выполнения в очереди.")
+                return
+            yield _IncomingMessage(203, reply_to=201, video=True)
+            yield _IncomingMessage(
+                202,
+                text="❌ Произошла ошибка. Пожалуйста, попробуйте еще раз.",
+            )
+
+        async def download_media(self, _message, file):
+            assert file is bytes
+            return b"ru-mp4"
+
+    async def _noop_sleep(_sec: float) -> None:
+        return None
+
+    monkeypatch.setattr(telethon_fallback, "TelegramClient", _FakeClient)
+    monkeypatch.setattr(telethon_fallback, "StringSession", lambda value: value)
+    monkeypatch.setattr(telethon_fallback.asyncio, "sleep", _noop_sleep)
+    monkeypatch.setenv("TELEGRAM_API_ID", "123")
+    monkeypatch.setenv("TELEGRAM_API_HASH", "hash")
+    monkeypatch.setenv("TELETHON_STRING_SESSION", "session")
+
+    results = try_generate_via_syntax_batch(
+        requests=[
+            BatchFallbackRequest(key="ru", prompt="lang:ru prompt", start_image=_syntax_test_frame_bytes()),
+            BatchFallbackRequest(key="en", prompt="lang:en prompt", start_image=_syntax_test_frame_bytes()),
+        ],
+        model="veo3_fast",
+        duration_sec=6,
+        timeout_sec=5,
+        acquire_timeout_sec=5,
+    )
+
+    assert results["ru"].success is True
+    assert results["ru"].video_bytes == b"ru-mp4"
+    assert results["en"].success is False
+    assert "Произошла ошибка" in results["en"].provider_message
+
+
+def test_try_generate_via_syntax_batch_times_out_each_pending_request(monkeypatch):
+    import app.syntax_telethon_fallback as telethon_fallback
+
+    class _IncomingMessage:
+        def __init__(self, msg_id: int):
+            self.id = msg_id
+            self.out = False
+            self.reply_to = None
+            self.raw_text = "Запрос ожидает выполнения в очереди."
+            self.message = self.raw_text
+            self.entities = []
+            self.video = None
+            self.document = None
+
+    class _SentMessage:
+        def __init__(self, msg_id: int):
+            self.id = msg_id
+
+    class _Entity:
+        id = 999
+
+    class _FakeClient:
+        def __init__(self, *_args, **_kwargs):
+            self._sent_count = 0
+            self._iter_count = 0
+
+        async def connect(self):
+            return None
+
+        async def disconnect(self):
+            return None
+
+        async def is_user_authorized(self):
+            return True
+
+        async def get_entity(self, _username):
+            return _Entity()
+
+        async def send_file(self, _target, file, caption=None, force_document=False):
+            del file, caption, force_document
+            self._sent_count += 1
+            return _SentMessage(101 if self._sent_count == 1 else 103)
+
+        async def send_message(self, _target, text, reply_to=None):
+            del reply_to
+            self._sent_count += 1
+            return _SentMessage(102 if "lang:ru" in text else 104)
+
+        async def get_messages(self, _target, limit=None, ids=None):
+            del _target, limit, ids
+            return None
+
+        async def iter_messages(self, _target, limit=40):
+            del _target, limit
+            self._iter_count += 1
+            if self._iter_count == 1:
+                yield _IncomingMessage(202)
+                yield _IncomingMessage(201)
+
+    clock = {"now": 0.0}
+
+    async def _advance_sleep(seconds: float) -> None:
+        clock["now"] += max(seconds, 2.0)
+
+    monkeypatch.setattr(telethon_fallback, "TelegramClient", _FakeClient)
+    monkeypatch.setattr(telethon_fallback, "StringSession", lambda value: value)
+    monkeypatch.setattr(telethon_fallback.time, "monotonic", lambda: clock["now"])
+    monkeypatch.setattr(telethon_fallback.asyncio, "sleep", _advance_sleep)
+    monkeypatch.setattr(telethon_fallback, "_poll_interval_sec", lambda: 2)
+    monkeypatch.setenv("TELEGRAM_API_ID", "123")
+    monkeypatch.setenv("TELEGRAM_API_HASH", "hash")
+    monkeypatch.setenv("TELETHON_STRING_SESSION", "session")
+
+    results = try_generate_via_syntax_batch(
+        requests=[
+            BatchFallbackRequest(key="ru", prompt="lang:ru prompt", start_image=_syntax_test_frame_bytes()),
+            BatchFallbackRequest(key="en", prompt="lang:en prompt", start_image=_syntax_test_frame_bytes()),
+        ],
+        model="veo3_fast",
+        duration_sec=6,
+        timeout_sec=1,
+        acquire_timeout_sec=1,
+    )
+
+    assert results["ru"].success is False
+    assert results["en"].success is False
+    assert "Syntax fallback timed out after 1s" in results["ru"].provider_message
+    assert "Syntax fallback timed out after 1s" in results["en"].provider_message
+    assert "Запрос ожидает выполнения" in results["ru"].provider_message
+    assert "Запрос ожидает выполнения" in results["en"].provider_message
 
 
 def test_batch_routes_video_replying_to_english_status():

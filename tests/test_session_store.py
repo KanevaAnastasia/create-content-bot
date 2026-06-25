@@ -43,6 +43,23 @@ def test_generation_title_extracts_structured_viral_brief():
     assert title == "Вишнёвый пирог"
 
 
+def test_generation_title_prefers_russian_overlay_title():
+    title = _human_title_for_session(
+        {
+            "selected_concept": "Старое название",
+            "production": {
+                "overlay_title_by_lang": {
+                    "ru": "  Новый русский заголовок  ",
+                    "en": "New English title",
+                }
+            },
+        },
+        [],
+    )
+
+    assert title == "Новый русский заголовок"
+
+
 def test_save_and_load_session_restores_bytes_and_scene_candidates(monkeypatch):
     _install_sqlite(monkeypatch)
     SESSIONS.clear()

@@ -1,4 +1,4 @@
-.PHONY: test test-cov run start stop restart status logs
+.PHONY: test test-cov run final-worker final-worker-once start stop restart status logs
 
 test:
 	.venv/bin/python -m pytest
@@ -8,6 +8,12 @@ test-cov:
 
 run:
 	.venv/bin/python main.py
+
+final-worker:
+	.venv/bin/python admin_panel/manage.py final_build_worker
+
+final-worker-once:
+	.venv/bin/python admin_panel/manage.py final_build_worker --once
 
 start:
 	scripts/botctl.sh start

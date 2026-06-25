@@ -154,14 +154,13 @@ def _first_word(text: str) -> str:
 
 
 def _expected_lang_token_from_prompt(prompt: str) -> str | None:
-    first = _first_word(prompt)
-    if not first:
+    text = str(prompt or "")
+    if not text.strip():
         return None
-    if first.startswith("lang:"):
-        return first
-    if first.startswith("lang="):
-        return "lang:" + first.split("=", 1)[1]
-    return None
+    match = re.search(r"\blang\s*[:=]\s*([a-z]{2,8})\b", text, flags=re.IGNORECASE)
+    if not match:
+        return None
+    return f"lang:{match.group(1).lower()}"
 
 
 def _extract_mp4_uri(text: str) -> str | None:
@@ -446,6 +445,7 @@ async def _process_bot_message(
     message: Any,
     sent_ids: set[int],
     expected_lang_token: str | None = None,
+    require_lang_token_for_loose: bool = True,
 ) -> tuple[bytes | None, str | None, str, bool, bool] | None:
     """
     Handle one incoming bot message for this attempt.
@@ -462,16 +462,21 @@ async def _process_bot_message(
     mid = int(getattr(message, "id", 0) or 0)
     reply_id = getattr(getattr(message, "reply_to", None), "reply_to_msg_id", None)
     our_high = max(sent_ids) if sent_ids else 0
-    correlated = bool(reply_id and reply_id in sent_ids)
+    correlated = bool((reply_id and reply_id in sent_ids) or mid in sent_ids)
+    loose_missing_lang_token = False
     if not correlated:
         if not (_syntax_allow_loose_correlation() and mid > our_high):
             return None
         text_for_lang = _extract_text(message)
-        if expected_lang_token and text_for_lang:
-            if expected_lang_token not in text_for_lang.lower():
-                return None
+        if require_lang_token_for_loose and expected_lang_token:
+            if re.search(r"\blang\s*[:=]\s*[a-z]{2,8}\b", text_for_lang, flags=re.IGNORECASE):
+                if expected_lang_token not in text_for_lang.lower():
+                    return None
+            loose_missing_lang_token = expected_lang_token not in text_for_lang.lower()
 
     if _message_looks_like_video(message):
+        if loose_missing_lang_token:
+            return None
         data = await client.download_media(message, file=bytes)
         if isinstance(data, bytes) and data:
             return data, None, "Video downloaded from Syntax bot.", False, False
@@ -485,6 +490,8 @@ async def _process_bot_message(
 
     vbytes, vuri, msg = await _try_download_from_urls(urls)
     if vbytes or vuri:
+        if loose_missing_lang_token:
+            return None
         return vbytes, vuri, msg or "Syntax returned a video link.", False, False
     if urls:
         hint = (msg or text or "Syntax link present; video not ready yet.").strip()
@@ -612,6 +619,19 @@ def _batch_message_candidate_keys(message: Any, pending_states: dict[str, dict[s
 
     if len(pending_states) == 1:
         return list(pending_states)
+
+    if (
+        _text_looks_like_syntax_pending_status(text)
+        or _syntax_bot_message_is_hard_reject(text, _collect_urls_from_message(message))
+    ):
+        unanchored = [
+            key
+            for key, state in pending_states.items()
+            if mid > int(state["reply_anchor"])
+            and not state["pending_refetch"]
+        ]
+        if unanchored:
+            return unanchored[:1]
 
     # A bare video in a multi-request chat has no reliable language identity.
     return []
@@ -1117,11 +1137,15 @@ async def _run_batch_fallback_async(
                 mid = int(getattr(message, "id", 0) or 0)
                 if mid <= state["reply_anchor"] or mid in state["processed"]:
                     continue
+                correlation_ids = set(state["sent_ids"]) | set(state["pending_refetch"])
+                if mid in state["pending_refetch"]:
+                    correlation_ids.add(mid)
                 out = await _process_bot_message(
                     client,
                     message=message,
-                    sent_ids=state["sent_ids"],
+                    sent_ids=correlation_ids,
                     expected_lang_token=state["request"].expected_lang_token,
+                    require_lang_token_for_loose=True,
                 )
                 if out is None:
                     continue
@@ -1167,10 +1191,16 @@ async def _run_batch_fallback_async(
                 return
 
         while pending_states and time.monotonic() < deadline:
+            messages_by_id: dict[int, Any] = {}
             latest_raw = await client.get_messages(target, limit=1)
             latest = _first_message_from_get_messages(latest_raw)
-            await _consume_for_batch_message(latest)
+            if latest is not None:
+                messages_by_id[int(getattr(latest, "id", 0) or 0)] = latest
             async for msg in client.iter_messages(target, limit=40):
+                if msg is not None:
+                    messages_by_id[int(getattr(msg, "id", 0) or 0)] = msg
+            # Telethon yields newest first; batch status messages must be assigned in chat order.
+            for _mid, msg in sorted(messages_by_id.items()):
                 await _consume_for_batch_message(msg)
                 if not pending_states:
                     break

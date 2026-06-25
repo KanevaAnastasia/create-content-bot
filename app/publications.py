@@ -48,6 +48,92 @@ class PublicationTarget:
     description: str
     video_label: str
 
+    @property
+    def key(self) -> str:
+        return publication_target_key(self.platform, self.language)
+
+
+PUBLICATION_VIDEO_VARIANT_LABELS = {
+    "clean": "clean master",
+    "upscaled_4k": "4K master",
+    "subtitled_music": "subtitled/music master",
+    "titled_subtitled_music": "title/subtitled/music master",
+}
+DEFAULT_PUBLICATION_VIDEO_VARIANT = "titled_subtitled_music"
+
+PUBLICATION_TARGET_LABELS = {
+    "youtube:ru": "YouTube Shorts RU",
+    "rutube:ru": "RuTube RU",
+    "instagram:ru": "Instagram RU",
+    "vk:ru": "VK RU",
+    "tiktok:ru": "TikTok RU",
+    "instagram:en": "Instagram EN",
+    "youtube:en": "YouTube Shorts EN",
+}
+
+
+def publication_target_key(platform: str, language: str) -> str:
+    return f"{str(platform or '').strip().lower()}:{str(language or '').strip().lower()}"
+
+
+def normalize_publication_target_keys(value: Any) -> set[str]:
+    if value is None:
+        return set()
+    if isinstance(value, str):
+        raw_items = re.split(r"[\s,;]+", value)
+    else:
+        raw_items = list(value) if isinstance(value, (list, tuple, set)) else []
+    out: set[str] = set()
+    for item in raw_items:
+        text = str(item or "").strip().lower()
+        if not text:
+            continue
+        if ":" not in text and "/" in text:
+            text = text.replace("/", ":", 1)
+        if ":" in text:
+            platform, language = text.split(":", 1)
+            out.add(publication_target_key(platform, language))
+    return out
+
+
+def publication_target_label(target_or_key: PublicationTarget | str) -> str:
+    key = target_or_key.key if isinstance(target_or_key, PublicationTarget) else str(target_or_key or "")
+    return PUBLICATION_TARGET_LABELS.get(key, key)
+
+
+def normalize_publication_video_variant(value: str | None) -> str:
+    variant = str(value or "").strip()
+    if variant in PUBLICATION_VIDEO_VARIANT_LABELS:
+        return variant
+    return DEFAULT_PUBLICATION_VIDEO_VARIANT
+
+
+def normalize_publication_scheduled_at(value: Any, *, default_timezone=timezone.utc) -> datetime | None:
+    if value is None or value == "":
+        return None
+    if isinstance(value, datetime):
+        scheduled = value
+    else:
+        text = str(value or "").strip()
+        if not text:
+            return None
+        if text.endswith("Z"):
+            text = text[:-1] + "+00:00"
+        try:
+            scheduled = datetime.fromisoformat(text)
+        except ValueError:
+            for fmt in ("%Y-%m-%d %H:%M", "%Y-%m-%d %H:%M:%S", "%d.%m.%Y %H:%M"):
+                try:
+                    scheduled = datetime.strptime(text, fmt)
+                    break
+                except ValueError:
+                    scheduled = None
+            if scheduled is None:
+                raise ValueError("Publication time must be ISO-like, YYYY-MM-DD HH:MM, or DD.MM.YYYY HH:MM.")
+    if scheduled.tzinfo is None:
+        scheduled = scheduled.replace(tzinfo=default_timezone)
+    return scheduled.astimezone(timezone.utc)
+
 
 def publication_artifacts_dir() -> Path:
     raw = (os.getenv(PUBLICATION_ARTIFACTS_DIR_ENV_NAME) or "").strip()
@@ -65,8 +151,13 @@ def extract_hashtags(text: str) -> list[str]:
     return seen
 
 
-def build_publication_targets(copy: dict[str, str]) -> list[PublicationTarget]:
-    return [
+def build_publication_targets(
+    copy: dict[str, str],
+    *,
+    selected_target_keys: Any = None,
+) -> list[PublicationTarget]:
+    selected = normalize_publication_target_keys(selected_target_keys)
+    targets = [
         PublicationTarget(
             platform="youtube",
             language="ru",
@@ -117,6 +208,9 @@ def build_publication_targets(copy: dict[str, str]) -> list[PublicationTarget]:
             video_label="EN video / final master",
         ),
     ]
+    if not selected:
+        return targets
+    return [target for target in targets if target.key in selected]
 
 
 def resolve_project_for_publications(session: Session, project_slug: str | None) -> Project:
@@ -189,6 +283,7 @@ def export_publication_video_assets(
     *,
     bundle_key: str,
     base_dir: Path | None = None,
+    video_variant: str | None = None,
 ) -> dict[str, str]:
     target_dir = (base_dir or publication_artifacts_dir()) / bundle_key
     target_dir.mkdir(parents=True, exist_ok=True)
@@ -196,10 +291,19 @@ def export_publication_video_assets(
     renders = post_production.get("renders_by_language")
     if not isinstance(renders, dict):
         return out
+    preferred_variant = normalize_publication_video_variant(video_variant)
     for language, payload in renders.items():
         if not isinstance(payload, dict):
             continue
-        source = payload.get("subtitled_music") or payload.get("clean") or {}
+        source = payload.get(preferred_variant)
+        if not isinstance(source, dict):
+            source = (
+                payload.get("titled_subtitled_music")
+                or payload.get("subtitled_music")
+                or payload.get("upscaled_4k")
+                or payload.get("clean")
+                or {}
+            )
         filename = f"publish_{language}.mp4"
         path = target_dir / filename
         video_path = str((source or {}).get("video_path") or "").strip()
@@ -227,6 +331,9 @@ def queue_publication_bundle(
     copy: dict[str, str],
     post_production: dict[str, Any],
     origin: str = "production_final",
+    selected_target_keys: Any = None,
+    video_variant: str | None = None,
+    scheduled_at: Any = None,
 ) -> list[PublicationJob]:
     project = resolve_project_for_publications(session, project_slug)
     accounts = upsert_project_publish_accounts_from_env(session, project)
@@ -236,15 +343,23 @@ def queue_publication_bundle(
         if row.is_active
     }
     bundle_key = str(uuid.uuid4())
-    video_paths = export_publication_video_assets(post_production, bundle_key=bundle_key)
+    normalized_variant = normalize_publication_video_variant(video_variant)
+    video_paths = export_publication_video_assets(
+        post_production,
+        bundle_key=bundle_key,
+        video_variant=normalized_variant,
+    )
     approved_at = datetime.now(timezone.utc)
+    normalized_scheduled_at = normalize_publication_scheduled_at(scheduled_at)
     jobs: list[PublicationJob] = []
-    for target in build_publication_targets(copy):
+    for target in build_publication_targets(copy, selected_target_keys=selected_target_keys):
         video_path = video_paths.get(target.language)
         if not video_path or not target.description:
             continue
         account = account_index.get((target.platform, target.language))
         status = PUBLICATION_STATUS_APPROVED if account and account.external_account_id else PUBLICATION_STATUS_NEEDS_MANUAL_ACTION
+        if normalized_scheduled_at is not None and status == PUBLICATION_STATUS_APPROVED:
+            status = PUBLICATION_STATUS_SCHEDULED
         account_key = account.account_key if account else "default"
         external_account_id = account.external_account_id if account else None
         publish_policy = account.publish_policy if account else "manual_review_required"
@@ -258,13 +373,14 @@ def queue_publication_bundle(
             external_account_id=external_account_id,
             status=status,
             video_path=video_path,
-            video_label=target.video_label,
+            video_label=f"{target.language.upper()} video / {PUBLICATION_VIDEO_VARIANT_LABELS[normalized_variant]}",
             title=target.title,
             description=target.description,
             hashtags_json=extract_hashtags(target.description),
             recipe=recipe,
             publish_policy=publish_policy,
-            approved_at=approved_at if status == PUBLICATION_STATUS_APPROVED else None,
+            scheduled_at=normalized_scheduled_at,
+            approved_at=approved_at if status in {PUBLICATION_STATUS_APPROVED, PUBLICATION_STATUS_SCHEDULED} else None,
             payload_json={
                 "bundle_key": bundle_key,
                 "platform": target.platform,
@@ -273,6 +389,10 @@ def queue_publication_bundle(
                 "title": target.title,
                 "description": target.description,
                 "hashtags": extract_hashtags(target.description),
+                "target_key": target.key,
+                "target_label": publication_target_label(target),
+                "video_variant": normalized_variant,
+                "scheduled_at": normalized_scheduled_at.isoformat() if normalized_scheduled_at else None,
             },
         )
         session.add(job)
@@ -285,10 +405,12 @@ def publication_jobs_summary(jobs: list[PublicationJob]) -> str:
     if not jobs:
         return "Публикационные jobs не созданы."
     approved = [job for job in jobs if job.status == PUBLICATION_STATUS_APPROVED]
+    scheduled = [job for job in jobs if job.status == PUBLICATION_STATUS_SCHEDULED]
     manual = [job for job in jobs if job.status == PUBLICATION_STATUS_NEEDS_MANUAL_ACTION]
     lines = [
         f"Создано публикационных jobs: {len(jobs)}.",
-        f"Автоготовы для n8n: {len(approved)}.",
+        f"Автоготовы для n8n: {len(approved) + len(scheduled)}.",
+        f"Запланированы: {len(scheduled)}.",
         f"Требуют ручной/полуручной ветки: {len(manual)}.",
     ]
     for job in jobs:
