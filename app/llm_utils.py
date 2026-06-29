@@ -18,6 +18,7 @@ import os
 import random
 import re
 import contextvars
+import ssl
 import threading
 import time
 import hashlib
@@ -43,6 +44,9 @@ _PREFER_VERTEX_API: contextvars.ContextVar[bool] = contextvars.ContextVar(
     "prefer_vertex_api",
     default=False,
 )
+_VERTEX_CACHE_LOCK = threading.Lock()
+_VERTEX_MODEL_CACHE: dict[tuple[int, int, str, str, str], Any] = {}
+_VERTEX_SAFETY_SETTINGS_CACHE: dict[tuple[int, int, int, int], list[Any]] = {}
 
 
 class GeminiQuotaError(RuntimeError):
@@ -203,6 +207,9 @@ def _extract_retry_seconds_from_error(error_text: str) -> float | None:
 LLM_BACKOFF_INITIAL_SEC = 5.0
 LLM_BACKOFF_MAX_SEC = 120.0
 LLM_RATE_LIMIT_MAX_ATTEMPTS = 5
+LLM_TRANSPORT_MAX_ATTEMPTS = 3
+LLM_TRANSPORT_BACKOFF_INITIAL_SEC = 2.0
+LLM_TRANSPORT_BACKOFF_MAX_SEC = 20.0
 _MAX_USER_VISIBLE_LLM_ERROR_LEN = 1200
 
 
@@ -224,6 +231,41 @@ def _backoff_delay_before_retry(
     return min(backoff_max_sec, jitter)
 
 
+def _is_transient_transport_retryable(e: BaseException) -> bool:
+    """Network/SSL transport glitches where retrying the same LLM request is reasonable."""
+    current: BaseException | None = e
+    while current is not None:
+        if isinstance(current, (TimeoutError, ConnectionError, ssl.SSLError)):
+            return True
+        current = current.__cause__ if isinstance(current.__cause__, BaseException) else None
+
+    s = str(e).lower()
+    retry_markers = (
+        "ssl",
+        "ssleoferror",
+        "unexpected_eof",
+        "eof occurred in violation of protocol",
+        "max retries exceeded",
+        "connection reset",
+        "connection aborted",
+        "remote end closed connection",
+        "temporarily unavailable",
+        "timed out",
+        "timeout",
+    )
+    service_markers = (
+        "aiplatform.googleapis.com",
+        "generative language",
+        "google.api_core",
+        "httpsconnectionpool",
+    )
+    return any(marker in s for marker in retry_markers) and (
+        any(marker in s for marker in service_markers)
+        or "generatecontent" in s
+        or isinstance(e, (TimeoutError, ConnectionError))
+    )
+
+
 def safe_llm_call(
     fn: Callable[[], T],
     *,
@@ -243,6 +285,7 @@ def safe_llm_call(
     Выполнение ``fn`` ставится в глобальную LLM-очередь: параллельных обращений к API нет.
     """
     last_err: BaseException | None = None
+    transport_attempt = 0
     for attempt in range(max_attempts):
         try:
             return submit_llm(fn)
@@ -268,6 +311,24 @@ def safe_llm_call(
                     time.sleep(wait_sec)
                     continue
                 raise GeminiQuotaError(GEMINI_RATE_LIMIT_EXHAUSTED_USER_MESSAGE) from e
+            if _is_transient_transport_retryable(e):
+                transport_attempt += 1
+                if transport_attempt < LLM_TRANSPORT_MAX_ATTEMPTS:
+                    wait_sec = _backoff_delay_before_retry(
+                        transport_attempt - 1,
+                        e,
+                        backoff_initial_sec=LLM_TRANSPORT_BACKOFF_INITIAL_SEC,
+                        backoff_max_sec=LLM_TRANSPORT_BACKOFF_MAX_SEC,
+                    )
+                    logger.warning(
+                        "LLM transport error, retrying same request: wait %.1fs (attempt %s/%s) err=%s",
+                        wait_sec,
+                        transport_attempt,
+                        LLM_TRANSPORT_MAX_ATTEMPTS,
+                        _truncate_error_text(str(e), max_len=500),
+                    )
+                    time.sleep(wait_sec)
+                    continue
             raise
     raise RuntimeError(f"LLM call failed after {max_attempts} attempts") from last_err
 
@@ -468,6 +529,112 @@ def _guess_image_mime_type(data: bytes) -> str:
     return "image/jpeg"
 
 
+def _guess_media_mime_type(data: bytes) -> str:
+    if data.startswith(b"\x00\x00\x00") and data[4:8] == b"ftyp":
+        return "video/mp4"
+    return _guess_image_mime_type(data)
+
+
+def _dedupe_binary_payloads(payloads: list[bytes] | None) -> list[bytes]:
+    """
+    Preserves order while dropping exact duplicate media payloads before upload.
+    """
+    out: list[bytes] = []
+    seen: set[str] = set()
+    for payload in payloads or []:
+        if not isinstance(payload, bytes) or not payload:
+            continue
+        digest = hashlib.sha256(payload).hexdigest()
+        if digest in seen:
+            continue
+        seen.add(digest)
+        out.append(payload)
+    return out
+
+
+def _load_vertex_generative_sdk() -> tuple[Any, Any]:
+    try:
+        import vertexai  # type: ignore
+        from vertexai import generative_models as vertex_generative_models  # type: ignore
+    except Exception as e:
+        raise RuntimeError("Missing dependency. Install with: pip install google-cloud-aiplatform") from e
+    return vertexai, vertex_generative_models
+
+
+def get_vertex_generative_model(project: str, location: str, model_id: str) -> Any:
+    """
+    Returns a cached Vertex GenerativeModel for the current SDK module/config.
+    """
+    vertexai, vertex_generative_models = _load_vertex_generative_sdk()
+    GenerativeModel = getattr(vertex_generative_models, "GenerativeModel", None)
+    if GenerativeModel is None:
+        raise RuntimeError("Vertex Gemini SDK does not expose GenerativeModel.")
+    cache_key = (id(vertex_generative_models), id(GenerativeModel), project, location, model_id)
+    with _VERTEX_CACHE_LOCK:
+        model = _VERTEX_MODEL_CACHE.get(cache_key)
+        if model is None:
+            vertexai.init(project=project, location=location)
+            model = GenerativeModel(model_id)
+            _VERTEX_MODEL_CACHE[cache_key] = model
+        return model
+
+
+def get_vertex_safety_settings() -> list[Any]:
+    """
+    Builds Vertex Gemini safety settings once per SDK class set.
+    """
+    try:
+        from vertexai import generative_models as vertex_generative_models  # type: ignore
+    except Exception as e:
+        raise RuntimeError("Missing dependency. Install with: pip install google-cloud-aiplatform") from e
+    HarmBlockThreshold = getattr(vertex_generative_models, "HarmBlockThreshold", None)
+    HarmCategory = getattr(vertex_generative_models, "HarmCategory", None)
+    SafetySetting = getattr(vertex_generative_models, "SafetySetting", None)
+    if HarmBlockThreshold is None or HarmCategory is None or SafetySetting is None:
+        raise RuntimeError("Vertex Gemini SDK does not expose safety setting classes.")
+    cache_key = (id(vertex_generative_models), id(SafetySetting), id(HarmCategory), id(HarmBlockThreshold))
+    with _VERTEX_CACHE_LOCK:
+        cached = _VERTEX_SAFETY_SETTINGS_CACHE.get(cache_key)
+        if cached is not None:
+            return cached
+        settings = [
+            SafetySetting(
+                category=HarmCategory.HARM_CATEGORY_HATE_SPEECH,
+                threshold=HarmBlockThreshold.BLOCK_ONLY_HIGH,
+            ),
+            SafetySetting(
+                category=HarmCategory.HARM_CATEGORY_DANGEROUS_CONTENT,
+                threshold=HarmBlockThreshold.BLOCK_ONLY_HIGH,
+            ),
+            SafetySetting(
+                category=HarmCategory.HARM_CATEGORY_SEXUALLY_EXPLICIT,
+                threshold=HarmBlockThreshold.BLOCK_ONLY_HIGH,
+            ),
+            SafetySetting(
+                category=HarmCategory.HARM_CATEGORY_HARASSMENT,
+                threshold=HarmBlockThreshold.BLOCK_ONLY_HIGH,
+            ),
+        ]
+        _VERTEX_SAFETY_SETTINGS_CACHE[cache_key] = settings
+        return settings
+
+
+def vertex_part_from_text(project: str, location: str, text: str) -> Any:
+    _vertexai, vertex_generative_models = _load_vertex_generative_sdk()
+    Part = getattr(vertex_generative_models, "Part", None)
+    if Part is None:
+        raise RuntimeError("Vertex Gemini SDK does not support image parts in this version.")
+    return Part.from_text(text)
+
+
+def vertex_part_from_data(project: str, location: str, data: bytes) -> Any:
+    _vertexai, vertex_generative_models = _load_vertex_generative_sdk()
+    Part = getattr(vertex_generative_models, "Part", None)
+    if Part is None:
+        raise RuntimeError("Vertex Gemini SDK does not support image parts in this version.")
+    return Part.from_data(data=data, mime_type=_guess_media_mime_type(data))
+
+
 def gemini_generate_sync(prompt: str, *, images: list[bytes] | None = None) -> str:
     """
     Синхронный вызов Gemini (исполняется из async-кода через ``asyncio.to_thread``).
@@ -493,18 +660,7 @@ def gemini_generate_sync(prompt: str, *, images: list[bytes] | None = None) -> s
     location = (os.getenv("GOOGLE_CLOUD_LOCATION") or "us-central1").strip() or "us-central1"
     if not project:
         raise RuntimeError("Missing environment variable: GOOGLE_CLOUD_PROJECT")
-    try:
-        import vertexai  # type: ignore
-        from vertexai.generative_models import (  # type: ignore
-            GenerativeModel,
-            HarmBlockThreshold,
-            HarmCategory,
-            SafetySetting,
-        )
-        from vertexai import generative_models as vertex_generative_models  # type: ignore
-    except Exception as e:
-        raise RuntimeError("Missing dependency. Install with: pip install google-cloud-aiplatform") from e
-    vertexai.init(project=project, location=location)
+    _load_vertex_generative_sdk()
     primary_model = (os.getenv(GEMINI_MODEL_ENV_NAME) or "").strip() or DEFAULT_GEMINI_MODEL
     fallback_models_raw = (os.getenv(GEMINI_MODEL_FALLBACKS_ENV_NAME) or "").strip()
     fallback_models = [m.strip() for m in fallback_models_raw.split(",") if m.strip()] if fallback_models_raw else []
@@ -514,7 +670,7 @@ def gemini_generate_sync(prompt: str, *, images: list[bytes] | None = None) -> s
             model_ids.append(m)
     transports: list[tuple[str, Any]] = [("vertexai_sdk", None)]
     prompt_snapshot = str(prompt)
-    image_payloads = [image for image in (images or []) if isinstance(image, bytes) and image]
+    image_payloads = _dedupe_binary_payloads(images)
     context_fingerprint = hashlib.sha1(prompt_snapshot.encode("utf-8")).hexdigest()[:10]
 
     last_quota_error: BaseException | None = None
@@ -539,35 +695,12 @@ def gemini_generate_sync(prompt: str, *, images: list[bytes] | None = None) -> s
                     len(prompt_snapshot),
                     prompt_snapshot,
                 )
-                model = GenerativeModel(model_id)
-                safety_settings = [
-                    SafetySetting(
-                        category=HarmCategory.HARM_CATEGORY_HATE_SPEECH,
-                        threshold=HarmBlockThreshold.BLOCK_ONLY_HIGH,
-                    ),
-                    SafetySetting(
-                        category=HarmCategory.HARM_CATEGORY_DANGEROUS_CONTENT,
-                        threshold=HarmBlockThreshold.BLOCK_ONLY_HIGH,
-                    ),
-                    SafetySetting(
-                        category=HarmCategory.HARM_CATEGORY_SEXUALLY_EXPLICIT,
-                        threshold=HarmBlockThreshold.BLOCK_ONLY_HIGH,
-                    ),
-                    SafetySetting(
-                        category=HarmCategory.HARM_CATEGORY_HARASSMENT,
-                        threshold=HarmBlockThreshold.BLOCK_ONLY_HIGH,
-                    ),
-                ]
+                model = get_vertex_generative_model(project, location, model_id)
+                safety_settings = get_vertex_safety_settings()
                 request: Any = prompt_snapshot
                 if image_payloads:
-                    Part = getattr(vertex_generative_models, "Part", None)
-                    if Part is None:
-                        raise RuntimeError("Vertex Gemini SDK does not support image parts in this version.")
-                    request = [Part.from_text(prompt_snapshot)]
-                    request.extend(
-                        Part.from_data(data=image, mime_type=_guess_image_mime_type(image))
-                        for image in image_payloads
-                    )
+                    request = [vertex_part_from_text(project, location, prompt_snapshot)]
+                    request.extend(vertex_part_from_data(project, location, image) for image in image_payloads)
                 resp = model.generate_content(request, safety_settings=safety_settings)
                 text = _extract_text_from_vertex_response(resp)
                 if not text:

@@ -11,12 +11,37 @@ from sqlalchemy import select
 
 from .db import SessionLocal
 from .generation_store import ensure_generation_run_for_session
-from .models import ChatSession
+from .models import ChatSession, GenerationRun
 from .scene_media_store import rebuild_production_session, rebuild_scene_db_ids_for_session
 
 logger = logging.getLogger("bot.session")
 
 _BYTES_MARKER = "__cf_bytes_b64__"
+_INLINE_MEDIA_KEYS = {
+    "image_b64",
+    "video_b64",
+    "video_bytes",
+    "start_frame_image_b64",
+    "end_frame_image_b64",
+}
+_INLINE_MEDIA_KEY_SUFFIXES = ("_image_b64", "_video_b64")
+
+
+def _is_inline_media_key(key: Any) -> bool:
+    text = str(key)
+    return text in _INLINE_MEDIA_KEYS or text.endswith(_INLINE_MEDIA_KEY_SUFFIXES)
+
+
+def _strip_inline_media_payloads(value: Any) -> Any:
+    if isinstance(value, dict):
+        return {
+            str(key): _strip_inline_media_payloads(item)
+            for key, item in value.items()
+            if not _is_inline_media_key(key)
+        }
+    if isinstance(value, list):
+        return [_strip_inline_media_payloads(item) for item in value]
+    return value
 
 
 def _serialize_value(value: Any) -> Any:
@@ -54,7 +79,7 @@ def save_session(chat_id: int, session: dict[str, Any]) -> None:
                 session["scene_db_ids_by_index"] = scene_map
     except Exception:
         logger.exception("session_store.ensure_generation_run_failed chat_id=%s", chat_id)
-    payload = _serialize_value(session)
+    payload = _serialize_value(_strip_inline_media_payloads(session))
     with SessionLocal() as db:
         row = db.execute(select(ChatSession).where(ChatSession.chat_id == int(chat_id))).scalar_one_or_none()
         if row is None:
@@ -69,6 +94,7 @@ def save_session(chat_id: int, session: dict[str, Any]) -> None:
 def load_session(chat_id: int) -> dict[str, Any] | None:
     with SessionLocal() as db:
         row = db.execute(select(ChatSession).where(ChatSession.chat_id == int(chat_id))).scalar_one_or_none()
+        run = db.get(GenerationRun, row.generation_run_id) if row is not None and row.generation_run_id else None
     if row is None:
         return None
     session = _deserialize_value(dict(row.session_json or {}))
@@ -77,6 +103,13 @@ def load_session(chat_id: int) -> dict[str, Any] | None:
     generation_run_id = str(row.generation_run_id or session.get("generation_run_id") or "").strip() or None
     if generation_run_id:
         session["generation_run_id"] = generation_run_id
+        if run is not None and bool(run.is_active):
+            if run.current_scene_index is not None:
+                session["image_scene_index"] = int(run.current_scene_index)
+            if run.current_media_substep:
+                session["scene_media_substep"] = str(run.current_media_substep)
+            if run.current_media_language_index is not None:
+                session["scene_media_language_index"] = int(run.current_media_language_index)
         if not isinstance(session.get("scene_db_ids_by_index"), dict):
             session["scene_db_ids_by_index"] = rebuild_scene_db_ids_for_session(session, generation_run_id)
         rebuild_production_session(session, generation_run_id)

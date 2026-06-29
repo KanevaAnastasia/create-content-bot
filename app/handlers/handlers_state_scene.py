@@ -82,7 +82,7 @@ from .handlers_state_commands import (
     first_step_menu_markup,
     project_choice_markup,
 )
-from .handlers_keyboards import remove_keyboard_markup, reply_text_without_keyboard, safe_reply_text
+from .handlers_keyboards import remove_keyboard_markup, reply_text_without_keyboard, safe_reply_photo, safe_reply_text
 from ..assets import ASSETS
 from ..elevenlabs_tts import generate_elevenlabs_speech
 from ..llm_utils import gemini_generate_sync
@@ -701,7 +701,7 @@ async def _send_overlay_title_previews(update: Update, session: dict, style: dic
             continue
         bio = io.BytesIO(image_bytes)
         bio.name = f"overlay_title_preview_{language}.png"
-        await message.reply_photo(photo=bio, caption=f"Превью верхнего заголовка {label}.")
+        await safe_reply_photo(message, photo=bio, caption=f"Превью верхнего заголовка {label}.")
 
 
 async def _ask_overlay_title_style_approval(update: Update, session: dict) -> bool:
@@ -1159,6 +1159,42 @@ def _last_available_scene_media_substep(scene: dict) -> str:
     return SCENE_MEDIA_SUBSTEP_START
 
 
+def _clear_scene_media_navigation_pending(session: dict, scene: dict | None = None) -> None:
+    """Drop transient media prompts so Back lands on the visible target step."""
+    for key in (
+        "scene_speech_shorten_pending",
+        "scene_phrase_translation_pending",
+        "scene_phrase_input_pending",
+        "scene_image_edit_pending",
+        "scene_image_reference_pending",
+        "scene_video_feedback_pending",
+        "scene_video_speed_pending",
+        "scene_prompt_input_pending",
+    ):
+        session.pop(key, None)
+    if isinstance(scene, dict):
+        for key in (
+            "video_provider_choice_pending",
+            "syntax_fallback_pending",
+            "image_model_choice_pending",
+        ):
+            scene.pop(key, None)
+
+
+def _scene_media_nav_label(substep: str) -> str:
+    if substep == SCENE_MEDIA_SUBSTEP_START:
+        return "промпт стартового кадра"
+    if substep == SCENE_MEDIA_SUBSTEP_START_IMAGE_APPROVAL:
+        return "апрув стартового изображения"
+    if substep == SCENE_MEDIA_SUBSTEP_END:
+        return "промпт конечного кадра"
+    if substep == SCENE_MEDIA_SUBSTEP_END_IMAGE_APPROVAL:
+        return "апрув конечного изображения"
+    if substep == SCENE_MEDIA_SUBSTEP_VIDEO:
+        return "апрув video prompt"
+    return substep
+
+
 async def _handle_navigation_buttons(
     update: Update,
     *,
@@ -1204,6 +1240,8 @@ async def _handle_navigation_buttons(
             )
             return True
         scene = scenes[idx]
+        _clear_scene_media_navigation_pending(session, scene)
+        total = len(scenes)
         if sub == SCENE_MEDIA_SUBSTEP_VIDEO:
             if _scene_needs_end_frame_step(scene):
                 target_substep = (
@@ -1226,7 +1264,7 @@ async def _handle_navigation_buttons(
                 target_substep,
             )
             await update.message.reply_text(
-                "Вернула на предыдущий фактический подшаг текущей сцены."
+                f"Назад: сцена {idx + 1}/{total}, {_scene_media_nav_label(target_substep)}."
             )
             await _send_next_scene_media_step(update, session)
             return True
@@ -1239,7 +1277,9 @@ async def _handle_navigation_buttons(
                 sub,
                 SCENE_MEDIA_SUBSTEP_END,
             )
-            await update.message.reply_text("Вернула к промпту конечного кадра текущей сцены.")
+            await update.message.reply_text(
+                f"Назад: сцена {idx + 1}/{total}, {_scene_media_nav_label(SCENE_MEDIA_SUBSTEP_END)}."
+            )
             await _send_next_scene_media_step(update, session)
             return True
         if sub == SCENE_MEDIA_SUBSTEP_END:
@@ -1257,7 +1297,9 @@ async def _handle_navigation_buttons(
                 sub,
                 target_substep,
             )
-            await update.message.reply_text("Вернула к предыдущему этапу стартового кадра текущей сцены.")
+            await update.message.reply_text(
+                f"Назад: сцена {idx + 1}/{total}, {_scene_media_nav_label(target_substep)}."
+            )
             await _send_next_scene_media_step(update, session)
             return True
         if sub == SCENE_MEDIA_SUBSTEP_START_IMAGE_APPROVAL:
@@ -1269,12 +1311,15 @@ async def _handle_navigation_buttons(
                 sub,
                 SCENE_MEDIA_SUBSTEP_START,
             )
-            await update.message.reply_text("Вернула к промпту стартового кадра текущей сцены.")
+            await update.message.reply_text(
+                f"Назад: сцена {idx + 1}/{total}, {_scene_media_nav_label(SCENE_MEDIA_SUBSTEP_START)}."
+            )
             await _send_next_scene_media_step(update, session)
             return True
         if sub == SCENE_MEDIA_SUBSTEP_START and idx > 0:
             prev_idx = idx - 1
             prev_scene = scenes[prev_idx]
+            _clear_scene_media_navigation_pending(session, prev_scene if isinstance(prev_scene, dict) else None)
             target_substep = (
                 _last_available_scene_media_substep(prev_scene)
                 if isinstance(prev_scene, dict)
@@ -1291,7 +1336,9 @@ async def _handle_navigation_buttons(
                 prev_idx + 1,
                 target_substep,
             )
-            await update.message.reply_text("Вернула к концу предыдущей сцены.")
+            await update.message.reply_text(
+                f"Назад: сцена {prev_idx + 1}/{total}, {_scene_media_nav_label(target_substep)}."
+            )
             await _send_next_scene_media_step(update, session)
             return True
         _drop_step_outputs_from(session, "media")
@@ -1379,7 +1426,16 @@ async def _handle_navigation_buttons(
     if restored is not None:
         state_after_restore = str(session.get("state") or "")
         if state_after_restore == STATE_WAITING_SCENE_MEDIA:
-            await update.message.reply_text("Вернула на предыдущий сохранённый шаг.")
+            production = session.get("production") or {}
+            scenes = production.get("json_plan") if isinstance(production, dict) else None
+            idx = int(session.get("image_scene_index", 0) or 0)
+            sub = str(session.get("scene_media_substep") or SCENE_MEDIA_SUBSTEP_START)
+            total = len(scenes) if isinstance(scenes, list) else 0
+            await update.message.reply_text(
+                f"Назад: сцена {idx + 1}/{total}, {_scene_media_nav_label(sub)}."
+                if total
+                else "Назад: предыдущий сохранённый медиа-шаг."
+            )
             await _send_next_scene_media_step(update, session)
             return True
         await _reply_text_with_optional_markup(

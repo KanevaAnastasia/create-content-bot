@@ -15,7 +15,7 @@ from urllib.parse import quote, unquote, urlparse
 from django import forms as django_forms
 from django.contrib import admin, messages
 from django.db import close_old_connections, connection, transaction
-from django.http import FileResponse, Http404, HttpResponse, HttpResponseRedirect, StreamingHttpResponse
+from django.http import FileResponse, Http404, HttpResponse, HttpResponseRedirect, JsonResponse, StreamingHttpResponse
 from django.middleware.csrf import get_token
 from django.urls import NoReverseMatch, path, reverse
 from django.utils import timezone
@@ -25,6 +25,7 @@ from django.utils.safestring import mark_safe
 
 from app.artifact_store import persist_post_production_artifacts
 from app.db import SessionLocal
+from app.final_video_delivery import all_final_artifacts_delivered, deliver_final_artifact_to_telegram
 from app.post_production import (
     build_post_production,
     build_subtitled_post_production_from_upscaled_master,
@@ -40,8 +41,16 @@ from app.publications import (
     queue_publication_bundle,
 )
 from app.scene_media_store import rebuild_production_session, rebuild_scene_db_ids_for_session
+from app.series_store import advance_series_after_successful_render
 
-from .forms import ChatSessionAdminForm, SceneImageCandidateAdminForm, SceneVideoCandidateAdminForm
+from .forms import (
+    PENDING_OVERLAY_TITLE_STYLE_KEY,
+    ChatSessionAdminForm,
+    SceneAdminForm,
+    SceneImageCandidateAdminForm,
+    SceneVideoCandidateAdminForm,
+    _normalize_title_color,
+)
 from .models import (
     ChatSession,
     ContentSeries,
@@ -70,6 +79,7 @@ FINAL_BUILD_ACTIVE_STATUSES = {"pending", "running"}
 FINAL_BUILD_STALE_AFTER = timedelta(minutes=30)
 FINAL_BUILD_HEARTBEAT_INTERVAL_SEC = 15
 FINAL_BUILD_WORKER_KICK_DEBOUNCE_SEC = 10
+ARCHIVED_TEST_RUN_STATUS = "archived_test"
 _FINAL_BUILD_WORKER_KICKED_AT_BY_RUN: dict[str, Any] = {}
 SOCIAL_COPY_FIELD_LABELS = (
     ("youtube_ru_title", "YouTube Shorts RU title"),
@@ -392,6 +402,136 @@ def _scene_db_ids_for_run(run_id) -> dict[int, str]:
     return {idx: str(row.id) for idx, row in enumerate(rows)}
 
 
+def _production_plan_for_session(session: dict[str, Any]) -> list[Any]:
+    production = session.get("production") if isinstance(session, dict) else None
+    plan = production.get("json_plan") if isinstance(production, dict) else None
+    return plan if isinstance(plan, list) else []
+
+
+def _scene_payload_from_session(session: dict[str, Any], scene: Scene) -> dict[str, Any]:
+    plan = _production_plan_for_session(session)
+    if not plan:
+        return {}
+    scene_map_raw = session.get("scene_db_ids_by_index")
+    scene_map = scene_map_raw if isinstance(scene_map_raw, dict) else {}
+    scene_id = str(scene.id)
+    for raw_idx, raw_scene_id in scene_map.items():
+        if str(raw_scene_id) != scene_id:
+            continue
+        try:
+            idx = int(raw_idx)
+        except (TypeError, ValueError):
+            continue
+        if 0 <= idx < len(plan) and isinstance(plan[idx], dict):
+            return copy.deepcopy(plan[idx])
+    idx = int(scene.scene_order or 1) - 1
+    if 0 <= idx < len(plan) and isinstance(plan[idx], dict):
+        return copy.deepcopy(plan[idx])
+    return {}
+
+
+def _latest_scene_payload_for_admin(scene: Scene) -> dict[str, Any]:
+    if not scene.pk:
+        return {}
+    chat_session = ChatSession.objects.filter(generation_run_id=scene.run_id).order_by("-updated_at").first()
+    if chat_session is None:
+        return {}
+    return _scene_payload_from_session(copy.deepcopy(chat_session.session_json or {}), scene)
+
+
+def _coerce_scene_order_value(value: Any, fallback: int) -> int:
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError):
+        return fallback
+    return parsed if parsed > 0 else fallback
+
+
+def _renumber_scenes_for_run(run_id: Any) -> None:
+    rows = list(Scene.objects.filter(run_id=run_id).order_by("scene_order", "id"))
+    for idx, scene in enumerate(rows, start=1):
+        if int(scene.scene_order or 0) != idx:
+            Scene.objects.filter(id=scene.id).update(scene_order=idx)
+
+
+def _sync_chat_sessions_for_run_scenes(
+    run_id: Any,
+    *,
+    override_payloads_by_scene_id: dict[str, dict[str, Any]] | None = None,
+) -> int:
+    scenes = list(Scene.objects.filter(run_id=run_id).order_by("scene_order", "id"))
+    override_payloads_by_scene_id = override_payloads_by_scene_id or {}
+    updated = 0
+    for chat_session in ChatSession.objects.filter(generation_run_id=run_id).order_by("updated_at"):
+        session = copy.deepcopy(chat_session.session_json or {})
+        production = session.get("production")
+        if not isinstance(production, dict):
+            production = {}
+        old_plan = production.get("json_plan")
+        if not isinstance(old_plan, list):
+            old_plan = []
+        old_map_raw = session.get("scene_db_ids_by_index")
+        old_map = old_map_raw if isinstance(old_map_raw, dict) else {}
+
+        payloads_by_id: dict[str, dict[str, Any]] = {}
+        payloads_by_order: dict[int, dict[str, Any]] = {}
+        for raw_idx, raw_scene_id in old_map.items():
+            try:
+                idx = int(raw_idx)
+            except (TypeError, ValueError):
+                continue
+            if 0 <= idx < len(old_plan) and isinstance(old_plan[idx], dict):
+                payloads_by_id[str(raw_scene_id)] = copy.deepcopy(old_plan[idx])
+        for idx, item in enumerate(old_plan):
+            if not isinstance(item, dict):
+                continue
+            order = _coerce_scene_order_value(item.get("scene"), idx + 1)
+            payloads_by_order.setdefault(order, copy.deepcopy(item))
+
+        new_plan: list[dict[str, Any]] = []
+        new_map: dict[int, str] = {}
+        for idx, scene in enumerate(scenes, start=1):
+            scene_id = str(scene.id)
+            payload = (
+                copy.deepcopy(override_payloads_by_scene_id.get(scene_id))
+                if scene_id in override_payloads_by_scene_id
+                else copy.deepcopy(payloads_by_id.get(scene_id) or payloads_by_order.get(int(scene.scene_order or idx)) or {})
+            )
+            if not isinstance(payload, dict):
+                payload = {}
+            payload["scene"] = idx
+            payload["text"] = scene.text
+            payload["duration_sec"] = float(scene.duration_sec)
+            for key in ("start_frame_prompt", "start_frame_prompt_effective", "end_frame_prompt"):
+                value = getattr(scene, key, None)
+                if value:
+                    payload[key] = value
+                else:
+                    payload.pop(key, None)
+            for key in ("video_prompt_by_lang", "speech_by_lang", "syntax_prompt_by_lang", "prompt_meta_json"):
+                value = getattr(scene, key, None)
+                if isinstance(value, dict) and value:
+                    payload[key] = value
+                else:
+                    payload.pop(key, None)
+            new_plan.append(payload)
+            new_map[idx - 1] = scene_id
+
+        production["json_plan"] = new_plan
+        session["production"] = production
+        session["scene_db_ids_by_index"] = new_map
+        if new_plan:
+            session["image_scene_index"] = min(_coerce_scene_order_value(session.get("image_scene_index"), 0), len(new_plan) - 1)
+        else:
+            session["image_scene_index"] = 0
+        chat_session.session_json = _strip_inline_media_payloads(session)
+        chat_session.generation_run_id = run_id
+        chat_session.updated_at = timezone.now()
+        chat_session.save(update_fields=["session_json", "generation_run_id", "updated_at"])
+        updated += 1
+    return updated
+
+
 def _production_scenes_from_db(run: GenerationRun) -> list[dict[str, Any]]:
     scenes = list(Scene.objects.filter(run_id=run.id).order_by("scene_order"))
     scene_ids = [scene.id for scene in scenes]
@@ -421,7 +561,13 @@ def _production_scenes_from_db(run: GenerationRun) -> list[dict[str, Any]]:
                 "scene": int(scene.scene_order),
                 "text": scene.text,
                 "duration_sec": float(scene.duration_sec),
-                "speech_by_lang": {},
+                "start_frame_prompt": scene.start_frame_prompt or "",
+                "start_frame_prompt_effective": scene.start_frame_prompt_effective or "",
+                "end_frame_prompt": scene.end_frame_prompt or "",
+                "video_prompt_by_lang": scene.video_prompt_by_lang or {},
+                "speech_by_lang": scene.speech_by_lang or {},
+                "syntax_prompt_by_lang": scene.syntax_prompt_by_lang or {},
+                "prompt_meta_json": scene.prompt_meta_json or {},
                 "video_candidates_by_lang": by_lang,
             }
         )
@@ -539,6 +685,146 @@ def _overlay_title_style_for_admin_render(session: dict[str, Any], production: d
     return style
 
 
+def _pending_overlay_title_style_for_admin_render(session: dict[str, Any], production: dict[str, Any]) -> dict[str, Any]:
+    style: dict[str, Any] = {}
+    for source in (session, production):
+        value = source.get(PENDING_OVERLAY_TITLE_STYLE_KEY) if isinstance(source, dict) else None
+        if isinstance(value, dict):
+            style.update(copy.deepcopy(value))
+    return style
+
+
+def _apply_pending_overlay_title_style_for_build(session: dict[str, Any], production: dict[str, Any]) -> dict[str, Any]:
+    style = _overlay_title_style_for_admin_render(session, production)
+    pending_style = _pending_overlay_title_style_for_admin_render(session, production)
+    if not pending_style:
+        return style
+    style.update(copy.deepcopy(pending_style))
+    production["overlay_title_style"] = style
+    session["overlay_title_style"] = style
+    production.pop(PENDING_OVERLAY_TITLE_STYLE_KEY, None)
+    session.pop(PENDING_OVERLAY_TITLE_STYLE_KEY, None)
+    return style
+
+
+def _stage_pending_title_color_for_run(run: GenerationRun, title_color: str) -> dict[str, Any]:
+    normalized = _normalize_title_color(title_color)
+    if not normalized:
+        raise ValueError("Use a 6-digit hex color, for example #c72638.")
+    chat_session = ChatSession.objects.filter(generation_run_id=run.id).order_by("-updated_at").first()
+    if chat_session is None or not isinstance(chat_session.session_json, dict):
+        raise ValueError("No linked ChatSession found for this generation run.")
+    session = copy.deepcopy(chat_session.session_json or {})
+    production = session.get("production")
+    if not isinstance(production, dict):
+        production = {}
+    pending_style = _pending_overlay_title_style_for_admin_render(session, production)
+    pending_style["title_color"] = normalized
+    production[PENDING_OVERLAY_TITLE_STYLE_KEY] = pending_style
+    session[PENDING_OVERLAY_TITLE_STYLE_KEY] = pending_style
+    session["production"] = production
+    chat_session.session_json = _strip_inline_media_payloads(session)
+    chat_session.updated_at = timezone.now()
+    chat_session.save(update_fields=["session_json", "updated_at"])
+    return pending_style
+
+
+def _style_title_color(style: dict[str, Any]) -> str:
+    raw = str(style.get("title_color") or "").strip() if isinstance(style, dict) else ""
+    return raw if raw.startswith("#") else f"#{raw}" if raw else "#ffffff"
+
+
+def _title_color_swatch(color: str, label: str) -> str:
+    value = _style_title_color({"title_color": color})
+    return format_html(
+        '<span style="display:inline-flex;align-items:center;gap:6px;margin-right:12px;">'
+        '<span style="width:14px;height:14px;border-radius:3px;border:1px solid var(--border-color);'
+        'background:{};"></span><span>{}: <code>{}</code></span></span>',
+        value,
+        label,
+        value,
+    )
+
+
+def _title_color_picker_html(run: GenerationRun) -> str:
+    try:
+        _chat_session, session, production = _run_session_for_admin_render(run)
+    except Exception:
+        session, production = {}, {}
+    active_style = _overlay_title_style_for_admin_render(session, production)
+    pending_style = _pending_overlay_title_style_for_admin_render(session, production)
+    current_color = _style_title_color(pending_style or active_style)
+    active_color = _style_title_color(active_style)
+    url = reverse("admin:pipeline_admin_generationrun_title_color", args=[run.pk])
+    input_id = f"cf-title-color-{run.pk}"
+    status_id = f"cf-title-color-status-{run.pk}"
+    return format_html(
+        '<div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap;">'
+        '<input id="{}" type="color" value="{}" data-url="{}" '
+        'style="width:52px;height:34px;padding:2px;cursor:pointer;">'
+        '<code>{}</code>'
+        '<span id="{}" style="color:var(--body-quiet-color);">{}</span>'
+        "</div>"
+        "<script>"
+        "(function(){{"
+        "const input=document.getElementById('{}');"
+        "const status=document.getElementById('{}');"
+        "if(!input||input.dataset.bound==='1')return;"
+        "input.dataset.bound='1';"
+        "let timer=null;"
+        "function csrf(){{"
+        "const field=document.querySelector('input[name=csrfmiddlewaretoken]');"
+        "if(field&&field.value)return field.value;"
+        "const match=document.cookie.match(/(?:^|; )csrftoken=([^;]+)/);"
+        "return match?decodeURIComponent(match[1]):'';"
+        "}}"
+        "function save(){{"
+        "const body=new URLSearchParams();"
+        "body.set('title_color',input.value);"
+        "status.textContent='Saving...';"
+        "fetch(input.dataset.url,{{method:'POST',headers:{{'X-CSRFToken':csrf()}},body:body}})"
+        ".then(function(response){{return response.json().then(function(payload){{return {{ok:response.ok,payload:payload}};}});}})"
+        ".then(function(result){{"
+        "if(!result.ok||!result.payload.ok){{throw new Error(result.payload.error||'Save failed');}}"
+        "status.textContent='Saved; applies on next Build/rebuild.';"
+        "input.nextElementSibling.textContent=result.payload.title_color;"
+        "}})"
+        ".catch(function(error){{status.textContent=error.message||'Save failed';}});"
+        "}}"
+        "input.addEventListener('input',function(){{clearTimeout(timer);timer=setTimeout(save,250);}});"
+        "input.addEventListener('change',save);"
+        "}})();"
+        "</script>",
+        input_id,
+        current_color,
+        url,
+        current_color,
+        status_id,
+        "Pending color" if pending_style else f"Active color: {active_color}",
+        input_id,
+        status_id,
+    )
+
+
+def _title_color_status_html(session: dict[str, Any], production: dict[str, Any]) -> str:
+    active_style = _overlay_title_style_for_admin_render(session, production)
+    pending_style = _pending_overlay_title_style_for_admin_render(session, production)
+    active_color = _style_title_color(active_style)
+    pending_color = _style_title_color(pending_style) if pending_style else ""
+    if pending_color and pending_color.lower() != active_color.lower():
+        return format_html(
+            '<p style="margin:0 0 12px;">{}{}'
+            '<span style="color:var(--body-quiet-color);">Pending color applies on the next Build/rebuild.</span></p>',
+            _title_color_swatch(active_color, "Active title color"),
+            _title_color_swatch(pending_color, "Pending title color"),
+        )
+    return format_html(
+        '<p style="margin:0 0 12px;">{}'
+        '<span style="color:var(--body-quiet-color);">Change it in this GenerationRun form; Build/rebuild renders it into video.</span></p>',
+        _title_color_swatch(active_color, "Title color"),
+    )
+
+
 def _merge_post_production(existing: Any, update: dict[str, Any]) -> dict[str, Any]:
     merged = copy.deepcopy(existing) if isinstance(existing, dict) else {}
     for key, value in update.items():
@@ -579,11 +865,16 @@ def _build_final_videos_for_run(
     overlay_title_by_lang = _overlay_title_for_admin_render(run, session, production)
     if not overlay_title_by_lang:
         raise RuntimeError("Set human_title or overlay_title_by_lang before rendering the titled final master.")
-    overlay_title_style = _overlay_title_style_for_admin_render(session, production)
+    requested_variants = list(target_variants) if target_variants else ([target_variant] if target_variant else None)
+    applies_title_overlay = requested_variants is None or "titled_subtitled_music" in requested_variants
+    overlay_title_style = (
+        _apply_pending_overlay_title_style_for_build(session, production)
+        if applies_title_overlay
+        else _overlay_title_style_for_admin_render(session, production)
+    )
     overlay_series_title_by_lang = _overlay_series_title_for_admin_render(run, session, production)
     overlay_series_counter_by_lang = _overlay_series_counter_for_admin_render(run, session, production)
 
-    requested_variants = list(target_variants) if target_variants else ([target_variant] if target_variant else None)
     project_slug = _project_slug_for_admin_render(run, session)
     if (
         source_clean_video_path
@@ -1008,6 +1299,7 @@ def _run_final_build_batch(
     plan_variants: list[str] = []
     try:
         run = GenerationRun.objects.get(id=run_id)
+        GenerationRun.objects.filter(id=run.id).update(status="final_render_running", is_active=True)
         requested_variants = set(normalized_variants)
         required_variants = _final_build_required_variants(normalized_variants)
 
@@ -1025,6 +1317,7 @@ def _run_final_build_batch(
                 plan_variants.append(variant)
         if not plan_variants:
             plan_variants = normalized_variants
+        delivered_all = True
         current_statuses = _latest_final_build_statuses(run.id)
         for variant in plan_variants:
             current = current_statuses.get((language, variant), {})
@@ -1109,6 +1402,35 @@ def _run_final_build_batch(
                     "progress": _final_build_progress_payload("success", "Final video built", percent=100),
                 },
             )
+            if artifact is None:
+                delivered_all = False
+            else:
+                delivery = deliver_final_artifact_to_telegram(run.id, artifact.id)
+                if str(delivery.get("status") or "").lower() != "sent":
+                    delivered_all = False
+                    _set_final_build_status(
+                        run,
+                        language=language,
+                        variant=active_variant,
+                        status="success",
+                        artifact_id=str(artifact.id),
+                        message="Final video built, but Telegram delivery is not confirmed yet.",
+                        extra_payload={
+                            "worker_id": worker_id,
+                            "batch_variants": plan_variants,
+                            "requested_variants": normalized_variants,
+                            "telegram_delivery": delivery,
+                            "progress": _final_build_progress_payload(
+                                "delivery_failed",
+                                "Final video built; Telegram delivery needs retry",
+                                percent=100,
+                            ),
+                        },
+                    )
+        _advance_series_after_successful_queued_final_build(run)
+        GenerationRun.objects.filter(id=run.id).update(
+            status="final_videos_delivered" if delivered_all else "final_video_delivery_failed"
+        )
         stop_event.set()
         if heartbeat_thread is not None:
             heartbeat_thread.join(timeout=5)
@@ -1118,6 +1440,7 @@ def _run_final_build_batch(
             heartbeat_thread.join(timeout=5)
         try:
             run = GenerationRun.objects.get(id=run_id)
+            GenerationRun.objects.filter(id=run.id).update(status="final_render_failed")
             for variant in (plan_variants or normalized_variants):
                 _set_final_build_status(
                     run,
@@ -1161,6 +1484,10 @@ def _queue_final_build(run: GenerationRun, *, language: str, variant: str, kick_
         variant=normalized_variant,
         status="pending",
     )
+    try:
+        GenerationRun.objects.filter(id=run.id).update(status="final_render_pending", is_active=True)
+    except Exception:
+        GenerationRun.objects.filter(id=run.id).update(status="final_render_pending")
     if kick_worker:
         _kick_final_build_worker(run.id)
     return "pending"
@@ -1265,6 +1592,33 @@ def _claim_next_final_build_batch(worker_id: str, *, run_id: str | None = None) 
                 }
             )
     return claimed
+
+
+def _advance_series_after_successful_queued_final_build(run: GenerationRun) -> None:
+    status_rows = GenerationArtifact.objects.filter(
+        run_id=run.id,
+        artifact_type=FINAL_BUILD_STATUS_ARTIFACT_TYPE,
+    )
+    queued_payloads = [
+        row.payload_json
+        for row in status_rows
+        if isinstance(row.payload_json, dict) and row.payload_json.get("advance_series_after_success")
+    ]
+    if not queued_payloads:
+        return
+    if any(str(payload.get("status") or "").strip().lower() != "success" for payload in queued_payloads):
+        return
+    chat_session = ChatSession.objects.filter(generation_run_id=run.id).order_by("-updated_at").first()
+    if chat_session is None or not isinstance(chat_session.session_json, dict):
+        return
+    session = copy.deepcopy(chat_session.session_json or {})
+    before_advanced = bool(session.get("series_render_counter_advanced"))
+    advanced = advance_series_after_successful_render(session)
+    if advanced is None and before_advanced == bool(session.get("series_render_counter_advanced")):
+        return
+    chat_session.session_json = _strip_inline_media_payloads(session)
+    chat_session.updated_at = timezone.now()
+    chat_session.save(update_fields=["session_json", "updated_at"])
 
 
 def _rendered_variants_summary(post: dict[str, Any]) -> str:
@@ -1790,6 +2144,11 @@ def _final_videos_panel(run: GenerationRun) -> str:
     statuses = _latest_final_build_statuses(run.id)
     languages = _final_target_languages_for_run(run, artifacts, statuses)
     parts = ['<div class="cf-final-videos">']
+    try:
+        _chat_session, session, production = _run_session_for_admin_render(run)
+        parts.append(_title_color_status_html(session, production))
+    except Exception:
+        pass
     parts.append(
         format_html(
             '<p style="margin:0 0 12px;"><a class="button" href="{}">Rebuild all final videos</a> '
@@ -1929,9 +2288,9 @@ def _final_videos_panel(run: GenerationRun) -> str:
 class SceneInline(admin.TabularInline):
     model = Scene
     extra = 0
-    can_delete = False
-    fields = ("scene_order", "duration_sec", "short_text", "scene_link")
-    readonly_fields = fields
+    can_delete = True
+    fields = ("scene_order", "duration_sec", "text", "scene_link")
+    readonly_fields = ("scene_link",)
     show_change_link = True
 
     @admin.display(description="Scene text")
@@ -1963,6 +2322,8 @@ class GenerationRunAdmin(admin.ModelAdmin):
     list_display = (
         "display_title",
         "status",
+        "is_active",
+        "active_cursor",
         "language",
         "series",
         "series_video_index",
@@ -1970,31 +2331,114 @@ class GenerationRunAdmin(admin.ModelAdmin):
         "created_at",
         "artifact_count",
     )
-    list_editable = ("series", "series_video_index", "series_total_videos")
+    list_editable = ("is_active", "series", "series_video_index", "series_total_videos")
     search_fields = ("human_title", "script", "id", "series__title_ru", "series__title_en")
     list_filter = ("status", "language", "series")
     autocomplete_fields = ("series",)
     actions = (build_final_title_and_videos,)
-    readonly_fields = ("id", "created_at", "script", "final_videos", "publication_prep", "media_approval_overview")
+    readonly_fields = (
+        "id",
+        "created_at",
+        "overlay_title_color",
+        "script",
+        "final_videos",
+        "publication_prep",
+        "prompt_overview",
+        "media_approval_overview",
+    )
     fields = (
         "id",
         "human_title",
         "status",
+        "is_active",
+        "current_scene_index",
+        "current_media_substep",
+        "current_media_language_index",
         "language",
         "series",
         "series_video_index",
         "series_total_videos",
         "created_at",
+        "overlay_title_color",
         "final_videos",
         "publication_prep",
+        "prompt_overview",
         "media_approval_overview",
         "script",
     )
     inlines = (SceneInline, GenerationArtifactInline)
 
+    def save_model(self, request, obj: GenerationRun, form, change):
+        super().save_model(request, obj, form, change)
+        for chat_session in ChatSession.objects.filter(generation_run_id=obj.id):
+            session = copy.deepcopy(chat_session.session_json or {})
+            if obj.current_scene_index is not None:
+                session["image_scene_index"] = int(obj.current_scene_index)
+            if obj.current_media_substep:
+                session["scene_media_substep"] = obj.current_media_substep
+            if obj.current_media_language_index is not None:
+                session["scene_media_language_index"] = int(obj.current_media_language_index)
+            if obj.is_active and obj.current_media_substep:
+                session["state"] = "waiting_scene_media"
+                chat_session.state = "waiting_scene_media"
+            chat_session.session_json = session
+            chat_session.updated_at = timezone.now()
+            chat_session.save(update_fields=["state", "session_json", "updated_at"])
+
+    def save_formset(self, request, form, formset, change):
+        super().save_formset(request, form, formset, change)
+        if formset.model is Scene and form.instance and form.instance.pk:
+            _renumber_scenes_for_run(form.instance.pk)
+            _sync_chat_sessions_for_run_scenes(form.instance.pk)
+
+    @admin.display(description="Final title color")
+    def overlay_title_color(self, obj: GenerationRun) -> str:
+        return mark_safe(_title_color_picker_html(obj))
+
+    @admin.display(description="Cursor")
+    def active_cursor(self, obj: GenerationRun) -> str:
+        scene = "-" if obj.current_scene_index is None else str(int(obj.current_scene_index) + 1)
+        substep = obj.current_media_substep or "-"
+        lang_idx = "-" if obj.current_media_language_index is None else str(obj.current_media_language_index)
+        state = "active" if obj.is_active else "inactive"
+        return f"{state}: scene {scene}, {substep}, lang {lang_idx}"
+
+    @admin.display(description="Prompts by scene")
+    def prompt_overview(self, obj: GenerationRun) -> str:
+        scenes = list(Scene.objects.filter(run_id=obj.id).order_by("scene_order", "id"))
+        if not scenes:
+            return "No scenes."
+        parts = ['<div style="display:grid;gap:10px;">']
+        for scene in scenes:
+            video_langs = ", ".join(sorted((scene.video_prompt_by_lang or {}).keys())) or "-"
+            speech_langs = ", ".join(sorted((scene.speech_by_lang or {}).keys())) or "-"
+            syntax_langs = ", ".join(sorted((scene.syntax_prompt_by_lang or {}).keys())) or "-"
+            parts.append(
+                "<section style='border:1px solid var(--border-color);border-radius:6px;padding:10px;'>"
+                f"<strong>Scene {scene.scene_order}</strong> {_admin_change_link(scene, 'edit prompts')}"
+                f"<div>start: {'yes' if scene.start_frame_prompt else 'no'}; "
+                f"effective: {'yes' if scene.start_frame_prompt_effective else 'no'}; "
+                f"end: {'yes' if scene.end_frame_prompt else 'no'}</div>"
+                f"<div>video languages: {escape(video_langs)}; speech: {escape(speech_langs)}; Syntax compact: {escape(syntax_langs)}</div>"
+                "</section>"
+            )
+        parts.append("</div>")
+        return mark_safe("".join(parts))
+
+    def get_queryset(self, request):
+        queryset = super().get_queryset(request)
+        if request.GET.get("status__exact") == ARCHIVED_TEST_RUN_STATUS:
+            return queryset
+        return queryset.exclude(status=ARCHIVED_TEST_RUN_STATUS)
+
     def get_urls(self):
         urls = super().get_urls()
         custom = [
+            path(
+                "<path:object_id>/title-color/",
+                self.admin_site.admin_view(self.title_color_view),
+                name="pipeline_admin_generationrun_title_color",
+            ),
             path(
                 "<path:object_id>/build-final/",
                 self.admin_site.admin_view(self.build_final_view),
@@ -2012,6 +2456,24 @@ class GenerationRunAdmin(admin.ModelAdmin):
             ),
         ]
         return custom + urls
+
+    def title_color_view(self, request, object_id):
+        if request.method != "POST":
+            return JsonResponse({"ok": False, "error": "POST required."}, status=405)
+        run = self.get_object(request, object_id)
+        if run is None:
+            raise Http404("Generation run not found.")
+        try:
+            pending_style = _stage_pending_title_color_for_run(run, request.POST.get("title_color") or "")
+        except ValueError as exc:
+            return JsonResponse({"ok": False, "error": str(exc)}, status=400)
+        return JsonResponse(
+            {
+                "ok": True,
+                "title_color": pending_style.get("title_color"),
+                "message": "Saved; applies on next Build/rebuild.",
+            }
+        )
 
     def build_final_view(self, request, object_id):
         run = self.get_object(request, object_id)
@@ -2064,6 +2526,13 @@ class GenerationRunAdmin(admin.ModelAdmin):
         run = self.get_object(request, object_id)
         if run is None:
             raise Http404("Generation run not found.")
+        if not all_final_artifacts_delivered(run.id):
+            self.message_user(
+                request,
+                f"{run}: final videos are not confirmed delivered to Telegram yet; publication queue is blocked.",
+                level=messages.ERROR,
+            )
+            return HttpResponseRedirect(reverse("admin:pipeline_admin_generationrun_change", args=[run.pk]))
         initial_copy = _publication_copy_from_run(run)
         form = PublicationQueueAdminForm(
             request.POST or None,
@@ -2445,12 +2914,48 @@ class PipelineStepCheckpointAdmin(admin.ModelAdmin):
 
 @admin.register(Scene)
 class SceneAdmin(admin.ModelAdmin):
+    form = SceneAdminForm
     list_display = ("scene_order", "run_link", "duration_sec", "short_text")
     list_filter = ("run__language", "run__status")
     search_fields = ("text", "run__human_title", "run__script", "run__id")
     readonly_fields = ("id", "run_link", "artifacts", "images", "videos")
-    fields = ("id", "run", "run_link", "scene_order", "duration_sec", "text", "artifacts", "images", "videos")
+    fields = (
+        "id",
+        "run",
+        "run_link",
+        "scene_order",
+        "duration_sec",
+        "text",
+        "start_frame_prompt",
+        "start_frame_prompt_effective",
+        "end_frame_prompt",
+        "video_prompt_by_lang",
+        "speech_by_lang",
+        "syntax_prompt_by_lang",
+        "prompt_meta_json",
+        "production_scene_json",
+        "artifacts",
+        "images",
+        "videos",
+    )
     raw_id_fields = ("run",)
+
+    def get_form(self, request, obj=None, change=False, **kwargs):
+        form_class = super().get_form(request, obj, change, **kwargs)
+        production_scene = _latest_scene_payload_for_admin(obj) if obj is not None else {}
+
+        class BoundSceneAdminForm(form_class):
+            def __init__(self, *args, **form_kwargs):
+                form_kwargs.setdefault("production_scene", production_scene)
+                super().__init__(*args, **form_kwargs)
+
+        return BoundSceneAdminForm
+
+    def get_queryset(self, request):
+        queryset = super().get_queryset(request)
+        if request.GET.get("run__status__exact") == ARCHIVED_TEST_RUN_STATUS:
+            return queryset
+        return queryset.exclude(run__status=ARCHIVED_TEST_RUN_STATUS)
 
     @admin.display(description="Run")
     def run_link(self, obj: Scene) -> str:
@@ -2459,6 +2964,32 @@ class SceneAdmin(admin.ModelAdmin):
     @admin.display(description="Text")
     def short_text(self, obj: Scene) -> str:
         return _short(obj.text)
+
+    def save_model(self, request, obj: Scene, form, change):
+        old_run_id = None
+        if change and obj.pk:
+            old_run_id = Scene.objects.filter(pk=obj.pk).values_list("run_id", flat=True).first()
+        super().save_model(request, obj, form, change)
+        payload = form.cleaned_data.get("production_scene_json") if hasattr(form, "cleaned_data") else None
+        payloads = {str(obj.id): payload} if isinstance(payload, dict) and payload else {}
+        if old_run_id and old_run_id != obj.run_id:
+            _renumber_scenes_for_run(old_run_id)
+            _sync_chat_sessions_for_run_scenes(old_run_id)
+        _renumber_scenes_for_run(obj.run_id)
+        _sync_chat_sessions_for_run_scenes(obj.run_id, override_payloads_by_scene_id=payloads)
+
+    def delete_model(self, request, obj: Scene):
+        run_id = obj.run_id
+        super().delete_model(request, obj)
+        _renumber_scenes_for_run(run_id)
+        _sync_chat_sessions_for_run_scenes(run_id)
+
+    def delete_queryset(self, request, queryset):
+        run_ids = {row.run_id for row in queryset}
+        super().delete_queryset(request, queryset)
+        for run_id in run_ids:
+            _renumber_scenes_for_run(run_id)
+            _sync_chat_sessions_for_run_scenes(run_id)
 
     @admin.display(description="Artifacts")
     def artifacts(self, obj: Scene) -> str:
@@ -2523,6 +3054,12 @@ class GenerationArtifactAdmin(admin.ModelAdmin):
         "payload_json",
         "created_at",
     )
+
+    def get_queryset(self, request):
+        queryset = super().get_queryset(request)
+        if request.GET.get("run__status__exact") == ARCHIVED_TEST_RUN_STATUS:
+            return queryset
+        return queryset.exclude(run__status=ARCHIVED_TEST_RUN_STATUS)
 
     def get_urls(self):
         urls = super().get_urls()

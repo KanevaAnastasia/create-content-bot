@@ -16,7 +16,16 @@ from pathlib import Path
 from typing import Any, Literal
 
 from .character_catalog import character_prompt_catalog, format_character_short_descriptions, sanitize_character_names_and_keys
-from .llm_utils import extract_json_object, safe_llm_call
+from .llm_utils import (
+    _dedupe_binary_payloads,
+    _extract_text_from_vertex_response,
+    extract_json_object,
+    get_vertex_generative_model,
+    get_vertex_safety_settings,
+    safe_llm_call,
+    vertex_part_from_data,
+    vertex_part_from_text,
+)
 
 logger = logging.getLogger("bot")
 
@@ -366,28 +375,12 @@ def call_ai_approval_model(
     cfg = config or get_ai_approval_config()
     if not cfg.enabled:
         raise RuntimeError("AI approval is disabled by AI_APPROVAL_ENABLED")
-    try:
-        import vertexai  # type: ignore
-        from vertexai.generative_models import (  # type: ignore
-            GenerativeModel,
-            HarmBlockThreshold,
-            HarmCategory,
-            Part,
-            SafetySetting,
-        )
-    except Exception as e:
-        raise RuntimeError("Missing dependency. Install with: pip install google-cloud-aiplatform") from e
     project = (os.getenv("GOOGLE_CLOUD_PROJECT") or "").strip()
     location = (os.getenv("GOOGLE_CLOUD_LOCATION") or "us-central1").strip() or "us-central1"
     if not project:
         raise RuntimeError("Missing environment variable: GOOGLE_CLOUD_PROJECT")
-    vertexai.init(project=project, location=location)
-    safety_settings = [
-        SafetySetting(category=HarmCategory.HARM_CATEGORY_HATE_SPEECH, threshold=HarmBlockThreshold.BLOCK_ONLY_HIGH),
-        SafetySetting(category=HarmCategory.HARM_CATEGORY_DANGEROUS_CONTENT, threshold=HarmBlockThreshold.BLOCK_ONLY_HIGH),
-        SafetySetting(category=HarmCategory.HARM_CATEGORY_SEXUALLY_EXPLICIT, threshold=HarmBlockThreshold.BLOCK_ONLY_HIGH),
-        SafetySetting(category=HarmCategory.HARM_CATEGORY_HARASSMENT, threshold=HarmBlockThreshold.BLOCK_ONLY_HIGH),
-    ]
+    safety_settings = get_vertex_safety_settings()
+    media_payloads = _dedupe_binary_payloads(images)
     last_raw = ""
     for attempt in range(1, max_json_attempts + 1):
         request_text = prompt
@@ -395,24 +388,14 @@ def call_ai_approval_model(
             request_text += "\n\nYour previous response was not valid JSON. Return only one valid JSON object."
 
         def _call() -> str:
-            parts: list[Any] = [Part.from_text(request_text)]
-            for image in images or []:
-                parts.append(Part.from_data(data=image, mime_type=_guess_media_mime_type(image)))
-            model = GenerativeModel(cfg.model)
+            parts: list[Any] = [vertex_part_from_text(project, location, request_text)]
+            for image in media_payloads:
+                parts.append(vertex_part_from_data(project, location, image))
+            model = get_vertex_generative_model(project, location, cfg.model)
             resp = model.generate_content(parts, safety_settings=safety_settings)
-            text = getattr(resp, "text", None)
-            if isinstance(text, str) and text.strip():
+            text = _extract_text_from_vertex_response(resp)
+            if text:
                 return text.strip()
-            candidates = getattr(resp, "candidates", None) or []
-            chunks: list[str] = []
-            for candidate in candidates[:1]:
-                content = getattr(candidate, "content", None)
-                for part in getattr(content, "parts", None) or []:
-                    t = getattr(part, "text", None)
-                    if isinstance(t, str) and t.strip():
-                        chunks.append(t)
-            if chunks:
-                return "\n".join(chunks).strip()
             raise RuntimeError("AI approval Gemini returned empty response.")
 
         last_raw = safe_llm_call(_call)
@@ -431,18 +414,6 @@ def call_ai_approval_model(
         obj["_raw_model_response"] = last_raw
         return obj
     raise ValueError(f"AI approval model did not return valid JSON. Last response: {last_raw[:1200]}")
-
-
-def _guess_media_mime_type(data: bytes) -> str:
-    if data.startswith(b"\x00\x00\x00") and data[4:8] == b"ftyp":
-        return "video/mp4"
-    if data.startswith(b"\x89PNG\r\n\x1a\n"):
-        return "image/png"
-    if data.startswith(b"\xff\xd8\xff"):
-        return "image/jpeg"
-    if data.startswith(b"RIFF") and data[8:12] == b"WEBP":
-        return "image/webp"
-    return "image/png"
 
 
 def _resolve_ffmpeg() -> str | None:

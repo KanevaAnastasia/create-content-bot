@@ -81,6 +81,136 @@ def test_django_admin_session_form_updates_scene_json():
     assert saved.session_json["production"]["overlay_title_style"] == {"title_color": "#c72638"}
 
 
+def test_django_admin_session_form_stages_title_color_until_build():
+    admin_dir = Path(__file__).resolve().parents[1] / "admin_panel"
+    sys.path.insert(0, str(admin_dir))
+    os.environ.setdefault("DJANGO_SETTINGS_MODULE", "cf_admin.settings")
+
+    import django
+
+    django.setup()
+
+    from pipeline_admin.forms import ChatSessionAdminForm
+    from pipeline_admin.models import ChatSession
+
+    instance = ChatSession(
+        chat_id=987654330,
+        state="waiting_scene_media",
+        generation_run_id=None,
+        session_json={
+            "state": "waiting_scene_media",
+            "production": {
+                "json_plan": [],
+                "overlay_title_style": {"title_color": "#c72638", "top_margin_ratio": 0.05},
+            },
+            "overlay_title_style": {"title_color": "#c72638", "top_margin_ratio": 0.05},
+        },
+    )
+    form = ChatSessionAdminForm(
+        data={
+            "chat_id": "987654330",
+            "state": "waiting_scene_media",
+            "generation_run_id": "",
+            "session_json": instance.session_json,
+            "selected_concept": "",
+            "viral_concept_brief": "{}",
+            "recipe_full_text": "",
+            "scenes_plan_json": "[]",
+            "production_plan_json": "[]",
+            "overlay_title_by_lang_json": "{}",
+            "overlay_title_color": "#1a2b3c",
+            "overlay_title_style_json": '{"title_color": "#c72638", "top_margin_ratio": 0.05}',
+            "scene_index": "0",
+            "start_frame_prompt": "",
+            "end_frame_requested": "",
+            "end_frame_prompt": "",
+            "video_prompt_by_lang_json": "{}",
+            "speech_by_lang_json": "{}",
+            "syntax_retry_context_json": "{}",
+            "video_approvals_by_lang_json": "{}",
+        },
+        instance=instance,
+    )
+    form.validate_unique = lambda: None
+
+    assert form.is_valid(), form.errors
+    saved = form.save(commit=False)
+
+    assert saved.session_json["production"]["overlay_title_style"] == {
+        "title_color": "#c72638",
+        "top_margin_ratio": 0.05,
+    }
+    assert saved.session_json["production"]["pending_overlay_title_style"] == {"title_color": "#1a2b3c"}
+    assert saved.session_json["pending_overlay_title_style"] == {"title_color": "#1a2b3c"}
+
+
+def test_django_generation_admin_title_color_field_is_after_created_at():
+    admin_dir = Path(__file__).resolve().parents[1] / "admin_panel"
+    sys.path.insert(0, str(admin_dir))
+    os.environ.setdefault("DJANGO_SETTINGS_MODULE", "cf_admin.settings")
+
+    import django
+
+    django.setup()
+
+    import pipeline_admin.admin as admin_module
+
+    fields = list(admin_module.GenerationRunAdmin.fields)
+
+    assert fields[fields.index("created_at") + 1] == "overlay_title_color"
+    assert "overlay_title_color" in admin_module.GenerationRunAdmin.readonly_fields
+
+
+def test_django_generation_admin_ajax_stages_title_color_until_build(monkeypatch):
+    admin_dir = Path(__file__).resolve().parents[1] / "admin_panel"
+    sys.path.insert(0, str(admin_dir))
+    os.environ.setdefault("DJANGO_SETTINGS_MODULE", "cf_admin.settings")
+
+    import django
+
+    django.setup()
+
+    import pipeline_admin.admin as admin_module
+
+    run_id = uuid.uuid4()
+    saved_sessions = []
+
+    class ChatSessionStub:
+        session_json = {
+            "production": {
+                "json_plan": [],
+                "overlay_title_style": {"title_color": "#c72638", "top_margin_ratio": 0.05},
+            },
+            "overlay_title_style": {"title_color": "#c72638", "top_margin_ratio": 0.05},
+        }
+
+        def save(self, **kwargs):
+            saved_sessions.append({"session_json": self.session_json, "kwargs": kwargs})
+
+    chat_session = ChatSessionStub()
+
+    class QuerySetStub:
+        def order_by(self, *_args):
+            return self
+
+        def first(self):
+            return chat_session
+
+    class ManagerStub:
+        def filter(self, **kwargs):
+            assert kwargs == {"generation_run_id": run_id}
+            return QuerySetStub()
+
+    monkeypatch.setattr(admin_module.ChatSession, "objects", ManagerStub())
+
+    pending = admin_module._stage_pending_title_color_for_run(SimpleNamespace(id=run_id), "#1a2b3c")
+
+    assert saved_sessions
+    assert pending == {"title_color": "#1a2b3c"}
+    assert chat_session.session_json["production"]["overlay_title_style"]["title_color"] == "#c72638"
+    assert chat_session.session_json["production"]["pending_overlay_title_style"] == {"title_color": "#1a2b3c"}
+
+
 def test_django_admin_session_form_syncs_ru_overlay_title_to_generation_name(monkeypatch):
     admin_dir = Path(__file__).resolve().parents[1] / "admin_panel"
     sys.path.insert(0, str(admin_dir))
@@ -599,8 +729,14 @@ def test_django_admin_titled_only_build_uses_subtitled_source_fast_path(monkeypa
     production = {
         "json_plan": [{"duration_sec": 8, "text": "scene"}],
         "overlay_title_by_lang": {"ru": "Борщ"},
+        "overlay_title_style": {"title_color": "#c72638", "top_margin_ratio": 0.05},
+        "pending_overlay_title_style": {"title_color": "#1a2b3c"},
     }
-    session = {"production": production}
+    session = {
+        "production": production,
+        "overlay_title_style": {"title_color": "#c72638", "top_margin_ratio": 0.05},
+        "pending_overlay_title_style": {"title_color": "#1a2b3c"},
+    }
     calls = []
 
     class RunStub(SimpleNamespace):
@@ -630,6 +766,59 @@ def test_django_admin_titled_only_build_uses_subtitled_source_fast_path(monkeypa
     assert out["renders_by_language"]["ru"]["titled_subtitled_music"]["video_path"] == "/tmp/titled.mp4"
     assert calls[0]["subtitled_video_path"] == Path("/tmp/source_subtitled.mp4")
     assert calls[0]["language"] == "ru"
+    assert calls[0]["overlay_title_style"]["title_color"] == "#1a2b3c"
+    assert session["overlay_title_style"]["title_color"] == "#1a2b3c"
+    assert production["overlay_title_style"]["title_color"] == "#1a2b3c"
+    assert "pending_overlay_title_style" not in session
+    assert "pending_overlay_title_style" not in production
+
+
+def test_django_admin_non_title_build_keeps_pending_title_color(monkeypatch):
+    admin_dir = Path(__file__).resolve().parents[1] / "admin_panel"
+    sys.path.insert(0, str(admin_dir))
+    os.environ.setdefault("DJANGO_SETTINGS_MODULE", "cf_admin.settings")
+
+    import django
+
+    django.setup()
+
+    import pipeline_admin.admin as admin_module
+
+    run_id = uuid.uuid4()
+    production = {
+        "json_plan": [{"duration_sec": 8, "text": "scene"}],
+        "overlay_title_by_lang": {"ru": "Борщ"},
+        "overlay_title_style": {"title_color": "#c72638", "top_margin_ratio": 0.05},
+        "pending_overlay_title_style": {"title_color": "#1a2b3c"},
+    }
+    session = {
+        "production": production,
+        "overlay_title_style": {"title_color": "#c72638", "top_margin_ratio": 0.05},
+        "pending_overlay_title_style": {"title_color": "#1a2b3c"},
+    }
+    calls = []
+
+    class RunStub(SimpleNamespace):
+        def save(self, **_kwargs):
+            pass
+
+    def fake_build_post_production(scenes, **kwargs):
+        calls.append({"scenes": scenes, **kwargs})
+        return {"renders_by_language": {"ru": {"clean": {"video_path": "/tmp/clean.mp4"}}}}
+
+    monkeypatch.setattr(admin_module, "_run_session_for_admin_render", lambda _run: (None, session, production))
+    monkeypatch.setattr(admin_module, "build_post_production", fake_build_post_production)
+    monkeypatch.setattr(admin_module, "persist_post_production_artifacts", lambda _session, _post: None)
+
+    admin_module._build_final_videos_for_run(
+        RunStub(id=run_id, human_title=""),
+        target_language="ru",
+        target_variants=["clean"],
+    )
+
+    assert calls[0]["overlay_title_style"]["title_color"] == "#c72638"
+    assert session["pending_overlay_title_style"] == {"title_color": "#1a2b3c"}
+    assert production["pending_overlay_title_style"] == {"title_color": "#1a2b3c"}
 
 
 def test_django_generation_admin_shows_publication_prep_panel(monkeypatch):

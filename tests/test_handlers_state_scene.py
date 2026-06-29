@@ -4,6 +4,11 @@ import asyncio
 import io
 from types import SimpleNamespace
 
+import pytest
+from sqlalchemy import create_engine
+from sqlalchemy.orm import sessionmaker
+
+from app import db
 from app.handlers.handlers_state_scene import (
     _apply_overlay_title_style_feedback,
     _apply_overlay_title_to_production,
@@ -39,6 +44,17 @@ from app.series_store import (
     SeriesPayload,
 )
 from app.state import SESSIONS
+
+
+@pytest.fixture(autouse=True)
+def _isolate_persistent_db(monkeypatch):
+    engine = create_engine("sqlite+pysqlite:///:memory:", future=True)
+    db.create_tables(engine=engine)
+    factory = sessionmaker(bind=engine, autoflush=False, autocommit=False, expire_on_commit=False)
+    monkeypatch.setattr(db, "get_engine", lambda: engine)
+    monkeypatch.setattr(db, "get_session_factory", lambda: factory)
+    yield
+    engine.dispose()
 
 
 def test_frame_prompts_slice_from_production_maps_start_end():
@@ -1736,7 +1752,8 @@ def test_on_text_navigation_previous_moves_from_media_video_to_start_image_appro
     assert sess["image_scene_index"] == 1
     assert sess["scene_media_substep"] == "start_image_approval"
     assert send_calls["count"] == 1
-    assert "предыдущий фактический подшаг текущей сцены" in captured[0][0]
+    assert "сцена 2/2" in captured[0][0].lower()
+    assert "апрув стартового изображения" in captured[0][0]
 
 
 def test_on_text_navigation_previous_moves_from_media_video_to_end_prompt_when_not_generated(monkeypatch):
@@ -1773,6 +1790,7 @@ def test_on_text_navigation_previous_moves_from_media_video_to_end_prompt_when_n
     assert sess["state"] == "waiting_scene_media"
     assert sess["scene_media_substep"] == "end_prompt"
     assert send_calls["count"] == 1
+    assert "промпт конечного кадра" in captured[0][0]
 
 
 def test_on_text_navigation_previous_moves_from_media_video_to_end_image_approval(monkeypatch):
@@ -1814,7 +1832,7 @@ def test_on_text_navigation_previous_moves_from_media_video_to_end_image_approva
 
     assert SESSIONS[1025]["scene_media_substep"] == "end_image_approval"
     assert send_calls["count"] == 1
-    assert "предыдущий фактический подшаг текущей сцены" in captured[0][0]
+    assert "апрув конечного изображения" in captured[0][0]
 
 
 def test_on_text_navigation_previous_moves_from_next_scene_start_to_previous_scene_end(monkeypatch):
@@ -1866,4 +1884,52 @@ def test_on_text_navigation_previous_moves_from_next_scene_start_to_previous_sce
     assert sess["scene_media_substep"] == "video_prompt"
     assert sess["scene_media_language_index"] == 0
     assert sent_steps == [(2, "video_prompt")]
-    assert "концу предыдущей сцены" in captured[0][0]
+    assert "сцена 3/4" in captured[0][0].lower()
+    assert "апрув video prompt" in captured[0][0]
+
+
+def test_on_text_navigation_previous_clears_media_pending_state(monkeypatch):
+    sent_steps: list[tuple[int, str]] = []
+    SESSIONS[1027] = {
+        "state": "waiting_scene_media",
+        "image_scene_index": 0,
+        "scene_media_substep": "video_prompt",
+        "scene_prompt_input_pending": {"scene_idx": 0, "target": "video"},
+        "scene_phrase_translation_pending": {"scene_idx": 0, "stage": "approval"},
+        "production": {
+            "json_plan": [
+                {
+                    "scene": 1,
+                    "start_frame_image_b64": "c3RhcnQ=",
+                    "video_provider_choice_pending": {"source": "scene", "language": "ru"},
+                    "syntax_fallback_pending": {"source": "scene"},
+                    "image_model_choice_pending": {"lower_model": "imagen-fast"},
+                }
+            ]
+        },
+    }
+
+    class _Message:
+        text = NAV_BUTTON_PREVIOUS_STEP
+
+        async def reply_text(self, text, reply_markup=None):
+            _ = (text, reply_markup)
+
+    async def _fake_send_next_scene_media_step(update, session):
+        _ = update
+        sent_steps.append((session["image_scene_index"], session["scene_media_substep"]))
+
+    monkeypatch.setattr(
+        "app.handlers.handlers_state_scene._send_next_scene_media_step",
+        _fake_send_next_scene_media_step,
+    )
+    update = SimpleNamespace(message=_Message(), effective_chat=SimpleNamespace(id=1027))
+    asyncio.run(on_text(update, context=None))
+
+    scene = SESSIONS[1027]["production"]["json_plan"][0]
+    assert "scene_prompt_input_pending" not in SESSIONS[1027]
+    assert "scene_phrase_translation_pending" not in SESSIONS[1027]
+    assert "video_provider_choice_pending" not in scene
+    assert "syntax_fallback_pending" not in scene
+    assert "image_model_choice_pending" not in scene
+    assert sent_steps == [(0, "start_image_approval")]

@@ -11,6 +11,7 @@ from sqlalchemy import select
 from .artifact_store import persist_generation_artifact
 from .db import SessionLocal
 from .generation_store import ensure_generation_run_for_session
+from .generation_store import merge_scene_prompt_payload
 from .models import Scene, SceneImageCandidate, SceneMediaMessageLink, SceneVideoCandidate
 from .scene_media_candidates import SCENE_MEDIA_MESSAGE_INDEX_KEY
 
@@ -247,6 +248,7 @@ def rebuild_production_session(session: dict[str, Any], generation_run_id: str |
     scene_candidates_by_id: dict[str, list[SceneImageCandidate]] = defaultdict(list)
     video_candidates_by_id: dict[str, list[SceneVideoCandidate]] = defaultdict(list)
     message_links_by_scene_id: dict[str, list[SceneMediaMessageLink]] = defaultdict(list)
+    prompt_payloads_by_id: dict[str, dict[str, Any]] = {}
     with SessionLocal() as db:
         scene_ids = []
         for raw in scene_map.values():
@@ -256,6 +258,7 @@ def rebuild_production_session(session: dict[str, Any], generation_run_id: str |
                 continue
         if not scene_ids:
             return production
+        scene_rows = db.execute(select(Scene).where(Scene.id.in_(scene_ids))).scalars().all()
         image_rows = db.execute(
             select(SceneImageCandidate).where(SceneImageCandidate.scene_id.in_(scene_ids))
         ).scalars().all()
@@ -265,6 +268,16 @@ def rebuild_production_session(session: dict[str, Any], generation_run_id: str |
         link_rows = db.execute(
             select(SceneMediaMessageLink).where(SceneMediaMessageLink.scene_id.in_(scene_ids))
         ).scalars().all()
+        for row in scene_rows:
+            prompt_payloads_by_id[str(row.id)] = {
+                "start_frame_prompt": row.start_frame_prompt,
+                "start_frame_prompt_effective": row.start_frame_prompt_effective,
+                "end_frame_prompt": row.end_frame_prompt,
+                "video_prompt_by_lang": row.video_prompt_by_lang or {},
+                "speech_by_lang": row.speech_by_lang or {},
+                "syntax_prompt_by_lang": row.syntax_prompt_by_lang or {},
+                "prompt_meta_json": row.prompt_meta_json or {},
+            }
         for row in image_rows:
             scene_candidates_by_id[str(row.scene_id)].append(row)
         for row in video_rows:
@@ -279,6 +292,7 @@ def rebuild_production_session(session: dict[str, Any], generation_run_id: str |
         scene_id = scene_map.get(idx)
         if not scene_id:
             continue
+        merge_scene_prompt_payload(scene, prompt_payloads_by_id.get(scene_id, {}))
         image_candidates = sorted(
             scene_candidates_by_id.get(scene_id, []),
             key=lambda row: (row.created_at is None, row.created_at, row.candidate_id),

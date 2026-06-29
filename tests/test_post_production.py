@@ -79,14 +79,14 @@ def test_build_post_production_uses_selected_scene_videos_and_speed(monkeypatch)
     en_payload = base64.b64decode(out["renders_by_language"]["en"]["subtitled_music"]["video_b64"]).decode(
         "utf-8", errors="ignore"
     )
-    assert "Style: CleanPremium,Inter SemiBold,86" in ru_payload
+    assert f"Style: CleanPremium,{post_production._subtitle_font_name()},88" in ru_payload
     assert "|upscaled_4k" in ru_payload
     assert "Comic Sans" not in ru_payload
     assert "BorderStyle=3" not in ru_payload
-    assert "Первая сцена" in ru_payload
-    assert "Вторая сцена" in ru_payload
-    assert "First scene line" in en_payload
-    assert "Second line" in en_payload
+    assert "ПЕРВАЯ СЦЕНА" in ru_payload
+    assert "ВТОРАЯ СЦЕНА" in ru_payload
+    assert "FIRST SCENE LINE" in en_payload
+    assert "SECOND LINE" in en_payload
 
 
 def test_build_post_production_adds_title_overlay_for_first_segment_duration(monkeypatch):
@@ -134,8 +134,8 @@ def test_build_post_production_adds_title_overlay_for_first_segment_duration(mon
     assert "Style: TitleSeriesEN,Ravsten Demo" in ass_by_name["title_overlay_en.ass"]
     assert "Style: TitleOverlayRU,TD Afisha,118,&H003826C7" in ass_by_name["title_overlay_ru.ass"]
     assert "&H00000000,&H00000000" in ass_by_name["title_overlay_ru.ass"]
-    assert ",0,1,2,5,7," in ass_by_name["title_overlay_ru.ass"]
-    assert ",0,1,1,3,7," in ass_by_name["title_overlay_ru.ass"]
+    assert ",0,1,3,7,7," in ass_by_name["title_overlay_ru.ass"]
+    assert ",0,1,3,6,7," in ass_by_name["title_overlay_ru.ass"]
     assert r"\fsp" not in ass_by_name["title_overlay_ru.ass"]
     assert re.search(r",118,118,\d+,1", ass_by_name["title_overlay_ru.ass"])
     assert "Dialogue: 1,0:00:00.00,0:00:04.00,TitleOverlayRU" in ass_by_name["title_overlay_ru.ass"]
@@ -144,8 +144,11 @@ def test_build_post_production_adds_title_overlay_for_first_segment_duration(mon
     assert "Dialogue: 2,0:00:00.00,0:00:04.00,TitleSeriesEN" in ass_by_name["title_overlay_en.ass"]
     assert "Борщ" in ass_by_name["title_overlay_ru.ass"]
     assert "Borscht" in ass_by_name["title_overlay_en.ass"]
+    series_sep = post_production.TITLE_SERIES_WORD_SEPARATOR
+    assert f"супы{series_sep}у{series_sep}бабушки" in ass_by_name["title_overlay_ru.ass"]
+    assert f"Grandma's{series_sep}Soups" in ass_by_name["title_overlay_en.ass"]
     assert re.search(
-        r"Dialogue: 2,0:00:00.00,0:00:04.00,TitleSeriesRU,,0,0,0,,\{\\q2\\fscx\d+\\fs\d+\}супы\\hу\\hбабушки",
+        r"Dialogue: 2,0:00:00.00,0:00:04.00,TitleSeriesRU,,0,0,0,,\{\\q2\\fscx100\\fs\d+\}",
         ass_by_name["title_overlay_ru.ass"],
     )
     assert re.search(
@@ -153,7 +156,7 @@ def test_build_post_production_adds_title_overlay_for_first_segment_duration(mon
         ass_by_name["title_overlay_ru.ass"],
     )
     assert re.search(
-        r"Dialogue: 2,0:00:00.00,0:00:04.00,TitleSeriesEN,,0,0,0,,\{\\q2\\fscx\d+\\fs\d+\}Grandma's\\hSoups",
+        r"Dialogue: 2,0:00:00.00,0:00:04.00,TitleSeriesEN,,0,0,0,,\{\\q2\\fscx\d+\\fs\d+\}",
         ass_by_name["title_overlay_en.ass"],
     )
     assert re.search(
@@ -228,14 +231,13 @@ def test_series_overlay_keeps_day_near_series_size_without_wrapping():
         assert fit.width <= max_safe_width
         assert fit.series_width == round(1080 * post_production._title_series_width_ratio(language))
         assert fit.counter_width == round(1080 * post_production.TITLE_SERIES_DAY_WIDTH_RATIO)
+        assert fit.series_actual_width >= int(fit.series_width * 0.98)
+        assert fit.counter_actual_width >= int(fit.counter_width * 0.95)
         assert post_production._title_series_day_start_ratio(language, side_margin_ratio=0.10) == 0.70
-        assert fit.counter_font_size >= int(fit.series_font_size * 0.85)
-        if language == "ru":
-            assert fit.scale_x == post_production.TITLE_SERIES_ASS_SCALE_X_BY_LANGUAGE["ru"]
-            assert fit.counter_scale_x == post_production.TITLE_SERIES_DAY_ASS_SCALE_X_BY_LANGUAGE["ru"]
-        else:
-            assert fit.scale_x == 100
-            assert fit.counter_scale_x == post_production.TITLE_SERIES_DAY_ASS_SCALE_X_BY_LANGUAGE["en"]
+        assert fit.counter_font_size >= int(fit.series_font_size * 0.55)
+        assert fit.counter_scale_x == 100
+        assert fit.counter_actual_width <= fit.counter_width
+        assert fit.scale_x == 100
 
 
 def test_series_overlay_fit_scales_for_4k_title_overlay_canvas():
@@ -254,9 +256,33 @@ def test_series_overlay_fit_scales_for_4k_title_overlay_canvas():
     assert fit.width <= max_safe_width
     assert fit.series_width == round(2160 * post_production._title_series_width_ratio("ru"))
     assert fit.counter_width == round(2160 * post_production.TITLE_SERIES_DAY_WIDTH_RATIO)
-    assert fit.width == fit.series_width + fit.counter_width
+    assert fit.width == fit.series_actual_width + fit.counter_actual_width + post_production._title_series_day_gap(layout)
     assert fit.series_font_size > 63
     assert post_production._title_series_day_start_ratio("ru", side_margin_ratio=0.10) == 0.70
+
+
+def test_series_day_position_follows_measured_series_width():
+    layout = post_production._subtitle_layout_for_dimensions(1080, 1920)
+    fit = post_production._fit_title_series_ass_text(
+        "летние напитки",
+        "день 8 из 10",
+        layout=layout,
+        language="ru",
+        side_margin_ratio=0.10,
+    )
+
+    assert fit is not None
+    day_x = post_production._title_series_day_x(
+        layout=layout,
+        fit=fit,
+        series_left=108,
+        title_margin_h=108,
+        language="ru",
+        side_margin_ratio=0.10,
+    )
+
+    assert day_x == 108 + fit.series_actual_width + post_production._title_series_day_gap(layout)
+    assert day_x <= 108 + fit.series_width + post_production._title_series_day_gap(layout)
 
 
 def test_ru_series_overlay_normalizes_uppercase_for_berezka_glyphs():
@@ -269,7 +295,7 @@ def test_ru_series_overlay_normalizes_uppercase_for_berezka_glyphs():
         language="ru",
     )
 
-    assert "летние\\hнапитки" in formatted
+    assert f"летние{post_production.TITLE_SERIES_WORD_SEPARATOR}напитки" in formatted
     assert "ЛЕТНИЕ" not in formatted
 
 
@@ -343,11 +369,20 @@ def test_build_upscaled_post_production_reuses_existing_clean_master(tmp_path, m
 def test_build_subtitled_post_production_reuses_existing_upscaled_master(tmp_path, monkeypatch):
     source = tmp_path / "final_upscaled_4k_master_ru.mp4"
     source.write_bytes(b"upscaled-source")
+    scene = {
+        "duration_sec": 6,
+        "text": "Первая сцена",
+        "speech_cues_by_lang": {"ru": [{"text": "Первая сцена", "start_sec": 0.0, "end_sec": 8.0}]},
+    }
+    candidate = register_video_candidate(scene, language="ru", video_bytes=b"source-video")
+    candidate["approved_for_production"] = True
+    candidate["speed_coef"] = 2.0
     rendered_inputs = []
     progress_events = []
 
     monkeypatch.setattr(post_production, "_resolve_ffmpeg", lambda: "/usr/bin/ffmpeg")
     monkeypatch.setattr(post_production, "_video_dimensions", lambda _path: (2160, 3840))
+    monkeypatch.setattr(post_production, "_selected_video_source_duration", lambda _selected: 8.0)
     monkeypatch.setattr(post_production, "_resolve_music_path", lambda _slug: ("/tmp/music.mp3", 0.2))
     monkeypatch.setattr(post_production, "_persist_render_artifact", lambda path, **_kwargs: str(path))
 
@@ -361,7 +396,7 @@ def test_build_subtitled_post_production_reuses_existing_upscaled_master(tmp_pat
     monkeypatch.setattr(post_production, "_upscale_master_to_4k", lambda **_kwargs: (_ for _ in ()).throw(AssertionError("no upscale")))
 
     out = post_production.build_subtitled_post_production_from_upscaled_master(
-        [{"duration_sec": 8, "text": "Первая сцена"}],
+        [scene],
         upscaled_video_path=source,
         language="ru",
         progress_callback=progress_events.append,
@@ -371,6 +406,17 @@ def test_build_subtitled_post_production_reuses_existing_upscaled_master(tmp_pat
     payload = out["renders_by_language"]["ru"]["subtitled_music"]
     assert payload["source_variant"] == "upscaled_4k"
     assert payload["source_video_path"] == str(source)
+    assert out["subtitle_entries"] == [
+        {
+            "scene": 1,
+            "language": "ru",
+            "text": "Первая сцена",
+            "start_sec": 0.0,
+            "end_sec": 4.0,
+            "speed_coef": 2.0,
+            "timing_scale": 1.0,
+        }
+    ]
     assert [item["stage"] for item in progress_events] == ["reuse_upscaled", "subtitles_building", "subtitles_ready", "persisting"]
 
 
@@ -451,10 +497,11 @@ def test_title_overlay_fit_caps_one_line_title_height_to_eight_percent():
             - post_production.TITLE_OVERLAY_SHADOW
             - (post_production.TITLE_OVERLAY_OUTLINE * 2)
         )
-        * post_production.TITLE_OVERLAY_ASS_SAFE_WIDTH_RATIO
+        * post_production._title_overlay_ass_safe_width_ratio("ru")
     )
     max_safe_height = int(1920 * post_production.TITLE_OVERLAY_MAX_HEIGHT_RATIO)
     assert fit.width <= max_safe_width
+    assert post_production.TITLE_OVERLAY_RU_SCALE_X == 100
     assert fit.height <= max_safe_height
     assert fit.font_size > post_production.TITLE_OVERLAY_VERTICAL_FONT_SIZE
 
@@ -529,13 +576,13 @@ def test_burned_subtitle_layout_uses_clean_premium_two_line_blocks():
         "для белого мусса нужен белый шоколад и немного холодных сливок"
     )
     assert pages == [
-        ["для", "белого", "мусса", "нужен", "белый", "шоколад"],
-        ["и", "немного", "холодных", "сливок"],
+        ["для", "белого", "мусса", "нужен", "белый"],
+        ["шоколад", "и", "немного", "холодных", "сливок"],
     ]
     first_block = post_production._format_burned_subtitle_block(pages[0])
-    assert first_block == "для белого мусса\nнужен белый шоколад"
+    assert first_block == "ДЛЯ БЕЛОГО\nМУССА НУЖЕН БЕЛЫЙ"
     assert len(first_block.splitlines()) <= 2
-    assert post_production._format_burned_subtitle_block(["в", "дом", "и", "сад"]) == "в дом и сад"
+    assert post_production._format_burned_subtitle_block(["в", "дом", "и", "сад"]) == "В ДОМ И САД"
 
 
 def test_burned_subtitle_ass_style_adapts_to_video_shape(tmp_path):
@@ -547,27 +594,93 @@ def test_burned_subtitle_ass_style_adapts_to_video_shape(tmp_path):
 
     vertical_text = vertical.read_text(encoding="utf-8")
     horizontal_text = horizontal.read_text(encoding="utf-8")
-    assert "Style: CleanPremium,Inter SemiBold,86" in vertical_text
-    assert "&H80000000,&H40000000" in vertical_text
-    assert ",1,2,5,2,80,80,420,1" in vertical_text
-    assert "Style: CleanPremium,Inter SemiBold,67" in horizontal_text
-    assert "&H80000000,&H40000000" in horizontal_text
-    assert ",1,2,5,2,80,80,145,1" in horizontal_text
+    font_name = post_production._subtitle_font_name()
+    assert f"Style: CleanPremium,{font_name},88" in vertical_text
+    assert "&H00000000,&H70000000" in vertical_text
+    assert ",1,6,3,1,150,150,575,1" in vertical_text
+    assert f"Style: CleanPremium,{font_name},78" in horizontal_text
+    assert "&H00000000,&H70000000" in horizontal_text
+    assert ",1,6,3,1,150,150,190,1" in horizontal_text
 
 
-def test_burned_subtitles_reveal_lines_progressively_with_clean_style():
+def test_burned_subtitle_ass_uses_tight_explicit_line_spacing(tmp_path):
+    ass_path = tmp_path / "tight_lines.ass"
+
+    post_production._write_burned_subtitle_ass(
+        ass_path,
+        [{"text": "МОЖЕТ\nСБЕЖИМ СЕГОДНЯ", "start_sec": 1.0, "end_sec": 3.0}],
+        video_width=1080,
+        video_height=1920,
+    )
+
+    payload = ass_path.read_text(encoding="utf-8")
+    assert post_production._subtitle_line_advance(
+        post_production._subtitle_layout_for_dimensions(1080, 1920)
+    ) == 88
+    assert "Dialogue: 0,0:00:01.00,0:00:03.00,CleanPremium,,0,0,0,,{\\an1\\pos(150,1257)}МОЖЕТ" in payload
+    assert (
+        "Dialogue: 0,0:00:01.00,0:00:03.00,CleanPremium,,0,0,0,,{\\an1\\pos(150,1345)}СБЕЖИМ СЕГОДНЯ"
+        in payload
+    )
+    assert r"МОЖЕТ\NСБЕЖИМ" not in payload
+
+
+def test_burned_subtitle_layout_keeps_visual_line_width_at_4k():
+    layout_1080 = post_production._subtitle_layout_for_dimensions(1080, 1920)
+    layout_4k = post_production._subtitle_layout_for_dimensions(2160, 3840)
+
+    assert layout_1080.line_chars == 18
+    assert layout_4k.line_chars == layout_1080.line_chars
+
+
+def test_burned_subtitles_render_complete_block_without_progressive_jump():
     cues = post_production._build_burned_subtitle_cues(
         {"text": "для белого мусса нужен белый шоколад", "start_sec": 1.0, "end_sec": 4.0},
         video_width=1080,
         video_height=1920,
     )
 
+    assert [cue["text"] for cue in cues] == ["ДЛЯ БЕЛОГО\nМУССА НУЖЕН БЕЛЫЙ", "ШОКОЛАД"]
+    assert [cue["start_sec"] for cue in cues] == [1.0, 3.5]
+    assert [cue["end_sec"] for cue in cues] == [3.5, 4.0]
+    assert post_production.SUBTITLE_ASS_INVISIBLE_TOKEN not in cues[0]["text"]
+
+
+def test_burned_subtitles_switch_pages_without_overlap_or_jump():
+    cues = post_production._build_burned_subtitle_cues(
+        {
+            "text": "для белого мусса нужен белый шоколад и немного холодных сливок",
+            "start_sec": 1.0,
+            "end_sec": 5.0,
+        },
+        video_width=1080,
+        video_height=1920,
+    )
+
     assert [cue["text"] for cue in cues] == [
-        f"для белого мусса\n{post_production.SUBTITLE_ASS_INVISIBLE_TOKEN}",
-        "для белого мусса\nнужен белый шоколад",
+        "ДЛЯ БЕЛОГО\nМУССА НУЖЕН БЕЛЫЙ",
+        "ШОКОЛАД И НЕМНОГО\nХОЛОДНЫХ СЛИВОК",
     ]
-    assert [cue["start_sec"] for cue in cues] == [1.0, 2.5]
-    assert [cue["end_sec"] for cue in cues] == [2.5, 4.0]
+    assert [cue["start_sec"] for cue in cues] == [1.0, 3.0]
+    assert [cue["end_sec"] for cue in cues] == [3.0, 5.0]
+
+
+def test_burned_subtitles_split_4k_text_into_two_line_pages():
+    cues = post_production._build_burned_subtitle_cues(
+        {
+            "text": "Don't lose this recipe! The most refreshing raspberry lemonade to beat the heat.",
+            "start_sec": 1.0,
+            "end_sec": 5.0,
+        },
+        video_width=2160,
+        video_height=3840,
+    )
+
+    assert len(cues) > 1
+    assert all(len(cue["text"].splitlines()) <= 2 for cue in cues)
+    assert [cue["start_sec"] for cue in cues] == sorted(cue["start_sec"] for cue in cues)
+    for previous, current in zip(cues, cues[1:]):
+        assert previous["end_sec"] == current["start_sec"]
 
 
 def test_build_post_production_prefers_language_specific_speech_cues(monkeypatch):
@@ -681,6 +794,8 @@ def test_build_post_production_scales_subtitles_to_actual_normalized_duration(mo
 
 def test_subtitle_text_removes_veo_stress_markers():
     assert post_production._normalize_subtitle_text("готОво [пауза] молоко́") == "готово молоко"
+    assert post_production._normalize_subtitle_text("Ready [pause] now") == "Ready now"
+    assert post_production._normalize_subtitle_text("Ready [ PAUSE ] now") == "Ready now"
     assert post_production._normalize_subtitle_text("Мягкий бЕлый мусс") == "Мягкий белый мусс"
 
 
@@ -773,9 +888,9 @@ def test_dense_subtitle_entry_is_split_into_subwindows():
     }
     out = post_production._expand_dense_subtitle_entry(item)
     assert len(out) == 2
-    assert out[0]["text"] == "для белого мусса нужен белый шоколад"
+    assert out[0]["text"] == "для белого мусса нужен белый"
     assert out[0]["start_sec"] == 0.0
     assert 0.0 < out[0]["end_sec"] < 2.0
-    assert out[1]["text"] == "и немного холодных сливок"
+    assert out[1]["text"] == "шоколад и немного холодных сливок"
     assert out[1]["start_sec"] == out[0]["end_sec"]
     assert out[1]["end_sec"] == 2.0

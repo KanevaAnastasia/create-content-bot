@@ -2,15 +2,18 @@ from __future__ import annotations
 
 import asyncio
 import inspect
+import io
 import logging
+from typing import Any
 
 from telegram import ReplyKeyboardMarkup, ReplyKeyboardRemove
 from telegram.error import NetworkError, RetryAfter, TimedOut
 
 logger = logging.getLogger("bot")
 
-_SEND_RETRY_ATTEMPTS = 3
-_SEND_RETRY_BASE_DELAY_SEC = 1.0
+_SEND_RETRY_ATTEMPTS = 6
+_SEND_RETRY_BASE_DELAY_SEC = 2.0
+_SEND_RETRY_MAX_DELAY_SEC = 30.0
 _REPLY_MARKUP_UNSET = object()
 
 FIRST_STEP_BUTTON_GENERATE = "Генерировать"
@@ -62,8 +65,8 @@ def _type_error_is_unexpected_reply_markup(exc: TypeError) -> bool:
     )
 
 
-async def safe_send(call, *, label: str) -> None:
-    """Runs a Telegram send call with short retries on transient delivery failures."""
+async def safe_send(call, *, label: str) -> Any:
+    """Runs a Telegram send call with patient retries on transient delivery failures."""
     for attempt in range(1, _SEND_RETRY_ATTEMPTS + 1):
         try:
             return await call()
@@ -81,11 +84,13 @@ async def safe_send(call, *, label: str) -> None:
         except (NetworkError, TimedOut) as e:
             if attempt >= _SEND_RETRY_ATTEMPTS:
                 raise
-            delay = _SEND_RETRY_BASE_DELAY_SEC * attempt
+            delay = min(_SEND_RETRY_MAX_DELAY_SEC, _SEND_RETRY_BASE_DELAY_SEC * (2 ** (attempt - 1)))
             logger.warning(
-                "telegram.send transient_error label=%s attempt=%s err=%s",
+                "telegram.send transient_error label=%s attempt=%s/%s delay=%ss err=%s",
                 label,
                 attempt,
+                _SEND_RETRY_ATTEMPTS,
+                delay,
                 str(e),
             )
             await asyncio.sleep(delay)
@@ -110,6 +115,41 @@ async def safe_reply_text(message, text: str, *, reply_markup=_REPLY_MARKUP_UNSE
         return await message.reply_text(text)
 
     return await safe_send(_send_once, label="reply_text")
+
+
+def _reusable_upload_payload(upload) -> tuple[bytes, str] | None:
+    if isinstance(upload, (bytes, bytearray)):
+        return bytes(upload), "upload.bin"
+    if not hasattr(upload, "read"):
+        return None
+    name = str(getattr(upload, "name", "") or "upload.bin")
+    try:
+        upload.seek(0)
+    except Exception:
+        pass
+    return upload.read(), name
+
+
+async def safe_reply_photo(message, *, photo, caption: str | None = None, **kwargs) -> Any:
+    """Sends a photo with retry, recreating byte streams between attempts."""
+    payload = _reusable_upload_payload(photo)
+    if payload is None:
+        return await safe_send(
+            lambda: message.reply_photo(photo=photo, caption=caption, **kwargs),
+            label="reply_photo",
+        )
+
+    data, name = payload
+
+    def _fresh_photo():
+        stream = io.BytesIO(data)
+        stream.name = name
+        return stream
+
+    return await safe_send(
+        lambda: message.reply_photo(photo=_fresh_photo(), caption=caption, **kwargs),
+        label="reply_photo",
+    )
 
 
 async def safe_send_message(bot, *, chat_id: int, text: str, **kwargs) -> None:

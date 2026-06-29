@@ -1,4 +1,5 @@
 import asyncio
+from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 
 from sqlalchemy import create_engine
@@ -6,7 +7,8 @@ from sqlalchemy.orm import sessionmaker
 
 from app import db, session_store
 from app.generation_store import _human_title_for_session
-from app.models import GenerationArtifact
+from app.models import ChatSession, GenerationArtifact, GenerationRun, Scene
+from app.final_video_delivery import all_final_artifacts_delivered, deliver_final_artifact_to_telegram
 from app.handlers.handlers_media_core import SyntaxFallbackPendingConfirmation, VideoProviderChoiceRequired
 from app.handlers.handlers_state_commands import generate_video_command
 from app.handlers.handlers_state_scene import on_message_reaction, on_text
@@ -68,7 +70,8 @@ def test_save_and_load_session_restores_bytes_and_scene_candidates(monkeypatch):
         "scene": 1,
         "duration_sec": 6,
         "text": "Сцена 1",
-        "video_results_by_lang": {},
+        "start_frame_image_b64": "inline-start-image",
+        "video_results_by_lang": {"ru": {"video_b64": "inline-video", "estimated_cost_usd": 0.01}},
         "video_prompt_by_lang": {"ru": "lang:ru prompt"},
     }
     image_candidate = register_image_candidate(scene, kind="start", image_bytes=b"img-start")
@@ -94,6 +97,13 @@ def test_save_and_load_session_restores_bytes_and_scene_candidates(monkeypatch):
         artifacts = check_db.query(GenerationArtifact).all()
     assert {item.artifact_type for item in artifacts} == {"scene_start_image", "scene_video_candidate"}
     session_store.save_session(101, session)
+    with db.SessionLocal() as check_db:
+        saved = check_db.query(ChatSession).filter(ChatSession.chat_id == 101).one()
+        saved_json_text = str(saved.session_json)
+    assert "inline-start-image" not in saved_json_text
+    assert "inline-video" not in saved_json_text
+    assert "image_b64" not in saved_json_text
+    assert "video_b64" not in saved_json_text
 
     loaded = session_store.load_session(101)
 
@@ -105,6 +115,188 @@ def test_save_and_load_session_restores_bytes_and_scene_candidates(monkeypatch):
     assert selected is not None
     assert selected["candidate_id"] == latest_video["candidate_id"]
     assert selected["speed_coef"] == 1.2
+
+
+def test_session_persists_run_cursor_and_restores_scene_prompts_from_db(monkeypatch):
+    _install_sqlite(monkeypatch)
+    SESSIONS.clear()
+
+    session = {
+        "state": "waiting_scene_media",
+        "image_scene_index": 1,
+        "scene_media_substep": "video_prompt",
+        "scene_media_language_index": 1,
+        "target_languages": ["ru", "en"],
+        "production": {
+            "json_plan": [
+                {"scene": 1, "duration_sec": 6, "text": "Сцена 1"},
+                {
+                    "scene": 2,
+                    "duration_sec": 6,
+                    "text": "Сцена 2",
+                    "start_frame_prompt": "start db",
+                    "start_frame_prompt_effective": "effective db",
+                    "end_frame_prompt": "end db",
+                    "video_prompt_by_lang": {"ru": "video ru"},
+                    "speech_by_lang": {"ru": "speech ru"},
+                    "syntax_prompt_by_lang": {"ru": {"prompt": "compact"}},
+                },
+            ]
+        },
+    }
+
+    session_store.save_session(202, session)
+
+    with db.SessionLocal() as check_db:
+        run = check_db.query(GenerationRun).one()
+        scene_two = check_db.query(Scene).filter(Scene.scene_order == 2).one()
+        assert run.is_active is True
+        assert run.current_scene_index == 1
+        assert run.current_media_substep == "video_prompt"
+        assert run.current_media_language_index == 1
+        assert scene_two.start_frame_prompt == "start db"
+        assert scene_two.video_prompt_by_lang == {"ru": "video ru"}
+
+        scene_two.start_frame_prompt = "edited start"
+        scene_two.video_prompt_by_lang = {"ru": "edited video"}
+        check_db.commit()
+
+    restored = session_store.load_session(202)
+
+    assert restored is not None
+    assert restored["image_scene_index"] == 1
+    assert restored["scene_media_substep"] == "video_prompt"
+    restored_scene = restored["production"]["json_plan"][1]
+    assert restored_scene["start_frame_prompt"] == "edited start"
+    assert restored_scene["video_prompt_by_lang"] == {"ru": "edited video"}
+
+
+def test_final_video_delivery_marks_artifact_sent(monkeypatch, tmp_path):
+    _install_sqlite(monkeypatch)
+    video_path = tmp_path / "final.mp4"
+    video_path.write_bytes(b"mp4")
+
+    with db.SessionLocal() as check_db:
+        run = GenerationRun(status="final_render_running", language="ru", script="recipe")
+        check_db.add(run)
+        check_db.flush()
+        check_db.add(ChatSession(chat_id=303, state="ready_for_production", session_json={}, generation_run_id=run.id))
+        artifact = GenerationArtifact(
+            run_id=run.id,
+            artifact_type="final_titled_subtitled_music",
+            label="Final video",
+            uri=f"file://{video_path}",
+            language="ru",
+            mime_type="video/mp4",
+            payload_json={},
+        )
+        check_db.add(artifact)
+        check_db.commit()
+        run_id = str(run.id)
+        artifact_id = str(artifact.id)
+
+    async def _fake_send(token, chat_id, path, caption):
+        assert token == "token"
+        assert chat_id == 303
+        assert path == video_path
+        assert "Final video" in caption
+        return 777
+
+    monkeypatch.setenv("TELEGRAM_BOT_TOKEN", "token")
+    monkeypatch.setattr("app.final_video_delivery._send_video_file", _fake_send)
+
+    delivery = deliver_final_artifact_to_telegram(run_id, artifact_id)
+
+    assert delivery["status"] == "sent"
+    assert delivery["telegram_message_id"] == 777
+    with db.SessionLocal() as check_db:
+        saved = check_db.get(GenerationArtifact, artifact.id)
+        assert saved.payload_json["telegram_delivery"]["status"] == "sent"
+
+
+def test_final_video_delivery_rejects_artifact_from_other_run(monkeypatch, tmp_path):
+    _install_sqlite(monkeypatch)
+    video_path = tmp_path / "final.mp4"
+    video_path.write_bytes(b"mp4")
+
+    with db.SessionLocal() as check_db:
+        owner_run = GenerationRun(status="final_render_running", language="ru", script="owner")
+        other_run = GenerationRun(status="final_render_running", language="ru", script="other")
+        check_db.add_all([owner_run, other_run])
+        check_db.flush()
+        check_db.add(ChatSession(chat_id=404, state="ready_for_production", session_json={}, generation_run_id=owner_run.id))
+        artifact = GenerationArtifact(
+            run_id=other_run.id,
+            artifact_type="final_titled_subtitled_music",
+            label="Final video",
+            uri=f"file://{video_path}",
+            language="ru",
+            mime_type="video/mp4",
+            payload_json={},
+        )
+        check_db.add(artifact)
+        check_db.commit()
+        owner_run_id = str(owner_run.id)
+        artifact_id = str(artifact.id)
+
+    async def _unexpected_send(*_args, **_kwargs):
+        raise AssertionError("must not send artifacts from another run")
+
+    monkeypatch.setenv("TELEGRAM_BOT_TOKEN", "token")
+    monkeypatch.setattr("app.final_video_delivery._send_video_file", _unexpected_send)
+
+    delivery = deliver_final_artifact_to_telegram(owner_run_id, artifact_id)
+
+    assert delivery["status"] == "failed"
+    assert delivery["last_error"] == "artifact does not belong to run"
+
+
+def test_all_final_artifacts_delivered_uses_latest_video_per_track(monkeypatch):
+    _install_sqlite(monkeypatch)
+    now = datetime.now(timezone.utc)
+
+    with db.SessionLocal() as check_db:
+        run = GenerationRun(status="ready", language="ru", script="recipe")
+        check_db.add(run)
+        check_db.flush()
+        check_db.add_all(
+            [
+                GenerationArtifact(
+                    run_id=run.id,
+                    artifact_type="final_titled_subtitled_music",
+                    label="Old final video",
+                    uri="file:///tmp/old.mp4",
+                    language="ru",
+                    mime_type="video/mp4",
+                    payload_json={},
+                    created_at=now - timedelta(minutes=5),
+                ),
+                GenerationArtifact(
+                    run_id=run.id,
+                    artifact_type="final_titled_subtitled_music",
+                    label="Latest final video",
+                    uri="file:///tmp/latest.mp4",
+                    language="ru",
+                    mime_type="video/mp4",
+                    payload_json={"telegram_delivery": {"status": "sent", "telegram_message_id": 7}},
+                    created_at=now,
+                ),
+                GenerationArtifact(
+                    run_id=run.id,
+                    artifact_type="final_build_status",
+                    label="Build status",
+                    uri="admin://final-build/status",
+                    language="ru",
+                    mime_type="application/json",
+                    payload_json={},
+                    created_at=now + timedelta(minutes=1),
+                ),
+            ]
+        )
+        check_db.commit()
+        run_id = str(run.id)
+
+    assert all_final_artifacts_delivered(run_id) is True
 
 
 def test_reaction_like_works_after_memory_clear(monkeypatch):

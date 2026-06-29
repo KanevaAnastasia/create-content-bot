@@ -16,6 +16,7 @@ _recipe_steps: dict[str, Any] = {}
 _recipe_full: dict[str, Any] = {}
 _derived_recipe_steps: dict[str, Any] = {}
 _scenes_plan: dict[str, Any] = {}
+_viral_concept_brief: dict[str, Any] = {}
 
 
 def _key(*parts: Any) -> str:
@@ -73,4 +74,41 @@ def set_scenes_plan(
 ) -> None:
     _scenes_plan[
         _key(concept.strip(), (full_recipe_text or "").strip(), (feedback or "").strip())
+    ] = value
+
+
+def get_viral_concept_brief(
+    concept: str,
+    full_recipe_text: str,
+    sponsored_content: bool,
+    brand_context: str | None,
+    analytics_feedback: dict[str, Any] | None,
+) -> Any | None:
+    return _viral_concept_brief.get(
+        _key(
+            concept.strip(),
+            (full_recipe_text or "").strip(),
+            bool(sponsored_content),
+            (brand_context or "").strip(),
+            analytics_feedback or {},
+        )
+    )
+
+
+def set_viral_concept_brief(
+    concept: str,
+    full_recipe_text: str,
+    sponsored_content: bool,
+    brand_context: str | None,
+    analytics_feedback: dict[str, Any] | None,
+    value: Any,
+) -> None:
+    _viral_concept_brief[
+        _key(
+            concept.strip(),
+            (full_recipe_text or "").strip(),
+            bool(sponsored_content),
+            (brand_context or "").strip(),
+            analytics_feedback or {},
+        )
     ] = value

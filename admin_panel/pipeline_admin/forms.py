@@ -1,11 +1,12 @@
 from __future__ import annotations
 
 import json
+import re
 from typing import Any
 
 from django import forms
 
-from .models import ChatSession, GenerationRun, SceneImageCandidate, SceneVideoCandidate
+from .models import ChatSession, GenerationRun, Scene, SceneImageCandidate, SceneVideoCandidate
 
 
 def _pretty(value: Any) -> str:
@@ -17,6 +18,38 @@ def _loads_json(value: str, *, fallback: Any) -> Any:
     if not text:
         return fallback
     return json.loads(text)
+
+
+_TITLE_COLOR_RE = re.compile(r"#?([0-9a-fA-F]{6})")
+PENDING_OVERLAY_TITLE_STYLE_KEY = "pending_overlay_title_style"
+DEFAULT_TITLE_COLOR = "#ffffff"
+
+
+def _normalize_title_color(value: Any) -> str:
+    raw = str(value or "").strip()
+    match = _TITLE_COLOR_RE.fullmatch(raw)
+    if not match:
+        return ""
+    return f"#{match.group(1).lower()}"
+
+
+def _title_color_for_input(*styles: dict[str, Any]) -> str:
+    for style in styles:
+        if not isinstance(style, dict):
+            continue
+        normalized = _normalize_title_color(style.get("title_color"))
+        if normalized:
+            return normalized
+    return DEFAULT_TITLE_COLOR
+
+
+def _merged_style_from_sources(key: str, *sources: dict[str, Any]) -> dict[str, Any]:
+    style: dict[str, Any] = {}
+    for source in sources:
+        value = source.get(key) if isinstance(source, dict) else None
+        if isinstance(value, dict):
+            style.update(value)
+    return style
 
 
 def _safe_scene_index(value: Any) -> int:
@@ -47,6 +80,65 @@ def _sync_generation_title_from_overlay(obj: ChatSession, overlay_title_by_lang:
     if not title or not obj.generation_run_id:
         return
     GenerationRun.objects.filter(id=obj.generation_run_id).update(human_title=title)
+
+
+def _sync_generation_prompts_and_cursor_from_session(obj: ChatSession, session: dict[str, Any]) -> None:
+    if not obj.generation_run_id or not isinstance(session, dict):
+        return
+    has_cursor = "image_scene_index" in session or "scene_media_substep" in session or "scene_media_language_index" in session
+    updates: dict[str, Any] = {}
+    if has_cursor:
+        updates["is_active"] = bool(str(session.get("state") or "").strip() and session.get("state") != "ready_for_production")
+        try:
+            updates["current_scene_index"] = int(session.get("image_scene_index"))
+        except (TypeError, ValueError):
+            updates["current_scene_index"] = None
+        substep = str(session.get("scene_media_substep") or "").strip()
+        updates["current_media_substep"] = substep or None
+        try:
+            updates["current_media_language_index"] = int(session.get("scene_media_language_index"))
+        except (TypeError, ValueError):
+            updates["current_media_language_index"] = None
+    if updates:
+        GenerationRun.objects.filter(id=obj.generation_run_id).update(**updates)
+
+    production = session.get("production")
+    scenes = production.get("json_plan") if isinstance(production, dict) else None
+    if not isinstance(scenes, list) or not scenes:
+        return
+    try:
+        rows = {int(row.scene_order): row for row in Scene.objects.filter(run_id=obj.generation_run_id)}
+    except Exception:
+        return
+    for idx, payload in enumerate(scenes, start=1):
+        if not isinstance(payload, dict):
+            continue
+        row = rows.get(idx)
+        if row is None:
+            continue
+        for key in ("start_frame_prompt", "start_frame_prompt_effective", "end_frame_prompt"):
+            setattr(row, key, str(payload.get(key) or "") or None)
+        for key in ("video_prompt_by_lang", "speech_by_lang", "syntax_prompt_by_lang", "prompt_meta_json"):
+            value = payload.get(key)
+            setattr(row, key, value if isinstance(value, dict) else {})
+        row.text = str(payload.get("text") or row.text or "")
+        try:
+            row.duration_sec = float(payload.get("duration_sec") or row.duration_sec or 0.0)
+        except (TypeError, ValueError):
+            pass
+        row.save(
+            update_fields=[
+                "text",
+                "duration_sec",
+                "start_frame_prompt",
+                "start_frame_prompt_effective",
+                "end_frame_prompt",
+                "video_prompt_by_lang",
+                "speech_by_lang",
+                "syntax_prompt_by_lang",
+                "prompt_meta_json",
+            ]
+        )
 
 
 _MEDIA_SUBSTEP_CHOICES = (
@@ -89,6 +181,12 @@ class ChatSessionAdminForm(forms.ModelForm):
         label="Final title overlay style (JSON)",
         widget=forms.Textarea(attrs={"rows": 4}),
         help_text='Optional style, for example {"title_color": "#c72638", "top_margin_ratio": 0.05}.',
+    )
+    overlay_title_color = forms.CharField(
+        required=False,
+        label="Final title color",
+        widget=forms.TextInput(attrs={"type": "color"}),
+        help_text="Saved as pending; the final video uses it only after Build/rebuild is pressed.",
     )
 
     scene_index = forms.IntegerField(required=False, min_value=0, help_text="0-based scene index to edit below.")
@@ -148,6 +246,9 @@ class ChatSessionAdminForm(forms.ModelForm):
         self.fields["overlay_title_style_json"].initial = _pretty(
             production.get("overlay_title_style") or session.get("overlay_title_style") or {}
         )
+        active_title_style = _merged_style_from_sources("overlay_title_style", session, production)
+        pending_title_style = _merged_style_from_sources(PENDING_OVERLAY_TITLE_STYLE_KEY, session, production)
+        self.fields["overlay_title_color"].initial = _title_color_for_input(pending_title_style, active_title_style)
         self.fields["scene_index"].initial = scene_idx
         self.fields["media_scene_number"].initial = scene_idx + 1
         self.fields["media_substep"].initial = session.get("scene_media_substep") or "start_prompt"
@@ -193,6 +294,13 @@ class ChatSessionAdminForm(forms.ModelForm):
             value = cleaned.get(field_name)
             if value is not None and not isinstance(value, expected_type):
                 self.add_error(field_name, f"Expected JSON {expected_type.__name__}.")
+        title_color = str(cleaned.get("overlay_title_color") or "").strip()
+        if title_color:
+            normalized_title_color = _normalize_title_color(title_color)
+            if not normalized_title_color:
+                self.add_error("overlay_title_color", "Use a 6-digit hex color, for example #c72638.")
+            else:
+                cleaned["overlay_title_color"] = normalized_title_color
         if cleaned.get("apply_media_step_override"):
             production_plan = cleaned.get("production_plan_json")
             scene_number = cleaned.get("media_scene_number")
@@ -222,6 +330,13 @@ class ChatSessionAdminForm(forms.ModelForm):
         production["json_plan"] = self.cleaned_data.get("production_plan_json") or []
         overlay_title_by_lang = self.cleaned_data.get("overlay_title_by_lang_json") or {}
         overlay_title_style = self.cleaned_data.get("overlay_title_style_json") or {}
+        pending_overlay_title_style = _merged_style_from_sources(PENDING_OVERLAY_TITLE_STYLE_KEY, session, production)
+        if "overlay_title_color" in self.data and "overlay_title_color" in self.changed_data:
+            title_color = self.cleaned_data.get("overlay_title_color") or ""
+            if title_color:
+                pending_overlay_title_style["title_color"] = title_color
+            else:
+                pending_overlay_title_style.pop("title_color", None)
         if overlay_title_by_lang:
             production["overlay_title_by_lang"] = overlay_title_by_lang
             session["overlay_title_by_lang"] = overlay_title_by_lang
@@ -234,6 +349,12 @@ class ChatSessionAdminForm(forms.ModelForm):
         else:
             production.pop("overlay_title_style", None)
             session.pop("overlay_title_style", None)
+        if pending_overlay_title_style:
+            production[PENDING_OVERLAY_TITLE_STYLE_KEY] = pending_overlay_title_style
+            session[PENDING_OVERLAY_TITLE_STYLE_KEY] = pending_overlay_title_style
+        else:
+            production.pop(PENDING_OVERLAY_TITLE_STYLE_KEY, None)
+            session.pop(PENDING_OVERLAY_TITLE_STYLE_KEY, None)
         session["production"] = production
 
         scenes = production.get("json_plan")
@@ -267,7 +388,94 @@ class ChatSessionAdminForm(forms.ModelForm):
         if commit:
             obj.save()
             _sync_generation_title_from_overlay(obj, overlay_title_by_lang)
+            _sync_generation_prompts_and_cursor_from_session(obj, session)
         return obj
+
+
+class SceneAdminForm(forms.ModelForm):
+    production_scene_json = forms.CharField(
+        required=False,
+        label="Production scene JSON",
+        widget=forms.Textarea(attrs={"rows": 16}),
+        help_text="Full scene payload from the linked ChatSession production.json_plan. Saving syncs it back.",
+    )
+
+    class Meta:
+        model = Scene
+        fields = (
+            "run",
+            "scene_order",
+            "duration_sec",
+            "text",
+            "start_frame_prompt",
+            "start_frame_prompt_effective",
+            "end_frame_prompt",
+            "video_prompt_by_lang",
+            "speech_by_lang",
+            "syntax_prompt_by_lang",
+            "prompt_meta_json",
+        )
+        widgets = {
+            "start_frame_prompt": forms.Textarea(attrs={"rows": 4}),
+            "start_frame_prompt_effective": forms.Textarea(attrs={"rows": 4}),
+            "end_frame_prompt": forms.Textarea(attrs={"rows": 4}),
+            "video_prompt_by_lang": forms.Textarea(attrs={"rows": 8}),
+            "speech_by_lang": forms.Textarea(attrs={"rows": 5}),
+            "syntax_prompt_by_lang": forms.Textarea(attrs={"rows": 5}),
+            "prompt_meta_json": forms.Textarea(attrs={"rows": 4}),
+        }
+
+    def __init__(self, *args, production_scene: dict[str, Any] | None = None, **kwargs):
+        super().__init__(*args, **kwargs)
+        payload = production_scene if isinstance(production_scene, dict) else {}
+        if not payload and self.instance and self.instance.pk:
+            payload = {
+                "scene": self.instance.scene_order,
+                "text": self.instance.text,
+                "duration_sec": self.instance.duration_sec,
+            }
+        if self.instance and self.instance.pk:
+            for key in ("start_frame_prompt", "start_frame_prompt_effective", "end_frame_prompt"):
+                if not payload.get(key):
+                    value = getattr(self.instance, key, None)
+                    if value:
+                        payload[key] = value
+            for key in ("video_prompt_by_lang", "speech_by_lang", "syntax_prompt_by_lang", "prompt_meta_json"):
+                if not isinstance(payload.get(key), dict) or not payload.get(key):
+                    value = getattr(self.instance, key, None)
+                    if isinstance(value, dict) and value:
+                        payload[key] = value
+        self.fields["production_scene_json"].initial = _pretty(payload)
+
+    def clean_production_scene_json(self):
+        try:
+            value = _loads_json(self.cleaned_data.get("production_scene_json") or "", fallback={})
+        except json.JSONDecodeError as exc:
+            raise forms.ValidationError(f"Invalid JSON: {exc}") from exc
+        if value is not None and not isinstance(value, dict):
+            raise forms.ValidationError("Expected JSON object.")
+        return value or {}
+
+    def clean(self):
+        cleaned = super().clean()
+        payload = dict(cleaned.get("production_scene_json") or {})
+        payload["scene"] = cleaned.get("scene_order") or self.instance.scene_order
+        payload["text"] = cleaned.get("text") or ""
+        payload["duration_sec"] = float(cleaned.get("duration_sec") or 0.0)
+        for key in ("start_frame_prompt", "start_frame_prompt_effective", "end_frame_prompt"):
+            value = cleaned.get(key)
+            if value:
+                payload[key] = value
+            else:
+                payload.pop(key, None)
+        for key in ("video_prompt_by_lang", "speech_by_lang", "syntax_prompt_by_lang", "prompt_meta_json"):
+            value = cleaned.get(key)
+            if isinstance(value, dict) and value:
+                payload[key] = value
+            else:
+                payload.pop(key, None)
+        cleaned["production_scene_json"] = payload
+        return cleaned
 
 
 class SceneImageCandidateAdminForm(forms.ModelForm):

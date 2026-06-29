@@ -23,10 +23,12 @@ from .cache import (
     get_recipe_full,
     get_recipe_steps,
     get_scenes_plan,
+    get_viral_concept_brief,
     set_concepts,
     set_recipe_full,
     set_recipe_steps,
     set_scenes_plan,
+    set_viral_concept_brief,
 )
 from .assets import ASSETS
 from .character_catalog import GRANDMA_KITCHEN_PROJECT_SLUG, sanitize_character_names_and_keys
@@ -358,11 +360,7 @@ def _ensure_image_prompt_framing_requirements(
 
 def _append_first_scene_title_safe_video_rule(video_prompt: str, *, scene_index: int) -> str:
     out = str(video_prompt or "").strip()
-    if scene_index != 1:
-        return out
-    if "title_safe_top_30:" in out.lower():
-        return out
-    return f"{out} {TITLE_SAFE_FIRST_SCENE_VIDEO_RULE}".strip()
+    return out
 
 
 def append_veo3_video_framing_constraints(
@@ -1130,6 +1128,15 @@ async def generate_viral_concept_brief(
         raise ValueError("Empty concept for viral brief.")
     if not body:
         raise ValueError("Empty full_recipe_text for viral brief.")
+    cached = get_viral_concept_brief(
+        concept,
+        body,
+        sponsored_content,
+        brand_context,
+        analytics_feedback,
+    )
+    if isinstance(cached, dict):
+        return cached
     prompt = llm_steps.build_viral_concept_brief_prompt(
         concept=concept,
         full_recipe_text=body,
@@ -1143,12 +1150,21 @@ async def generate_viral_concept_brief(
     except Exception:
         logger.exception("viral concept brief generation failed; using fallback brief")
         parsed = {}
-    return normalize_viral_concept_brief(
+    out = normalize_viral_concept_brief(
         parsed,
         concept=concept,
         sponsored_content=sponsored_content,
         brand_context=brand_context,
     )
+    set_viral_concept_brief(
+        concept,
+        body,
+        sponsored_content,
+        brand_context,
+        analytics_feedback,
+        out,
+    )
+    return out
 
 
 async def expand_recipe_steps(recipe_steps: list[str]) -> list[str]:
@@ -2010,7 +2026,7 @@ async def generate_full_production(
                     "For scene 1, video_prompt_en must place CHARACTERS SPEAKS early in the clip and the exact "
                     "spoken phrase from scene.text must explicitly name the dish from concept/full_recipe_text."
                 ),
-                "scene1_title_safe_rule": TITLE_SAFE_FIRST_SCENE_VIDEO_RULE,
+                "scene1_title_safe_rule": "Title-safe top area applies only to start_frame_prompt_ru, never to video_prompt_en.",
                 "fruit_only_first_moment_rule": FRUIT_ONLY_FIRST_MOMENT_RULE,
                 "veo3_framing_rule": VEO3_FAST_VIDEO_FRAMING_RULE,
                 "continuity_rule": (
@@ -2058,6 +2074,8 @@ async def generate_full_production(
             "requested_end_frame_scenes; return `пусто` for every other scene. Never infer an end frame from action, "
             "payoff, transformation, or a visually different final beat.\n"
             "VIDEO PROMPT must include clip duration, reference style, no on-screen text or subtitles, and no background music/soundtrack. "
+            "VIDEO PROMPT must be action-first: describe characters' actions, speech/lip sync, voice lock, and useful motion beats; "
+            "do not spend prompt budget on static layout, relative placement, room/background inventory, or title-safe composition zones. "
             "Visual style must be non-photorealistic/non-realistic cartoon (no realism). "
             "Grandmother must be a cartoon grandmother and the cat must be a cartoon cat; include the exact phrase cartoon cat. "
             "Kitchen physics must stay plausible: cookware belongs on a visible burner or hob when cooking; "
@@ -2067,7 +2085,7 @@ async def generate_full_production(
             "For every Russian word copied into video_prompt_en, especially after CHARACTERS SPEAKS, use `ё` when Russian spelling requires `ё`, not `е`. "
             "For scene 1, the spoken phrase in CHARACTERS SPEAKS must happen at the start of the clip and explicitly "
             "name the dish from the scenario; the viewer must hear the dish name in the first scene. "
-            "For scene 1, include title_safe_top_30 and keep the top 30% clear for a title overlay. "
+            "Do not include title_safe_top_30 or top-30-percent overlay instructions in video_prompt_en; that rule is only for start_frame_prompt_ru. "
             f"Scene 1 fruit-only first-moment exception: {FRUIT_ONLY_FIRST_MOMENT_RULE} "
             "Framing: close-up / medium-close; grandmother's full figure and every other character in the scene "
             "must stay fully visible; camera angle or framing should evolve during the clip (no fixed static "
@@ -2191,7 +2209,7 @@ async def generate_full_production(
             ),
             "scene1_title_safe_rule": {
                 "start_frame_ru": TITLE_SAFE_FIRST_SCENE_START_FRAME_RULE,
-                "video_prompt_en": TITLE_SAFE_FIRST_SCENE_VIDEO_RULE,
+                "video_prompt_en": "Do not copy title-safe/top-30-percent overlay rules to video_prompt_en.",
             },
             "fruit_only_first_moment_rule": FRUIT_ONLY_FIRST_MOMENT_RULE,
             "veo3_framing_rule": VEO3_FAST_VIDEO_FRAMING_RULE,
@@ -2229,6 +2247,8 @@ async def generate_full_production(
         f"SCENE 1 fruit-only first-moment exception: {FRUIT_ONLY_FIRST_MOMENT_RULE} "
         "VIDEO PROMPT must include clip duration, reference style, "
         "no on-screen text or subtitles, and no background music/soundtrack. "
+        "VIDEO PROMPT must be action-first: describe characters' actions, speech/lip sync, voice lock, and useful motion beats; "
+        "avoid static layout, relative placement, room/background inventory, and title-safe composition zones. "
         "Visual style must be non-photorealistic/non-realistic cartoon (no realism). "
         "Grandmother must be a cartoon grandmother and the cat must be a cartoon cat; include the exact phrase cartoon cat. "
         "Kitchen physics must stay plausible: cookware belongs on a visible burner or hob when cooking; "
@@ -2238,7 +2258,7 @@ async def generate_full_production(
         "For every Russian word copied into video_prompt_en, especially after CHARACTERS SPEAKS, use `ё` when Russian spelling requires `ё`, not `е`. "
         "For scene 1, the spoken phrase in CHARACTERS SPEAKS must happen at the start of the clip and explicitly "
         "name the dish from the scenario; the viewer must hear the dish name in the first scene. "
-        "For scene 1, include title_safe_top_30 and keep the top 30% clear for a title overlay. "
+        "Do not include title_safe_top_30 or top-30-percent overlay instructions in video_prompt_en; that rule is only for START FRAME. "
         f"Scene 1 fruit-only first-moment exception: {FRUIT_ONLY_FIRST_MOMENT_RULE} "
         "Framing: close-up / medium-close; grandmother's full figure and every other character in the scene "
         "must stay fully visible; camera angle or framing should evolve during the clip (no fixed static "

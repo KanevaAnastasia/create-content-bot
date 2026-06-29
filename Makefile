@@ -7,7 +7,7 @@ test-cov:
 	.venv/bin/python -m pytest
 
 run:
-	.venv/bin/python main.py
+	scripts/botctl.sh start
 
 final-worker:
 	.venv/bin/python admin_panel/manage.py final_build_worker

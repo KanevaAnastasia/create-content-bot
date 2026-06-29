@@ -47,21 +47,29 @@ SUBTITLE_ASS_INVISIBLE_TOKEN = "__ASS_INVISIBLE_DOT__"
 SUBTITLE_MAX_WORDS_PER_SECOND = 2.6
 SUBTITLE_MIN_PAGE_DURATION_SEC = 1.4
 SUBTITLE_STYLE_NAME = "CleanPremium"
-SUBTITLE_PRIMARY_FONT = "Inter SemiBold"
-SUBTITLE_FALLBACK_FONT = "Noto Sans"
-SUBTITLE_VERTICAL_FONT_SIZE = 86
-SUBTITLE_VERTICAL_MARGIN_V = 420
-SUBTITLE_VERTICAL_LINE_CHARS = 20
-SUBTITLE_HORIZONTAL_FONT_SIZE = 67
-SUBTITLE_HORIZONTAL_MARGIN_V = 145
-SUBTITLE_HORIZONTAL_LINE_CHARS = 27
-SUBTITLE_SQUARE_FONT_SIZE = 75
-SUBTITLE_SQUARE_MARGIN_V = 145
-SUBTITLE_SQUARE_LINE_CHARS = 23
-SUBTITLE_OUTLINE = 2
-SUBTITLE_SHADOW = 5
-SUBTITLE_OUTLINE_COLOUR = "&H80000000"
-SUBTITLE_SHADOW_COLOUR = "&H40000000"
+SUBTITLE_PRIMARY_FONT = "DIN Condensed"
+SUBTITLE_SECONDARY_FONT = "Arial Narrow"
+SUBTITLE_FALLBACK_FONT = "TD Afisha"
+SUBTITLE_VERTICAL_FONT_SIZE = 88
+SUBTITLE_VERTICAL_MARGIN_H = 150
+SUBTITLE_VERTICAL_MARGIN_V = 575
+SUBTITLE_VERTICAL_LINE_CHARS = 18
+SUBTITLE_HORIZONTAL_FONT_SIZE = 78
+SUBTITLE_HORIZONTAL_MARGIN_H = 150
+SUBTITLE_HORIZONTAL_MARGIN_V = 190
+SUBTITLE_HORIZONTAL_LINE_CHARS = 22
+SUBTITLE_SQUARE_FONT_SIZE = 82
+SUBTITLE_SQUARE_MARGIN_H = 115
+SUBTITLE_SQUARE_MARGIN_V = 230
+SUBTITLE_SQUARE_LINE_CHARS = 18
+SUBTITLE_OUTLINE = 6
+SUBTITLE_SHADOW = 3
+SUBTITLE_OUTLINE_COLOUR = "&H00000000"
+SUBTITLE_SHADOW_COLOUR = "&H70000000"
+SUBTITLE_BOLD = -1
+SUBTITLE_ALIGNMENT = 1
+SUBTITLE_UPPERCASE = True
+SUBTITLE_LINE_ADVANCE_RATIO = 1.00
 SUBTITLE_FONTS_DIR_ENV_NAME = "SUBTITLE_FONTS_DIR"
 TITLE_OVERLAY_STYLE_PREFIX = "TitleOverlay"
 TITLE_OVERLAY_FONT_BY_LANGUAGE = {
@@ -80,15 +88,18 @@ TITLE_OVERLAY_SQUARE_FONT_SIZE = 92
 TITLE_OVERLAY_MARGIN_RATIO = 0.10
 TITLE_OVERLAY_TOP_MARGIN_RATIO = 0.05
 TITLE_OVERLAY_MAX_HEIGHT_RATIO = 0.08
-TITLE_OVERLAY_OUTLINE = 2
-TITLE_OVERLAY_SHADOW = 5
+TITLE_OVERLAY_OUTLINE = 3
+TITLE_OVERLAY_SHADOW = 7
 TITLE_OVERLAY_SPACING = 0
 TITLE_OVERLAY_ASS_SAFE_WIDTH_RATIO = 1.0
-TITLE_OVERLAY_RU_SCALE_X = 92
+TITLE_OVERLAY_ASS_SAFE_WIDTH_RATIO_BY_LANGUAGE = {
+    "ru": 0.88,
+}
+TITLE_OVERLAY_RU_SCALE_X = 100
 TITLE_SERIES_WIDTH_RATIO = 0.60
 TITLE_SERIES_WIDTH_RATIO_BY_LANGUAGE = {
-    "en": 0.58,
-    "ru": 0.56,
+    "en": 0.60,
+    "ru": 0.60,
 }
 TITLE_SERIES_DAY_WIDTH_RATIO = 0.20
 TITLE_SERIES_DAY_START_RATIO_BY_LANGUAGE = {
@@ -100,10 +111,12 @@ TITLE_SERIES_DAY_BASELINE_Y_SHIFT_BY_LANGUAGE = {
     "ru": 0.27,
 }
 TITLE_SERIES_MAIN_TITLE_OFFSET_FONT_SCALE_BY_LANGUAGE = {
-    "en": 0.74,
-    "ru": 0.90,
+    "en": 0.48,
+    "ru": 0.52,
 }
-TITLE_SERIES_ROW_GAP_RATIO = 0.012
+TITLE_SERIES_DAY_GAP_RATIO = 0.005
+TITLE_SERIES_ROW_GAP_RATIO = -0.010
+TITLE_SERIES_WORD_SEPARATOR = "\u2005"
 TITLE_OVERLAY_OUTLINE_COLOUR = "&H00000000"
 TITLE_OVERLAY_SHADOW_COLOUR = "&H00000000"
 TITLE_SERIES_STYLE_PREFIX = "TitleSeries"
@@ -126,23 +139,30 @@ TITLE_SERIES_DAY_VERTICAL_FONT_SIZE = 150
 TITLE_SERIES_DAY_HORIZONTAL_FONT_SIZE = 76
 TITLE_SERIES_DAY_SQUARE_FONT_SIZE = 88
 TITLE_SERIES_RU_DAY_NUMBER_FONT_SCALE = 1.0
-TITLE_SERIES_FONT_SIZE_SCALE_BY_LANGUAGE = {
-    "ru": 1.32,
+TITLE_SERIES_FONT_SIZE_SCALE_BY_LANGUAGE = {}
+TITLE_SERIES_ASS_WIDTH_CORRECTION_BY_LANGUAGE = {
+    "ru": 0.56,
+}
+TITLE_SERIES_DAY_ASS_WIDTH_CORRECTION_BY_LANGUAGE = {
+    "en": 0.60,
+    "ru": 0.46,
 }
 TITLE_SERIES_ASS_SCALE_X_BY_LANGUAGE = {
-    "ru": 130,
+    "en": 100,
+    "ru": 100,
 }
 TITLE_SERIES_DAY_ASS_SCALE_X_BY_LANGUAGE = {
-    "en": 120,
-    "ru": 180,
+    "en": 100,
+    "ru": 100,
 }
-TITLE_SERIES_OUTLINE = 1
-TITLE_SERIES_SHADOW = 3
+TITLE_SERIES_OUTLINE = 3
+TITLE_SERIES_SHADOW = 6
 TITLE_SERIES_PRIMARY_COLOUR = "&H00FFFFFF"
-TITLE_SERIES_OUTLINE_COLOUR = "&H60000000"
-TITLE_SERIES_SHADOW_COLOUR = "&H50000000"
+TITLE_SERIES_OUTLINE_COLOUR = "&H00000000"
+TITLE_SERIES_SHADOW_COLOUR = "&H00000000"
 COMBINING_ACCENT_MARKS_RE = re.compile(r"[\u0300-\u036f]")
 CYRILLIC_WORD_RE = re.compile(r"[А-Яа-яЁё]+(?:[А-Яа-яЁё]+)?")
+SUBTITLE_PAUSE_MARKER_RE = re.compile(r"\[\s*(?:pause|пауза)\s*\]", re.IGNORECASE)
 DEFAULT_BACKGROUND_MUSIC_FALLBACKS = (
     "/Users/anastasia/Downloads/Cooking-Show-chosic.com_.mp3",
 )
@@ -187,6 +207,9 @@ class TitleSeriesFit:
     width: int
     height: int
     scale_x: int = 100
+    series_actual_width: int = 0
+    series_actual_height: int = 0
+    counter_actual_width: int = 0
 
 
 def _encode_b64(data: bytes) -> str:
@@ -214,11 +237,24 @@ def _subtitle_font_name(fonts_dir: Path | None = None) -> str:
             for path in fonts_path.iterdir()
             if path.suffix.lower() in {".ttf", ".otf", ".ttc"}
         ]
-    if any("inter" in name and "semibold" in name for name in font_files):
+    if any("dincondensed" in name for name in font_files):
         return SUBTITLE_PRIMARY_FONT
-    if any("notosans" in name for name in font_files):
+    if any("arialnarrow" in name for name in font_files):
+        return SUBTITLE_SECONDARY_FONT
+    system_font_candidates = (
+        (Path("/System/Library/Fonts/Supplemental/DIN Condensed Bold.ttf"), SUBTITLE_PRIMARY_FONT),
+        (Path("/System/Library/Fonts/Supplemental/Arial Narrow Bold.ttf"), SUBTITLE_SECONDARY_FONT),
+    )
+    for path, name in system_font_candidates:
+        if path.exists():
+            return name
+    if any("tdafisha" in name for name in font_files):
         return SUBTITLE_FALLBACK_FONT
-    return SUBTITLE_PRIMARY_FONT
+    if any("inter" in name and "semibold" in name for name in font_files):
+        return "Inter SemiBold"
+    if any("notosans" in name for name in font_files):
+        return "Noto Sans"
+    return SUBTITLE_FALLBACK_FONT
 
 
 def post_production_artifacts_dir() -> Path:
@@ -440,7 +476,7 @@ def _subtitle_timestamp(seconds: float) -> str:
 
 
 def _normalize_subtitle_text(text: str) -> str:
-    raw = str(text or "").replace("[пауза]", " ").replace("[ПАУЗА]", " ")
+    raw = SUBTITLE_PAUSE_MARKER_RE.sub(" ", str(text or ""))
     raw = COMBINING_ACCENT_MARKS_RE.sub("", raw)
     raw = " ".join(raw.split())
     raw = CYRILLIC_WORD_RE.sub(lambda match: _normalize_cyrillic_subtitle_word(match.group(0)), raw)
@@ -464,26 +500,30 @@ def _subtitle_layout_for_dimensions(width: int | None, height: int | None) -> Su
         base_width = 1080
         base_height = 1920
         base_font_size = SUBTITLE_VERTICAL_FONT_SIZE
+        base_margin_h = SUBTITLE_VERTICAL_MARGIN_H
         base_margin_v = SUBTITLE_VERTICAL_MARGIN_V
         base_line_chars = SUBTITLE_VERTICAL_LINE_CHARS
     elif ratio > 1.15:
         base_width = 1920
         base_height = 1080
         base_font_size = SUBTITLE_HORIZONTAL_FONT_SIZE
+        base_margin_h = SUBTITLE_HORIZONTAL_MARGIN_H
         base_margin_v = SUBTITLE_HORIZONTAL_MARGIN_V
         base_line_chars = SUBTITLE_HORIZONTAL_LINE_CHARS
     else:
         base_width = 1080
         base_height = 1080
         base_font_size = SUBTITLE_SQUARE_FONT_SIZE
+        base_margin_h = SUBTITLE_SQUARE_MARGIN_H
         base_margin_v = SUBTITLE_SQUARE_MARGIN_V
         base_line_chars = SUBTITLE_SQUARE_LINE_CHARS
     scale = safe_height / float(base_height)
     width_scale = safe_width / float(base_width)
     font_size = max(24, int(round(base_font_size * scale)))
     margin_v = max(36, int(round(base_margin_v * scale)))
-    margin_h = max(48, int(round(80 * width_scale)))
-    line_chars = max(18, int(round(base_line_chars * width_scale)))
+    margin_h = max(48, int(round(base_margin_h * width_scale)))
+    font_scale = max(0.01, scale)
+    line_chars = max(18, int(round(base_line_chars * (width_scale / font_scale))))
     return SubtitleLayout(
         width=safe_width,
         height=safe_height,
@@ -508,8 +548,9 @@ def _balanced_subtitle_lines(words: list[str], *, max_line_chars: int) -> list[s
         first = " ".join(visible_words[:split_at])
         second = " ".join(visible_words[split_at:])
         overflow = max(0, len(first) - max_line_chars) + max(0, len(second) - max_line_chars)
+        longer_top_penalty = max(0, len(first) - len(second))
         balance = abs(len(first) - len(second))
-        score = (overflow, balance, abs(split_at - (len(visible_words) // 2)), [first, second])
+        score = (overflow, longer_top_penalty, balance, [first, second])
         if best is None or score[:3] < best[:3]:
             best = score
     return best[3] if best else [full_line]
@@ -528,7 +569,21 @@ def _format_burned_subtitle_block(words: list[str], *, max_line_chars: int | Non
     visible = _balanced_subtitle_lines(words, max_line_chars=limit)
     if not visible:
         visible = [SUBTITLE_ASS_INVISIBLE_TOKEN]
-    return "\n".join(visible[:SUBTITLE_MAX_LINES])
+    return "\n".join(_subtitle_display_text(line) for line in visible[:SUBTITLE_MAX_LINES])
+
+
+def _subtitle_display_text(text: str) -> str:
+    display = str(text or "")
+    return display.upper() if SUBTITLE_UPPERCASE else display
+
+
+def _subtitle_line_advance(layout: SubtitleLayout) -> int:
+    return max(1, int(round(layout.font_size * SUBTITLE_LINE_ADVANCE_RATIO)))
+
+
+def _subtitle_line_anchor_y(layout: SubtitleLayout, *, line_count: int, index: int) -> int:
+    virtual_margin_v = layout.margin_v + ((line_count - index - 1) * _subtitle_line_advance(layout))
+    return max(0, layout.height - virtual_margin_v)
 
 
 def _ass_timestamp(seconds: float) -> str:
@@ -565,6 +620,11 @@ def _title_overlay_font_path(language: str) -> Path | None:
 def _title_series_style_name(language: str) -> str:
     code = str(language or "").strip().lower()
     return f"{TITLE_SERIES_STYLE_PREFIX}{code.upper() if code else 'RU'}"
+
+
+def _title_overlay_ass_safe_width_ratio(language: str) -> float:
+    code = str(language or "").strip().lower()
+    return float(TITLE_OVERLAY_ASS_SAFE_WIDTH_RATIO_BY_LANGUAGE.get(code) or TITLE_OVERLAY_ASS_SAFE_WIDTH_RATIO)
 
 
 def _title_series_font_name(language: str) -> str:
@@ -605,6 +665,16 @@ def _title_series_font_size_scale(language: str) -> float:
     return float(TITLE_SERIES_FONT_SIZE_SCALE_BY_LANGUAGE.get(code) or 1.0)
 
 
+def _title_series_ass_width_correction(language: str) -> float:
+    code = str(language or "").strip().lower()
+    return float(TITLE_SERIES_ASS_WIDTH_CORRECTION_BY_LANGUAGE.get(code) or 1.0)
+
+
+def _title_series_day_ass_width_correction(language: str) -> float:
+    code = str(language or "").strip().lower()
+    return float(TITLE_SERIES_DAY_ASS_WIDTH_CORRECTION_BY_LANGUAGE.get(code) or 1.0)
+
+
 def _title_series_day_ass_scale_x(language: str) -> int:
     code = str(language or "").strip().lower()
     return int(TITLE_SERIES_DAY_ASS_SCALE_X_BY_LANGUAGE.get(code) or 100)
@@ -618,6 +688,28 @@ def _title_series_day_y_shift_ratio(language: str) -> float:
 def _title_series_main_title_offset_scale(language: str) -> float:
     code = str(language or "").strip().lower()
     return float(TITLE_SERIES_MAIN_TITLE_OFFSET_FONT_SCALE_BY_LANGUAGE.get(code) or 0.74)
+
+
+def _title_series_day_gap(layout: SubtitleLayout) -> int:
+    return max(6, int(round(layout.width * TITLE_SERIES_DAY_GAP_RATIO)))
+
+
+def _title_series_day_x(
+    *,
+    layout: SubtitleLayout,
+    fit: TitleSeriesFit | None,
+    series_left: int,
+    title_margin_h: int,
+    language: str,
+    side_margin_ratio: float = TITLE_OVERLAY_MARGIN_RATIO,
+) -> int:
+    if fit is None:
+        return int(round(layout.width * _title_series_day_start_ratio(language, side_margin_ratio=side_margin_ratio)))
+    series_width = int(fit.series_actual_width or fit.series_width)
+    counter_width = int(fit.counter_actual_width or fit.counter_width)
+    preferred_x = series_left + series_width + _title_series_day_gap(layout)
+    max_x = layout.width - title_margin_h - counter_width
+    return max(series_left, min(preferred_x, max_x))
 
 
 def _coerce_overlay_ratio(value: Any, *, default: float, minimum: float, maximum: float) -> float:
@@ -833,7 +925,7 @@ def _fit_title_overlay_ass_text(
                 - TITLE_OVERLAY_SHADOW
                 - (TITLE_OVERLAY_OUTLINE * 2)
             )
-            * TITLE_OVERLAY_ASS_SAFE_WIDTH_RATIO
+            * _title_overlay_ass_safe_width_ratio(language)
         ),
     )
     _ = (top_margin_ratio, has_series_cue)
@@ -867,13 +959,15 @@ def _fit_title_series_ass_text(
     clean = " ".join(str(series_text or "").split())
     if str(language or "").strip().lower() == "ru":
         clean = clean.lower()
+    measure_text = _title_series_visual_text(clean)
     font_path = _title_series_font_path(language)
     if not clean or font_path is None:
         return None
 
     margin_h = int(layout.width * side_margin_ratio)
     max_row_width = max(1, int(max_width or (layout.width - (margin_h * 2))))
-    gap_width = 0
+    clean_counter = " ".join(str(counter_text or "").split())
+    gap_width = _title_series_day_gap(layout) if clean_counter else 0
     counter_target_width = min(
         max_row_width,
         max(1, int(round(layout.width * TITLE_SERIES_DAY_WIDTH_RATIO))),
@@ -883,24 +977,30 @@ def _fit_title_series_ass_text(
         max(1, int(round(layout.width * _title_series_width_ratio(language)))),
     )
     draw = ImageDraw.Draw(Image.new("RGB", (1, 1)))
-    clean_counter = " ".join(str(counter_text or "").split())
     base_size = _title_series_font_size(layout)
     max_series_size = max(base_size, int(round(layout.height * 0.16)))
     min_series_size = max(24, int(round(base_size * 0.45)))
+    display_series_scale = _title_series_font_size_scale(language)
+    display_series_scale_x = _title_series_ass_scale_x(language)
+    series_width_correction = _title_series_ass_width_correction(language)
     size = min_series_size
     series_width = 0
     series_height = 0
     for candidate_size in range(max_series_size, min_series_size - 1, -2):
-        font = ImageFont.truetype(str(font_path), size=candidate_size)
-        width, height = _measure_title_block(draw, [clean], font, spacing=0)
+        display_size = int(round(candidate_size * display_series_scale))
+        font = ImageFont.truetype(str(font_path), size=display_size)
+        raw_width, height = _measure_title_block(draw, [measure_text], font, spacing=0)
+        width = int(round(raw_width * (display_series_scale_x / 100.0) * series_width_correction))
         if width <= series_target_width:
             size = candidate_size
             series_width = width
             series_height = height
             break
     if series_width <= 0:
-        font = ImageFont.truetype(str(font_path), size=size)
-        series_width, series_height = _measure_title_block(draw, [clean], font, spacing=0)
+        display_size = int(round(size * display_series_scale))
+        font = ImageFont.truetype(str(font_path), size=display_size)
+        raw_width, series_height = _measure_title_block(draw, [measure_text], font, spacing=0)
+        series_width = int(round(raw_width * (display_series_scale_x / 100.0) * series_width_correction))
 
     counter_width = 0
     counter_height = 0
@@ -912,11 +1012,11 @@ def _fit_title_series_ass_text(
         base_counter_size = _title_series_day_font_size(layout, language)
         lang = str(language or "").strip().lower()
         preferred_counter_size = max(
-            int(round(base_counter_size * 0.75)),
+            int(round(base_counter_size * 2.60)),
             int(round(size * (1.70 if lang == "ru" else 1.15))),
         )
         max_counter_size = preferred_counter_size
-        min_counter_size = max(24, int(round(base_counter_size * 0.50)))
+        min_counter_size = max(24, int(round(base_counter_size * 0.35)))
         for candidate_size in range(max_counter_size, min_counter_size - 1, -2):
             candidate_width, candidate_height = _measure_title_series_counter(
                 draw,
@@ -926,13 +1026,13 @@ def _fit_title_series_ass_text(
                 base_size=candidate_size,
                 number_size=candidate_size,
             )
-            candidate_scale_x = min(100, int(round((counter_target_width / max(1, candidate_width)) * 100)))
-            if candidate_scale_x >= 60:
+            candidate_width = int(round(candidate_width * _title_series_day_ass_width_correction(language)))
+            if candidate_width <= counter_target_width:
                 counter_size = candidate_size
                 number_size = candidate_size
                 counter_width = candidate_width
                 counter_height = candidate_height
-                counter_scale_x = candidate_scale_x
+                counter_scale_x = 100
                 break
         if counter_width <= 0:
             counter_size = min_counter_size
@@ -945,8 +1045,9 @@ def _fit_title_series_ass_text(
                 base_size=counter_size,
                 number_size=number_size,
             )
-            counter_scale_x = min(100, int(round((counter_target_width / max(1, counter_width)) * 100)))
-    scaled_counter_width = int(round(counter_width * (counter_scale_x / 100.0)))
+            counter_width = int(round(counter_width * _title_series_day_ass_width_correction(language)))
+            counter_scale_x = 100
+    scaled_counter_width = counter_width
     fitted_width = series_width + gap_width + scaled_counter_width
     while fitted_width > max_row_width and (size > min_series_size or (clean_counter and counter_size > min_counter_size)):
         reduce_counter = bool(
@@ -965,11 +1066,14 @@ def _fit_title_series_ass_text(
                 base_size=counter_size,
                 number_size=number_size,
             )
-            counter_scale_x = min(100, int(round((counter_target_width / max(1, counter_width)) * 100)))
+            counter_width = int(round(counter_width * _title_series_day_ass_width_correction(language)))
+            counter_scale_x = 100
         elif size > min_series_size:
             size = max(min_series_size, size - 1)
-            font = ImageFont.truetype(str(font_path), size=size)
-            series_width, series_height = _measure_title_block(draw, [clean], font, spacing=0)
+            display_size = int(round(size * display_series_scale))
+            font = ImageFont.truetype(str(font_path), size=display_size)
+            raw_width, series_height = _measure_title_block(draw, [measure_text], font, spacing=0)
+            series_width = int(round(raw_width * (display_series_scale_x / 100.0) * series_width_correction))
         elif clean_counter and counter_size > min_counter_size:
             counter_size = max(min_counter_size, counter_size - 1)
             number_size = counter_size
@@ -981,26 +1085,32 @@ def _fit_title_series_ass_text(
                 base_size=counter_size,
                 number_size=number_size,
             )
-            counter_scale_x = min(100, int(round((counter_target_width / max(1, counter_width)) * 100)))
-        scaled_counter_width = int(round(counter_width * (counter_scale_x / 100.0)))
+            counter_width = int(round(counter_width * _title_series_day_ass_width_correction(language)))
+            counter_scale_x = 100
+        scaled_counter_width = counter_width
         fitted_width = series_width + gap_width + scaled_counter_width
-    display_series_size = int(round(size * _title_series_font_size_scale(language)))
+    display_series_size = int(round(size * display_series_scale))
     series_slot_width = series_target_width
     counter_slot_width = counter_target_width if clean_counter else 0
+    counter_ass_scale_x = counter_scale_x if clean_counter else 100
+    counter_actual_width = counter_width
     return TitleSeriesFit(
         clean,
         clean_counter,
         display_series_size,
         counter_size,
         number_size,
-        _title_series_day_ass_scale_x(language) if clean_counter else 100,
+        counter_ass_scale_x,
         series_slot_width,
         series_height,
         counter_slot_width,
         counter_height,
-        series_slot_width + gap_width + counter_slot_width,
+        series_width + gap_width + counter_actual_width,
         max(series_height, counter_height),
-        _title_series_ass_scale_x(language),
+        display_series_scale_x,
+        series_width,
+        series_height,
+        counter_actual_width,
     )
 
 
@@ -1038,6 +1148,14 @@ def _format_title_overlay_ass_text(
 
 def _escape_ass_no_wrap_spaces(text: str) -> str:
     return _escape_ass_text(text).replace(" ", r"\h")
+
+
+def _title_series_visual_text(text: str) -> str:
+    return " ".join(str(text or "").split()).replace(" ", TITLE_SERIES_WORD_SEPARATOR)
+
+
+def _escape_title_series_ass_text(text: str) -> str:
+    return _escape_ass_text(_title_series_visual_text(text))
 
 
 def _format_title_series_counter_ass_text(
@@ -1099,7 +1217,7 @@ def _format_title_series_ass_text(
     if clean_series:
         series_font_size = fit.series_font_size if fit is not None else _title_series_font_size(layout)
         scale_x = fit.scale_x if fit is not None else 100
-        formatted_series = f"{{\\q2\\fscx{scale_x}\\fs{series_font_size}}}" + _escape_ass_no_wrap_spaces(clean_series)
+        formatted_series = f"{{\\q2\\fscx{scale_x}\\fs{series_font_size}}}" + _escape_title_series_ass_text(clean_series)
     if not clean_counter:
         return formatted_series
     counter = _format_title_series_counter_ass_text(
@@ -1144,7 +1262,7 @@ def _format_title_series_title_only_ass_text(
             fit = None
     series_font_size = fit.series_font_size if fit is not None else _title_series_font_size(layout)
     scale_x = fit.scale_x if fit is not None else 100
-    return f"{{\\q2\\fscx{scale_x}\\fs{series_font_size}}}" + _escape_ass_no_wrap_spaces(clean_series)
+    return f"{{\\q2\\fscx{scale_x}\\fs{series_font_size}}}" + _escape_title_series_ass_text(clean_series)
 
 
 def _overlay_title_for_language(overlay_title_by_lang: dict[str, Any] | None, language: str) -> str:
@@ -1257,12 +1375,8 @@ def _write_burned_subtitle_ass(
             max_width=layout.width - (title_margin_h * 2),
         )
         if fit is not None:
-            language_scale = _title_series_main_title_offset_scale(language)
             series_row_offsets.append(
-                max(
-                    int(round(fit.series_height * 0.76)),
-                    int(round(fit.series_font_size * language_scale)),
-                )
+                max(0, int(round(fit.series_actual_height + (layout.height * TITLE_SERIES_ROW_GAP_RATIO))))
             )
         else:
             series_row_offsets.append(_title_series_row_offset(layout, language))
@@ -1341,7 +1455,7 @@ def _write_burned_subtitle_ass(
             (
                 f"Style: {SUBTITLE_STYLE_NAME},{font_name},{layout.font_size},"
                 f"&H00FFFFFF,&H00FFFFFF,{SUBTITLE_OUTLINE_COLOUR},{SUBTITLE_SHADOW_COLOUR},"
-                f"0,0,0,0,100,100,0,0,1,{SUBTITLE_OUTLINE},{SUBTITLE_SHADOW},2,"
+                f"{SUBTITLE_BOLD},0,0,0,100,100,0,0,1,{SUBTITLE_OUTLINE},{SUBTITLE_SHADOW},{SUBTITLE_ALIGNMENT},"
                 f"{layout.margin_l},{layout.margin_r},{layout.margin_v},1"
             ),
             *title_styles,
@@ -1391,8 +1505,13 @@ def _write_burned_subtitle_ass(
                     )
                 )
             if counter_text:
-                day_pos_x = int(
-                    round(layout.width * _title_series_day_start_ratio(language, side_margin_ratio=title_margin_ratio))
+                day_pos_x = _title_series_day_x(
+                    layout=layout,
+                    fit=fit,
+                    series_left=series_margin_l,
+                    title_margin_h=title_margin_h,
+                    language=language,
+                    side_margin_ratio=title_margin_ratio,
                 )
                 day_font_size = fit.counter_font_size if fit is not None else _title_series_day_font_size(layout, language)
                 day_pos_y = max(
@@ -1433,15 +1552,21 @@ def _write_burned_subtitle_ass(
             )
         )
     for cue in cues:
-        text = _escape_ass_text(str(cue.get("text") or " "))
-        lines.append(
-            "Dialogue: 0,{start},{end},{style},,0,0,0,,{text}".format(
-                start=_ass_timestamp(float(cue.get("start_sec") or 0.0)),
-                end=_ass_timestamp(float(cue.get("end_sec") or 0.0)),
-                style=SUBTITLE_STYLE_NAME,
-                text=text,
+        cue_lines = str(cue.get("text") or " ").splitlines() or [" "]
+        for index, line in enumerate(cue_lines):
+            anchor_y = _subtitle_line_anchor_y(layout, line_count=len(cue_lines), index=index)
+            text = f"{{\\an1\\pos({layout.margin_l},{anchor_y})}}" + _escape_ass_text(line)
+            lines.append(
+                "Dialogue: 0,{start},{end},{style},,{margin_l},{margin_r},{margin_v},,{text}".format(
+                    start=_ass_timestamp(float(cue.get("start_sec") or 0.0)),
+                    end=_ass_timestamp(float(cue.get("end_sec") or 0.0)),
+                    style=SUBTITLE_STYLE_NAME,
+                    margin_l=0,
+                    margin_r=0,
+                    margin_v=0,
+                    text=text,
+                )
             )
-        )
     path.write_text("\n".join(lines).rstrip() + "\n", encoding="utf-8")
 
 
@@ -1522,28 +1647,28 @@ def _build_burned_subtitle_cues(
         _balanced_subtitle_lines(page, max_line_chars=layout.line_chars)[:SUBTITLE_MAX_LINES]
         for page in pages
     ]
-    total_steps = sum(len(lines) for lines in page_lines)
-    if total_steps <= 0 or end_sec <= start_sec:
+    if not page_lines or end_sec <= start_sec:
         return [{"start_sec": start_sec, "end_sec": end_sec, "text": " "}]
 
     duration = end_sec - start_sec
-    step_duration = duration / float(total_steps)
     cues: list[dict[str, Any]] = []
-    step_index = 0
-    for lines in page_lines:
-        for size in range(1, len(lines) + 1):
-            cue_start = start_sec + (step_index * step_duration)
-            cue_end = end_sec if step_index == total_steps - 1 else start_sec + ((step_index + 1) * step_duration)
-            visible_lines = lines[:size]
-            fixed_height_lines = visible_lines + [SUBTITLE_ASS_INVISIBLE_TOKEN] * (len(lines) - size)
-            cues.append(
-                {
-                    "start_sec": cue_start,
-                    "end_sec": cue_end,
-                    "text": "\n".join(fixed_height_lines),
-                }
-            )
-            step_index += 1
+    weights = [max(1, sum(len(line.split()) for line in lines)) for lines in page_lines]
+    total_weight = sum(weights)
+    cursor = start_sec
+    for index, lines in enumerate(page_lines):
+        cue_start = cursor
+        if index == len(page_lines) - 1:
+            cue_end = end_sec
+        else:
+            cue_end = start_sec + (duration * (sum(weights[: index + 1]) / float(total_weight)))
+        cues.append(
+            {
+                "start_sec": cue_start,
+                "end_sec": cue_end,
+                "text": "\n".join(_subtitle_display_text(line) for line in lines),
+            }
+        )
+        cursor = cue_end
     return cues
 
 
@@ -1600,6 +1725,24 @@ def _scene_subtitle_entries(
             "end_sec": start_offset + fallback_duration,
         }
     )
+
+
+def _selected_video_source_duration(selected: dict[str, Any] | None) -> float | None:
+    if not isinstance(selected, dict):
+        return None
+    raw_b64 = str(selected.get("video_b64") or "").strip()
+    if not raw_b64:
+        return None
+    try:
+        video_bytes = base64.b64decode(raw_b64)
+    except Exception:
+        return None
+    if not video_bytes:
+        return None
+    with tempfile.TemporaryDirectory(prefix="post_production_subtitle_probe_") as tmp:
+        path = Path(tmp) / "scene_video.mp4"
+        path.write_bytes(video_bytes)
+        return _media_duration(path)
 
 
 def _run_ffmpeg(cmd: list[str], *, timeout: int = FFMPEG_SHORT_TIMEOUT_SEC, stage: str = "unknown") -> None:
@@ -2366,10 +2509,12 @@ def _subtitle_entries_for_language_from_plan(scenes: list[dict[str, Any]], langu
             if isinstance(selected, dict)
             else None
         ) or DEFAULT_SCENE_VIDEO_SPEED_COEF
-        try:
-            source_duration = float(scene.get("duration_sec") or 0.0)
-        except (TypeError, ValueError):
-            source_duration = 0.0
+        source_duration = _selected_video_source_duration(selected)
+        if source_duration is None:
+            try:
+                source_duration = float(scene.get("duration_sec") or 0.0)
+            except (TypeError, ValueError):
+                source_duration = 0.0
         planned_duration = source_duration / float(speed_coef or DEFAULT_SCENE_VIDEO_SPEED_COEF) if source_duration > 0 else 0.0
         scene_entries = _scene_subtitle_entries(
             scene,

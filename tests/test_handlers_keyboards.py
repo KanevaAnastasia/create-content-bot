@@ -1,6 +1,7 @@
 import asyncio
+import io
 
-from telegram.error import NetworkError
+from telegram.error import NetworkError, TimedOut
 
 from app.handlers import handlers_keyboards
 
@@ -108,3 +109,60 @@ def test_safe_send_message_retries_and_preserves_reply_markup(monkeypatch):
         (123, "hello", markup),
         (123, "hello", markup),
     ]
+
+
+def test_safe_reply_photo_retries_with_fresh_stream(monkeypatch):
+    class Message:
+        def __init__(self):
+            self.calls = []
+
+        async def reply_photo(self, *, photo, caption):
+            data = photo.read()
+            self.calls.append((data, getattr(photo, "name", ""), caption, photo))
+            if len(self.calls) == 1:
+                raise NetworkError("temporary send failure")
+            return True
+
+    async def fake_sleep(_seconds):
+        return None
+
+    monkeypatch.setattr(handlers_keyboards, "_SEND_RETRY_ATTEMPTS", 2)
+    monkeypatch.setattr(handlers_keyboards, "_SEND_RETRY_BASE_DELAY_SEC", 0)
+    monkeypatch.setattr(handlers_keyboards.asyncio, "sleep", fake_sleep)
+
+    photo = io.BytesIO(b"fake png")
+    photo.name = "preview.png"
+    message = Message()
+
+    asyncio.run(handlers_keyboards.safe_reply_photo(message, photo=photo, caption="preview"))
+
+    assert [call[:3] for call in message.calls] == [
+        (b"fake png", "preview.png", "preview"),
+        (b"fake png", "preview.png", "preview"),
+    ]
+    assert message.calls[0][3] is not message.calls[1][3]
+
+
+def test_safe_send_retries_timed_out_with_exponential_backoff(monkeypatch):
+    calls = {"count": 0}
+    sleeps = []
+
+    async def flaky_send():
+        calls["count"] += 1
+        if calls["count"] < 4:
+            raise TimedOut("temporary")
+        return "sent"
+
+    async def fake_sleep(seconds):
+        sleeps.append(seconds)
+
+    monkeypatch.setattr(handlers_keyboards, "_SEND_RETRY_ATTEMPTS", 4)
+    monkeypatch.setattr(handlers_keyboards, "_SEND_RETRY_BASE_DELAY_SEC", 2)
+    monkeypatch.setattr(handlers_keyboards, "_SEND_RETRY_MAX_DELAY_SEC", 30)
+    monkeypatch.setattr(handlers_keyboards.asyncio, "sleep", fake_sleep)
+
+    result = asyncio.run(handlers_keyboards.safe_send(flaky_send, label="test"))
+
+    assert result == "sent"
+    assert calls["count"] == 4
+    assert sleeps == [2, 4, 8]

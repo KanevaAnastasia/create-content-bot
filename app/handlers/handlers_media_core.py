@@ -1022,7 +1022,8 @@ async def _generate_video_bytes_with_high_load_retry(
     syntax_enabled = _syntax_fallback_env_enabled() and not disable_syntax_fallback
     if not force_vertex_fallback and syntax_enabled and not skip_initial_syntax:
         if update.message is not None:
-            await update.message.reply_text(
+            await safe_reply_text(
+                update.message,
                 "Сначала пробую генерацию через Syntax. В Vertex автоматически не ухожу."
             )
         syntax_bytes = await _attempt_syntax_video_fallback_bytes(
@@ -1035,7 +1036,7 @@ async def _generate_video_bytes_with_high_load_retry(
         if syntax_bytes is not None:
             _LAST_VIDEO_PROVIDER.set("telegram")
             if update.message is not None:
-                await update.message.reply_text("Видео получено через Syntax.")
+                await safe_reply_text(update.message, "Видео получено через Syntax.")
             return syntax_bytes
         raise VideoProviderChoiceRequired(
             prompt=prompt,
@@ -1073,7 +1074,8 @@ async def _generate_video_bytes_with_high_load_retry(
             syntax_error_message="Syntax сейчас недоступен, поэтому нужен явный выбор: повторить Syntax позже или запустить Vertex вручную.",
         )
     if force_vertex_fallback and model.strip().lower().startswith("veo") and update.message is not None:
-        await update.message.reply_text(
+        await safe_reply_text(
+            update.message,
             f"Запускаю резервный Vertex/Veo путь на {_vertex_fallback_duration_sec(model, duration_sec)} сек."
         )
 

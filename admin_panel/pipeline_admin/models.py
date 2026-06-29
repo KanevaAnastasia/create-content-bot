@@ -76,6 +76,10 @@ class PipelineStepCheckpoint(models.Model):
 class GenerationRun(models.Model):
     id = models.UUIDField(primary_key=True, default=uuid.uuid4)
     status = models.CharField(max_length=64)
+    is_active = models.BooleanField(default=True)
+    current_scene_index = models.IntegerField(blank=True, null=True)
+    current_media_substep = models.CharField(max_length=128, blank=True, null=True)
+    current_media_language_index = models.IntegerField(blank=True, null=True)
     human_title = models.TextField(blank=True, null=True)
     language = models.CharField(max_length=8)
     series = models.ForeignKey("ContentSeries", db_column="series_id", blank=True, null=True, on_delete=models.DO_NOTHING)
@@ -225,6 +229,13 @@ class Scene(models.Model):
     scene_order = models.IntegerField()
     text = models.TextField()
     duration_sec = models.FloatField()
+    start_frame_prompt = models.TextField(blank=True, null=True)
+    start_frame_prompt_effective = models.TextField(blank=True, null=True)
+    end_frame_prompt = models.TextField(blank=True, null=True)
+    video_prompt_by_lang = LenientJSONField(default=dict)
+    speech_by_lang = LenientJSONField(default=dict)
+    syntax_prompt_by_lang = LenientJSONField(default=dict)
+    prompt_meta_json = LenientJSONField(default=dict)
 
     class Meta:
         managed = False
@@ -263,7 +274,7 @@ class GenerationArtifact(models.Model):
 class SceneImageCandidate(models.Model):
     id = models.UUIDField(primary_key=True, default=uuid.uuid4)
     candidate_id = models.CharField(max_length=64, unique=True)
-    scene_id = models.UUIDField()
+    scene = models.ForeignKey(Scene, db_column="scene_id", on_delete=models.DO_NOTHING)
     kind = models.CharField(max_length=16)
     image_blob = models.BinaryField()
     liked = models.BooleanField(default=False)
@@ -283,7 +294,7 @@ class SceneImageCandidate(models.Model):
 class SceneVideoCandidate(models.Model):
     id = models.UUIDField(primary_key=True, default=uuid.uuid4)
     candidate_id = models.CharField(max_length=64, unique=True)
-    scene_id = models.UUIDField()
+    scene = models.ForeignKey(Scene, db_column="scene_id", on_delete=models.DO_NOTHING)
     language = models.CharField(max_length=8)
     video_blob = models.BinaryField()
     liked = models.BooleanField(default=False)

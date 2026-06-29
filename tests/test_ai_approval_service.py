@@ -13,6 +13,7 @@ from app.ai_approval_service import (
     AI_APPROVAL_STATUS_REGENERATE_IMAGE,
     AI_APPROVAL_STATUS_REGENERATE_VIDEO,
     AIApprovalConfig,
+    call_ai_approval_model,
     check_scene_prompts,
     check_start_frame,
     check_video,
@@ -171,6 +172,77 @@ def test_ai_approval_default_model_ignores_main_gemini_model(monkeypatch) -> Non
     cfg = get_ai_approval_config()
 
     assert cfg.model == "gemini-2.5-flash-lite"
+
+
+def test_call_ai_approval_model_reuses_vertex_helpers_and_dedupes_media(monkeypatch) -> None:
+    import sys
+    import types
+
+    calls = {"init": 0, "model": 0}
+    captured: dict[str, object] = {}
+
+    class _Resp:
+        text = '{"status":"APPROVE","overall_score":0.91}'
+
+    class _Part:
+        @staticmethod
+        def from_text(text):
+            return {"text": text}
+
+        @staticmethod
+        def from_data(*, data, mime_type):
+            return {"data": data, "mime_type": mime_type}
+
+    class _Model:
+        def __init__(self, model_name):
+            calls["model"] += 1
+            self.model_name = model_name
+
+        def generate_content(self, parts, **_kwargs):
+            captured["parts"] = parts
+            captured["model"] = self.model_name
+            return _Resp()
+
+    monkeypatch.setenv("GOOGLE_CLOUD_PROJECT", "proj")
+    monkeypatch.setenv("GOOGLE_CLOUD_LOCATION", "us-central1")
+    monkeypatch.setattr("app.ai_approval_service.safe_llm_call", lambda fn: fn())
+
+    fake_vertexai = types.ModuleType("vertexai")
+    fake_vertexai.init = lambda **_kwargs: calls.__setitem__("init", calls["init"] + 1)
+    fake_vm = types.ModuleType("vertexai.generative_models")
+    fake_vm.GenerativeModel = _Model
+    fake_vm.Part = _Part
+    fake_vm.SafetySetting = type("SafetySetting", (), {"__init__": lambda self, category, threshold: None})
+    fake_vm.HarmCategory = type(
+        "HarmCategory",
+        (),
+        {
+            "HARM_CATEGORY_HATE_SPEECH": "hs",
+            "HARM_CATEGORY_DANGEROUS_CONTENT": "dc",
+            "HARM_CATEGORY_SEXUALLY_EXPLICIT": "sx",
+            "HARM_CATEGORY_HARASSMENT": "hr",
+        },
+    )
+    fake_vm.HarmBlockThreshold = type("HarmBlockThreshold", (), {"BLOCK_ONLY_HIGH": "high"})
+    monkeypatch.setitem(sys.modules, "vertexai", fake_vertexai)
+    monkeypatch.setitem(sys.modules, "vertexai.generative_models", fake_vm)
+
+    png = b"\x89PNG\r\n\x1a\nimage"
+    mp4 = b"\x00\x00\x00\x18ftypmp42fake-video"
+    result = call_ai_approval_model(
+        "approve this",
+        images=[png, png, mp4],
+        config=AIApprovalConfig(enabled=True, model="approval-model"),
+    )
+
+    assert result["status"] == "APPROVE"
+    assert captured["model"] == "approval-model"
+    assert captured["parts"] == [
+        {"text": "approve this"},
+        {"data": png, "mime_type": "image/png"},
+        {"data": mp4, "mime_type": "video/mp4"},
+    ]
+    assert calls == {"init": 1, "model": 1}
 
 
 def test_check_scene_prompts_requires_character_and_prop_consistency(monkeypatch) -> None:

@@ -38,6 +38,7 @@ ENV/
 
 # Runtime logs
 logs/
+runtime/
 *.log
 *.log.*
 

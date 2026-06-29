@@ -49,6 +49,58 @@ def test_gemini_generate_sync_uses_vertexai_sdk(monkeypatch):
     assert calls["model"] >= 1
 
 
+def test_gemini_generate_sync_reuses_vertex_model_and_safety_settings(monkeypatch):
+    calls = {"init": 0, "model": 0, "safety": 0, "generate": 0}
+
+    class _Resp:
+        text = "ok"
+
+    class _Model:
+        def __init__(self, model_name):
+            calls["model"] += 1
+            self.model_name = model_name
+
+        def generate_content(self, _prompt, **_kwargs):
+            calls["generate"] += 1
+            return _Resp()
+
+    class _SafetySetting:
+        def __init__(self, category, threshold):
+            calls["safety"] += 1
+
+    monkeypatch.setenv("GOOGLE_CLOUD_PROJECT", "proj")
+    monkeypatch.setenv("GOOGLE_CLOUD_LOCATION", "us-central1")
+    monkeypatch.setenv("GEMINI_MODEL", "gemini-2.5-flash")
+    monkeypatch.setenv("GEMINI_MODEL_FALLBACKS", "")
+    monkeypatch.setattr(llm_utils, "submit_llm", lambda fn: fn())
+
+    import sys
+    import types
+
+    fake_vertexai = types.ModuleType("vertexai")
+    fake_vertexai.init = lambda **_kwargs: calls.__setitem__("init", calls["init"] + 1)
+    fake_vm = types.ModuleType("vertexai.generative_models")
+    fake_vm.GenerativeModel = _Model
+    fake_vm.SafetySetting = _SafetySetting
+    fake_vm.HarmCategory = type(
+        "HarmCategory",
+        (),
+        {
+            "HARM_CATEGORY_HATE_SPEECH": "hs",
+            "HARM_CATEGORY_DANGEROUS_CONTENT": "dc",
+            "HARM_CATEGORY_SEXUALLY_EXPLICIT": "sx",
+            "HARM_CATEGORY_HARASSMENT": "hr",
+        },
+    )
+    fake_vm.HarmBlockThreshold = type("HarmBlockThreshold", (), {"BLOCK_ONLY_HIGH": "high"})
+    monkeypatch.setitem(sys.modules, "vertexai", fake_vertexai)
+    monkeypatch.setitem(sys.modules, "vertexai.generative_models", fake_vm)
+
+    assert llm_utils.gemini_generate_sync("hello") == "ok"
+    assert llm_utils.gemini_generate_sync("hello again") == "ok"
+    assert calls == {"init": 1, "model": 1, "safety": 4, "generate": 2}
+
+
 def test_gemini_generate_sync_sends_image_parts(monkeypatch):
     captured = {}
 
@@ -103,6 +155,69 @@ def test_gemini_generate_sync_sends_image_parts(monkeypatch):
     result = llm_utils.gemini_generate_sync(
         "extract recipe",
         images=[b"\x89PNG\r\n\x1a\nimage"],
+    )
+
+    assert result == "recipe"
+    assert captured["request"] == [
+        {"text": "extract recipe"},
+        {"data": b"\x89PNG\r\n\x1a\nimage", "mime_type": "image/png"},
+    ]
+
+
+def test_gemini_generate_sync_dedupes_image_parts(monkeypatch):
+    captured = {}
+
+    class _Resp:
+        text = "recipe"
+
+    class _Part:
+        @staticmethod
+        def from_text(text):
+            return {"text": text}
+
+        @staticmethod
+        def from_data(*, data, mime_type):
+            return {"data": data, "mime_type": mime_type}
+
+    class _Model:
+        def __init__(self, _model_name):
+            pass
+
+        def generate_content(self, request, **_kwargs):
+            captured["request"] = request
+            return _Resp()
+
+    monkeypatch.setenv("GOOGLE_CLOUD_PROJECT", "proj")
+    monkeypatch.setenv("GEMINI_MODEL", "gemini-2.5-flash")
+    monkeypatch.setenv("GEMINI_MODEL_FALLBACKS", "")
+    monkeypatch.setattr(llm_utils, "submit_llm", lambda fn: fn())
+
+    import sys
+    import types
+
+    fake_vertexai = types.ModuleType("vertexai")
+    fake_vertexai.init = lambda **_kwargs: None
+    fake_vm = types.ModuleType("vertexai.generative_models")
+    fake_vm.GenerativeModel = _Model
+    fake_vm.Part = _Part
+    fake_vm.SafetySetting = type("SafetySetting", (), {"__init__": lambda self, category, threshold: None})
+    fake_vm.HarmCategory = type(
+        "HarmCategory",
+        (),
+        {
+            "HARM_CATEGORY_HATE_SPEECH": "hs",
+            "HARM_CATEGORY_DANGEROUS_CONTENT": "dc",
+            "HARM_CATEGORY_SEXUALLY_EXPLICIT": "sx",
+            "HARM_CATEGORY_HARASSMENT": "hr",
+        },
+    )
+    fake_vm.HarmBlockThreshold = type("HarmBlockThreshold", (), {"BLOCK_ONLY_HIGH": "high"})
+    monkeypatch.setitem(sys.modules, "vertexai", fake_vertexai)
+    monkeypatch.setitem(sys.modules, "vertexai.generative_models", fake_vm)
+
+    result = llm_utils.gemini_generate_sync(
+        "extract recipe",
+        images=[b"\x89PNG\r\n\x1a\nimage", b"\x89PNG\r\n\x1a\nimage"],
     )
 
     assert result == "recipe"
@@ -342,6 +457,46 @@ def test_gemini_generate_sync_includes_empty_response_reason_when_all_models_fai
         llm_utils.gemini_generate_sync("hello")
     assert "finish_reason=MAX_TOKENS" in str(exc.value)
     assert "finish_message=No text was produced." in str(exc.value)
+
+
+def test_safe_llm_call_retries_vertex_ssl_transport_error(monkeypatch):
+    calls = {"count": 0}
+
+    def fake_submit(fn):
+        calls["count"] += 1
+        if calls["count"] == 1:
+            raise RuntimeError(
+                "HTTPSConnectionPool(host='aiplatform.googleapis.com', port=443): "
+                "Max retries exceeded with url: /v1/projects/proj/locations/global/"
+                "publishers/google/models/gemini-2.5-flash:generateContent "
+                "(Caused by SSLError(SSLEOFError(8, '[SSL: UNEXPECTED_EOF_WHILE_READING] EOF occurred')))"
+            )
+        return fn()
+
+    sleeps = []
+    monkeypatch.setattr(llm_utils, "submit_llm", fake_submit)
+    monkeypatch.setattr(llm_utils.time, "sleep", lambda seconds: sleeps.append(seconds))
+    monkeypatch.setattr(llm_utils.random, "uniform", lambda _a, _b: 1.0)
+    monkeypatch.setattr(llm_utils, "LLM_TRANSPORT_MAX_ATTEMPTS", 2)
+
+    assert llm_utils.safe_llm_call(lambda: "ok") == "ok"
+    assert calls["count"] == 2
+    assert sleeps == [llm_utils.LLM_TRANSPORT_BACKOFF_INITIAL_SEC]
+
+
+def test_safe_llm_call_does_not_retry_quota_as_transport(monkeypatch):
+    calls = {"count": 0}
+
+    def fake_submit(_fn):
+        calls["count"] += 1
+        raise RuntimeError("RESOURCE_EXHAUSTED quotaValue 0")
+
+    monkeypatch.setattr(llm_utils, "submit_llm", fake_submit)
+    monkeypatch.setattr(llm_utils.time, "sleep", lambda _seconds: None)
+
+    with pytest.raises(llm_utils.GeminiQuotaError):
+        llm_utils.safe_llm_call(lambda: "ok")
+    assert calls["count"] == 1
 
 
 def test_extract_json_array_and_object():

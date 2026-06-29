@@ -14,7 +14,7 @@ from telegram import ReplyKeyboardMarkup, Update
 from ..assets import ASSETS
 from ..character_catalog import character_identity_lines, format_character_short_descriptions, sanitize_character_names_and_keys
 from ..constants import STATE_READY_FOR_PRODUCTION
-from .handlers_keyboards import safe_reply_text
+from .handlers_keyboards import safe_reply_photo, safe_reply_text
 from .handlers_media_core import (
     _decode_b64,
     _image_end_scene_prompt,
@@ -58,9 +58,18 @@ SCENE_USER_REFERENCE_IMAGES_KEY = "scene_user_reference_images_by_kind"
 
 def _reply_markup_with_rows(*rows: list[str]) -> ReplyKeyboardMarkup:
     """Строит компактную reply-клавиатуру для выбора действий в медиа-шаге."""
-    keyboard = [[item] for row in rows for item in row if item]
+    mode_buttons = {
+        SCENE_MEDIA_AUTO_APPROVE_BUTTON,
+        SCENE_MEDIA_AI_APPROVE_BUTTON,
+        SCENE_MEDIA_STOP_BUTTON,
+    }
+    keyboard = [[item] for row in rows for item in row if item and item not in mode_buttons]
     keyboard.append([NAV_BUTTON_PREVIOUS_STEP])
     keyboard.append([NAV_BUTTON_START_OVER])
+    for row in rows:
+        for item in row:
+            if item in mode_buttons:
+                keyboard.append([item])
     return ReplyKeyboardMarkup(
         keyboard=keyboard,
         resize_keyboard=True,
@@ -515,7 +524,7 @@ async def _send_next_scene_media_step(update: Update, session: dict) -> None:
         if start_img:
             b = io.BytesIO(start_img)
             b.name = f"scene_{idx + 1}_start_approval.png"
-            await update.message.reply_photo(photo=b, caption=f"Сцена {idx + 1}: стартовый кадр.")
+            await safe_reply_photo(update.message, photo=b, caption=f"Сцена {idx + 1}: стартовый кадр.")
         end_prompt = _raw_end_frame_text(scene)
         await _reply_text_with_optional_markup(
             update,
@@ -532,11 +541,11 @@ async def _send_next_scene_media_step(update: Update, session: dict) -> None:
         if start_img:
             b = io.BytesIO(start_img)
             b.name = f"scene_{idx + 1}_start_reference.png"
-            await update.message.reply_photo(photo=b, caption=f"Сцена {idx + 1}: стартовый кадр-референс.")
+            await safe_reply_photo(update.message, photo=b, caption=f"Сцена {idx + 1}: стартовый кадр-референс.")
         if end_img:
             eb = io.BytesIO(end_img)
             eb.name = f"scene_{idx + 1}_end_approval.png"
-            await update.message.reply_photo(photo=eb, caption=f"Сцена {idx + 1}: конечный кадр.")
+            await safe_reply_photo(update.message, photo=eb, caption=f"Сцена {idx + 1}: конечный кадр.")
         await _reply_text_with_optional_markup(
             update,
             "Проверьте конечный кадр.\n"
@@ -547,11 +556,11 @@ async def _send_next_scene_media_step(update: Update, session: dict) -> None:
     if start_img:
         b = io.BytesIO(start_img)
         b.name = f"scene_{idx + 1}_start_preview.png"
-        await update.message.reply_photo(photo=b, caption=f"Сцена {idx + 1}: стартовый кадр (для video-этапа).")
+        await safe_reply_photo(update.message, photo=b, caption=f"Сцена {idx + 1}: стартовый кадр (для video-этапа).")
     if end_img:
         eb = io.BytesIO(end_img)
         eb.name = f"scene_{idx + 1}_end_preview.png"
-        await update.message.reply_photo(photo=eb, caption=f"Сцена {idx + 1}: конечный кадр (для video-этапа).")
+        await safe_reply_photo(update.message, photo=eb, caption=f"Сцена {idx + 1}: конечный кадр (для video-этапа).")
     langs = ["ru"]
     prompt_map = scene.get("video_prompt_by_lang")
     if isinstance(prompt_map, dict) and prompt_map:

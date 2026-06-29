@@ -474,6 +474,29 @@ def test_generate_viral_concept_brief_fallback_on_bad_json(monkeypatch):
     assert out["first_scene_dialogue_hint"] is False
 
 
+def test_generate_viral_concept_brief_uses_cache(monkeypatch):
+    calls = {"n": 0}
+
+    async def fake_text(prompt: str) -> str:
+        calls["n"] += 1
+        assert "brand-x" in prompt
+        return '{"main_hook":"крючок","dish_audience_type":"neutral","first_scene_dialogue_hint":false}'
+
+    monkeypatch.setattr(pipeline_llm_steps, "gemini_text", fake_text)
+
+    kwargs = {
+        "full_recipe_text": "Ингредиенты: cache-only-test-berries, мука. Собрать торт.",
+        "sponsored_content": True,
+        "brand_context": "brand-x",
+        "analytics_feedback": {"retention": 7},
+    }
+    first = asyncio.run(generate_viral_concept_brief("cache-only-test-пирог", **kwargs))
+    second = asyncio.run(generate_viral_concept_brief("cache-only-test-пирог", **kwargs))
+
+    assert calls["n"] == 1
+    assert second == first
+
+
 def test_postprocess_scenes_output_adds_child_character_only_to_first_and_last_scene():
     scenes = [
         {"scene": 1, "characters": ["grandma", "cat"], "text": "корн-доги хрустят"},
@@ -1028,7 +1051,8 @@ def test_generate_full_production_with_approved_frames(monkeypatch):
     assert scene["start_frame_prompt"]
     assert "Фоновая драма этой сцены: белая кошка машет рыжий кот за окном" in scene["start_frame_prompt"]
     assert "voice_lock_full:" in scene["video_prompt"]
-    assert "title_safe_top_30:" in scene["video_prompt"]
+    assert "title_safe_top_30:" not in scene["video_prompt"]
+    assert "верхние примерно 30%" in scene["start_frame_prompt"]
     assert "background romantic drama beat: белая кошка машет рыжий кот за окном" in scene["video_prompt"]
     assert "Zaya" not in scene["video_prompt"]
     assert "Timosha" not in scene["video_prompt"]
@@ -1111,7 +1135,7 @@ def test_generate_full_production_without_approved_frames_fills_placeholders(mon
     assert scene["start_frame_prompt"] == "пусто"
     assert scene["end_frame_prompt"] == "пусто"
     assert scene["video_prompt"]
-    assert "title_safe_top_30:" in scene["video_prompt"]
+    assert "title_safe_top_30:" not in scene["video_prompt"]
     assert "cartoon cat" not in scene["video_prompt"]
     assert "speech_by_lang" in scene
     assert "speech_plan_by_lang" in scene

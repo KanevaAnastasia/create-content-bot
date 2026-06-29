@@ -11,6 +11,119 @@ import sqlalchemy as sa
 from .db import SessionLocal
 from .models import GenerationRun, Scene, VideoResult
 
+MEDIA_CURSOR_STATE = "waiting_scene_media"
+SCENE_PROMPT_TEXT_KEYS = (
+    "start_frame_prompt",
+    "start_frame_prompt_effective",
+    "end_frame_prompt",
+)
+SCENE_PROMPT_JSON_KEYS = (
+    "video_prompt_by_lang",
+    "speech_by_lang",
+    "syntax_prompt_by_lang",
+    "prompt_meta_json",
+)
+
+
+def _safe_int_or_none(value: Any) -> int | None:
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _scene_prompt_payload(scene: dict[str, Any]) -> dict[str, Any]:
+    payload: dict[str, Any] = {}
+    for key in SCENE_PROMPT_TEXT_KEYS:
+        value = scene.get(key)
+        if isinstance(value, str) and value.strip():
+            payload[key] = value
+    for key in SCENE_PROMPT_JSON_KEYS:
+        value = scene.get(key)
+        if isinstance(value, dict):
+            payload[key] = value
+    return payload
+
+
+def _apply_prompt_payload_to_scene_row(row: Scene, scene: dict[str, Any]) -> bool:
+    changed = False
+    for key in SCENE_PROMPT_TEXT_KEYS:
+        value = scene.get(key)
+        text_value = str(value) if isinstance(value, str) and value else None
+        if getattr(row, key) != text_value:
+            setattr(row, key, text_value)
+            changed = True
+    for key in SCENE_PROMPT_JSON_KEYS:
+        value = scene.get(key)
+        json_value = value if isinstance(value, dict) else {}
+        if getattr(row, key) != json_value:
+            setattr(row, key, json_value)
+            changed = True
+    return changed
+
+
+def merge_scene_prompt_payload(scene: dict[str, Any], payload: dict[str, Any]) -> None:
+    for key in SCENE_PROMPT_TEXT_KEYS:
+        value = payload.get(key)
+        if isinstance(value, str) and value.strip():
+            scene[key] = value
+    for key in SCENE_PROMPT_JSON_KEYS:
+        value = payload.get(key)
+        if isinstance(value, dict) and value:
+            scene[key] = value
+
+
+def _run_cursor_from_session(session: dict[str, Any]) -> dict[str, Any]:
+    scene_index = _safe_int_or_none(session.get("image_scene_index"))
+    language_index = _safe_int_or_none(session.get("scene_media_language_index"))
+    substep = str(session.get("scene_media_substep") or "").strip() or None
+    state = str(session.get("state") or "").strip()
+    is_active = bool(state and state != "ready_for_production")
+    if state == MEDIA_CURSOR_STATE:
+        is_active = True
+    return {
+        "is_active": is_active,
+        "current_scene_index": scene_index if scene_index is not None and scene_index >= 0 else None,
+        "current_media_substep": substep,
+        "current_media_language_index": language_index if language_index is not None and language_index >= 0 else None,
+    }
+
+
+def _apply_run_cursor(run: GenerationRun, session: dict[str, Any]) -> bool:
+    cursor = _run_cursor_from_session(session)
+    changed = False
+    for key, value in cursor.items():
+        if getattr(run, key) != value:
+            setattr(run, key, value)
+            changed = True
+    return changed
+
+
+def _update_scene_prompt_rows(db, run_id: uuid.UUID, scenes_plan: list[dict[str, Any]]) -> dict[int, str]:
+    rows = db.execute(select(Scene).where(Scene.run_id == run_id).order_by(Scene.scene_order.asc())).scalars().all()
+    rows_by_order = {int(row.scene_order): row for row in rows}
+    scene_map: dict[int, str] = {}
+    for idx, scene in enumerate(scenes_plan):
+        if not isinstance(scene, dict):
+            continue
+        order = idx + 1
+        row = rows_by_order.get(order)
+        if row is None:
+            row = Scene(
+                run_id=run_id,
+                scene_order=order,
+                text=str(scene.get("text") or ""),
+                duration_sec=float(scene.get("duration_sec") or 0.0),
+            )
+            db.add(row)
+            db.flush()
+            rows_by_order[order] = row
+        row.text = str(scene.get("text") or row.text or "")
+        row.duration_sec = float(scene.get("duration_sec") or row.duration_sec or 0.0)
+        _apply_prompt_payload_to_scene_row(row, scene)
+        scene_map[idx] = str(row.id)
+    return scene_map
+
 
 def _language_for_session(session: dict[str, Any]) -> str:
     langs = session.get("target_languages")
@@ -106,9 +219,10 @@ def ensure_generation_run_for_session(session: dict[str, Any]) -> tuple[str | No
     """Create a lightweight run+scene snapshot in DB on first persistence."""
     existing = str(session.get("generation_run_id") or "").strip()
     raw_map = session.get("scene_db_ids_by_index")
-    if existing and isinstance(raw_map, dict):
+    if existing:
         title = _human_title_for_session(session, _scenes_plan_for_session(session))
         series_fields = _series_fields_for_session(session)
+        scenes_plan = _scenes_plan_for_session(session)
         try:
             with SessionLocal() as db:
                 run = db.get(GenerationRun, uuid.UUID(existing))
@@ -117,6 +231,13 @@ def ensure_generation_run_for_session(session: dict[str, Any]) -> tuple[str | No
                     changed = True
                 else:
                     changed = False
+                if run is not None:
+                    changed = _apply_run_cursor(run, session) or changed
+                    scene_map = _update_scene_prompt_rows(db, run.id, scenes_plan) if scenes_plan else {}
+                    if scene_map:
+                        session["scene_db_ids_by_index"] = scene_map
+                        raw_map = scene_map
+                        changed = True
                 if run is not None and series_fields["series_id"] and not run.series_id:
                     run.series_id = series_fields["series_id"]
                     run.series_video_index = series_fields["series_video_index"]
@@ -126,7 +247,9 @@ def ensure_generation_run_for_session(session: dict[str, Any]) -> tuple[str | No
                     db.commit()
         except Exception:
             pass
-        return existing, {int(k): str(v) for k, v in raw_map.items()}
+        if isinstance(raw_map, dict):
+            return existing, {int(k): str(v) for k, v in raw_map.items()}
+        return existing, {}
 
     scenes_plan = _scenes_plan_for_session(session)
     if not scenes_plan:
@@ -142,6 +265,7 @@ def ensure_generation_run_for_session(session: dict[str, Any]) -> tuple[str | No
         series_fields = _series_fields_for_session(session)
         run = GenerationRun(
             status="media_in_progress",
+            **_run_cursor_from_session(session),
             human_title=_human_title_for_session(session, scenes_plan),
             language=_language_for_session(session),
             **series_fields,
@@ -161,11 +285,48 @@ def ensure_generation_run_for_session(session: dict[str, Any]) -> tuple[str | No
             )
             db.add(row)
             db.flush()
+            _apply_prompt_payload_to_scene_row(row, scene)
             scene_map[idx] = str(row.id)
         db.commit()
         session["generation_run_id"] = str(run.id)
         session["scene_db_ids_by_index"] = scene_map
         return str(run.id), scene_map
+
+
+def update_generation_run_cursor_from_session(session: dict[str, Any]) -> None:
+    run_id_str = str(session.get("generation_run_id") or "").strip()
+    if not run_id_str:
+        return
+    try:
+        run_id = uuid.UUID(run_id_str)
+    except (TypeError, ValueError, AttributeError):
+        return
+    with SessionLocal() as db:
+        run = db.get(GenerationRun, run_id)
+        if run is None:
+            return
+        _apply_run_cursor(run, session)
+        db.commit()
+
+
+def mark_generation_run_ready(session: dict[str, Any], *, status: str = "ready_for_production") -> None:
+    run_id_str = str(session.get("generation_run_id") or "").strip()
+    if not run_id_str:
+        return
+    try:
+        run_id = uuid.UUID(run_id_str)
+    except (TypeError, ValueError, AttributeError):
+        return
+    with SessionLocal() as db:
+        run = db.get(GenerationRun, run_id)
+        if run is None:
+            return
+        run.status = status
+        run.is_active = False
+        run.current_scene_index = None
+        run.current_media_substep = None
+        run.current_media_language_index = None
+        db.commit()
 
 
 def save_video_result_estimate(

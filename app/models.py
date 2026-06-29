@@ -304,6 +304,10 @@ class GenerationRun(Base):
 
     id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
     status: Mapped[str] = mapped_column(String(64), nullable=False)
+    is_active: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
+    current_scene_index: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    current_media_substep: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    current_media_language_index: Mapped[int | None] = mapped_column(Integer, nullable=True)
     human_title: Mapped[str | None] = mapped_column(Text, nullable=True)
     language: Mapped[str] = mapped_column(
         Enum("ru", "en", name="generation_language"),
@@ -341,6 +345,13 @@ class Scene(Base):
     scene_order: Mapped[int] = mapped_column(Integer, nullable=False)
     text: Mapped[str] = mapped_column(Text, nullable=False)
     duration_sec: Mapped[float] = mapped_column(Float, nullable=False)
+    start_frame_prompt: Mapped[str | None] = mapped_column(Text, nullable=True)
+    start_frame_prompt_effective: Mapped[str | None] = mapped_column(Text, nullable=True)
+    end_frame_prompt: Mapped[str | None] = mapped_column(Text, nullable=True)
+    video_prompt_by_lang: Mapped[dict] = mapped_column(JSON, nullable=False, default=dict)
+    speech_by_lang: Mapped[dict] = mapped_column(JSON, nullable=False, default=dict)
+    syntax_prompt_by_lang: Mapped[dict] = mapped_column(JSON, nullable=False, default=dict)
+    prompt_meta_json: Mapped[dict] = mapped_column(JSON, nullable=False, default=dict)
 
     run: Mapped["GenerationRun"] = relationship(back_populates="scenes")
     video_results: Mapped[list["VideoResult"]] = relationship(back_populates="scene", cascade="all, delete-orphan")
