@@ -1,3 +1,4 @@
+import asyncio
 import base64
 import threading
 
@@ -19,6 +20,44 @@ def _skip_syntax_frame_resize(monkeypatch):
 
 def _syntax_test_frame_bytes() -> bytes:
     return _ONE_PIXEL_PNG
+
+
+def test_process_bot_message_times_out_hung_video_download(monkeypatch):
+    import app.syntax_telethon_fallback as telethon_fallback
+
+    class _ReplyTo:
+        reply_to_msg_id = 100
+
+    class _Message:
+        id = 200
+        out = False
+        reply_to = _ReplyTo()
+        video = object()
+
+    class _Client:
+        async def download_media(self, _message, file):
+            assert file is bytes
+            await asyncio.sleep(60)
+            return b"late"
+
+    monkeypatch.setattr(telethon_fallback, "_syntax_media_download_timeout_sec", lambda: 0.01)
+
+    result = asyncio.run(
+        telethon_fallback._process_bot_message(
+            _Client(),
+            message=_Message(),
+            sent_ids={100},
+            expected_lang_token=None,
+        )
+    )
+
+    assert result == (
+        None,
+        None,
+        "Syntax sent a video attachment but download failed or timed out.",
+        True,
+        False,
+    )
 
 
 def test_prepare_long_prompt_uses_local_fallback_when_gemini_fails(monkeypatch):

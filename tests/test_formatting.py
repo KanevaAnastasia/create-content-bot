@@ -1,3 +1,4 @@
+from app import formatting
 from app.formatting import (
     build_human_readable_plan,
     cost_label,
@@ -23,6 +24,7 @@ def test_format_json_for_telegram_escapes_html():
 
 def test_cost_label_known_and_unknown():
     assert cost_label("kling") == "~0.005-0.01$"
+    assert cost_label("heygen") == "~0.03-0.06$"
     assert cost_label("unknown") == "~n/a"
 
 
@@ -82,6 +84,31 @@ def test_build_human_readable_plan_shows_dialogue_for_multi_speaker_scene():
     assert "Агрегированная фраза сцены:" in out
 
 
+def test_build_human_readable_plan_skips_invalid_dialogue_items_and_supports_heygen():
+    scenes = [
+        {
+            "scene": 1,
+            "model": "heygen",
+            "dialogue_mode": "multi",
+            "dialogue": "bad",
+            "text": ["привет", None, 5],
+        },
+        {
+            "scene": 2,
+            "model": "heygen",
+            "dialogue_mode": "multi",
+            "dialogue": ["bad", {"speaker": "", "text": "нет спикера"}],
+            "text": "реплика",
+        },
+    ]
+
+    out = build_human_readable_plan(scenes)
+
+    assert "сложный lip sync крупным планом" in out
+    assert "привет  5" in out
+    assert "Диалог сцены" not in out
+
+
 def test_format_viral_concept_brief_shows_audience_type_and_family_plan():
     out = format_viral_concept_brief(
         {
@@ -94,6 +121,25 @@ def test_format_viral_concept_brief_shows_audience_type_and_family_plan():
     )
     assert "Тип блюда для каста: male" in out
     assert "План семейных персонажей: Добавить дедушку в первую и последнюю сцену." in out
+
+
+def test_format_viral_concept_brief_empty_and_hooks():
+    assert format_viral_concept_brief({}) == "VIRAL CONCEPT BRIEF:\n—"
+    out = format_viral_concept_brief(
+        {
+            "hooks": {
+                "emotional": ["тепло"],
+                "intrigue": "bad",
+                "useful": ["", "экономит время"],
+                "cliffhanger": ["финал"],
+            },
+            "final_phrases": ["готово"],
+            "analysis": {"hook_strength": 8},
+        }
+    )
+    assert "эмоциональные: тепло" in out
+    assert "полезные: экономит время" in out
+    assert "cliffhanger: финал" in out
 
 
 def test_format_romantic_drama_status_explicitly_reports_decision():
@@ -122,6 +168,16 @@ def test_format_romantic_drama_status_explicitly_reports_decision():
     assert "Тимош" not in on
     assert "Зая" not in on
     assert "Маркиз" not in on
+
+
+def test_format_romantic_drama_status_infers_characters_from_scenes():
+    out = format_romantic_drama_status(
+        {"enabled": False, "characters": []},
+        [{"characters": ["grandma", "cat", "zaya", "markiz"]}],
+    )
+
+    assert "Драма с персонажем: белая кошка - да" in out
+    assert "Дополнительный соседский кот: черно-белый кот - да" in out
 
 
 def test_format_viral_application_summary_explains_usage():
@@ -160,6 +216,12 @@ def test_format_viral_application_summary_explains_usage():
     assert "Первая фраза в сценарии" in out
     assert "1:hook" in out
     assert "3:payoff" in out
+
+
+def test_format_viral_application_summary_without_scenes():
+    out = format_viral_application_summary({}, [])
+
+    assert "сценарий ещё не собран" in out
 
 
 def test_concepts_recipe_and_production_formatting():
@@ -216,6 +278,43 @@ def test_format_production_bundle_contains_scene_and_prompts():
     assert "VIDEO PROMPT" in out
 
 
+def test_format_production_bundle_uses_language_maps_and_skips_bad_items():
+    scenes = [
+        "bad",
+        {
+            "scene": 2,
+            "action": "Подача сырников",
+            "characters": ["grandma", "cat"],
+            "speech_by_lang": {"ru": "смотрИте сырники", "en": "look"},
+            "video_prompt_by_lang": {"ru": "ru prompt", "en": "en prompt"},
+        },
+    ]
+
+    out = format_production_bundle_for_approval(scenes)  # type: ignore[list-item]
+
+    assert "[ru] ru prompt" in out
+    assert "[en] look" in out
+    assert "СЦЕНА 2" in out
+
+
+def test_format_production_cards_shows_speaker_profiles():
+    out = format_production_cards(
+        [
+            {
+                "scene": 1,
+                "tts": {
+                    "speaker_profiles": {
+                        "grandma": {"voice_profile": "warm"},
+                        "cat": "bad",
+                    }
+                },
+            }
+        ]
+    )
+
+    assert "grandma: profile=warm" in out
+
+
 def test_recipe_scene_draft_formatting():
     out = format_recipe_step_scene_draft(
         ["тщательно смешать творог с яйцом и сахаром", "сформировать сырники"]
@@ -226,3 +325,13 @@ def test_recipe_scene_draft_formatting():
     assert "Длительность:" in out
     assert "Фраза (черновик):" not in out
     assert "Что происходит:" not in out
+
+
+def test_private_recipe_draft_helpers_cover_edge_cases():
+    assert formatting._draft_duration_by_step_text(" ".join(str(i) for i in range(12))) == 8
+    assert formatting._draft_phrase_by_step_text("") == "я сейчас готовим вкусное блюдо [пауза] делАю шаг аккурАтно"
+    assert formatting._draft_dish_name([]) == "вкусное блюдо"
+    assert formatting._draft_dish_name(["Суп с курицей"]) == "суп"
+    assert formatting._draft_dish_name(["Котлеты домашние"]) == "котлеты"
+    assert formatting._draft_dish_name(["Паста с сыром"]) == "паста"
+    assert formatting._draft_dish_name(["123 !!!"]) == "это блюдо"

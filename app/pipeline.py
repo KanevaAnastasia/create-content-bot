@@ -85,12 +85,18 @@ VEO3_COOKING_CAST_RULE = (
 )
 VEO3_CARTOON_CHARACTER_RULE = (
     "veo3_cartoon_character_rule: visual style is explicitly cartoon; grandmother is a cartoon grandmother, "
-    "the cat is a cartoon cat; include the exact phrase \"cartoon cat\"; never render grandma or cat as realistic, "
-    "photorealistic, or live-action characters."
+    "every human or animal character is cartoon, the cat is a cartoon cat; include the exact phrase \"cartoon cat\"; "
+    "never render grandma, cats, children, or any other characters as realistic, photorealistic, or live-action."
+)
+VIDEO_PROMPT_VISUAL_SOURCE_GENERATION_RULE = (
+    "Describe only motion, actions, speech, lipsync, reactions, camera movement. "
+    "Do not describe location, background, static dish layout, serving, ingredients, new food, "
+    "garnish, topping, side dish, tableware, decor, scenery."
 )
 VIDEO_KITCHEN_PHYSICS_RULE = (
     "kitchen_physics_rule: cookware and electric appliances must be physically plausible and functional. "
-    "If a pot, saucepan, cauldron, or pan is cooking, it must sit on a visible stovetop burner/hob, not float on a bare table. "
+    "If a pot, saucepan, cauldron, frying pan, or skillet is boiling, simmering, frying, sauteing, steaming, or visibly cooking, "
+    "it must sit on a visible stovetop burner/hob, not float on a bare table, cutting board, floor, or disconnected surface. "
     "If a blender is used, show a complete blender with jar locked onto its motor base; before blending the jar is closed with a lid, "
     "then grandma turns it on from the base/control area. If a hand mixer or stand mixer is used, show beaters attached, a bowl underneath, "
     "and the mixer connected to/held by its motor body; no impossible floating appliance parts."
@@ -122,7 +128,9 @@ _IMAGE_NON_CLOSEUP_TOKENS = (
 _FRAME_PLAN_EXCEPTION_LOCATIONS = {"fridge", "холодильник", "kamin", "камин", "fireplace"}
 START_FRAME_RECIPE_VISUAL_DETAIL_RULE = (
     "Для стартового кадра обязательно подробно опиши: способ нарезки продуктов, если есть нарезка "
-    "(кубик, соломка, ломтики, кольца, тёрка и т.д.); описание блюда или текущего состояния блюда; "
+    "(кубик, соломка, ломтики, кольца, полукольца, крупные куски, пластинки, тёрка и т.д.); "
+    "если в кадре видны нарезанные ингредиенты, укажи способ нарезки для каждого такого ингредиента; "
+    "описание блюда или текущего состояния блюда; "
     "подробное описание видимых ингредиентов, их форму, цвет, фактуру и состояние обработки."
 )
 TITLE_SAFE_FIRST_SCENE_START_FRAME_RULE = (
@@ -478,6 +486,77 @@ def _enforce_voice_lock_if_needed(video_prompt: str, scene: dict[str, Any]) -> s
     if GRANDMA_VOICE_LOCK_FULL.lower() in vp.lower():
         return vp
     return f"{vp} voice_lock_full: {GRANDMA_VOICE_LOCK_FULL}".strip()
+
+
+_DIALOGUE_SPEAKER_PROMPT_LABELS = {
+    "grandma": "GRANDMA",
+    "grandfather": "GRANDFATHER",
+    "grandson": "GRANDSON",
+    "granddaughter": "GRANDDAUGHTER",
+    "daughter": "DAUGHTER",
+    "banana": "BANANA",
+    "strawberry": "STRAWBERRY",
+}
+
+
+def _voice_lock_for_speaker_language(speaker: str, language: str) -> str:
+    lock = _speaker_voice_params(speaker).get("voice_lock_full") or GRANDMA_VOICE_LOCK_FULL
+    lang = str(language or "ru").strip().lower()
+    if lang and lang != "ru":
+        label = language_name(lang)
+        lock = lock.replace("Russian language", f"{label} language").replace(
+            "neutral Russian accent",
+            f"neutral {label} accent",
+        )
+    return lock
+
+
+def _strip_dialogue_video_prompt_metadata(prompt: str) -> str:
+    out = str(prompt or "").strip()
+    patterns = (
+        r"\n?speaker_dialogue_order:\s*[^\n]*",
+        r"\n?character_dialogue_script:\s*(?:\n[A-Z_]+:\s*[^\n]*)+",
+        r"\n?voice_lock_full_[a-z_]+:\s*[^\n]*",
+    )
+    for pattern in patterns:
+        out = re.sub(pattern, "", out, flags=re.IGNORECASE).strip()
+    return out
+
+
+def _append_dialogue_video_prompt_metadata(
+    prompt: str,
+    dialogue: list[dict[str, str]] | None,
+    language: str,
+) -> str:
+    if not isinstance(dialogue, list) or len(dialogue) < 2:
+        return _strip_dialogue_video_prompt_metadata(prompt)
+    order: list[str] = []
+    script: list[str] = []
+    locks: list[str] = []
+    seen_locks: set[str] = set()
+    for item in dialogue:
+        if not isinstance(item, dict):
+            continue
+        speaker = _normalize_dialogue_speaker(item.get("speaker"))
+        text = str(item.get("text") or "").strip()
+        if not speaker or not text:
+            continue
+        label = _DIALOGUE_SPEAKER_PROMPT_LABELS.get(speaker, speaker.upper())
+        order.append(label)
+        script.append(f"{label}: {text}")
+        if speaker not in seen_locks:
+            locks.append(f"voice_lock_full_{speaker}: {_voice_lock_for_speaker_language(speaker, language)}")
+            seen_locks.add(speaker)
+    if len(script) < 2:
+        return _strip_dialogue_video_prompt_metadata(prompt)
+    base = _strip_dialogue_video_prompt_metadata(prompt)
+    metadata = [
+        f"speaker_dialogue_order: {', '.join(order)}",
+        "character_dialogue_script:",
+        *script,
+        *locks,
+    ]
+    return (base + "\n" + "\n".join(metadata)).strip()
 
 
 def _finalize_scene_video_prompt(video_prompt_en: str, scene: dict[str, Any]) -> str:
@@ -1513,6 +1592,7 @@ async def generate_scenes_plan(
     brand_context: str | None = None,
     analytics_feedback: dict[str, Any] | None = None,
     romantic_drama_subplot: dict[str, Any] | None = None,
+    generation_comment: str | None = None,
 ) -> dict[str, Any]:
     """
     Один запрос к Gemini: сценарий из 3–6 сцен по **полному тексту рецепта**, с репликами Veo3 в ``text``.
@@ -1525,8 +1605,9 @@ async def generate_scenes_plan(
         raise ValueError("Пустой full_recipe_text для сценария.")
     concept = concept.strip()
     fb = (user_feedback or "").strip()
+    comment = (generation_comment or "").strip()
     has_previous_scenes = bool(previous_scenes)
-    cached = None if has_previous_scenes else get_scenes_plan(concept, body, fb or None)
+    cached = None if has_previous_scenes or comment else get_scenes_plan(concept, body, fb or None)
     if cached is not None:
         if isinstance(cached, dict):
             cached_plan = cached.get("json_plan")
@@ -1567,6 +1648,7 @@ async def generate_scenes_plan(
         brand_context=brand_context,
         analytics_feedback=analytics_feedback,
         romantic_drama_subplot=romantic_drama_subplot,
+        generation_comment=comment,
     )
     prompt = llm_steps.build_scenes_plan_prompt(payload)
 
@@ -1622,7 +1704,7 @@ async def generate_scenes_plan(
         "retention_review": retention_review,
         "regeneration_events": [],
     }
-    if not has_previous_scenes:
+    if not has_previous_scenes and not comment:
         set_scenes_plan(concept, body, fb or None, out_raw)
     return out_raw
 
@@ -1888,6 +1970,11 @@ async def generate_frame_prompts_for_approval(
                 "or dish appearance requested by the user, while still obeying every scene requirement"
             ),
             "ingredients_rule": "если в кадре есть еда, явно перечисляй конкретные ингредиенты",
+            "ingredient_source_of_truth_rule": (
+                "видимые ингредиенты, гарниры, топпинги, соусы и гарнирные элементы должны быть подтверждены "
+                "recipe/full_recipe_text, сценой, пользовательским фидбеком или референсом; не добавляй продукты "
+                "для красоты или по догадке"
+            ),
             "labels_rule": "если есть надписи в кадре, указывай: все надписи на русском",
             "title_safe_scene1_rule": TITLE_SAFE_FIRST_SCENE_START_FRAME_RULE,
             "fruit_only_first_moment_rule": FRUIT_ONLY_FIRST_MOMENT_RULE,
@@ -1921,6 +2008,8 @@ async def generate_frame_prompts_for_approval(
         f"SCENE 1 title-safe mandatory rule: {TITLE_SAFE_FIRST_SCENE_START_FRAME_RULE}\n"
         f"SCENE 1 fruit-only first-moment exception: {FRUIT_ONLY_FIRST_MOMENT_RULE}\n"
         "If food is present, explicitly list concrete ingredients.\n"
+        "Do not add visible ingredients, garnishes, toppings, sides, or sauces that are not supported by the recipe text, "
+        "the scene, user feedback, or reference images.\n"
         "If any labels/signs/text appear in frame, explicitly state: all labels are in Russian.\n"
         "Use reference style; do not invent an explicit art style.\n"
         "If user reference images are attached, inspect them and fold their relevant visual details into "
@@ -1959,6 +2048,7 @@ async def generate_full_production(
     viral_concept_brief: dict[str, Any] | None = None,
     sponsored_content: bool = False,
     brand_context: str | None = None,
+    generation_comment: str | None = None,
 ) -> dict[str, Any]:
     """
     Сборка промптов для медиа по сценам.
@@ -1977,6 +2067,7 @@ async def generate_full_production(
         if str(value).isdigit() and 1 <= int(value) <= len(scenes)
     }
     viral_brief = viral_concept_brief if isinstance(viral_concept_brief, dict) else {}
+    comment = (generation_comment or "").strip()
     target_languages = target_languages_from_env()
     if approved_frame_prompts is not None:
         if len(approved_frame_prompts) != len(scenes):
@@ -2012,6 +2103,8 @@ async def generate_full_production(
                 "video_prompt_en": (
                     "include exact clip duration, reference style, no on-screen text or subtitles; "
                     "no background music or soundtrack; "
+                    "action-only: do not describe location, background, static dish layout, serving composition, "
+                    "or ingredient inventory because those come from the start/end frame; "
                     "strictly non-photorealistic/non-realistic cartoon visuals; "
                     "grandmother must be a cartoon grandmother and the cat must be a cartoon cat; "
                     "include the exact phrase cartoon cat; "
@@ -2020,6 +2113,12 @@ async def generate_full_production(
                     "close-up with full grandma + all characters visible, lip sync, camera angle evolves "
                     "(not a single fixed static angle for the whole clip)"
                 ),
+                "visual_source_action_only_rule": VIDEO_PROMPT_VISUAL_SOURCE_GENERATION_RULE,
+                "do_not_copy_internal_rules_to_video_prompt": (
+                    "Use visual_source_action_only_rule while writing video_prompt_en, but do not copy this sentence, "
+                    "the label visual_source_lock, or any meta-instruction about describing only motion into video_prompt_en."
+                ),
+                "generation_comment": comment,
                 "if_speech_add_lipsync": True,
                 "characters_speaks_rule": _LLM_VIDEO_CHARACTERS_SPEAKS_RULE,
                 "scene1_spoken_dish_name_rule": (
@@ -2030,8 +2129,13 @@ async def generate_full_production(
                 "fruit_only_first_moment_rule": FRUIT_ONLY_FIRST_MOMENT_RULE,
                 "veo3_framing_rule": VEO3_FAST_VIDEO_FRAMING_RULE,
                 "continuity_rule": (
-                    "video_prompt_en must preserve continuity_anchors and continuity_state: same cookware, "
-                    "plate, cutting board, stovetop/working surface, utensils, ingredient state and food texture"
+                    "video_prompt_en must use start/end frames as the visual source of truth. It may mention only "
+                    "objects already visible in the frames when describing an action with them; do not restate "
+                    "static cookware, location, dish, or ingredient inventory."
+                ),
+                "ingredient_source_of_truth_rule": (
+                    "video_prompt_en must not introduce new visible ingredients, garnishes, toppings, sides, sauces, "
+                    "or dish decorations; all visuals come from start/end frames"
                 ),
                 "romantic_drama_rule": (
                     "If scene.romantic_drama_beat is non-empty, video_prompt_en must explicitly include that background "
@@ -2075,13 +2179,19 @@ async def generate_full_production(
             "payoff, transformation, or a visually different final beat.\n"
             "VIDEO PROMPT must include clip duration, reference style, no on-screen text or subtitles, and no background music/soundtrack. "
             "VIDEO PROMPT must be action-first: describe characters' actions, speech/lip sync, voice lock, and useful motion beats; "
-            "do not spend prompt budget on static layout, relative placement, room/background inventory, or title-safe composition zones. "
+            f"{VIDEO_PROMPT_VISUAL_SOURCE_GENERATION_RULE} "
+            "Do not copy this rule text, the phrase visual_source_lock, or other meta-instructions into video_prompt_en. "
+            "Do not describe relative placement, room/background inventory, or title-safe composition zones. "
+            "Use the start/end frames as the visual source of truth; mention a visual object only when a character acts on it, "
+            "and never introduce new food, garnish, tableware, or scenery in video_prompt_en. "
             "Visual style must be non-photorealistic/non-realistic cartoon (no realism). "
             "Grandmother must be a cartoon grandmother and the cat must be a cartoon cat; include the exact phrase cartoon cat. "
             "Kitchen physics must stay plausible: cookware belongs on a visible burner or hob when cooking; "
             "blenders must have jar, base, and lid; mixers need beaters, bowl, and motor body. "
             "Do not invent extra characters, duplicate animals, extra hands, or unrelated side actions. "
             "If scene has speech, require accurate lip sync with the Russian line. "
+            "Speech must be spoken verbatim with no extra filler words and no omitted words; declarative cooking lines "
+            "must end with calm completed intonation, not question-like rising intonation. "
             "For every Russian word copied into video_prompt_en, especially after CHARACTERS SPEAKS, use `ё` when Russian spelling requires `ё`, not `е`. "
             "For scene 1, the spoken phrase in CHARACTERS SPEAKS must happen at the start of the clip and explicitly "
             "name the dish from the scenario; the viewer must hear the dish name in the first scene. "
@@ -2107,6 +2217,7 @@ async def generate_full_production(
             "final scene must deliver the visual payoff. If sponsored_content is true, integrate the brand naturally "
             "inside the cooking story, not as an ad break.\n"
             "If a scene contains romantic_drama_beat, video_prompt_en must show that beat as visible background action for that exact scene.\n"
+            + (f"MANDATORY GENERATION COMMENT FROM QUEUE/USER:\n{comment}\n" if comment else "")
             + feedback_block
             + "\n"
             + json.dumps(payload, ensure_ascii=False, indent=2)
@@ -2158,10 +2269,14 @@ async def generate_full_production(
             scene_out["speech_cues_by_lang"] = speech_cues_by_lang
             scene_out["speech_budget_by_lang"] = _speech_budget_by_lang(speech_by_lang, scene_out.get("duration_sec"))
             scene_out["video_prompt_by_lang"] = {
-                lang: append_prompt_timing_hints(
-                    _replace_characters_speaks(base_prompt, speech),
-                    speech_plan_by_lang.get(lang),
-                    duration_sec=float(scene_out.get("duration_sec") or 0.0),
+                lang: _append_dialogue_video_prompt_metadata(
+                    append_prompt_timing_hints(
+                        _replace_characters_speaks(base_prompt, speech),
+                        speech_plan_by_lang.get(lang),
+                        duration_sec=float(scene_out.get("duration_sec") or 0.0),
+                    ),
+                    dialogue_by_lang.get(lang) if isinstance(dialogue_by_lang, dict) else None,
+                    lang,
                 )
                 for lang, speech in speech_by_lang.items()
             }
@@ -2192,6 +2307,8 @@ async def generate_full_production(
             "video_prompt_en": (
                 "include exact clip duration, reference style, no on-screen text or subtitles; "
                 "no background music or soundtrack; "
+                "action-only: do not describe location, background, static dish layout, serving composition, "
+                "or ingredient inventory because those come from the start/end frame; "
                 "strictly non-photorealistic/non-realistic cartoon visuals; "
                 "grandmother must be a cartoon grandmother and the cat must be a cartoon cat; "
                 "include the exact phrase cartoon cat; "
@@ -2201,6 +2318,12 @@ async def generate_full_production(
                 "spoken delivery should feel natural but efficient, and the final phrase should finish slightly before the clip ends "
                 "(not a single fixed static angle for the whole clip)"
             ),
+            "visual_source_action_only_rule": VIDEO_PROMPT_VISUAL_SOURCE_GENERATION_RULE,
+            "do_not_copy_internal_rules_to_video_prompt": (
+                "Use visual_source_action_only_rule while writing video_prompt_en, but do not copy this sentence, "
+                "the label visual_source_lock, or any meta-instruction about describing only motion into video_prompt_en."
+            ),
+            "generation_comment": comment,
             "if_speech_add_lipsync": True,
             "characters_speaks_rule": _LLM_VIDEO_CHARACTERS_SPEAKS_RULE,
             "scene1_spoken_dish_name_rule": (
@@ -2214,10 +2337,13 @@ async def generate_full_production(
             "fruit_only_first_moment_rule": FRUIT_ONLY_FIRST_MOMENT_RULE,
             "veo3_framing_rule": VEO3_FAST_VIDEO_FRAMING_RULE,
                 "continuity_rule": (
-                    "start_frame_ru and video_prompt_en must preserve continuity_anchors and continuity_state: "
-                    "same cookware, plate, cutting board, stovetop/working surface, utensils, ingredient state "
-                    "and food texture"
-            ),
+                    "start_frame_ru preserves continuity_anchors and continuity_state in visual detail; video_prompt_en "
+                    "uses the frames as visual source of truth and only describes motion/action/speech with already-visible objects"
+                ),
+                "ingredient_source_of_truth_rule": (
+                    "start_frame_ru must not add unsupported visible ingredients; video_prompt_en must not introduce "
+                    "new visible ingredients, garnishes, toppings, sides, sauces, or dish decorations"
+                ),
             "romantic_drama_rule": (
                 "If scene.romantic_drama_beat is non-empty, both start_frame_ru and video_prompt_en must explicitly "
                 "include that background drama beat as visible action, using concrete staging and behavior rather than "
@@ -2248,13 +2374,19 @@ async def generate_full_production(
         "VIDEO PROMPT must include clip duration, reference style, "
         "no on-screen text or subtitles, and no background music/soundtrack. "
         "VIDEO PROMPT must be action-first: describe characters' actions, speech/lip sync, voice lock, and useful motion beats; "
-        "avoid static layout, relative placement, room/background inventory, and title-safe composition zones. "
+        f"{VIDEO_PROMPT_VISUAL_SOURCE_GENERATION_RULE} "
+        "Do not copy this rule text, the phrase visual_source_lock, or other meta-instructions into video_prompt_en. "
+        "Do not describe relative placement, room/background inventory, or title-safe composition zones. "
+        "Use the start/end frames as the visual source of truth; mention a visual object only when a character acts on it, "
+        "and never introduce new food, garnish, tableware, or scenery in video_prompt_en. "
         "Visual style must be non-photorealistic/non-realistic cartoon (no realism). "
         "Grandmother must be a cartoon grandmother and the cat must be a cartoon cat; include the exact phrase cartoon cat. "
         "Kitchen physics must stay plausible: cookware belongs on a visible burner or hob when cooking; "
         "blenders must have jar, base, and lid; mixers need beaters, bowl, and motor body. "
         "Do not invent extra characters, duplicate animals, extra hands, or unrelated side actions. "
         "If scene has speech, require accurate lip sync with the Russian line. "
+        "Speech must be spoken verbatim with no extra filler words and no omitted words; declarative cooking lines "
+        "must end with calm completed intonation, not question-like rising intonation. "
         "For every Russian word copied into video_prompt_en, especially after CHARACTERS SPEAKS, use `ё` when Russian spelling requires `ё`, not `е`. "
         "For scene 1, the spoken phrase in CHARACTERS SPEAKS must happen at the start of the clip and explicitly "
         "name the dish from the scenario; the viewer must hear the dish name in the first scene. "
@@ -2283,6 +2415,7 @@ async def generate_full_production(
         "final scene must deliver the visual payoff. If sponsored_content is true, integrate the brand naturally "
         "inside the cooking story, not as an ad break.\n"
         "If a scene contains romantic_drama_beat, both start_frame_prompt_ru and video_prompt_en must show that beat as visible background action for that exact scene.\n"
+        + (f"MANDATORY GENERATION COMMENT FROM QUEUE/USER:\n{comment}\n" if comment else "")
         + json.dumps(payload, ensure_ascii=False, indent=2)
     )
     raw = await asyncio.to_thread(gemini_generate_sync, prompt)
@@ -2339,10 +2472,14 @@ async def generate_full_production(
         scene_out["speech_cues_by_lang"] = speech_cues_by_lang
         scene_out["speech_budget_by_lang"] = _speech_budget_by_lang(speech_by_lang, scene_out.get("duration_sec"))
         scene_out["video_prompt_by_lang"] = {
-            lang: append_prompt_timing_hints(
-                _replace_characters_speaks(base_prompt, speech),
-                speech_plan_by_lang.get(lang),
-                duration_sec=float(scene_out.get("duration_sec") or 0.0),
+            lang: _append_dialogue_video_prompt_metadata(
+                append_prompt_timing_hints(
+                    _replace_characters_speaks(base_prompt, speech),
+                    speech_plan_by_lang.get(lang),
+                    duration_sec=float(scene_out.get("duration_sec") or 0.0),
+                ),
+                dialogue_by_lang.get(lang) if isinstance(dialogue_by_lang, dict) else None,
+                lang,
             )
             for lang, speech in speech_by_lang.items()
         }

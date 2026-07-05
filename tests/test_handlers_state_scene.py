@@ -21,6 +21,7 @@ from app.handlers.handlers_state_scene import (
     _scene_numbers_from_end_frame_feedback,
     _update_end_frame_scene_requests,
     _generate_project_image,
+    _handle_draft_buttons,
     keyboard_for_session_state,
     on_photo,
     on_text,
@@ -32,6 +33,7 @@ from app.handlers.handlers_state_start import (
     SERIES_PENDING_NEXT_SESSION_KEY,
     STATE_WAITING_SERIES_CHOICE,
     STATE_WAITING_SERIES_CREATE,
+    STATE_WAITING_SERIES_TRANSLATION_APPROVAL,
     generate,
     _parse_series_create_text,
 )
@@ -132,6 +134,243 @@ def test_restored_concept_state_uses_numbered_concept_keyboard():
     )
 
     assert [[button.text for button in row] for row in markup.keyboard][:2] == [["1", "2"], ["3"]]
+
+
+def test_drafts_button_lists_without_name_error(monkeypatch):
+    monkeypatch.setenv("SCHEDULED_GENERATION_ADMIN_CHAT_ID", "123")
+    replies: list[str] = []
+
+    class Message:
+        async def reply_text(self, text, **_kwargs):
+            replies.append(text)
+
+    update = SimpleNamespace(message=Message())
+
+    handled = asyncio.run(
+        _handle_draft_buttons(update, SimpleNamespace(), chat_id=123, session={}, text="Черновики")
+    )
+
+    assert handled is True
+    assert replies == ["Черновиков пока нет."]
+
+
+def test_drafts_open_number_after_list_keeps_page_ids(monkeypatch):
+    import app.handlers.handlers_state_scene as scene_handlers
+
+    monkeypatch.setenv("SCHEDULED_GENERATION_ADMIN_CHAT_ID", "123")
+    draft = SimpleNamespace(id="draft-1", title="Черновик", scene_index=None, created_at=__import__("datetime").datetime.now(__import__("datetime").timezone.utc))
+    monkeypatch.setattr(scene_handlers, "list_generation_drafts", lambda *_args, **_kwargs: [draft])
+    monkeypatch.setattr(
+        scene_handlers,
+        "load_generation_draft",
+        lambda draft_id: (
+            draft,
+            {"production": {"json_plan": [{"scene": 1}]}, "scene_media_approve_mode": "ai"},
+        ) if draft_id == "draft-1" else None,
+    )
+    saved_sessions: list[dict] = []
+    monkeypatch.setattr(scene_handlers, "save_session_if_possible", lambda _chat_id, session: saved_sessions.append(dict(session)))
+    replies: list[str] = []
+
+    class Message:
+        async def reply_text(self, text, **_kwargs):
+            replies.append(text)
+
+    update = SimpleNamespace(message=Message())
+    SESSIONS.pop(123, None)
+
+    listed = asyncio.run(
+        scene_handlers._handle_draft_buttons(update, SimpleNamespace(), chat_id=123, session={}, text="Черновики")
+    )
+    opened = asyncio.run(
+        scene_handlers._handle_draft_buttons(
+            update,
+            SimpleNamespace(),
+            chat_id=123,
+            session=SESSIONS.get(123) or {},
+            text="Открыть 1",
+        )
+    )
+
+    assert listed is True
+    assert opened is True
+    assert SESSIONS[123]["state"] == "state_waiting_draft_scenes"
+    assert SESSIONS[123]["scene_media_approve_mode"] == "manual"
+    assert saved_sessions
+    assert any("Открыла черновик" in reply for reply in replies)
+
+
+def test_open_draft_disables_ai_auto_and_uses_scene_keyboard(monkeypatch):
+    import app.handlers.handlers_state_scene as scene_handlers
+
+    monkeypatch.setenv("SCHEDULED_GENERATION_ADMIN_CHAT_ID", "123")
+    draft = SimpleNamespace(id="draft-1", title="Черновик")
+    snapshot = {
+        "state": "waiting_scene_media",
+        "scene_media_auto_approve": True,
+        "scene_media_approve_mode": "ai",
+        "scene_media_ai_human_review": {"stage": "video"},
+        "production": {"json_plan": [{"scene": 1}, {"scene": 2}, {"scene": 3}, {"scene": 4}]},
+    }
+    monkeypatch.setattr(scene_handlers, "load_generation_draft", lambda _draft_id: (draft, dict(snapshot)))
+    replies: list[tuple[str, object | None]] = []
+
+    class Message:
+        async def reply_text(self, text, **kwargs):
+            replies.append((text, kwargs.get("reply_markup")))
+
+    update = SimpleNamespace(message=Message())
+
+    handled = asyncio.run(
+        scene_handlers._handle_draft_buttons(update, SimpleNamespace(), chat_id=123, session={}, text="Черновик draft-1")
+    )
+
+    assert handled is True
+    opened = SESSIONS[123]
+    assert opened["state"] == "state_waiting_draft_scenes"
+    assert opened["scene_media_approve_mode"] == "manual"
+    assert "scene_media_auto_approve" not in opened
+    assert "scene_media_ai_human_review" not in opened
+    buttons = [button.text for row in replies[-1][1].keyboard for button in row]
+    assert "Сцена 4" in buttons
+    assert "СТОП" not in buttons
+
+
+def test_draft_repair_plan_can_select_scene_four_only(monkeypatch):
+    import app.handlers.handlers_state_scene as scene_handlers
+
+    sent_steps: list[tuple[int, str]] = []
+
+    async def _fake_send_next(_update, session):
+        sent_steps.append((session["image_scene_index"], session["scene_media_substep"]))
+
+    db_clears: list[tuple[str | None, str, list[str]]] = []
+
+    def _fake_clear_db(scene_id, *, stage, languages):
+        db_clears.append((scene_id, stage, list(languages)))
+
+    monkeypatch.setattr(scene_handlers, "_send_next_scene_media_step", _fake_send_next)
+    monkeypatch.setattr(scene_handlers, "clear_scene_db_approvals_for_repair", _fake_clear_db)
+    session = {
+        "state": "state_waiting_draft_scenes",
+        "draft_repair": {"draft_id": "draft-1", "plan": []},
+        "scene_db_ids_by_index": {"3": "scene-db-4"},
+        "production": {
+            "json_plan": [
+                {
+                    "scene": idx + 1,
+                    "video_results_by_lang": {"ru": {"video_b64": "old"}, "en": {}},
+                    "video_approvals_by_lang": {"ru": True, "en": True},
+                    "video_candidates_by_lang": {
+                        "ru": [{"candidate_id": f"old-ru-{idx}", "approved_for_production": True}],
+                    },
+                }
+                for idx in range(5)
+            ]
+        },
+    }
+    replies: list[str] = []
+
+    class Message:
+        async def reply_text(self, text, **_kwargs):
+            replies.append(text)
+
+    update = SimpleNamespace(message=Message())
+
+    assert asyncio.run(scene_handlers._handle_draft_buttons(update, SimpleNamespace(), chat_id=123, session=session, text="Сцена 4"))
+    assert asyncio.run(scene_handlers._handle_draft_buttons(update, SimpleNamespace(), chat_id=123, session=session, text="Далее"))
+    assert asyncio.run(scene_handlers._handle_draft_buttons(update, SimpleNamespace(), chat_id=123, session=session, text="RU"))
+    assert asyncio.run(scene_handlers._handle_draft_buttons(update, SimpleNamespace(), chat_id=123, session=session, text="Видео"))
+    assert asyncio.run(scene_handlers._handle_draft_buttons(update, SimpleNamespace(), chat_id=123, session=session, text="Начать правку"))
+
+    assert session["draft_repair_active_plan"] == [{"scene_index": 3, "languages": ["ru"], "stage": "video"}]
+    assert sent_steps == [(3, "video_prompt")]
+    assert "video_results_by_lang" in session["production"]["json_plan"][1]
+    scene_four = session["production"]["json_plan"][3]
+    assert scene_four["video_approvals_by_lang"]["ru"] is False
+    assert "ru" not in scene_four["video_results_by_lang"]
+    assert "ru" not in scene_four["video_candidates_by_lang"]
+    assert scene_four["draft_repair_ignore_restored_video_candidates_by_lang"] == {"ru": True}
+    assert db_clears == [("scene-db-4", "video", ["ru"])]
+
+
+def test_clear_scene_for_image_repair_unapproves_images_and_videos():
+    from app.drafts import clear_scene_for_repair
+
+    scene = {
+        "start_frame_image_b64": "old-start",
+        "image_candidates": [
+            {"candidate_id": "img-1", "approved_for_video": True},
+            {"candidate_id": "img-2", "approved_for_video": True},
+        ],
+        "video_results_by_lang": {
+            "ru": {"video_b64": "old-ru"},
+            "en": {"video_b64": "old-en"},
+        },
+        "video_approvals_by_lang": {"ru": True, "en": True},
+        "video_candidates_by_lang": {
+            "ru": [{"candidate_id": "vid-ru", "approved_for_production": True}],
+            "en": [{"candidate_id": "vid-en", "approved_for_production": True}],
+        },
+    }
+
+    clear_scene_for_repair(scene, stage="image", languages=["ru"])
+
+    assert "start_frame_image_b64" not in scene
+    assert "image_candidates" not in scene
+    assert "ru" not in scene["video_results_by_lang"]
+    assert "en" in scene["video_results_by_lang"]
+    assert "ru" not in scene["video_candidates_by_lang"]
+    assert scene["video_candidates_by_lang"]["en"][0]["approved_for_production"] is True
+    assert scene["video_approvals_by_lang"]["ru"] is False
+    assert scene["video_approvals_by_lang"]["en"] is True
+    assert scene["draft_repair_ignore_restored_video_candidates_by_lang"] == {"ru": True}
+
+
+def test_draft_repair_keyboard_multiple_scenes_configures_each_scene_separately(monkeypatch):
+    import app.handlers.handlers_state_scene as scene_handlers
+
+    sent_steps: list[tuple[int, str]] = []
+
+    async def _fake_send_next(_update, session):
+        sent_steps.append((session["image_scene_index"], session["scene_media_substep"]))
+
+    monkeypatch.setattr(scene_handlers, "_send_next_scene_media_step", _fake_send_next)
+    session = {
+        "state": "state_waiting_draft_scenes",
+        "draft_repair": {"draft_id": "draft-1", "plan": []},
+        "production": {"json_plan": [{"scene": idx + 1, "video_results_by_lang": {"ru": {}, "en": {}}} for idx in range(4)]},
+    }
+    replies: list[str] = []
+
+    class Message:
+        async def reply_text(self, text, **_kwargs):
+            replies.append(text)
+
+    update = SimpleNamespace(message=Message())
+
+    assert asyncio.run(scene_handlers._handle_draft_buttons(update, SimpleNamespace(), chat_id=123, session=session, text="Сцена 1"))
+    assert asyncio.run(scene_handlers._handle_draft_buttons(update, SimpleNamespace(), chat_id=123, session=session, text="Сцена 3"))
+    assert session["draft_repair"]["selected_scene_indexes"] == [0, 2]
+
+    assert asyncio.run(scene_handlers._handle_draft_buttons(update, SimpleNamespace(), chat_id=123, session=session, text="Далее"))
+    assert "Сцена 1" in replies[-1]
+    assert asyncio.run(scene_handlers._handle_draft_buttons(update, SimpleNamespace(), chat_id=123, session=session, text="RU"))
+    assert asyncio.run(scene_handlers._handle_draft_buttons(update, SimpleNamespace(), chat_id=123, session=session, text="Видео"))
+    assert "Сцена 3" in replies[-1]
+    assert asyncio.run(scene_handlers._handle_draft_buttons(update, SimpleNamespace(), chat_id=123, session=session, text="EN"))
+    assert asyncio.run(scene_handlers._handle_draft_buttons(update, SimpleNamespace(), chat_id=123, session=session, text="Промпт"))
+
+    assert session["draft_repair"]["plan"] == [
+        {"scene_index": 0, "languages": ["ru"], "stage": "video"},
+        {"scene_index": 2, "languages": ["en"], "stage": "prompt"},
+    ]
+    assert asyncio.run(scene_handlers._handle_draft_buttons(update, SimpleNamespace(), chat_id=123, session=session, text="Начать правку"))
+    assert session["draft_repair_active_plan"] == [
+        {"scene_index": 0, "languages": ["ru"], "stage": "video"},
+        {"scene_index": 2, "languages": ["en"], "stage": "prompt"},
+    ]
+    assert sent_steps == [(0, "video_prompt")]
 
 
 def test_restored_overlay_title_ru_state_removes_keyboard():
@@ -271,8 +510,8 @@ def test_start_generation_with_recipe_asks_for_series(monkeypatch):
 
     assert SESSIONS[1060]["state"] == STATE_WAITING_SERIES_CHOICE
     assert SESSIONS[1060][SERIES_PENDING_RECIPE_SESSION_KEY].startswith("Клубника")
-    assert "Можно привязать" in captured[0][0]
-    assert captured[0][1] is not None
+    assert any("Можно привязать" in text for text, _markup in captured)
+    assert any(markup is not None for _text, markup in captured)
 
 
 def test_series_skip_continues_generation(monkeypatch):
@@ -412,6 +651,77 @@ def test_series_create_parser_and_flow(monkeypatch):
     assert continued == ["Идея"]
     assert SESSIONS[1062]["series"]["id"] == payload.id
     assert SESSIONS[1062]["series_video_index"] == 1
+
+
+def test_series_create_with_ru_only_suggests_ai_translations_before_create(monkeypatch):
+    payload = SeriesPayload(
+        id="00000000-0000-0000-0000-000000000002",
+        title_by_lang={"ru": "летние напитки", "en": "summer drinks", "es": "bebidas de verano"},
+        video_index=1,
+        total_videos=10,
+        counter_by_lang={"ru": "день 1 из 10", "en": "day 1 of 10", "es": "day 1 of 10"},
+    )
+    created: list[dict] = []
+    continued: list[str] = []
+    replies: list[str] = []
+    SESSIONS[1065] = {
+        "state": STATE_WAITING_SERIES_CREATE,
+        SERIES_PENDING_RECIPE_SESSION_KEY: "Идея",
+        SERIES_PENDING_PREFER_VERTEX_SESSION_KEY: False,
+        "selected_project_key": "grandma_kitchen",
+        "target_languages": ["ru", "en", "es"],
+    }
+
+    async def _fake_translate(update, context, *, chat_id, ru_title, languages):
+        _ = (update, context, chat_id)
+        assert ru_title == "летние напитки"
+        assert languages == ["ru", "en", "es"]
+        return {"ru": ru_title, "en": "summer drinks", "es": "bebidas de verano"}
+
+    def _fake_create_series(**kwargs):
+        created.append(kwargs)
+        return payload
+
+    async def _fake_continue(update, context, *, recipe, prefer_vertex_api):
+        _ = (update, context, prefer_vertex_api)
+        continued.append(recipe)
+
+    monkeypatch.setattr("app.handlers.handlers_state_start._translate_series_titles", _fake_translate)
+    monkeypatch.setattr("app.handlers.handlers_state_start.create_series", _fake_create_series)
+    monkeypatch.setattr("app.handlers.handlers_state_start._continue_generation_with_recipe", _fake_continue)
+
+    class _Message:
+        text = "летние напитки | 10"
+
+        async def reply_text(self, text, reply_markup=None):
+            _ = reply_markup
+            replies.append(text)
+
+    update = SimpleNamespace(message=_Message(), effective_chat=SimpleNamespace(id=1065))
+    asyncio.run(on_text(update, context=None))
+
+    assert SESSIONS[1065]["state"] == STATE_WAITING_SERIES_TRANSLATION_APPROVAL
+    assert not created
+    assert any("ES: bebidas de verano" in text for text in replies)
+
+    update.message.text = "ОК"
+    asyncio.run(on_text(update, context=None))
+
+    assert created == [
+        {
+            "title_ru": "летние напитки",
+            "title_en": "summer drinks",
+            "title_by_lang": {
+                "ru": "летние напитки",
+                "en": "summer drinks",
+                "es": "bebidas de verano",
+            },
+            "total_videos": 10,
+            "project_slug": "grandma_kitchen",
+        }
+    ]
+    assert continued == ["Идея"]
+    assert SESSIONS[1065]["series"]["title_by_lang"]["es"] == "bebidas de verano"
 
 
 def test_on_text_first_step_button_after_completed_production_starts_new_mode():
@@ -1687,6 +1997,40 @@ def test_on_text_navigation_start_over_resets_session():
     update = SimpleNamespace(message=_Message(), effective_chat=SimpleNamespace(id=1020))
     asyncio.run(on_text(update, context=None))
     assert 1020 not in SESSIONS
+    assert "Начинаем сначала" in captured[0][0]
+    assert captured[0][1] is not None
+
+
+@pytest.mark.parametrize(
+    "draft_state",
+    [
+        "state_waiting_draft_scenes",
+        "state_waiting_draft_language",
+        "state_waiting_draft_stage",
+    ],
+)
+def test_on_text_navigation_start_over_wins_over_draft_repair_states(draft_state):
+    captured: list[tuple[str, object | None]] = []
+    SESSIONS[1022] = {
+        "state": draft_state,
+        "draft_repair": {
+            "selected_scene_indexes": [0, 2],
+            "pending_scene_queue": [0, 2],
+            "current_scene_index": 0,
+        },
+        "production": {"json_plan": [{"scene": 1}, {"scene": 2}, {"scene": 3}]},
+    }
+
+    class _Message:
+        text = NAV_BUTTON_START_OVER
+
+        async def reply_text(self, text, reply_markup=None):
+            captured.append((text, reply_markup))
+
+    update = SimpleNamespace(message=_Message(), effective_chat=SimpleNamespace(id=1022))
+    asyncio.run(on_text(update, context=None))
+
+    assert 1022 not in SESSIONS
     assert "Начинаем сначала" in captured[0][0]
     assert captured[0][1] is not None
 

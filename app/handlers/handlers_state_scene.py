@@ -1,3 +1,4 @@
+import os
 import re
 from pathlib import Path
 
@@ -50,6 +51,7 @@ from .handlers_state_deps import (
     SCENE_MEDIA_SUBSTEP_END_IMAGE_APPROVAL,
     SCENE_MEDIA_SUBSTEP_START,
     SCENE_MEDIA_SUBSTEP_START_IMAGE_APPROVAL,
+    SCENE_MEDIA_STOP_BUTTON,
     SCENE_MEDIA_SUBSTEP_VIDEO,
     _scene_needs_end_frame_step,
     _load_scene_reference_images,
@@ -82,9 +84,29 @@ from .handlers_state_commands import (
     first_step_menu_markup,
     project_choice_markup,
 )
-from .handlers_keyboards import remove_keyboard_markup, reply_text_without_keyboard, safe_reply_photo, safe_reply_text
+from .handlers_keyboards import (
+    DRAFT_BUTTON_LIST,
+    DRAFT_BUTTON_SAVE,
+    remove_keyboard_markup,
+    reply_text_without_keyboard,
+    safe_reply_photo,
+    safe_reply_text,
+)
 from ..assets import ASSETS
+from ..drafts import (
+    DRAFTS_PAGE_SIZE,
+    clear_scene_db_approvals_for_repair,
+    clear_scene_for_repair,
+    format_drafts_page,
+    format_drafts_list,
+    hide_generation_draft,
+    list_generation_drafts,
+    load_generation_draft,
+    parse_draft_open_command,
+    save_generation_draft,
+)
 from ..elevenlabs_tts import generate_elevenlabs_speech
+from ..generation_store import set_generation_run_title_color_for_session
 from ..llm_utils import gemini_generate_sync
 from ..scene_media_candidates import resolve_candidate_by_message
 from .handlers_state_start import (
@@ -93,10 +115,12 @@ from .handlers_state_start import (
     SERIES_PENDING_NEXT_SESSION_KEY,
     STATE_WAITING_SERIES_CHOICE,
     STATE_WAITING_SERIES_CREATE,
+    STATE_WAITING_SERIES_TRANSLATION_APPROVAL,
     _ask_series_choice,
     _concept_choice_markup,
     _handle_waiting_series_choice_state,
     _handle_waiting_series_create_state,
+    _handle_waiting_series_translation_approval_state,
     _handle_waiting_concept_state,
     _handle_waiting_recipe_approval_state,
     _series_choice_markup,
@@ -124,7 +148,7 @@ from .handlers_state_media import (
 from ..character_catalog import format_character_short_descriptions
 from ..pipeline_history import record_checkpoint, restore_previous_checkpoint, session_step_signature
 from ..scene_media_store import mark_candidate_liked_by_message as persist_mark_candidate_liked_by_message
-from ..session_store import save_session_if_possible
+from ..session_store import load_session_if_possible, save_session_if_possible
 from ..series_store import (
     SERIES_COUNTER_BY_LANG_SESSION_KEY,
     SERIES_SESSION_KEY,
@@ -162,6 +186,15 @@ _STATE_WAITING_FIRST_STEP_PROJECT_SELECTION = "state_waiting_first_step_project_
 _STATE_WAITING_FIRST_STEP_PROJECT_IMAGE_CHARACTERS = "state_waiting_first_step_project_image_characters"
 _STATE_WAITING_FIRST_STEP_PROJECT_IMAGE_PROMPT = "state_waiting_first_step_project_image_prompt"
 _STATE_WAITING_FIRST_STEP_PROJECT_IMAGE_REFERENCES = "state_waiting_first_step_project_image_references"
+_STATE_WAITING_DRAFT_SCENES = "state_waiting_draft_scenes"
+_STATE_WAITING_DRAFT_LANGUAGE = "state_waiting_draft_language"
+_STATE_WAITING_DRAFT_STAGE = "state_waiting_draft_stage"
+_DRAFTS_PAGE_SESSION_KEY = "telegram_drafts_page"
+_DRAFTS_PAGE_IDS_SESSION_KEY = "telegram_drafts_page_ids"
+_DRAFT_REPAIR_ACTIVE_PLAN_KEY = "draft_repair_active_plan"
+_DRAFT_REPAIR_ADD_SCENE_BUTTON = "Добавить сцену"
+_DRAFT_REPAIR_START_BUTTON = "Начать правку"
+_DRAFT_REPAIR_NEXT_BUTTON = "Далее"
 _PROJECT_IMAGE_DONE_BUTTON = "больше никто не нужен"
 _PROJECT_IMAGE_CHARACTERS_SESSION_KEY = "first_step_project_image_characters"
 _PROJECT_IMAGE_BASE_CHARACTERS = ("grandma", "cat")
@@ -1078,8 +1111,449 @@ def _is_first_step_menu_button(text: str) -> bool:
         FIRST_STEP_BUTTON_SOUND.lower(),
         FIRST_STEP_BUTTON_VIDEO.lower(),
         FIRST_STEP_BUTTON_PROJECT.lower(),
+        DRAFT_BUTTON_SAVE.lower(),
+        DRAFT_BUTTON_LIST.lower(),
         project_image_button,
     } or low.startswith(f"{project_image_button} ")
+
+
+def _draft_admin_allowed(chat_id: int | None) -> bool:
+    raw = str(os.getenv("SCHEDULED_GENERATION_ADMIN_CHAT_ID") or "").strip()
+    if not raw:
+        return True
+    try:
+        return chat_id is not None and int(raw) == int(chat_id)
+    except ValueError:
+        return True
+
+
+def _parse_scene_indexes(text: str, total: int) -> list[int]:
+    low = str(text or "").strip().lower()
+    if low in {"все", "all"}:
+        return list(range(total))
+    out: list[int] = []
+    for match in re.finditer(r"\d+", low):
+        idx = int(match.group(0)) - 1
+        if 0 <= idx < total and idx not in out:
+            out.append(idx)
+    return out
+
+
+def _parse_draft_languages(text: str) -> list[str]:
+    low = str(text or "").strip().lower().replace(" ", "")
+    if low in {"ru+en", "en+ru", "оба", "обе", "both"}:
+        return ["ru", "en"]
+    if low in {"ru", "рус", "русский"}:
+        return ["ru"]
+    if low in {"en", "англ", "английский"}:
+        return ["en"]
+    return []
+
+
+def _parse_draft_stage(text: str) -> str | None:
+    low = str(text or "").strip().lower()
+    if low in {"промпт", "prompt"}:
+        return "prompt"
+    if low in {"изображение", "картинка", "image"}:
+        return "image"
+    if low in {"видео", "video"}:
+        return "video"
+    return None
+
+
+def _simple_keyboard(rows: list[list[str]]):
+    try:
+        from telegram import ReplyKeyboardMarkup
+    except Exception:
+        return None
+    return ReplyKeyboardMarkup(rows, resize_keyboard=True, one_time_keyboard=False)
+
+
+def _drafts_page_markup(*, page: int, has_next: bool, count: int):
+    rows: list[list[str]] = []
+    for idx in range(1, count + 1):
+        rows.append([f"Открыть {idx}", f"Убрать {idx}"])
+    nav: list[str] = []
+    if page > 0:
+        nav.append("Назад")
+    if has_next:
+        nav.append("Дальше")
+    if nav:
+        rows.append(nav)
+    rows.append([NAV_BUTTON_START_OVER])
+    return _simple_keyboard(rows)
+
+
+def _draft_scene_markup(total: int, *, has_plan: bool, selected: list[int] | None = None):
+    selected_set = {int(idx) for idx in (selected or [])}
+    rows: list[list[str]] = []
+    labels = [f"{'✓ ' if idx - 1 in selected_set else ''}Сцена {idx}" for idx in range(1, total + 1)]
+    for idx in range(0, len(labels), 3):
+        rows.append(labels[idx : idx + 3])
+    if total > 1:
+        rows.append(["Все"])
+    if selected_set:
+        rows.append([_DRAFT_REPAIR_NEXT_BUTTON])
+    if has_plan:
+        rows.append([_DRAFT_REPAIR_ADD_SCENE_BUTTON, _DRAFT_REPAIR_START_BUTTON])
+    rows.append([NAV_BUTTON_START_OVER])
+    return _simple_keyboard(rows)
+
+
+def _draft_language_markup():
+    return _simple_keyboard([["RU", "EN", "RU+EN"], [NAV_BUTTON_START_OVER]])
+
+
+def _draft_stage_markup():
+    return _simple_keyboard([["Промпт", "Изображение", "Видео"], [NAV_BUTTON_START_OVER]])
+
+
+def _draft_after_scene_markup():
+    return _simple_keyboard([[_DRAFT_REPAIR_ADD_SCENE_BUTTON, _DRAFT_REPAIR_START_BUTTON], [NAV_BUTTON_START_OVER]])
+
+
+def _disable_scene_media_ai_auto(session: dict) -> None:
+    session.pop("scene_media_auto_approve", None)
+    session.pop("scene_media_ai_human_review", None)
+    session.pop("scene_media_ai_technical_failure", None)
+    session["scene_media_approve_mode"] = "manual"
+
+
+def _parse_numbered_button(text: str, prefix: str) -> int | None:
+    raw = str(text or "").strip().lower()
+    prefix_low = prefix.lower()
+    if not raw.startswith(prefix_low):
+        return None
+    match = re.search(r"\d+", raw[len(prefix_low):])
+    if not match:
+        return None
+    return int(match.group(0)) - 1
+
+
+def _draft_pending_scene_label(repair: dict) -> str:
+    try:
+        return f"сцены {int(repair.get('pending_scene_index')) + 1}"
+    except (TypeError, ValueError):
+        return "выбранной сцены"
+
+
+def _draft_plan_summary(plan: list[dict]) -> str:
+    parts: list[str] = []
+    for item in plan:
+        try:
+            scene_num = int(item.get("scene_index")) + 1
+        except (TypeError, ValueError):
+            continue
+        languages = "/".join(str(lang) for lang in (item.get("languages") or []))
+        stage = str(item.get("stage") or "")
+        parts.append(f"{scene_num}:{languages}:{stage}")
+    return ", ".join(parts) or "-"
+
+
+async def _ask_next_draft_scene_language(update: Update, session: dict, scenes: list[dict]) -> bool:
+    repair = dict(session.get("draft_repair") or {})
+    queue = repair.get("pending_scene_queue")
+    if not isinstance(queue, list) or not queue:
+        selected = repair.get("selected_scene_indexes")
+        queue = [int(idx) for idx in (selected or []) if 0 <= int(idx) < len(scenes)]
+    if not queue:
+        await update.message.reply_text(
+            "Сначала выберите одну или несколько сцен.",
+            reply_markup=_draft_scene_markup(
+                len(scenes),
+                has_plan=bool(repair.get("plan")),
+                selected=repair.get("selected_scene_indexes") if isinstance(repair.get("selected_scene_indexes"), list) else [],
+            ),
+        )
+        return True
+    current = int(queue.pop(0))
+    repair["pending_scene_index"] = current
+    repair["pending_scene_queue"] = queue
+    repair["selected_scene_indexes"] = queue
+    session["draft_repair"] = repair
+    session["state"] = _STATE_WAITING_DRAFT_LANGUAGE
+    await update.message.reply_text(
+        f"Сцена {current + 1}: выберите язык.",
+        reply_markup=_draft_language_markup(),
+    )
+    return True
+
+
+async def _send_drafts_page(update: Update, chat_id: int, session: dict | None, *, page: int) -> None:
+    if not isinstance(session, dict):
+        session = {}
+    SESSIONS[chat_id] = session
+    page = max(0, int(page))
+    rows = list_generation_drafts(None, limit=DRAFTS_PAGE_SIZE + 1, offset=page * DRAFTS_PAGE_SIZE)
+    drafts = rows[:DRAFTS_PAGE_SIZE]
+    has_next = len(rows) > DRAFTS_PAGE_SIZE
+    session[_DRAFTS_PAGE_SESSION_KEY] = page
+    session[_DRAFTS_PAGE_IDS_SESSION_KEY] = [str(draft.id) for draft in drafts]
+    save_session_if_possible(chat_id, session)
+    await update.message.reply_text(
+        format_drafts_page(drafts, page=page, has_next=has_next),
+        reply_markup=_drafts_page_markup(page=page, has_next=has_next, count=len(drafts)),
+    )
+
+
+async def _open_generation_draft(update: Update, chat_id: int, draft_id: str) -> bool:
+    loaded = load_generation_draft(draft_id)
+    if loaded is None:
+        await update.message.reply_text("Не нашла такой черновик.")
+        return True
+    draft, snapshot = loaded
+    _disable_scene_media_ai_auto(snapshot)
+    snapshot["draft_repair"] = {"draft_id": str(draft.id), "plan": []}
+    snapshot.pop(_DRAFT_REPAIR_ACTIVE_PLAN_KEY, None)
+    snapshot["state"] = _STATE_WAITING_DRAFT_SCENES
+    snapshot["is_draft"] = True
+    SESSIONS[chat_id] = snapshot
+    production = snapshot.get("production") or {}
+    scenes = production.get("json_plan") if isinstance(production, dict) else None
+    total = len(scenes) if isinstance(scenes, list) else 0
+    await update.message.reply_text(
+        f"Открыла черновик: {draft.title}\n"
+        f"Сцен: {total}.\n"
+        "Выберите одну или несколько сцен для правки, затем нажмите `Далее`.",
+        reply_markup=_draft_scene_markup(total, has_plan=False),
+    )
+    return True
+
+
+async def _start_draft_repair(update: Update, session: dict) -> bool:
+    repair = dict(session.get("draft_repair") or {})
+    plan = repair.get("plan") if isinstance(repair.get("plan"), list) else []
+    if not plan:
+        await update.message.reply_text("Сначала выберите хотя бы одну сцену для правки.")
+        return True
+    production = session.get("production") or {}
+    scenes = production.get("json_plan") if isinstance(production, dict) else None
+    if not isinstance(scenes, list) or not scenes:
+        await update.message.reply_text("В этом черновике нет production-сцен.")
+        session["state"] = ""
+        return True
+    normalized_plan: list[dict] = []
+    for item in plan:
+        if not isinstance(item, dict):
+            continue
+        idx = _safe_draft_scene_index(item.get("scene_index"), len(scenes))
+        languages = [str(lang).strip().lower() for lang in (item.get("languages") or []) if str(lang).strip()]
+        stage = _parse_draft_stage(str(item.get("stage") or ""))
+        if idx is None or not languages or stage is None:
+            continue
+        normalized_plan.append({"scene_index": idx, "languages": languages, "stage": stage})
+        clear_scene_for_repair(scenes[idx], stage=stage, languages=languages)
+        scene_db_ids = session.get("scene_db_ids_by_index")
+        scene_db_id = None
+        if isinstance(scene_db_ids, dict):
+            scene_db_id = scene_db_ids.get(idx) or scene_db_ids.get(str(idx))
+        clear_scene_db_approvals_for_repair(scene_db_id, stage=stage, languages=languages)
+    if not normalized_plan:
+        await update.message.reply_text("Не вижу корректного плана правки.")
+        return True
+    normalized_plan.sort(key=lambda row: int(row["scene_index"]))
+    first = normalized_plan[0]
+    session[_DRAFT_REPAIR_ACTIVE_PLAN_KEY] = normalized_plan
+    session["image_scene_index"] = int(first["scene_index"])
+    session["scene_media_language_index"] = 0
+    session["scene_media_substep"] = SCENE_MEDIA_SUBSTEP_VIDEO if first["stage"] == "video" else SCENE_MEDIA_SUBSTEP_START
+    session["state"] = STATE_WAITING_SCENE_MEDIA
+    session["is_draft"] = True
+    session.pop("draft_repair", None)
+    _disable_scene_media_ai_auto(session)
+    await update.message.reply_text(
+        "Черновик подготовлен к правке. Пройду только выбранные сцены; остальные останутся в финальной сборке как были."
+    )
+    await _send_next_scene_media_step(update, session)
+    return True
+
+
+def _safe_draft_scene_index(value, total: int) -> int | None:
+    try:
+        idx = int(value)
+    except (TypeError, ValueError):
+        return None
+    if 0 <= idx < total:
+        return idx
+    return None
+
+
+async def _handle_draft_buttons(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+    *,
+    chat_id: int,
+    session: dict | None,
+    text: str,
+) -> bool:
+    if update.message is None:
+        return False
+    low = str(text or "").strip().lower()
+    if low == DRAFT_BUTTON_SAVE.lower() or low == "/save_draft":
+        if not isinstance(session, dict) or not session:
+            await update.message.reply_text("Пока нечего сохранять: активной генерации нет.")
+            return True
+        draft = save_generation_draft(chat_id, session)
+        await update.message.reply_text(f"Черновик сохранён: {draft.title}\nid: {draft.id}")
+        return True
+    if low == DRAFT_BUTTON_LIST.lower() or low == "/drafts":
+        if not _draft_admin_allowed(chat_id):
+            await update.message.reply_text("Список черновиков доступен только админскому Telegram chat id.")
+            return True
+        await _send_drafts_page(update, chat_id, session, page=0)
+        return True
+    if low in {"дальше", "next"} and _draft_admin_allowed(chat_id):
+        page = int((session or {}).get(_DRAFTS_PAGE_SESSION_KEY, 0) or 0) + 1
+        await _send_drafts_page(update, chat_id, session, page=page)
+        return True
+    if low in {"назад", "back"} and _draft_admin_allowed(chat_id):
+        page = max(0, int((session or {}).get(_DRAFTS_PAGE_SESSION_KEY, 0) or 0) - 1)
+        await _send_drafts_page(update, chat_id, session, page=page)
+        return True
+    open_idx = _parse_numbered_button(text, "Открыть")
+    if open_idx is not None and _draft_admin_allowed(chat_id):
+        ids = (session or {}).get(_DRAFTS_PAGE_IDS_SESSION_KEY)
+        if not isinstance(ids, list):
+            page = int((session or {}).get(_DRAFTS_PAGE_SESSION_KEY, 0) or 0)
+            drafts = list_generation_drafts(None, limit=DRAFTS_PAGE_SIZE, offset=page * DRAFTS_PAGE_SIZE)
+            ids = [str(draft.id) for draft in drafts]
+        if isinstance(ids, list) and 0 <= open_idx < len(ids):
+            return await _open_generation_draft(update, chat_id, str(ids[open_idx]))
+        await update.message.reply_text("Не вижу такого номера на текущей странице черновиков.")
+        return True
+    hide_idx = _parse_numbered_button(text, "Убрать")
+    if hide_idx is not None and _draft_admin_allowed(chat_id):
+        ids = (session or {}).get(_DRAFTS_PAGE_IDS_SESSION_KEY)
+        if not isinstance(ids, list):
+            page = int((session or {}).get(_DRAFTS_PAGE_SESSION_KEY, 0) or 0)
+            drafts = list_generation_drafts(None, limit=DRAFTS_PAGE_SIZE, offset=page * DRAFTS_PAGE_SIZE)
+            ids = [str(draft.id) for draft in drafts]
+        if isinstance(ids, list) and 0 <= hide_idx < len(ids):
+            hidden = hide_generation_draft(str(ids[hide_idx]))
+            if hidden:
+                page = int((session or {}).get(_DRAFTS_PAGE_SESSION_KEY, 0) or 0)
+                await update.message.reply_text("Убрала черновик из списка.")
+                await _send_drafts_page(update, chat_id, session, page=page)
+                return True
+        await update.message.reply_text("Не вижу такого номера на текущей странице черновиков.")
+        return True
+    draft_id = parse_draft_open_command(text)
+    if draft_id:
+        return await _open_generation_draft(update, chat_id, draft_id)
+    if isinstance(session, dict) and session.get("state") in {
+        _STATE_WAITING_DRAFT_SCENES,
+        _STATE_WAITING_DRAFT_LANGUAGE,
+        _STATE_WAITING_DRAFT_STAGE,
+    } and low == SCENE_MEDIA_STOP_BUTTON.lower():
+        _disable_scene_media_ai_auto(session)
+        session["state"] = STATE_WAITING_SCENE_MEDIA if session.get("production") else ""
+        session.pop("draft_repair", None)
+        await update.message.reply_text("Остановила правку черновика и вернула ручной режим без удаления медиа.")
+        return True
+    if isinstance(session, dict) and session.get("state") == _STATE_WAITING_DRAFT_SCENES:
+        production = session.get("production") or {}
+        scenes = production.get("json_plan") if isinstance(production, dict) else None
+        if not isinstance(scenes, list) or not scenes:
+            await update.message.reply_text("В этом черновике нет production-сцен.")
+            session["state"] = ""
+            return True
+        repair = dict(session.get("draft_repair") or {})
+        plan = repair.get("plan") if isinstance(repair.get("plan"), list) else []
+        if low in {_DRAFT_REPAIR_START_BUTTON.lower(), "start repair", "начать"}:
+            return await _start_draft_repair(update, session)
+        if low in {_DRAFT_REPAIR_ADD_SCENE_BUTTON.lower(), "add scene"}:
+            repair["selected_scene_indexes"] = []
+            repair["pending_scene_queue"] = []
+            session["draft_repair"] = repair
+            await update.message.reply_text(
+                "Выберите одну или несколько следующих сцен.",
+                reply_markup=_draft_scene_markup(len(scenes), has_plan=bool(plan), selected=[]),
+            )
+            return True
+        if low in {_DRAFT_REPAIR_NEXT_BUTTON.lower(), "next", "далее"}:
+            return await _ask_next_draft_scene_language(update, session, scenes)
+        indexes = _parse_scene_indexes(text, len(scenes))
+        if not indexes:
+            await update.message.reply_text(
+                "Не поняла сцену. Нажмите кнопку сцены или пришлите, например: `1`, `1, 3` или `все`.",
+                reply_markup=_draft_scene_markup(
+                    len(scenes),
+                    has_plan=bool(plan),
+                    selected=repair.get("selected_scene_indexes") if isinstance(repair.get("selected_scene_indexes"), list) else [],
+                ),
+            )
+            return True
+        selected = repair.get("selected_scene_indexes") if isinstance(repair.get("selected_scene_indexes"), list) else []
+        if low.startswith("сцена") or low.startswith("✓ сцена"):
+            idx = indexes[0]
+            if idx in selected:
+                selected = [item for item in selected if int(item) != idx]
+            else:
+                selected = [*selected, idx]
+            selected = sorted({int(item) for item in selected})
+            repair["selected_scene_indexes"] = selected
+            session["draft_repair"] = repair
+            selected_text = ", ".join(str(int(idx) + 1) for idx in selected) or "нет"
+            await update.message.reply_text(
+                f"Выбрано сцен: {selected_text}.",
+                reply_markup=_draft_scene_markup(len(scenes), has_plan=bool(plan), selected=selected),
+            )
+            return True
+        repair["selected_scene_indexes"] = indexes
+        repair["pending_scene_queue"] = list(indexes)
+        session["draft_repair"] = repair
+        return await _ask_next_draft_scene_language(update, session, scenes)
+    if isinstance(session, dict) and session.get("state") == _STATE_WAITING_DRAFT_LANGUAGE:
+        languages = _parse_draft_languages(text)
+        if not languages:
+            await update.message.reply_text("Не поняла язык. Выберите `RU`, `EN` или `RU+EN`.", reply_markup=_draft_language_markup())
+            return True
+        repair = dict(session.get("draft_repair") or {})
+        repair["languages"] = languages
+        session["draft_repair"] = repair
+        session["state"] = _STATE_WAITING_DRAFT_STAGE
+        await update.message.reply_text(
+            f"{_draft_pending_scene_label(repair).capitalize()}: откуда перезапустить?",
+            reply_markup=_draft_stage_markup(),
+        )
+        return True
+    if isinstance(session, dict) and session.get("state") == _STATE_WAITING_DRAFT_STAGE:
+        stage = _parse_draft_stage(text)
+        if stage is None:
+            await update.message.reply_text("Не поняла этап. Выберите `Промпт`, `Изображение` или `Видео`.", reply_markup=_draft_stage_markup())
+            return True
+        repair = dict(session.get("draft_repair") or {})
+        try:
+            pending_idx = int(repair.get("pending_scene_index"))
+        except (TypeError, ValueError):
+            pending_idx = -1
+        indexes = [pending_idx] if pending_idx >= 0 else []
+        languages = [str(lang) for lang in (repair.get("languages") or ["ru"])]
+        production = session.get("production") or {}
+        scenes = production.get("json_plan") if isinstance(production, dict) else None
+        if not isinstance(scenes, list) or not indexes:
+            await update.message.reply_text("Не вижу выбранных сцен в черновике.")
+            session["state"] = ""
+            return True
+        plan = repair.get("plan") if isinstance(repair.get("plan"), list) else []
+        for idx in indexes:
+            if 0 <= idx < len(scenes):
+                plan.append({"scene_index": idx, "languages": languages, "stage": stage})
+        repair["plan"] = plan
+        repair.pop("pending_scene_index", None)
+        repair.pop("languages", None)
+        session["draft_repair"] = repair
+        queue = repair.get("pending_scene_queue") if isinstance(repair.get("pending_scene_queue"), list) else []
+        if queue:
+            return await _ask_next_draft_scene_language(update, session, scenes)
+        session["state"] = _STATE_WAITING_DRAFT_SCENES
+        selected = _draft_plan_summary(plan)
+        await update.message.reply_text(
+            f"Добавила в план: {selected}.\nМожно добавить ещё сцену или начать правку.",
+            reply_markup=_draft_after_scene_markup(),
+        )
+        return True
+    return False
 
 
 def _drop_step_outputs_from(session: dict, step: str) -> None:
@@ -1980,6 +2454,7 @@ async def _handle_waiting_overlay_title_style_approval_state(
     low = str(text or "").strip().lower()
     if low in {"ок", "ok", "okay", "approve"}:
         session[OVERLAY_TITLE_STYLE_SESSION_KEY] = style
+        set_generation_run_title_color_for_session(session, style.get("title_color"))
         SESSIONS[chat_id] = session
         return await _generate_production_after_overlay_title(
             update,
@@ -1989,6 +2464,7 @@ async def _handle_waiting_overlay_title_style_approval_state(
         )
     updated = _apply_overlay_title_style_feedback(style, text)
     session[OVERLAY_TITLE_STYLE_SESSION_KEY] = updated
+    set_generation_run_title_color_for_session(session, updated.get("title_color"))
     session["state"] = STATE_WAITING_OVERLAY_TITLE_STYLE_APPROVAL
     SESSIONS[chat_id] = session
     await _send_overlay_title_previews(update, session, updated)
@@ -2402,6 +2878,16 @@ async def _on_text_impl(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     session = session or SESSIONS.get(chat_id) or {}
     if await _handle_navigation_buttons(update, chat_id=chat_id, session=session, text=text):
         return
+    if await _handle_draft_buttons(update, context, chat_id=chat_id, session=session, text=text):
+        return
+    if str(session.get("state") or "") != STATE_WAITING_SOCIAL_DESCRIPTIONS_APPROVAL:
+        persisted = load_session_if_possible(chat_id)
+        if (
+            isinstance(persisted, dict)
+            and str(persisted.get("state") or "") == STATE_WAITING_SOCIAL_DESCRIPTIONS_APPROVAL
+        ):
+            SESSIONS[chat_id] = persisted
+            session = persisted
     state = str(session.get("state") or "")
     low = text.lower().strip()
     if state == STATE_READY_FOR_PRODUCTION and _is_first_step_menu_button(text):
@@ -2676,6 +3162,15 @@ async def _on_text_impl(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         return
     if session.get("state") == STATE_WAITING_SERIES_CREATE:
         await _handle_waiting_series_create_state(
+            update,
+            context,
+            chat_id=chat_id,
+            session=session,
+            text=text,
+        )
+        return
+    if session.get("state") == STATE_WAITING_SERIES_TRANSLATION_APPROVAL:
+        await _handle_waiting_series_translation_approval_state(
             update,
             context,
             chat_id=chat_id,

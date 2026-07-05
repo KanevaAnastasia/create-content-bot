@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import uuid
 
-from sqlalchemy import Boolean, Enum, Float, ForeignKey, Integer, JSON, LargeBinary, String, Text, UniqueConstraint, func
+from sqlalchemy import Boolean, Enum, Float, ForeignKey, Index, Integer, JSON, LargeBinary, String, Text, UniqueConstraint, func
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 from sqlalchemy.sql.sqltypes import DateTime, Uuid
 
@@ -305,10 +305,12 @@ class GenerationRun(Base):
     id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
     status: Mapped[str] = mapped_column(String(64), nullable=False)
     is_active: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
+    is_draft: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
     current_scene_index: Mapped[int | None] = mapped_column(Integer, nullable=True)
     current_media_substep: Mapped[str | None] = mapped_column(String(128), nullable=True)
     current_media_language_index: Mapped[int | None] = mapped_column(Integer, nullable=True)
     human_title: Mapped[str | None] = mapped_column(Text, nullable=True)
+    title_color: Mapped[str] = mapped_column(String(32), nullable=False, default="#c72638")
     language: Mapped[str] = mapped_column(
         Enum("ru", "en", name="generation_language"),
         nullable=False,
@@ -321,13 +323,132 @@ class GenerationRun(Base):
     )
     series_video_index: Mapped[int | None] = mapped_column(Integer, nullable=True)
     series_total_videos: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    scheduled_item_id: Mapped[uuid.UUID | None] = mapped_column(
+        Uuid,
+        ForeignKey("scheduled_generation_items.id", ondelete="SET NULL"),
+        nullable=True,
+        index=True,
+    )
     script: Mapped[str] = mapped_column(Text, nullable=False)
     created_at: Mapped[DateTime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
 
     series: Mapped["ContentSeries | None"] = relationship(back_populates="generation_runs")
+    scheduled_item: Mapped["ScheduledGenerationItem | None"] = relationship(
+        back_populates="generation_runs",
+        foreign_keys=[scheduled_item_id],
+    )
     scenes: Mapped[list["Scene"]] = relationship(back_populates="run", cascade="all, delete-orphan")
     video_results: Mapped[list["VideoResult"]] = relationship(back_populates="run", cascade="all, delete-orphan")
     artifacts: Mapped[list["GenerationArtifact"]] = relationship(back_populates="run", cascade="all, delete-orphan")
+
+
+class ScheduledGenerationItem(Base):
+    """Night queue item imported from admin Excel or created manually."""
+
+    __tablename__ = "scheduled_generation_items"
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
+    title: Mapped[str] = mapped_column(Text, nullable=False)
+    recipe: Mapped[str] = mapped_column(Text, nullable=False)
+    comment: Mapped[str | None] = mapped_column(Text, nullable=True)
+    title_color: Mapped[str] = mapped_column(String(32), nullable=False, default="#c72638")
+    run_at: Mapped[DateTime] = mapped_column(DateTime(timezone=True), nullable=False, index=True)
+    is_draft: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
+    status: Mapped[str] = mapped_column(String(64), nullable=False, default="pending", index=True)
+    generation_run_id: Mapped[uuid.UUID | None] = mapped_column(
+        Uuid,
+        ForeignKey("generation_runs.id", ondelete="SET NULL"),
+        nullable=True,
+        index=True,
+    )
+    series_id: Mapped[uuid.UUID | None] = mapped_column(
+        Uuid,
+        ForeignKey("content_series.id", ondelete="SET NULL"),
+        nullable=True,
+        index=True,
+    )
+    source_row_key: Mapped[str | None] = mapped_column(String(128), nullable=True, unique=True)
+    source_file_path: Mapped[str | None] = mapped_column(Text, nullable=True)
+    error_text: Mapped[str | None] = mapped_column(Text, nullable=True)
+    payload_json: Mapped[dict] = mapped_column(JSON, nullable=False, default=dict)
+    claimed_at: Mapped[DateTime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    started_at: Mapped[DateTime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    finished_at: Mapped[DateTime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    created_at: Mapped[DateTime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
+    updated_at: Mapped[DateTime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        server_default=func.now(),
+        onupdate=func.now(),
+    )
+
+    generation_run: Mapped["GenerationRun | None"] = relationship(foreign_keys=[generation_run_id])
+    series: Mapped["ContentSeries | None"] = relationship(foreign_keys=[series_id])
+    generation_runs: Mapped[list["GenerationRun"]] = relationship(
+        back_populates="scheduled_item",
+        foreign_keys="GenerationRun.scheduled_item_id",
+    )
+    events: Mapped[list["ScheduledGenerationEvent"]] = relationship(
+        back_populates="scheduled_item",
+        cascade="all, delete-orphan",
+    )
+
+
+class ScheduledGenerationEvent(Base):
+    """Auditable timeline event for scheduled/unattended generation."""
+
+    __tablename__ = "scheduled_generation_events"
+    __table_args__ = (
+        Index("ix_scheduled_generation_events_scheduled_item_created", "scheduled_item_id", "created_at"),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
+    scheduled_item_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid,
+        ForeignKey("scheduled_generation_items.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    generation_run_id: Mapped[uuid.UUID | None] = mapped_column(
+        Uuid,
+        ForeignKey("generation_runs.id", ondelete="SET NULL"),
+        nullable=True,
+        index=True,
+    )
+    event_type: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
+    stage: Mapped[str | None] = mapped_column(String(64), nullable=True, index=True)
+    status: Mapped[str | None] = mapped_column(String(64), nullable=True, index=True)
+    message: Mapped[str] = mapped_column(Text, nullable=False, default="")
+    payload_json: Mapped[dict] = mapped_column(JSON, nullable=False, default=dict)
+    created_at: Mapped[DateTime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
+
+    scheduled_item: Mapped["ScheduledGenerationItem"] = relationship(back_populates="events")
+    generation_run: Mapped["GenerationRun | None"] = relationship()
+
+
+class GenerationDraft(Base):
+    """Saved Telegram generation snapshot that can be reopened for fixes."""
+
+    __tablename__ = "generation_drafts"
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
+    chat_id: Mapped[int | None] = mapped_column(Integer, nullable=True, index=True)
+    run_id: Mapped[uuid.UUID | None] = mapped_column(
+        Uuid,
+        ForeignKey("generation_runs.id", ondelete="SET NULL"),
+        nullable=True,
+        index=True,
+    )
+    title: Mapped[str] = mapped_column(Text, nullable=False)
+    stage: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    scene_index: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    substep: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    language: Mapped[str | None] = mapped_column(String(8), nullable=True)
+    session_snapshot_json: Mapped[dict] = mapped_column(JSON, nullable=False, default=dict)
+    payload_json: Mapped[dict] = mapped_column(JSON, nullable=False, default=dict)
+    created_at: Mapped[DateTime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
+
+    run: Mapped["GenerationRun | None"] = relationship()
 
 
 class Scene(Base):
@@ -371,6 +492,42 @@ class Scene(Base):
         back_populates="scene",
         passive_deletes=True,
     )
+    text_revisions: Mapped[list["SceneTextRevision"]] = relationship(
+        back_populates="scene",
+        passive_deletes=True,
+    )
+
+
+class SceneTextRevision(Base):
+    """Auditable scene text/speech edits made outside opaque session snapshots."""
+
+    __tablename__ = "scene_text_revisions"
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
+    run_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid,
+        ForeignKey("generation_runs.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    scene_id: Mapped[uuid.UUID | None] = mapped_column(
+        Uuid,
+        ForeignKey("scenes.id", ondelete="SET NULL"),
+        nullable=True,
+        index=True,
+    )
+    scene_order: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    field_name: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
+    language: Mapped[str | None] = mapped_column(String(8), nullable=True, index=True)
+    old_text: Mapped[str] = mapped_column(Text, nullable=False, default="")
+    new_text: Mapped[str] = mapped_column(Text, nullable=False, default="")
+    source: Mapped[str] = mapped_column(String(64), nullable=False, default="admin")
+    actor: Mapped[str | None] = mapped_column(String(256), nullable=True)
+    meta_json: Mapped[dict] = mapped_column(JSON, nullable=False, default=dict)
+    created_at: Mapped[DateTime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
+
+    run: Mapped["GenerationRun"] = relationship()
+    scene: Mapped["Scene | None"] = relationship(back_populates="text_revisions")
 
 
 class GenerationArtifact(Base):
@@ -494,7 +651,10 @@ class SceneImageCandidate(Base):
         index=True,
     )
     kind: Mapped[str] = mapped_column(String(16), nullable=False)
-    image_blob: Mapped[bytes] = mapped_column(LargeBinary, nullable=False)
+    image_blob: Mapped[bytes | None] = mapped_column(LargeBinary, nullable=True)
+    media_uri: Mapped[str | None] = mapped_column(Text, nullable=True)
+    mime_type: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    byte_size: Mapped[int | None] = mapped_column(Integer, nullable=True)
     liked: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
     approved_for_video: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
     created_at: Mapped[DateTime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
@@ -516,7 +676,10 @@ class SceneVideoCandidate(Base):
         index=True,
     )
     language: Mapped[str] = mapped_column(String(8), nullable=False, index=True)
-    video_blob: Mapped[bytes] = mapped_column(LargeBinary, nullable=False)
+    video_blob: Mapped[bytes | None] = mapped_column(LargeBinary, nullable=True)
+    media_uri: Mapped[str | None] = mapped_column(Text, nullable=True)
+    mime_type: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    byte_size: Mapped[int | None] = mapped_column(Integer, nullable=True)
     liked: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
     approved_for_production: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
     speed_coef: Mapped[float] = mapped_column(Float, nullable=False, default=1.2)

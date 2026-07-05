@@ -5,17 +5,23 @@
 from __future__ import annotations
 
 import os
+import sys
 from functools import lru_cache
 from typing import Any
 
 from sqlalchemy import create_engine, text
 from sqlalchemy.engine import Engine
+from sqlalchemy.engine.url import make_url
 from sqlalchemy.orm import DeclarativeBase, Session, sessionmaker
 
 from app.env_utils import load_env_file
 
 
 DATABASE_URL_ENV_NAME = "DATABASE_URL"
+PYTEST_DATABASE_ERROR = (
+    "Refusing to use non-test database under pytest. "
+    "Use sqlite://, sqlite+pysqlite://, or a database name containing 'test'/'pytest'."
+)
 
 
 class Base(DeclarativeBase):
@@ -40,6 +46,24 @@ def get_database_url() -> str:
     return database_url
 
 
+def running_under_pytest() -> bool:
+    return bool(os.getenv("PYTEST_CURRENT_TEST") or os.getenv("PYTEST_VERSION") or "pytest" in sys.modules)
+
+
+def database_url_is_test_safe(database_url: str) -> bool:
+    url = make_url(database_url)
+    driver = str(url.drivername or "").lower()
+    if driver.startswith("sqlite"):
+        return True
+    database_name = str(url.database or "").lower()
+    return "test" in database_name or "pytest" in database_name
+
+
+def assert_database_url_safe_for_tests(database_url: str) -> None:
+    if running_under_pytest() and not database_url_is_test_safe(database_url):
+        raise RuntimeError(PYTEST_DATABASE_ERROR)
+
+
 def create_db_engine(database_url: str | None = None) -> Engine:
     """
     Создаёт sync SQLAlchemy engine.
@@ -48,6 +72,7 @@ def create_db_engine(database_url: str | None = None) -> Engine:
         database_url: явный URL подключения; если не передан, берётся из env.
     """
     url = database_url or get_database_url()
+    assert_database_url_safe_for_tests(url)
     return create_engine(url, future=True, pool_pre_ping=True)
 
 

@@ -6,6 +6,8 @@ from typing import Any
 
 from django import forms
 
+from app.media_file_store import store_scene_candidate_media
+
 from .models import ChatSession, GenerationRun, Scene, SceneImageCandidate, SceneVideoCandidate
 
 
@@ -13,11 +15,48 @@ def _pretty(value: Any) -> str:
     return json.dumps(value if value is not None else {}, ensure_ascii=False, indent=2, sort_keys=True)
 
 
+def _scene_run_id(obj: Any) -> Any:
+    try:
+        scene = getattr(obj, "scene", None)
+    except Exception:
+        scene = None
+    return getattr(scene, "run_id", None)
+
+
 def _loads_json(value: str, *, fallback: Any) -> Any:
     text = (value or "").strip()
     if not text:
         return fallback
     return json.loads(text)
+
+
+def _speech_by_lang_from_admin_text(value: Any, *, existing: dict[str, Any] | None = None) -> dict[str, str]:
+    """Accept either a JSON language map or a plain Russian speech line."""
+    existing_clean = {
+        str(key).strip().lower(): " ".join(str(item or "").split())
+        for key, item in (existing or {}).items()
+        if str(key).strip() and str(item or "").strip()
+    }
+    if isinstance(value, dict):
+        return {
+            str(key).strip().lower(): " ".join(str(item or "").split())
+            for key, item in value.items()
+            if str(key).strip() and str(item or "").strip()
+        }
+    raw = str(value or "").strip()
+    if not raw:
+        return {}
+    if raw.startswith(("{", "[")):
+        try:
+            parsed = json.loads(raw)
+        except json.JSONDecodeError as exc:
+            raise forms.ValidationError(f"Invalid JSON: {exc}") from exc
+        if isinstance(parsed, dict):
+            return _speech_by_lang_from_admin_text(parsed)
+        if isinstance(parsed, str) and parsed.strip():
+            return {**existing_clean, "ru": " ".join(parsed.split())}
+        raise forms.ValidationError("Expected JSON object or plain speech text.")
+    return {**existing_clean, "ru": " ".join(raw.split())}
 
 
 _TITLE_COLOR_RE = re.compile(r"#?([0-9a-fA-F]{6})")
@@ -427,6 +466,12 @@ class SceneAdminForm(forms.ModelForm):
 
     def __init__(self, *args, production_scene: dict[str, Any] | None = None, **kwargs):
         super().__init__(*args, **kwargs)
+        self.fields["speech_by_lang"] = forms.CharField(
+            required=False,
+            label=self.fields["speech_by_lang"].label,
+            help_text="Можно вставить обычную русскую речь или JSON вида {\"ru\": \"...\", \"en\": \"...\"}.",
+            widget=forms.Textarea(attrs={"rows": 5}),
+        )
         payload = production_scene if isinstance(production_scene, dict) else {}
         if not payload and self.instance and self.instance.pk:
             payload = {
@@ -446,6 +491,16 @@ class SceneAdminForm(forms.ModelForm):
                     if isinstance(value, dict) and value:
                         payload[key] = value
         self.fields["production_scene_json"].initial = _pretty(payload)
+        speech_initial = payload.get("speech_by_lang") or getattr(self.instance, "speech_by_lang", None)
+        self._initial_speech_by_lang = speech_initial if isinstance(speech_initial, dict) else {}
+        if isinstance(speech_initial, dict) and speech_initial:
+            self.fields["speech_by_lang"].initial = _pretty(speech_initial)
+
+    def clean_speech_by_lang(self):
+        return _speech_by_lang_from_admin_text(
+            self.cleaned_data.get("speech_by_lang"),
+            existing=self._initial_speech_by_lang,
+        )
 
     def clean_production_scene_json(self):
         try:
@@ -503,7 +558,20 @@ class SceneImageCandidateAdminForm(forms.ModelForm):
         obj: SceneImageCandidate = super().save(commit=False)
         uploaded = self.cleaned_data.get("replacement_image")
         if uploaded is not None:
-            obj.image_blob = uploaded.read()
+            payload = uploaded.read()
+            if getattr(obj, "scene_id", None) and _scene_run_id(obj):
+                obj.image_blob = None
+                obj.media_uri = store_scene_candidate_media(
+                    run_id=_scene_run_id(obj),
+                    scene_id=obj.scene_id,
+                    candidate_id=obj.candidate_id,
+                    data=payload,
+                    extension="png",
+                )
+                obj.mime_type = str(getattr(uploaded, "content_type", "") or "image/png")
+                obj.byte_size = len(payload)
+            else:
+                obj.image_blob = payload
         if commit:
             obj.save()
         return obj
@@ -534,7 +602,20 @@ class SceneVideoCandidateAdminForm(forms.ModelForm):
         obj: SceneVideoCandidate = super().save(commit=False)
         uploaded = self.cleaned_data.get("replacement_video")
         if uploaded is not None:
-            obj.video_blob = uploaded.read()
+            payload = uploaded.read()
+            if getattr(obj, "scene_id", None) and _scene_run_id(obj):
+                obj.video_blob = None
+                obj.media_uri = store_scene_candidate_media(
+                    run_id=_scene_run_id(obj),
+                    scene_id=obj.scene_id,
+                    candidate_id=obj.candidate_id,
+                    data=payload,
+                    extension="mp4",
+                )
+                obj.mime_type = str(getattr(uploaded, "content_type", "") or "video/mp4")
+                obj.byte_size = len(payload)
+            else:
+                obj.video_blob = payload
         if commit:
             obj.save()
         return obj

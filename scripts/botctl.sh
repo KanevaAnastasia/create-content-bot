@@ -9,13 +9,23 @@ LOG_DIR="$ROOT_DIR/logs"
 SUPERVISOR_LOG="$LOG_DIR/bot.supervisor.log"
 FINAL_WORKER_LOG="$LOG_DIR/final_build_worker.log"
 FINAL_WORKER_PID_FILE="$RUNTIME_DIR/final_build_worker.pid"
+SCHEDULED_WORKER_LOG="$LOG_DIR/scheduled_generation_worker.log"
+SCHEDULED_WORKER_PID_FILE="$RUNTIME_DIR/scheduled_generation_worker.pid"
+CELERY_WORKER_LOG="$LOG_DIR/celery_worker.log"
+CELERY_WORKER_LAUNCHD_LOG="$LOG_DIR/celery_worker.launchd.log"
+CELERY_WORKER_LAUNCHD_ERR_LOG="$LOG_DIR/celery_worker.launchd.err.log"
+CELERY_WORKER_PID_FILE="$RUNTIME_DIR/celery_worker.pid"
+CELERY_BEAT_LOG="$LOG_DIR/celery_beat.log"
+CELERY_BEAT_LAUNCHD_LOG="$LOG_DIR/celery_beat.launchd.log"
+CELERY_BEAT_LAUNCHD_ERR_LOG="$LOG_DIR/celery_beat.launchd.err.log"
+CELERY_BEAT_PID_FILE="$RUNTIME_DIR/celery_beat.pid"
 PYTHON_BIN="$ROOT_DIR/.venv/bin/python"
 MAIN_SCRIPT="$ROOT_DIR/main.py"
 ADMIN_MANAGE="$ROOT_DIR/admin_panel/manage.py"
 LOCK_FILE="/tmp/content_fabric_bot.lock"
 
 usage() {
-  echo "Usage: $0 {start [-f|--follow]|stop|restart [-f|--follow]|status|logs [-f|--follow]|adopt <pid>|final-worker <run_id>|final-worker-foreground <run_id>|final-worker-status}"
+  echo "Usage: $0 {start [-f|--follow]|stop|restart [-f|--follow]|status|logs [-f|--follow]|adopt <pid>|final-worker <run_id>|final-worker-foreground <run_id>|final-worker-status|scheduled-worker [limit]|scheduled-worker-status|celery-worker|celery-worker-foreground|celery-worker-status|celery-beat|celery-beat-foreground|celery-beat-status}"
 }
 
 ensure_runtime() {
@@ -302,6 +312,153 @@ final_worker_status() {
   echo "Worker log: $FINAL_WORKER_LOG"
 }
 
+scheduled_worker_pids() {
+  pgrep -f "process_scheduled_generations" 2>/dev/null || true
+}
+
+scheduled_worker_once() {
+  ensure_runtime
+  local limit="${1:-0}"
+  if [[ ! -f "$ADMIN_MANAGE" ]]; then
+    echo "Django manage.py not found: $ADMIN_MANAGE" >&2
+    exit 1
+  fi
+  cd "$ROOT_DIR"
+  nohup "$PYTHON_BIN" "$ADMIN_MANAGE" process_scheduled_generations --due --once "--limit=$limit" >> "$SCHEDULED_WORKER_LOG" 2>&1 &
+  local pid="$!"
+  echo "$pid" > "$SCHEDULED_WORKER_PID_FILE"
+  echo "Scheduled generation worker started: pid=$pid limit=$limit"
+  echo "Worker log: $SCHEDULED_WORKER_LOG"
+}
+
+scheduled_worker_status() {
+  ensure_runtime
+  local pid
+  pid=""
+  if [[ -f "$SCHEDULED_WORKER_PID_FILE" ]]; then
+    pid="$(tr -d '[:space:]' < "$SCHEDULED_WORKER_PID_FILE")"
+  fi
+  if pid_is_running "$pid"; then
+    echo "Scheduled generation worker is running: pid=$pid"
+    echo "Command: $(pid_command "$pid")"
+  else
+    echo "Scheduled generation worker pid file is not active"
+  fi
+  local running
+  running="$(scheduled_worker_pids || true)"
+  if [[ -n "$running" ]]; then
+    echo "Detected process_scheduled_generations processes:"
+    for pid in $running; do
+      if pid_is_running "$pid"; then
+        echo "  pid=$pid command=$(pid_command "$pid")"
+      fi
+    done
+  fi
+  echo "Worker log: $SCHEDULED_WORKER_LOG"
+}
+
+celery_worker_pids() {
+  ps ax -o pid=,command= 2>/dev/null | awk '/[c]elery -A cf_admin worker/ {print $1}' || true
+}
+
+celery_beat_pids() {
+  ps ax -o pid=,command= 2>/dev/null | awk '/[c]elery -A cf_admin beat/ {print $1}' || true
+}
+
+celery_pythonpath() {
+  if [[ -n "${PYTHONPATH:-}" ]]; then
+    echo "$ROOT_DIR:$ROOT_DIR/admin_panel:$PYTHONPATH"
+  else
+    echo "$ROOT_DIR:$ROOT_DIR/admin_panel"
+  fi
+}
+
+celery_worker_start() {
+  ensure_runtime
+  cd "$ROOT_DIR"
+  nohup env "PYTHONPATH=$(celery_pythonpath)" "$PYTHON_BIN" -m celery -A cf_admin worker --loglevel=INFO --concurrency=1 --pool=solo >> "$CELERY_WORKER_LOG" 2>&1 &
+  local pid="$!"
+  echo "$pid" > "$CELERY_WORKER_PID_FILE"
+  echo "Celery worker started: pid=$pid"
+  echo "Worker log: $CELERY_WORKER_LOG"
+}
+
+celery_worker_status() {
+  ensure_runtime
+  local pid
+  pid=""
+  if [[ -f "$CELERY_WORKER_PID_FILE" ]]; then
+    pid="$(tr -d '[:space:]' < "$CELERY_WORKER_PID_FILE")"
+  fi
+  if pid_is_running "$pid"; then
+    echo "Celery worker is running: pid=$pid"
+    echo "Command: $(pid_command "$pid")"
+  else
+    echo "Celery worker pid file is not active"
+  fi
+  local running
+  running="$(celery_worker_pids || true)"
+  if [[ -n "$running" ]]; then
+    echo "Detected Celery worker processes:"
+    for pid in $running; do
+      if pid_is_running "$pid"; then
+        echo "  pid=$pid command=$(pid_command "$pid")"
+      fi
+    done
+  fi
+  echo "Worker log: $CELERY_WORKER_LOG"
+  echo "LaunchAgent logs: $CELERY_WORKER_LAUNCHD_LOG $CELERY_WORKER_LAUNCHD_ERR_LOG"
+}
+
+celery_worker_foreground() {
+  ensure_runtime
+  cd "$ROOT_DIR"
+  env "PYTHONPATH=$(celery_pythonpath)" "$PYTHON_BIN" -m celery -A cf_admin worker --loglevel=INFO --concurrency=1 --pool=solo
+}
+
+celery_beat_start() {
+  ensure_runtime
+  cd "$ROOT_DIR"
+  nohup env "PYTHONPATH=$(celery_pythonpath)" "$PYTHON_BIN" -m celery -A cf_admin beat --loglevel=INFO --scheduler django_celery_beat.schedulers:DatabaseScheduler >> "$CELERY_BEAT_LOG" 2>&1 &
+  local pid="$!"
+  echo "$pid" > "$CELERY_BEAT_PID_FILE"
+  echo "Celery beat started: pid=$pid"
+  echo "Beat log: $CELERY_BEAT_LOG"
+}
+
+celery_beat_status() {
+  ensure_runtime
+  local pid
+  pid=""
+  if [[ -f "$CELERY_BEAT_PID_FILE" ]]; then
+    pid="$(tr -d '[:space:]' < "$CELERY_BEAT_PID_FILE")"
+  fi
+  if pid_is_running "$pid"; then
+    echo "Celery beat is running: pid=$pid"
+    echo "Command: $(pid_command "$pid")"
+  else
+    echo "Celery beat pid file is not active"
+  fi
+  local running
+  running="$(celery_beat_pids || true)"
+  if [[ -n "$running" ]]; then
+    echo "Detected Celery beat processes:"
+    for pid in $running; do
+      if pid_is_running "$pid"; then
+        echo "  pid=$pid command=$(pid_command "$pid")"
+      fi
+    done
+  fi
+  echo "Beat log: $CELERY_BEAT_LOG"
+  echo "LaunchAgent logs: $CELERY_BEAT_LAUNCHD_LOG $CELERY_BEAT_LAUNCHD_ERR_LOG"
+}
+
+celery_beat_foreground() {
+  ensure_runtime
+  cd "$ROOT_DIR"
+  env "PYTHONPATH=$(celery_pythonpath)" "$PYTHON_BIN" -m celery -A cf_admin beat --loglevel=INFO --scheduler django_celery_beat.schedulers:DatabaseScheduler
+}
+
 adopt_bot() {
   ensure_runtime
   local pid="${1:-}"
@@ -375,6 +532,30 @@ case "${1:-}" in
     ;;
   final-worker-status)
     final_worker_status
+    ;;
+  scheduled-worker)
+    scheduled_worker_once "${2:-0}"
+    ;;
+  scheduled-worker-status)
+    scheduled_worker_status
+    ;;
+  celery-worker)
+    celery_worker_start
+    ;;
+  celery-worker-foreground)
+    celery_worker_foreground
+    ;;
+  celery-worker-status)
+    celery_worker_status
+    ;;
+  celery-beat)
+    celery_beat_start
+    ;;
+  celery-beat-foreground)
+    celery_beat_foreground
+    ;;
+  celery-beat-status)
+    celery_beat_status
     ;;
   logs)
     show_logs "${2:-}"

@@ -1,5 +1,6 @@
 import asyncio
 import hashlib
+import os
 import re
 import subprocess
 from dataclasses import dataclass
@@ -10,7 +11,8 @@ from telegram import ReplyKeyboardMarkup, ReplyKeyboardRemove
 from telegram.error import NetworkError, RetryAfter, TimedOut
 
 from ..character_catalog import sanitize_character_names_and_keys
-from ..pipeline_llm_steps import RUSSIAN_YO_RULE
+from ..dish_visuals import append_dish_visual_brief_to_prompt, build_dish_visual_brief
+from ..pipeline_llm_steps import FINAL_SCENE_SUBSCRIBE_CTA, RUSSIAN_YO_RULE
 from .handlers_state_deps import (
     ContextTypes,
     SESSIONS,
@@ -96,7 +98,9 @@ from .handlers_state_deps import (
     ServiceUnavailableRetriesExhaustedError,
 )
 from ..ai_approval_service import (
+    AIApprovalResult,
     AI_APPROVAL_STATUS_APPROVE,
+    AI_APPROVAL_STATUS_FIX_PROMPT,
     AI_APPROVAL_STATUS_HUMAN_REVIEW,
     AI_APPROVAL_STATUS_REGENERATE_IMAGE,
     AI_APPROVAL_STATUS_REGENERATE_VIDEO,
@@ -112,6 +116,7 @@ from ..artifact_store import persist_post_production_artifacts
 from ..final_build_queue import queue_final_builds_for_session
 from ..final_video_delivery import all_final_artifacts_delivered
 from ..generation_store import mark_generation_run_ready
+from .handlers_generation_utils import fetch_recipe_text_from_url
 from .handlers_state_commands import _regenerate_image_prompt_from_feedback
 from .handlers_keyboards import first_step_menu_markup, reply_text_without_keyboard, safe_send_message
 from ..llm_utils import extract_json_object
@@ -139,6 +144,7 @@ from ..scene_media_candidates import (
     resolve_scene_image_for_video,
     resolve_scene_video_for_production,
     selected_image_bytes_for_video,
+    selected_video_bytes_for_production,
 )
 from ..scene_media_store import (
     persist_image_candidate,
@@ -197,6 +203,20 @@ SCENE_IMAGE_MODEL_CHOICE_PENDING_KEY = "image_model_choice_pending"
 SCENE_IMAGE_MODEL_RETRY_BUTTON = "ПОВТОРИТЬ СИЛЬНУЮ"
 SCENE_IMAGE_MODEL_DOWNGRADE_BUTTON = "ПОНИЗИТЬ МОДЕЛЬ"
 SCENE_MEDIA_AI_HUMAN_REVIEW_SESSION_KEY = "scene_media_ai_human_review"
+SCENE_MEDIA_AI_TECHNICAL_FAILURE_SESSION_KEY = "scene_media_ai_technical_failure"
+DRAFT_REPAIR_ACTIVE_PLAN_KEY = "draft_repair_active_plan"
+SCHEDULED_AI_APPROVAL_MAX_ATTEMPTS_ENV_NAME = "SCHEDULED_AI_APPROVAL_MAX_ATTEMPTS"
+AI_APPROVAL_RETRY_COUNT_ENV_NAME = "AI_APPROVAL_RETRY_COUNT"
+AI_APPROVAL_RETRY_DELAY_SEC_ENV_NAME = "AI_APPROVAL_RETRY_DELAY_SEC"
+SCHEDULED_AI_APPROVAL_RETRY_COUNT_ENV_NAME = "SCHEDULED_AI_APPROVAL_RETRY_COUNT"
+SCHEDULED_AI_APPROVAL_RETRY_DELAY_SEC_ENV_NAME = "SCHEDULED_AI_APPROVAL_RETRY_DELAY_SEC"
+SCHEDULED_AI_APPROVAL_RETRY_INITIAL_DELAY_SEC_ENV_NAME = "SCHEDULED_AI_APPROVAL_RETRY_INITIAL_DELAY_SEC"
+SCHEDULED_AI_APPROVAL_RETRY_MAX_DELAY_SEC_ENV_NAME = "SCHEDULED_AI_APPROVAL_RETRY_MAX_DELAY_SEC"
+SCHEDULED_SYNTAX_VIDEO_RETRY_COUNT_ENV_NAME = "SCHEDULED_SYNTAX_VIDEO_RETRY_COUNT"
+SCHEDULED_SYNTAX_VIDEO_RETRY_DELAY_SEC_ENV_NAME = "SCHEDULED_SYNTAX_VIDEO_RETRY_DELAY_SEC"
+SCHEDULED_SYNTAX_VIDEO_RETRY_MAX_DELAY_SEC_ENV_NAME = "SCHEDULED_SYNTAX_VIDEO_RETRY_MAX_DELAY_SEC"
+SCHEDULED_SYNTAX_FALLBACK_TIMEOUT_SEC_ENV_NAME = "SCHEDULED_SYNTAX_FALLBACK_TIMEOUT_SEC"
+SCHEDULED_SYNTAX_FALLBACK_LOCK_TIMEOUT_SEC_ENV_NAME = "SCHEDULED_SYNTAX_FALLBACK_LOCK_TIMEOUT_SEC"
 START_IMAGE_MODEL_KEY = "start_frame_image_model"
 END_IMAGE_MODEL_KEY = "end_frame_image_model"
 EDITED_IMAGE_MODEL_KEY = "edited_image_model"
@@ -289,7 +309,22 @@ def _keyboard_snapshot(state: str, markup: object) -> SceneMediaKeyboardSnapshot
     return SceneMediaKeyboardSnapshot(state=state, rows=_keyboard_rows(markup), markup=markup)
 
 
-def _syntax_recovery_markup(languages: list[str] | None = None) -> ReplyKeyboardMarkup:
+def _scene_media_stop_visible(session: dict | None) -> bool:
+    if not isinstance(session, dict):
+        return False
+    approve_mode = str(session.get(SCENE_MEDIA_APPROVE_MODE_SESSION_KEY) or "").strip()
+    return bool(session.get(SCENE_MEDIA_AUTO_APPROVE_SESSION_KEY)) or (
+        approve_mode == SCENE_MEDIA_APPROVE_MODE_AI
+        and not bool(session.get(SCENE_MEDIA_AI_HUMAN_REVIEW_SESSION_KEY))
+    )
+
+
+def _append_stop_if_needed(rows: list[list[str]], session: dict | None) -> None:
+    if _scene_media_stop_visible(session):
+        rows.append([SCENE_MEDIA_STOP_BUTTON])
+
+
+def _syntax_recovery_markup(languages: list[str] | None = None, *, session: dict | None = None) -> ReplyKeyboardMarkup:
     rows: list[list[str]] = [["Syntax"], ["Vertex"], ["ФИДБЕК:"]]
     langs = [str(lang).strip().lower() for lang in (languages or []) if str(lang).strip()]
     if langs:
@@ -302,6 +337,20 @@ def _syntax_recovery_markup(languages: list[str] | None = None) -> ReplyKeyboard
         rows.append(["ФРАЗА:"])
     rows.append([NAV_BUTTON_PREVIOUS_STEP])
     rows.append([NAV_BUTTON_START_OVER])
+    _append_stop_if_needed(rows, session)
+    return ReplyKeyboardMarkup(rows, resize_keyboard=True, one_time_keyboard=False)
+
+
+def _stop_or_start_over_markup(session: dict | None = None) -> ReplyKeyboardMarkup:
+    rows = [[NAV_BUTTON_START_OVER]]
+    if _scene_media_stop_visible(session):
+        rows.insert(0, [SCENE_MEDIA_STOP_BUTTON])
+    return ReplyKeyboardMarkup(rows, resize_keyboard=True, one_time_keyboard=False)
+
+
+def _syntax_confirmation_markup(*, session: dict | None = None) -> ReplyKeyboardMarkup:
+    rows = [["да"], ["нет"], [NAV_BUTTON_PREVIOUS_STEP], [NAV_BUTTON_START_OVER]]
+    _append_stop_if_needed(rows, session)
     return ReplyKeyboardMarkup(rows, resize_keyboard=True, one_time_keyboard=False)
 
 
@@ -331,17 +380,13 @@ def scene_media_keyboard_snapshot(session: dict) -> SceneMediaKeyboardSnapshot:
         )
         return _keyboard_snapshot(
             "scene_media.video.provider_choice",
-            _syntax_recovery_markup(pending_languages),
+            _syntax_recovery_markup(pending_languages, session=session),
         )
 
     if isinstance(scene.get("syntax_fallback_pending"), dict):
         return _keyboard_snapshot(
             "scene_media.video.syntax_confirmation",
-            ReplyKeyboardMarkup(
-                [["да"], ["нет"], [NAV_BUTTON_PREVIOUS_STEP], [NAV_BUTTON_START_OVER]],
-                resize_keyboard=True,
-                one_time_keyboard=False,
-            ),
+            _syntax_confirmation_markup(session=session),
         )
 
     image_model_pending = scene.get(SCENE_IMAGE_MODEL_CHOICE_PENDING_KEY)
@@ -349,7 +394,8 @@ def scene_media_keyboard_snapshot(session: dict) -> SceneMediaKeyboardSnapshot:
         return _keyboard_snapshot(
             "scene_media.image.model_choice",
             _scene_image_model_retry_markup(
-                lower_model=str(image_model_pending.get("lower_model") or "").strip() or None
+                lower_model=str(image_model_pending.get("lower_model") or "").strip() or None,
+                session=session,
             ),
         )
 
@@ -359,7 +405,7 @@ def scene_media_keyboard_snapshot(session: dict) -> SceneMediaKeyboardSnapshot:
         if stage == "approval":
             markup = _scene_speech_approval_markup(session=session)
         elif stage == "approval_manual_phrase":
-            markup = ReplyKeyboardRemove()
+            markup = _stop_or_start_over_markup(session)
         elif stage == "user_long_phrase_choice":
             markup = _scene_speech_user_long_phrase_markup(session=session)
         else:
@@ -402,7 +448,7 @@ def scene_media_keyboard_snapshot(session: dict) -> SceneMediaKeyboardSnapshot:
         if isinstance(pending, dict) and int(pending.get("scene_idx", -1)) == idx:
             return _keyboard_snapshot(
                 f"scene_media.input.{state_suffix}",
-                ReplyKeyboardRemove(),
+                _stop_or_start_over_markup(session),
             )
 
     substep = str(session.get("scene_media_substep") or SCENE_MEDIA_SUBSTEP_START)
@@ -444,7 +490,8 @@ def scene_media_keyboard_snapshot(session: dict) -> SceneMediaKeyboardSnapshot:
         return _keyboard_snapshot(
             "scene_media.video.policy_retry",
             video_policy_retry_markup(
-                include_restart_hint=_should_suggest_regenerate_start_frame_after_video_prompt_fails(scene)
+                include_restart_hint=_should_suggest_regenerate_start_frame_after_video_prompt_fails(scene),
+                session=session,
             ),
         )
     return _keyboard_snapshot(
@@ -867,18 +914,20 @@ def _next_lower_scene_image_model(scene: dict, target: str) -> str | None:
     return _next_image_quality_model(_scene_image_model_for_generation(scene, target) or primary_image_generation_model())
 
 
-def _scene_image_model_retry_markup(*, lower_model: str | None) -> ReplyKeyboardMarkup:
+def _scene_image_model_retry_markup(*, lower_model: str | None, session: dict | None = None) -> ReplyKeyboardMarkup:
     rows = [[SCENE_IMAGE_MODEL_RETRY_BUTTON]]
     if lower_model:
         rows.append([SCENE_IMAGE_MODEL_DOWNGRADE_BUTTON])
     rows.append([NAV_BUTTON_PREVIOUS_STEP])
     rows.append([NAV_BUTTON_START_OVER])
+    _append_stop_if_needed(rows, session)
     return ReplyKeyboardMarkup(rows, resize_keyboard=True, one_time_keyboard=False)
 
 
 async def _ask_scene_image_model_choice(
     update: Update,
     *,
+    session: dict | None = None,
     scene: dict,
     target: str,
     failed_model: str,
@@ -905,7 +954,7 @@ async def _ask_scene_image_model_choice(
         update.message,
         f"Не удалось сгенерировать {target_label} на модели `{failed_model}`.\n"
         f"Ошибка: {_user_error_message(error)}\n\n{tail}",
-        reply_markup=_scene_image_model_retry_markup(lower_model=lower_model),
+        reply_markup=_scene_image_model_retry_markup(lower_model=lower_model, session=session),
     )
 
 
@@ -918,6 +967,24 @@ def _dedupe_image_reference_bytes(items: list[bytes | None]) -> list[bytes]:
         seen.add(item)
         out.append(item)
     return out
+
+
+def _image_reference_debug_text(label: str, refs: list[bytes], *, source_counts: dict[str, int] | None = None) -> str:
+    source_bits = []
+    for key, value in (source_counts or {}).items():
+        if value:
+            source_bits.append(f"{key}={value}")
+    items = []
+    for index, ref in enumerate(refs, start=1):
+        digest = hashlib.sha1(ref).hexdigest()[:10]
+        items.append(f"{index}: {len(ref)}b sha1={digest}")
+    source_text = ", ".join(source_bits) or "source=n/a"
+    item_text = "; ".join(items[:8]) or "-"
+    return f"{label} refs: total={len(refs)} ({source_text})\n{item_text}"
+
+
+async def _send_image_reference_debug(update: Update, label: str, refs: list[bytes], *, source_counts: dict[str, int] | None = None) -> None:
+    await _safe_reply_text(update.message, _image_reference_debug_text(label, refs, source_counts=source_counts))
 
 
 def _image_reference_target_for_substep(substep: str) -> str | None:
@@ -1303,6 +1370,79 @@ def _scene_speed_coef(scene: dict, language: str) -> float:
     return parse_speed_coef(selected.get("speed_coef")) or DEFAULT_SCENE_VIDEO_SPEED_COEF
 
 
+def _candidate_speech_qa(scene: dict, language: str, candidate: dict | None) -> dict:
+    if not isinstance(candidate, dict):
+        return {}
+    mapping = candidate.get("video_speech_qa_by_lang")
+    value = mapping.get(language) if isinstance(mapping, dict) else None
+    return value if isinstance(value, dict) else {}
+
+
+def _snapshot_candidate_speech_source(scene: dict, language: str, candidate: dict | None) -> None:
+    if not isinstance(candidate, dict):
+        return
+    lang = normalize_language_code(language) or "ru"
+    qa = _candidate_speech_qa(scene, lang, candidate)
+    recognized = str(qa.get("recognized_text") or "").strip()
+    speech = recognized or _scene_speech_for_language(scene, lang)
+    speech_map = dict(candidate.get("speech_by_lang") or {}) if isinstance(candidate.get("speech_by_lang"), dict) else {}
+    if speech:
+        speech_map[lang] = speech
+        candidate["speech_by_lang"] = speech_map
+    prompt = _scene_video_prompt_for_language(scene, lang)
+    prompt_map = dict(candidate.get("video_prompt_by_lang") or {}) if isinstance(candidate.get("video_prompt_by_lang"), dict) else {}
+    if prompt:
+        prompt_map[lang] = prompt
+        candidate["video_prompt_by_lang"] = prompt_map
+    cues_map = scene.get("speech_cues_by_lang")
+    if isinstance(cues_map, dict) and cues_map.get(lang) and not recognized:
+        candidate_cues = (
+            dict(candidate.get("speech_cues_by_lang") or {})
+            if isinstance(candidate.get("speech_cues_by_lang"), dict)
+            else {}
+        )
+        candidate_cues[lang] = cues_map.get(lang)
+        candidate["speech_cues_by_lang"] = candidate_cues
+    plan_map = scene.get("speech_plan_by_lang")
+    if isinstance(plan_map, dict) and plan_map.get(lang) and not recognized:
+        candidate_plan = (
+            dict(candidate.get("speech_plan_by_lang") or {})
+            if isinstance(candidate.get("speech_plan_by_lang"), dict)
+            else {}
+        )
+        candidate_plan[lang] = plan_map.get(lang)
+        candidate["speech_plan_by_lang"] = candidate_plan
+
+
+def _store_ai_video_speech_qa(scene: dict, language: str, result: AIApprovalResult) -> None:
+    candidate = resolve_scene_video_for_production(scene, language)
+    if candidate is None:
+        return
+    lang = normalize_language_code(language) or "ru"
+    qa_map = (
+        dict(candidate.get("video_speech_qa_by_lang") or {})
+        if isinstance(candidate.get("video_speech_qa_by_lang"), dict)
+        else {}
+    )
+    qa_map[lang] = {
+        "status": result.status,
+        "speech_completion_score": result.speech_completion_score,
+        "recognized_text": result.speech_recognized_text,
+        "missing_words": list(result.speech_missing_words),
+        "extra_words": list(result.speech_extra_words),
+    }
+    candidate["video_speech_qa_by_lang"] = qa_map
+    if result.speech_recognized_text.strip():
+        speech_map = (
+            dict(candidate.get("speech_by_lang") or {})
+            if isinstance(candidate.get("speech_by_lang"), dict)
+            else {}
+        )
+        speech_map[lang] = result.speech_recognized_text.strip()
+        candidate["speech_by_lang"] = speech_map
+    _persist_video_state_best_effort(candidate)
+
+
 def _approve_scene_video_language(scene: dict, language: str, *, speed_coef: float | None = None) -> None:
     approvals = scene.get("video_approvals_by_lang")
     if not isinstance(approvals, dict):
@@ -1312,6 +1452,7 @@ def _approve_scene_video_language(scene: dict, language: str, *, speed_coef: flo
     selected = resolve_scene_video_for_production(scene, language)
     if selected is None:
         return
+    _snapshot_candidate_speech_source(scene, language, selected)
     mark_video_candidate_approved(
         scene,
         language,
@@ -1496,6 +1637,250 @@ def _clear_ai_human_review_pending(session: dict) -> None:
     session.pop(SCENE_MEDIA_AI_HUMAN_REVIEW_SESSION_KEY, None)
 
 
+def _is_scheduled_unattended_ai_mode(session: dict) -> bool:
+    return bool(session.get("scheduled_generation_mode") or session.get("scene_media_unattended_ai"))
+
+
+def _scheduled_ai_approval_max_attempts() -> int:
+    raw = str(os.getenv(SCHEDULED_AI_APPROVAL_MAX_ATTEMPTS_ENV_NAME) or "").strip()
+    if not raw:
+        return 25
+    try:
+        value = int(raw)
+    except ValueError:
+        return 25
+    if value <= 0:
+        return 1_000_000
+    return value
+
+
+def _ai_regenerate_attempt_limit(session: dict) -> int:
+    if _is_scheduled_unattended_ai_mode(session):
+        return _scheduled_ai_approval_max_attempts()
+    return get_ai_approval_config().max_regenerate_attempts
+
+
+def _int_env_value(name: str, default: int) -> int:
+    try:
+        return int(str(os.getenv(name) or "").strip() or default)
+    except (TypeError, ValueError):
+        return default
+
+
+def _float_env_value(name: str, default: float) -> float:
+    try:
+        return float(str(os.getenv(name) or "").strip() or default)
+    except (TypeError, ValueError):
+        return default
+
+
+def _ai_approval_retry_count(session: dict) -> int:
+    if _is_scheduled_unattended_ai_mode(session):
+        return max(0, _int_env_value(SCHEDULED_AI_APPROVAL_RETRY_COUNT_ENV_NAME, 48))
+    return max(0, _int_env_value(AI_APPROVAL_RETRY_COUNT_ENV_NAME, 3))
+
+
+def _ai_approval_retry_delay_sec(session: dict, attempt: int = 1) -> float:
+    if _is_scheduled_unattended_ai_mode(session):
+        legacy_delay = _float_env_value(SCHEDULED_AI_APPROVAL_RETRY_DELAY_SEC_ENV_NAME, 300.0)
+        max_delay = max(
+            0.0,
+            _float_env_value(SCHEDULED_AI_APPROVAL_RETRY_MAX_DELAY_SEC_ENV_NAME, legacy_delay),
+        )
+        initial_delay = max(
+            0.0,
+            _float_env_value(SCHEDULED_AI_APPROVAL_RETRY_INITIAL_DELAY_SEC_ENV_NAME, min(60.0, max_delay)),
+        )
+        if max_delay <= 0 or initial_delay <= 0:
+            return 0.0
+        retry_index = max(0, int(attempt) - 1)
+        return min(max_delay, initial_delay * (2**retry_index))
+    return max(0.0, _float_env_value(AI_APPROVAL_RETRY_DELAY_SEC_ENV_NAME, 60.0))
+
+
+def _scheduled_syntax_video_retry_count(session: dict) -> int:
+    if not _is_scheduled_unattended_ai_mode(session):
+        return 0
+    return max(1, _int_env_value(SCHEDULED_SYNTAX_VIDEO_RETRY_COUNT_ENV_NAME, 24))
+
+
+def _scheduled_syntax_video_retry_delay_sec(session: dict, attempt: int = 1) -> float:
+    if not _is_scheduled_unattended_ai_mode(session):
+        return 0.0
+    max_delay = max(0.0, _float_env_value(SCHEDULED_SYNTAX_VIDEO_RETRY_MAX_DELAY_SEC_ENV_NAME, 300.0))
+    initial_delay = max(0.0, _float_env_value(SCHEDULED_SYNTAX_VIDEO_RETRY_DELAY_SEC_ENV_NAME, 60.0))
+    if max_delay <= 0 or initial_delay <= 0:
+        return 0.0
+    retry_index = max(0, int(attempt) - 1)
+    return min(max_delay, initial_delay * (2**retry_index))
+
+
+def _scheduled_syntax_timeout_sec(session: dict) -> int | None:
+    if not _is_scheduled_unattended_ai_mode(session):
+        return None
+    return max(60, _int_env_value(SCHEDULED_SYNTAX_FALLBACK_TIMEOUT_SEC_ENV_NAME, 3600))
+
+
+def _scheduled_syntax_lock_timeout_sec(session: dict) -> int | None:
+    if not _is_scheduled_unattended_ai_mode(session):
+        return None
+    timeout_sec = _scheduled_syntax_timeout_sec(session) or 3600
+    return max(60, _int_env_value(SCHEDULED_SYNTAX_FALLBACK_LOCK_TIMEOUT_SEC_ENV_NAME, timeout_sec))
+
+
+async def _attempt_scheduled_syntax_batch(
+    *,
+    requests: list[BatchFallbackRequest],
+    model: str,
+    duration_sec: int,
+    session: dict,
+) -> dict[str, bytes]:
+    timeout_sec = _scheduled_syntax_timeout_sec(session)
+    lock_timeout_sec = _scheduled_syntax_lock_timeout_sec(session)
+    try:
+        return await _attempt_syntax_video_fallback_batch(
+            requests=requests,
+            model=model,
+            duration_sec=duration_sec,
+            timeout_sec=timeout_sec,
+            acquire_timeout_sec=lock_timeout_sec,
+        )
+    except TypeError as exc:
+        if "unexpected keyword" not in str(exc):
+            raise
+        return await _attempt_syntax_video_fallback_batch(
+            requests=requests,
+            model=model,
+            duration_sec=duration_sec,
+        )
+
+
+def _ai_approval_result_text(result) -> str:
+    parts = [
+        str(getattr(result, "recommended_action", "") or ""),
+        str(getattr(result, "raw_model_response", "") or ""),
+    ]
+    for attr in ("critical_issues", "warnings", "positive_notes"):
+        value = getattr(result, attr, None)
+        if isinstance(value, list):
+            parts.extend(str(item) for item in value)
+        elif value:
+            parts.append(str(value))
+    return " ".join(part for part in parts if part).strip()
+
+
+def _is_ai_approval_transient_limit_result(result) -> bool:
+    text = _ai_approval_result_text(result).lower()
+    if not text:
+        return False
+    non_retryable_markers = (
+        "prompt_block_reason=prohibited_content",
+        "prompt block reason=prohibited_content",
+        "prohibited_content",
+        "blocked due to prohibited contents",
+        "prompt is blocked",
+        "safety block",
+        "safety blocked",
+    )
+    if any(marker in text for marker in non_retryable_markers):
+        return False
+    markers = (
+        "лимит генераций",
+        "лимит ai",
+        "слишком много запросов",
+        "подождите минуту",
+        "quota",
+        "resource_exhausted",
+        "resource exhausted",
+        "rate limit",
+        "too many requests",
+        "429",
+        "timed out",
+        "timeout",
+        "ответ модели не приш",
+        "empty response",
+        "returned empty response",
+        "пустой ответ",
+    )
+    return any(marker in text for marker in markers)
+
+
+async def _run_ai_approval_with_limit_retry(update: Update, session: dict, *, stage: str, op):
+    max_retries = _ai_approval_retry_count(session)
+    attempt = 0
+    while True:
+        result = await asyncio.to_thread(op)
+        is_transient_limit = _is_ai_approval_transient_limit_result(result)
+        if not is_transient_limit:
+            return result
+        reason = _ai_approval_result_text(result)[:1200]
+        if _is_scheduled_unattended_ai_mode(session):
+            if stage == "video":
+                await _safe_reply_text(
+                    update.message,
+                    "🤖 ИИ апрув получил временный технический сбой проверки видео. "
+                    "Ночной режим не останавливаю: перегенерирую видео для этого языка и продолжу.",
+                )
+                return result
+            session[SCENE_MEDIA_AI_TECHNICAL_FAILURE_SESSION_KEY] = {
+                "stage": stage,
+                "attempts": attempt + 1,
+                "max_retries": max_retries,
+                "reason": reason,
+            }
+            await _safe_reply_text(
+                update.message,
+                "🤖 ИИ апрув получил временный технический сбой проверки "
+                f"({stage}). Сохраняю шаг и отложу повтор через scheduled queue, "
+                "без долгого ожидания внутри бота.",
+            )
+            return result
+        if attempt >= max_retries:
+            session[SCENE_MEDIA_AI_TECHNICAL_FAILURE_SESSION_KEY] = {
+                "stage": stage,
+                "attempts": attempt,
+                "max_retries": max_retries,
+                "reason": reason,
+            }
+            await _safe_reply_text(
+                update.message,
+                "🤖 ИИ апрув не смог выполнить техническую проверку "
+                f"({stage}) после {max_retries} retry. "
+                "Останавливаю ночной пайплайн без перегенерации кадра.",
+            )
+            return result
+        attempt += 1
+        delay_sec = _ai_approval_retry_delay_sec(session, attempt)
+        await _safe_reply_text(
+            update.message,
+            "🤖 ИИ апрув уперся во временный технический сбой проверки "
+            f"({stage}). Жду {delay_sec:g} секунд и повторяю "
+            f"(попытка {attempt}/{max_retries})."
+        )
+        if delay_sec > 0:
+            await asyncio.sleep(delay_sec)
+
+
+def _normalize_ai_status_for_session(session: dict, status: str, *, stage: str) -> str:
+    normalized = str(status or "").strip().upper()
+    technical_failure = session.get(SCENE_MEDIA_AI_TECHNICAL_FAILURE_SESSION_KEY)
+    if (
+        _is_scheduled_unattended_ai_mode(session)
+        and isinstance(technical_failure, dict)
+        and str(technical_failure.get("stage") or "") == stage
+    ):
+        return AI_APPROVAL_STATUS_HUMAN_REVIEW
+    if not _is_scheduled_unattended_ai_mode(session) or normalized != AI_APPROVAL_STATUS_HUMAN_REVIEW:
+        return normalized
+    if stage in {"image", "end_image"}:
+        return AI_APPROVAL_STATUS_REGENERATE_IMAGE
+    if stage == "video":
+        return AI_APPROVAL_STATUS_REGENERATE_VIDEO
+    if stage == "prompt":
+        return AI_APPROVAL_STATUS_FIX_PROMPT
+    return normalized
+
+
 def _ai_attempt_count(scene: dict, stage: str) -> int:
     history = scene.get("ai_approval_history")
     if not isinstance(history, list):
@@ -1503,12 +1888,208 @@ def _ai_attempt_count(scene: dict, stage: str) -> int:
     return sum(1 for item in history if isinstance(item, dict) and item.get("stage") == stage)
 
 
-def _append_ai_approval_history(scene: dict, result, *, stage: str) -> None:
+def _append_ai_approval_history(scene: dict, result, *, stage: str, language: str | None = None) -> None:
     history = scene.get("ai_approval_history")
     if not isinstance(history, list):
         history = []
-    history.append(ai_approval_history_entry(result, attempt=_ai_attempt_count(scene, stage) + 1))
+    entry = ai_approval_history_entry(result, attempt=_ai_attempt_count(scene, stage) + 1)
+    if language:
+        entry["language"] = str(language).strip().lower()
+    history.append(entry)
     scene["ai_approval_history"] = history
+
+
+def _latest_ai_approval_feedback(scene: dict, *, stage: str) -> str:
+    history = scene.get("ai_approval_history")
+    if not isinstance(history, list):
+        return ""
+    for item in reversed(history):
+        if not isinstance(item, dict) or item.get("stage") != stage:
+            continue
+        parts: list[str] = []
+        for key, label in (
+            ("critical_issues", "Critical issues"),
+            ("warnings", "Warnings"),
+        ):
+            values = item.get(key)
+            if isinstance(values, list):
+                text = "; ".join(str(value).strip() for value in values if str(value).strip())
+                if text:
+                    parts.append(f"{label}: {text}")
+        recommended = str(item.get("recommended_action") or "").strip()
+        if recommended:
+            parts.append(f"Recommended action: {recommended}")
+        raw = str(item.get("raw_model_response") or "").strip()
+        if raw and not parts:
+            parts.append(raw[:1200])
+        return "\n".join(parts).strip()
+    return ""
+
+
+async def _regenerate_start_prompt_from_ai_feedback(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE | None,
+    *,
+    chat_id: int | None,
+    session: dict,
+    scene: dict,
+    idx: int,
+) -> bool:
+    feedback = _latest_ai_approval_feedback(scene, stage="image")
+    if not feedback:
+        feedback = (
+            "AI approval rejected the start frame. Rewrite the start frame prompt so the next image fixes "
+            "the visual mismatch, preserves required characters, contains no visible text, and matches the real dish."
+        )
+    dish_brief = _dish_visual_brief_for_session(session, scene)
+    if dish_brief:
+        feedback = (
+            f"{feedback}\n\n"
+            "Keep the real dish appearance exactly:\n"
+            f"{dish_brief}"
+        )
+    await _safe_reply_text(
+        update.message,
+        "🤖 ИИ апрув дал фидбэк по стартовому кадру. "
+        "Сначала переписываю prompt с учетом замечаний, потом генерирую новый кадр.\n\n"
+        f"{_prompt_preview(feedback)}",
+    )
+    try:
+        new_prompt = await _call_with_503_retries(
+            update,
+            context,
+            chat_id,
+            "regenerate_image_prompt_ai_feedback",
+            lambda: _regenerate_image_prompt_from_feedback(scene, feedback),
+        )
+    except ServiceUnavailableRetriesExhaustedError as e:
+        await _safe_reply_text(update.message, str(e))
+        return False
+    except Exception as e:
+        logger.exception("ai feedback image prompt regeneration failed")
+        await _safe_reply_text(update.message, f"Ошибка перегенерации prompt по AI feedback: {_user_error_message(e)}")
+        return False
+    new_prompt = _enforce_start_prompt_shot_type(scene, str(new_prompt or ""))
+    if not new_prompt.strip():
+        return False
+    scene["start_frame_prompt"] = new_prompt
+    if "start_frame_prompt_ru" in scene:
+        scene["start_frame_prompt_ru"] = new_prompt
+    scene[START_PROMPT_RAW_MODE_KEY] = False
+    scene["last_ai_image_feedback"] = feedback
+    session["scene_media_substep"] = SCENE_MEDIA_SUBSTEP_START
+    await _safe_reply_text(
+        update.message,
+        f"🤖 Prompt сцены {idx + 1} обновлен по AI feedback. Генерирую стартовый кадр заново.",
+    )
+    return True
+
+
+async def _regenerate_scene_prompts_from_prompt_ai_feedback(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE | None,
+    *,
+    chat_id: int | None,
+    session: dict,
+    scene: dict,
+    idx: int,
+) -> bool:
+    feedback = _latest_ai_approval_feedback(scene, stage="prompt")
+    if not feedback:
+        feedback = (
+            "AI approval rejected the scene prompts. Rewrite the start frame prompt and video prompts so visible "
+            "ingredients, garnishes, characters, kitchen physics, and dish state match the recipe and references."
+        )
+    dish_brief = _dish_visual_brief_for_session(session, scene)
+    if dish_brief:
+        feedback = (
+            f"{feedback}\n\n"
+            "Keep dish and ingredient fidelity exactly:\n"
+            f"{dish_brief}"
+        )
+    await _safe_reply_text(
+        update.message,
+        "🤖 ИИ апрув отклонил связку prompt/image/video до генерации. "
+        "Переписываю start prompt и video prompts по замечаниям, затем повторю сцену с начала.\n\n"
+        f"{_prompt_preview(feedback)}",
+    )
+    try:
+        new_start_prompt = await _call_with_503_retries(
+            update,
+            context,
+            chat_id,
+            "regenerate_scene_start_prompt_ai_prompt_feedback",
+            lambda: _regenerate_image_prompt_from_feedback(scene, feedback),
+        )
+    except ServiceUnavailableRetriesExhaustedError as e:
+        await _safe_reply_text(update.message, str(e))
+        return False
+    except Exception as e:
+        logger.exception("ai prompt feedback start prompt regeneration failed")
+        await _safe_reply_text(update.message, f"Ошибка перегенерации start prompt по AI feedback: {_user_error_message(e)}")
+        return False
+
+    new_start_prompt = _enforce_start_prompt_shot_type(scene, str(new_start_prompt or ""))
+    if not new_start_prompt.strip():
+        return False
+
+    original_video_prompt = scene.get("video_prompt")
+    original_language = scene.get("video_prompt_current_language")
+    prompt_map = scene.get("video_prompt_by_lang")
+    if isinstance(prompt_map, dict) and prompt_map:
+        language_prompts = {
+            str(lang).strip().lower() or "ru": str(prompt or "")
+            for lang, prompt in prompt_map.items()
+            if str(lang).strip()
+        }
+    else:
+        language = str(scene.get("video_prompt_current_language") or "ru").strip().lower() or "ru"
+        language_prompts = {language: str(scene.get("video_prompt") or "")}
+
+    rewritten_by_lang: dict[str, str] = {}
+    try:
+        for language, current_prompt in language_prompts.items():
+            scene["video_prompt_current_language"] = language
+            scene["video_prompt"] = current_prompt
+            rewritten = await _call_with_503_retries(
+                update,
+                context,
+                chat_id,
+                f"regenerate_scene_video_prompt_ai_prompt_feedback_{language}",
+                lambda: _regenerate_video_prompt_from_error(scene, feedback),
+            )
+            rewritten_by_lang[language] = str(rewritten or "").strip()
+    except ServiceUnavailableRetriesExhaustedError as e:
+        await _safe_reply_text(update.message, str(e))
+        return False
+    except Exception as e:
+        logger.exception("ai prompt feedback video prompt regeneration failed")
+        await _safe_reply_text(update.message, f"Ошибка перегенерации video prompt по AI feedback: {_user_error_message(e)}")
+        return False
+    finally:
+        scene["video_prompt_current_language"] = original_language
+        scene["video_prompt"] = original_video_prompt
+
+    if not rewritten_by_lang or not all(value.strip() for value in rewritten_by_lang.values()):
+        return False
+
+    scene["start_frame_prompt"] = new_start_prompt
+    if "start_frame_prompt_ru" in scene:
+        scene["start_frame_prompt_ru"] = new_start_prompt
+    scene[START_PROMPT_RAW_MODE_KEY] = False
+    scene["video_prompt_by_lang"] = rewritten_by_lang
+    scene["video_prompt"] = rewritten_by_lang.get("ru") or next(iter(rewritten_by_lang.values()))
+    scene["last_ai_prompt_feedback"] = feedback
+    scene.pop("start_frame_image_b64", None)
+    scene.pop("end_frame_image_b64", None)
+    scene["video_results_by_lang"] = {}
+    scene["video_approvals_by_lang"] = {lang: False for lang in rewritten_by_lang}
+    session["scene_media_substep"] = SCENE_MEDIA_SUBSTEP_START
+    await _safe_reply_text(
+        update.message,
+        f"🤖 Prompts сцены {idx + 1} обновлены по AI feedback. Повторяю сцену с start prompt.",
+    )
+    return True
 
 
 def _scene_recipe_text(session: dict, scene: dict) -> str:
@@ -1519,6 +2100,19 @@ def _scene_recipe_text(session: dict, scene: dict) -> str:
         or scene.get("text")
         or ""
     ).strip()
+
+
+def _dish_visual_brief_for_session(session: dict, scene: dict | None = None) -> str:
+    existing = str(session.get("dish_visual_brief") or "").strip()
+    if existing:
+        return existing
+    scene = scene or {}
+    title = str(session.get("recipe_title") or session.get("selected_concept") or "").strip()
+    recipe = str(session.get("recipe_full_text") or scene.get("recipe_step") or scene.get("text") or "").strip()
+    brief = build_dish_visual_brief(title, recipe)
+    if brief:
+        session["dish_visual_brief"] = brief
+    return brief
 
 
 def _scene_description(scene: dict) -> str:
@@ -1540,7 +2134,7 @@ def _scene_description(scene: dict) -> str:
 
 
 async def _send_ai_approval_summary(update: Update, result) -> None:
-    await update.message.reply_text(format_ai_approval_summary(result))
+    await _safe_reply_text(update.message, format_ai_approval_summary(result))
 
 
 async def _show_manual_scene_media_controls(update: Update, session: dict) -> None:
@@ -1592,22 +2186,27 @@ async def _run_ai_start_frame_check(
     image_bytes: bytes,
 ) -> str:
     cfg = get_ai_approval_config()
-    result = await asyncio.to_thread(
-        check_start_frame,
-        image_bytes=image_bytes,
-        scene_prompt=str(scene.get("start_frame_prompt_effective") or scene.get("start_frame_prompt") or "").strip(),
-        scene_description=_scene_description(scene),
-        recipe_text=_scene_recipe_text(session, scene),
-        scene_number=scene.get("scene") or idx + 1,
-        previous_reference_images=_load_scene_reference_images(
-            scene,
-            include_location=False,
-            prompt_keys=("start_frame_prompt", "start_frame_prompt_ru"),
+    result = await _run_ai_approval_with_limit_retry(
+        update,
+        session,
+        stage="image",
+        op=lambda: check_start_frame(
+            image_bytes=image_bytes,
+            scene_prompt=str(scene.get("start_frame_prompt_effective") or scene.get("start_frame_prompt") or "").strip(),
+            scene_description=_scene_description(scene),
+            recipe_text=_scene_recipe_text(session, scene),
+            dish_visual_brief=_dish_visual_brief_for_session(session, scene),
+            scene_number=scene.get("scene") or idx + 1,
+            previous_reference_images=_load_scene_reference_images(
+                scene,
+                include_location=False,
+                prompt_keys=("start_frame_prompt", "start_frame_prompt_ru"),
+            ),
+            expected_characters=[str(x) for x in (scene.get("characters") or [])],
+            expected_objects=[],
+            style_requirements="colorful cartoon style, soft stylized shading, non realistic rendering, warm cozy lighting",
+            config=cfg,
         ),
-        expected_characters=[str(x) for x in (scene.get("characters") or [])],
-        expected_objects=[],
-        style_requirements="colorful cartoon style, soft stylized shading, non realistic rendering, warm cozy lighting",
-        config=cfg,
     )
     _append_ai_approval_history(scene, result, stage="image")
     await _send_ai_approval_summary(update, result)
@@ -1624,16 +2223,21 @@ async def _run_ai_prompt_check(
 ) -> str:
     cfg = get_ai_approval_config()
     language = str(scene.get("video_prompt_current_language") or "ru").strip() or "ru"
-    result = await asyncio.to_thread(
-        check_scene_prompts,
-        start_frame_prompt=start_frame_prompt,
-        end_frame_prompt=_image_end_scene_prompt(scene),
-        video_prompt=_scene_video_prompt_for_language(scene, language),
-        scene_description=_scene_description(scene),
-        recipe_text=_scene_recipe_text(session, scene),
-        scene_number=scene.get("scene") or idx + 1,
-        expected_characters=[str(x) for x in (scene.get("characters") or [])],
-        config=cfg,
+    result = await _run_ai_approval_with_limit_retry(
+        update,
+        session,
+        stage="prompt",
+        op=lambda: check_scene_prompts(
+            start_frame_prompt=start_frame_prompt,
+            end_frame_prompt=_image_end_scene_prompt(scene),
+            video_prompt=_scene_video_prompt_for_language(scene, language),
+            scene_description=_scene_description(scene),
+            recipe_text=_scene_recipe_text(session, scene),
+            dish_visual_brief=_dish_visual_brief_for_session(session, scene),
+            scene_number=scene.get("scene") or idx + 1,
+            expected_characters=[str(x) for x in (scene.get("characters") or [])],
+            config=cfg,
+        ),
     )
     _append_ai_approval_history(scene, result, stage="prompt")
     await _send_ai_approval_summary(update, result)
@@ -1651,19 +2255,24 @@ async def _run_ai_end_frame_check(
 ) -> str:
     cfg = get_ai_approval_config()
     references = _end_frame_reference_images(session, scene, start_bytes)
-    result = await asyncio.to_thread(
-        check_start_frame,
-        image_bytes=image_bytes,
-        scene_prompt=str(scene.get("end_frame_prompt") or scene.get("end_frame_prompt_ru") or "").strip(),
-        scene_description=_scene_description(scene),
-        recipe_text=_scene_recipe_text(session, scene),
-        scene_number=scene.get("scene") or idx + 1,
-        previous_reference_images=references,
-        expected_characters=[str(x) for x in (scene.get("characters") or [])],
-        expected_objects=[],
-        style_requirements="colorful cartoon style, soft stylized shading, non realistic rendering, warm cozy lighting",
-        frame_kind="end",
-        config=cfg,
+    result = await _run_ai_approval_with_limit_retry(
+        update,
+        session,
+        stage="end_image",
+        op=lambda: check_start_frame(
+            image_bytes=image_bytes,
+            scene_prompt=str(scene.get("end_frame_prompt") or scene.get("end_frame_prompt_ru") or "").strip(),
+            scene_description=_scene_description(scene),
+            recipe_text=_scene_recipe_text(session, scene),
+            dish_visual_brief=_dish_visual_brief_for_session(session, scene),
+            scene_number=scene.get("scene") or idx + 1,
+            previous_reference_images=references,
+            expected_characters=[str(x) for x in (scene.get("characters") or [])],
+            expected_objects=[],
+            style_requirements="colorful cartoon style, soft stylized shading, non realistic rendering, warm cozy lighting",
+            frame_kind="end",
+            config=cfg,
+        ),
     )
     _append_ai_approval_history(scene, result, stage="end_image")
     await _send_ai_approval_summary(update, result)
@@ -1678,24 +2287,30 @@ async def _run_ai_video_check(
     idx: int,
     language: str,
     video_bytes: bytes,
-) -> str:
+) -> AIApprovalResult:
     cfg = get_ai_approval_config()
     start_bytes = _decode_b64(str(scene.get("start_frame_image_b64", "")).strip())
-    result = await asyncio.to_thread(
-        check_video,
-        video_bytes=video_bytes,
-        scene_prompt=_scene_video_prompt_for_language(scene, language),
-        expected_speech_text=_scene_speech_for_language(scene, language),
-        duration=scene.get("duration_sec"),
-        recipe_text=_scene_recipe_text(session, scene),
-        scene_number=scene.get("scene") or idx + 1,
-        previous_reference_images=_load_scene_reference_images(scene, include_location=False),
-        generated_start_frame=start_bytes,
-        config=cfg,
+    result = await _run_ai_approval_with_limit_retry(
+        update,
+        session,
+        stage="video",
+        op=lambda: check_video(
+            video_bytes=video_bytes,
+            scene_prompt=_scene_video_prompt_for_language(scene, language),
+            expected_speech_text=_scene_speech_for_language(scene, language),
+            duration=scene.get("duration_sec"),
+            recipe_text=_scene_recipe_text(session, scene),
+            dish_visual_brief=_dish_visual_brief_for_session(session, scene),
+            scene_number=scene.get("scene") or idx + 1,
+            language=language,
+            previous_reference_images=_load_scene_reference_images(scene, include_location=False),
+            generated_start_frame=start_bytes,
+            config=cfg,
+        ),
     )
-    _append_ai_approval_history(scene, result, stage="video")
+    _append_ai_approval_history(scene, result, stage="video", language=language)
     await _send_ai_approval_summary(update, result)
-    return result.status
+    return result
 
 
 def _extract_image_edit_instruction(text: str) -> str | None:
@@ -1915,7 +2530,33 @@ def _fallback_social_copy(recipe: str) -> dict[str, str]:
     }
 
 
-def _social_copy_prompt(recipe: str) -> str:
+def _extract_first_http_url(text: str) -> str:
+    match = re.search(r"https?://\S+", text or "")
+    if not match:
+        return ""
+    return match.group(0).rstrip(").,;!?'\"")
+
+
+async def _resolve_social_recipe_text(recipe: str) -> str:
+    text = str(recipe or "").strip()
+    source_url = _extract_first_http_url(text)
+    if not source_url:
+        return text
+    try:
+        return await asyncio.to_thread(fetch_recipe_text_from_url, source_url)
+    except Exception:
+        logger.exception("social recipe source url extraction failed")
+        return text
+
+
+def _social_copy_prompt(recipe: str, *, scheduled_comment: str = "") -> str:
+    comment = str(scheduled_comment or "").strip()
+    comment_block = (
+        "КОММЕНТАРИЙ ПОЛЬЗОВАТЕЛЯ К ГЕНЕРАЦИИ:\n"
+        f"{comment}\n\n"
+        if comment
+        else ""
+    )
     return (
         "Ты эксперт по Reels, YouTube Shorts и продвижению в соцсетях.\n\n"
         "Из утвержденного рецепта ниже сделай публикационные тексты.\n\n"
@@ -1934,17 +2575,22 @@ def _social_copy_prompt(recipe: str) -> str:
         "- в английские описания добавь переведенные постоянные хэштеги: #grandmatastesbetter #grandmasrecipes #recipes\n"
         "- в английские описания добавь еще 1-2 английских хэштега, отражающие конкретный рецепт, например #potatopancakes или #redvelvet\n"
         "- не выдумывай ингредиенты, если количества нет, оставь без количества\n\n"
+        "ЕСЛИ ЕСТЬ КОММЕНТАРИЙ ПОЛЬЗОВАТЕЛЯ:\n"
+        "- обязательно учитывай его как editorial direction для тона, акцентов, подачи и вирусного угла\n"
+        "- комментарий не заменяет рецепт\n"
+        "- не добавляй ингредиенты, шаги и факты, которых нет в утвержденном рецепте\n\n"
         f"{RUSSIAN_YO_RULE}\n\n"
         "Верни строго JSON объект без markdown с ключами:\n"
         "youtube_ru_title, youtube_ru_description, rutube_ru_title, rutube_ru_description, instagram_ru, vk_ru, tiktok_ru, instagram_en, youtube_en_title, youtube_en_description.\n\n"
+        f"{comment_block}"
         "УТВЕРЖДЕННЫЙ РЕЦЕПТ:\n"
         f"{recipe.strip()}"
     )
 
 
-async def _generate_social_copy_from_recipe(recipe: str) -> dict[str, str]:
+async def _generate_social_copy_from_recipe(recipe: str, *, scheduled_comment: str = "") -> dict[str, str]:
     fallback = _fallback_social_copy(recipe)
-    prompt = _social_copy_prompt(recipe)
+    prompt = _social_copy_prompt(recipe, scheduled_comment=scheduled_comment)
     try:
         raw = await asyncio.to_thread(gemini_generate_sync, prompt)
         obj = extract_json_object(raw or "")
@@ -2217,14 +2863,23 @@ async def _send_final_social_descriptions(update: Update, session: dict) -> bool
     recipe = str(session.get("recipe_full_text") or "").strip()
     if not recipe or session.get(SOCIAL_DESCRIPTIONS_SENT_KEY):
         return False
+    resolved_recipe = await _resolve_social_recipe_text(recipe)
+    if resolved_recipe and resolved_recipe != recipe:
+        recipe = resolved_recipe
+        session["recipe_full_text"] = resolved_recipe
     run_id = str(session.get("generation_run_id") or "").strip()
     if run_id and not all_final_artifacts_delivered(run_id):
         await update.message.reply_text(
             "Финальные видео ещё не доставлены в Telegram. Публикацию предложу только после подтвержденной доставки файлов."
         )
         return False
-    await reply_text_without_keyboard(update.message, "Готовлю описания для публикаций на основе утверждённого рецепта.")
-    copy = await _generate_social_copy_from_recipe(recipe)
+    scheduled_comment = str(session.get("scheduled_generation_comment") or "").strip()
+    await reply_text_without_keyboard(
+        update.message,
+        "Готовлю описания для публикаций на основе утверждённого рецепта.\n"
+        f"Описания генерируются с учётом комментария: {'да' if scheduled_comment else 'нет'}.",
+    )
+    copy = await _generate_social_copy_from_recipe(recipe, scheduled_comment=scheduled_comment)
     await _start_social_descriptions_approval(
         update,
         session=session,
@@ -2255,6 +2910,7 @@ async def send_social_descriptions_for_recipe(update: Update, recipe: str) -> No
     chat_id = update.effective_chat.id
     session = SESSIONS.setdefault(chat_id, {})
     await reply_text_without_keyboard(update.message, "Готовлю описания для публикаций на основе рецепта.")
+    recipe_text = await _resolve_social_recipe_text(recipe_text)
     copy = await _generate_social_copy_from_recipe(recipe_text)
     await _start_social_descriptions_approval(
         update,
@@ -2273,7 +2929,7 @@ async def _finish_scene_media_production(update: Update, session: dict, *, messa
     await update.message.reply_text(
         f"{message}\n"
         f"Оценка суммарной media-side себестоимости: ~${total_media_cost:.4f}.\n\n"
-        "Собираю финальные версии ролика и готовлю описания для апрува."
+        "Собираю финальные master-версии ролика; в Telegram отправлю мини-копии, если файл больше лимита Bot API."
     )
     if isinstance(production, dict) and isinstance(scenes, list) and scenes:
         try:
@@ -2294,7 +2950,8 @@ async def _finish_scene_media_production(update: Update, session: dict, *, messa
                 f"Run: {queued.get('run_id')}\n"
                 f"Языки: {languages or '-'}\n"
                 f"Версии: {variants or '-'}\n\n"
-                "Бот больше не будет держать тяжелый ffmpeg-рендер внутри Telegram handler."
+                "Бот больше не будет держать тяжелый ffmpeg-рендер внутри Telegram handler; "
+                "final_build_worker доставит Telegram-мини-копии и затем предложит описания."
             )
         except Exception as e:
             logger.exception("post production queue failed")
@@ -2304,7 +2961,7 @@ async def _finish_scene_media_production(update: Update, session: dict, *, messa
             )
     session["state"] = STATE_READY_FOR_PRODUCTION
     await update.message.reply_text(
-        "Production-сцены завершены. Жду финальный рендер и доставку готовых mp4 в Telegram; публикацию предложу после доставки файлов.",
+        "Production-сцены завершены. Жду финальный рендер и доставку Telegram-мини-копий; публикацию предложу после доставки файлов.",
         reply_markup=first_step_menu_markup(),
     )
     return True
@@ -2452,6 +3109,38 @@ def _sync_scene_text_into_video_prompt(video_prompt: str, new_text: str) -> str:
             merged = f"{merged}\n{tail_rest}"
         return merged
     return f"{prompt}\n{marker} {new_text}".strip() if prompt else f"{marker} {new_text}"
+
+
+def _speech_text_key(text: str) -> str:
+    text = re.sub(r"\[\s*пауза\s*\]", " ", text or "", flags=re.IGNORECASE)
+    text = re.sub(r"[.,!?;:…]+", " ", text)
+    return re.sub(r"\s+", " ", text).strip().lower()
+
+
+def _trim_speech_to_budget(text: str, max_chars: int) -> str:
+    words = str(text or "").strip().split()
+    while words and speech_chars_excluding_pauses(" ".join(words)) > max_chars:
+        words.pop()
+    return " ".join(words).strip(" ,.!?;:…") or "Готово"
+
+
+def _fallback_scheduled_ru_speech_for_budget(text: str, max_chars: int) -> str:
+    normalized = normalize_speech_phrase_for_voice(text)
+    has_final_cta = _speech_text_key(normalized).endswith(_speech_text_key(FINAL_SCENE_SUBSCRIBE_CTA))
+    if has_final_cta:
+        for candidate in (
+            f"Блюдо готово! [пауза] {FINAL_SCENE_SUBSCRIBE_CTA}",
+            f"Готово! [пауза] {FINAL_SCENE_SUBSCRIBE_CTA}",
+            FINAL_SCENE_SUBSCRIBE_CTA,
+        ):
+            if speech_chars_excluding_pauses(candidate) <= max_chars:
+                return candidate
+    parts = [part.strip() for part in re.split(r"(?<=[.!?…])\s+", normalized) if part.strip()]
+    if parts:
+        candidate = parts[0]
+        if speech_chars_excluding_pauses(candidate) <= max_chars:
+            return candidate
+    return _trim_speech_to_budget(normalized, max_chars)
 
 
 async def _reply_text_with_optional_markup(update: Update, text: str, reply_markup=None) -> None:
@@ -2620,11 +3309,124 @@ def _scene_media_context(session: dict) -> tuple[list[dict] | None, int]:
     production = session.get("production") or {}
     scenes = production.get("json_plan") if isinstance(production, dict) else None
     idx = int(session.get("image_scene_index", 0))
-    return scenes if isinstance(scenes, list) else None, idx
+    if isinstance(scenes, list):
+        idx = _align_draft_repair_scene_cursor(session, scenes, idx)
+        return scenes, idx
+    return None, idx
+
+
+def _draft_repair_plan(session: dict) -> list[dict]:
+    raw = session.get(DRAFT_REPAIR_ACTIVE_PLAN_KEY)
+    if not isinstance(raw, list):
+        return []
+    out: list[dict] = []
+    for item in raw:
+        if not isinstance(item, dict):
+            continue
+        try:
+            idx = int(item.get("scene_index"))
+        except (TypeError, ValueError):
+            continue
+        stage = str(item.get("stage") or "").strip().lower()
+        languages = [str(lang).strip().lower() for lang in (item.get("languages") or []) if str(lang).strip()]
+        if stage not in {"prompt", "image", "video"} or not languages:
+            continue
+        out.append({"scene_index": idx, "stage": stage, "languages": languages})
+    return sorted(out, key=lambda row: int(row["scene_index"]))
+
+
+def _draft_repair_substep_for_stage(stage: str) -> str:
+    return SCENE_MEDIA_SUBSTEP_VIDEO if str(stage).strip().lower() == "video" else SCENE_MEDIA_SUBSTEP_START
+
+
+def _draft_repair_item_for_scene(session: dict, idx: int) -> dict | None:
+    for item in _draft_repair_plan(session):
+        if int(item["scene_index"]) == int(idx):
+            return item
+    return None
+
+
+def _apply_draft_repair_scene_settings(session: dict, idx: int) -> None:
+    item = _draft_repair_item_for_scene(session, idx)
+    if not item:
+        return
+    stage = str(item.get("stage") or "").strip().lower()
+    session["scene_media_substep"] = _draft_repair_substep_for_stage(stage)
+    session["scene_media_language_index"] = 0
+    if stage != "video":
+        return
+    production = session.get("production") or {}
+    scenes = production.get("json_plan") if isinstance(production, dict) else None
+    if not isinstance(scenes, list) or not (0 <= int(idx) < len(scenes)):
+        return
+    scene = scenes[int(idx)]
+    if not isinstance(scene, dict):
+        return
+    for language in item.get("languages") or []:
+        lang = normalize_language_code(str(language)) or ""
+        if lang and not _draft_repair_has_generated_video(scene, lang):
+            _mark_draft_repair_ignore_restored_video_candidate(scene, lang)
+
+
+def _align_draft_repair_scene_cursor(session: dict, scenes: list[dict], idx: int) -> int:
+    plan = _draft_repair_plan(session)
+    if not plan:
+        return idx
+    selected = [int(item["scene_index"]) for item in plan if 0 <= int(item["scene_index"]) < len(scenes)]
+    if not selected:
+        session.pop(DRAFT_REPAIR_ACTIVE_PLAN_KEY, None)
+        return idx
+    if idx in selected:
+        _apply_draft_repair_scene_settings(session, idx)
+        return idx
+    next_indexes = [item for item in selected if item >= idx]
+    if not next_indexes:
+        session.pop(DRAFT_REPAIR_ACTIVE_PLAN_KEY, None)
+        session["image_scene_index"] = len(scenes)
+        return len(scenes)
+    next_idx = min(next_indexes)
+    session["image_scene_index"] = next_idx
+    for item in plan:
+        if int(item["scene_index"]) == next_idx:
+            session["scene_media_substep"] = _draft_repair_substep_for_stage(str(item.get("stage") or ""))
+            session["scene_media_language_index"] = 0
+            break
+    return next_idx
+
+
+def _advance_scene_media_after_current(session: dict, idx: int, *, total: int | None = None) -> int:
+    production = session.get("production") or {}
+    scenes = production.get("json_plan") if isinstance(production, dict) else None
+    scene_count = len(scenes) if isinstance(scenes, list) else int(total or 0)
+    next_idx = int(idx) + 1
+    session["image_scene_index"] = next_idx
+    session["scene_media_language_index"] = 0
+    if isinstance(scenes, list):
+        if not _draft_repair_plan(session):
+            session["scene_media_substep"] = SCENE_MEDIA_SUBSTEP_START
+            return next_idx
+        return _align_draft_repair_scene_cursor(session, scenes, next_idx)
+    session["scene_media_substep"] = SCENE_MEDIA_SUBSTEP_START
+    if scene_count and next_idx >= scene_count:
+        return scene_count
+    return next_idx
 
 
 def _scene_target_languages(session: dict, scene: dict) -> list[str]:
     """Resolve active languages for current scene media workflow."""
+    try:
+        idx = int(session.get("image_scene_index", 0) or 0)
+    except (TypeError, ValueError):
+        idx = 0
+    repair_item = _draft_repair_item_for_scene(session, idx)
+    if repair_item:
+        repair_languages = [
+            code
+            for code in (normalize_language_code(str(lang)) for lang in repair_item.get("languages", []))
+            if code
+        ]
+        if repair_languages:
+            return list(dict.fromkeys(repair_languages))
     raw = session.get("target_languages")
     out: list[str] = []
     if isinstance(raw, list):
@@ -2851,6 +3653,24 @@ def _scene_video_provider_choice_entry(
         "end_image_b64": _encode_b64(end_image) if end_image else "",
         "syntax_error_message": (syntax_error_message or "")[:8000],
     }
+
+
+def _scene_video_provider_payload_for_language(scene: dict, pending: dict, language: str) -> dict:
+    payload = dict(pending)
+    entries = pending.get("entries_by_lang")
+    lang = normalize_language_code(language) or str(language or "").strip().lower() or "ru"
+    entry = entries.get(lang) if isinstance(entries, dict) else None
+    if isinstance(entry, dict):
+        payload.update(entry)
+    if not str(payload.get("start_image_b64") or payload.get("start_frame_image_b64") or "").strip():
+        start_bytes = selected_image_bytes_for_video(scene, kind="start")
+        if start_bytes:
+            payload["start_image_b64"] = _encode_b64(start_bytes)
+    if not str(payload.get("end_image_b64") or payload.get("end_frame_image_b64") or "").strip():
+        end_bytes = selected_image_bytes_for_video(scene, kind="end")
+        if end_bytes:
+            payload["end_image_b64"] = _encode_b64(end_bytes)
+    return payload
 
 
 async def _deliver_scene_video_result(
@@ -3335,6 +4155,8 @@ def _store_scene_video_result(
         source_image_candidate_id=source_image_candidate_id,
         speed_coef=DEFAULT_SCENE_VIDEO_SPEED_COEF,
     )
+    _mark_draft_repair_generated_video(scene, language)
+    _clear_draft_repair_ignore_restored_video_candidate(scene, language)
     if session is not None and scene_idx is not None:
         _persist_video_candidate_best_effort(session, scene_idx=scene_idx, candidate=candidate)
     _set_video_regeneration_requested(scene, language, False)
@@ -3361,13 +4183,62 @@ def _store_scene_video_result(
     return cost_summary
 
 
+DRAFT_REPAIR_IGNORE_RESTORED_VIDEO_CANDIDATES_KEY = "draft_repair_ignore_restored_video_candidates_by_lang"
+DRAFT_REPAIR_GENERATED_VIDEO_BY_LANG_KEY = "draft_repair_generated_video_by_lang"
+
+
+def _draft_repair_ignores_restored_video_candidate(scene: dict, language: str) -> bool:
+    lang = normalize_language_code(language) or "ru"
+    ignored = scene.get(DRAFT_REPAIR_IGNORE_RESTORED_VIDEO_CANDIDATES_KEY)
+    return isinstance(ignored, dict) and bool(ignored.get(lang))
+
+
+def _mark_draft_repair_generated_video(scene: dict, language: str) -> None:
+    lang = normalize_language_code(language) or "ru"
+    generated = scene.get(DRAFT_REPAIR_GENERATED_VIDEO_BY_LANG_KEY)
+    if not isinstance(generated, dict):
+        generated = {}
+    generated[lang] = True
+    scene[DRAFT_REPAIR_GENERATED_VIDEO_BY_LANG_KEY] = generated
+
+
+def _draft_repair_has_generated_video(scene: dict, language: str) -> bool:
+    lang = normalize_language_code(language) or "ru"
+    generated = scene.get(DRAFT_REPAIR_GENERATED_VIDEO_BY_LANG_KEY)
+    return isinstance(generated, dict) and bool(generated.get(lang))
+
+
+def _mark_draft_repair_ignore_restored_video_candidate(scene: dict, language: str) -> None:
+    lang = normalize_language_code(language) or "ru"
+    ignored = scene.get(DRAFT_REPAIR_IGNORE_RESTORED_VIDEO_CANDIDATES_KEY)
+    if not isinstance(ignored, dict):
+        ignored = {}
+    ignored[lang] = True
+    scene[DRAFT_REPAIR_IGNORE_RESTORED_VIDEO_CANDIDATES_KEY] = ignored
+
+
+def _clear_draft_repair_ignore_restored_video_candidate(scene: dict, language: str) -> None:
+    lang = normalize_language_code(language) or "ru"
+    ignored = scene.get(DRAFT_REPAIR_IGNORE_RESTORED_VIDEO_CANDIDATES_KEY)
+    if not isinstance(ignored, dict):
+        return
+    ignored.pop(lang, None)
+    if ignored:
+        scene[DRAFT_REPAIR_IGNORE_RESTORED_VIDEO_CANDIDATES_KEY] = ignored
+    else:
+        scene.pop(DRAFT_REPAIR_IGNORE_RESTORED_VIDEO_CANDIDATES_KEY, None)
+
+
 def _all_scene_languages_have_video(scene: dict, languages: list[str]) -> bool:
     """True when each language has generated video result."""
     results = scene.get("video_results_by_lang")
     results = results if isinstance(results, dict) else {}
     for lang in languages:
-        if isinstance(results.get(lang), dict):
+        result = results.get(lang)
+        if isinstance(result, dict) and str(result.get("video_b64") or "").strip():
             continue
+        if _draft_repair_ignores_restored_video_candidate(scene, lang):
+            return False
         if latest_scene_video_candidate(scene, lang) is not None:
             continue
         return False
@@ -3394,19 +4265,57 @@ def _set_all_scene_languages_approval(scene: dict, languages: list[str], approve
 
 def _scene_video_bytes_for_language(scene: dict, language: str) -> bytes | None:
     results = scene.get("video_results_by_lang")
-    if not isinstance(results, dict):
+    if isinstance(results, dict):
+        item = results.get(language)
+        if isinstance(item, dict):
+            payload = _decode_b64(str(item.get("video_b64") or "").strip())
+            if payload:
+                return payload
+    if _draft_repair_ignores_restored_video_candidate(scene, language):
         return None
-    item = results.get(language)
-    if not isinstance(item, dict):
-        return None
-    return _decode_b64(str(item.get("video_b64") or "").strip())
+    return selected_video_bytes_for_production(scene, language)
+
+
+def _scene_video_progress_signature(scene: dict, languages: list[str] | None = None) -> tuple:
+    lang_list = languages or _scene_target_languages({}, scene)
+    candidates = scene.get("video_candidates_by_lang")
+    approvals = scene.get("video_approvals_by_lang")
+    results = scene.get("video_results_by_lang")
+    return (
+        tuple(
+            (
+                lang,
+                len(candidates.get(lang) or []) if isinstance(candidates, dict) else 0,
+                isinstance(results, dict) and isinstance(results.get(lang), dict),
+                isinstance(approvals, dict) and bool(approvals.get(lang)),
+            )
+            for lang in lang_list
+        ),
+    )
 
 
 def _remove_scene_video_for_language(scene: dict, language: str) -> None:
+    selected = resolve_scene_video_for_production(scene, language)
+    selected_candidate_id = str(selected.get("candidate_id") or "") if isinstance(selected, dict) else ""
     results = scene.get("video_results_by_lang")
     if isinstance(results, dict):
         results.pop(language, None)
         scene["video_results_by_lang"] = results
+    candidates_by_lang = scene.get("video_candidates_by_lang")
+    lang = normalize_language_code(language) or "ru"
+    if isinstance(candidates_by_lang, dict):
+        bucket = candidates_by_lang.get(lang)
+        if isinstance(bucket, list):
+            candidates_by_lang[lang] = [
+                item
+                for item in bucket
+                if not (
+                    isinstance(item, dict)
+                    and selected_candidate_id
+                    and str(item.get("candidate_id") or "") == selected_candidate_id
+                )
+            ]
+            scene["video_candidates_by_lang"] = candidates_by_lang
     approvals = scene.get("video_approvals_by_lang")
     if isinstance(approvals, dict):
         approvals[language] = False
@@ -3450,7 +4359,7 @@ async def _ai_check_existing_scene_videos(
         video_bytes = _scene_video_bytes_for_language(scene, language)
         if not video_bytes:
             return False
-        status = await _run_ai_video_check(
+        result = await _run_ai_video_check(
             update,
             session=session,
             scene=scene,
@@ -3458,18 +4367,27 @@ async def _ai_check_existing_scene_videos(
             language=language,
             video_bytes=video_bytes,
         )
+        _store_ai_video_speech_qa(scene, language, result)
+        status = result.status
+        status = _normalize_ai_status_for_session(session, status, stage="video")
         if status == AI_APPROVAL_STATUS_APPROVE:
             _mark_ai_video_approved(scene, language)
             continue
         if status == AI_APPROVAL_STATUS_REGENERATE_VIDEO:
-            if _ai_attempt_count(scene, "video") <= get_ai_approval_config().max_regenerate_attempts:
+            if _ai_attempt_count(scene, "video") <= _ai_regenerate_attempt_limit(session):
                 _remove_scene_video_for_language(scene, language)
                 _clear_ai_video_approval(scene, language)
                 session["scene_media_language_index"] = languages.index(language)
-                await update.message.reply_text(f"🤖 ИИ апрув просит перегенерировать видео для языка {language}.")
+                await _safe_reply_text(update.message, f"🤖 ИИ апрув просит перегенерировать видео для языка {language}.")
+                return False
+            if _is_scheduled_unattended_ai_mode(session):
+                await _safe_reply_text(
+                    update.message,
+                    f"Ночной режим: лимит перегенерации видео для {language} исчерпан, ручную проверку не запрашиваю."
+                )
                 return False
         _set_ai_human_review_pending(session, stage="video", reason=f"video QA requires manual review for {language}")
-        await update.message.reply_text("ИИ апрув не смог уверенно принять видео, нужна ручная проверка.")
+        await _safe_reply_text(update.message, "ИИ апрув не смог уверенно принять видео, нужна ручная проверка.")
         await _reply_text_with_optional_markup(
             update,
             "Проверьте видео вручную.",
@@ -3776,22 +4694,19 @@ async def _scene_media_start_ok(
     scene: dict,
     idx: int,
 ) -> bool:
-    auto_approve = _is_scene_media_auto_approve_enabled(session)
+    auto_approve = _is_scene_media_auto_approve_enabled(session) or _is_scheduled_unattended_ai_mode(session)
     try:
         base_prompt = _image_scene_prompt(scene)
     except Exception as e:
         await _safe_reply_text(update.message, f"Ошибка подготовки промпта: {e}")
         return True
-    scene_refs = _dedupe_image_reference_bytes(
-        [
-            *_load_scene_reference_images(
-                scene,
-                include_location=False,
-                prompt_keys=("start_frame_prompt", "start_frame_prompt_ru"),
-            ),
-            *_scene_user_reference_images(scene, "start"),
-        ]
+    scene_reference_images = _load_scene_reference_images(
+        scene,
+        include_location=False,
+        prompt_keys=("start_frame_prompt", "start_frame_prompt_ru"),
     )
+    user_reference_images = _scene_user_reference_images(scene, "start")
+    scene_refs = _dedupe_image_reference_bytes([*scene_reference_images, *user_reference_images])
     raw_mode = bool(scene.get(START_PROMPT_RAW_MODE_KEY))
     if raw_mode:
         prompt = str(base_prompt or "").strip()
@@ -3801,6 +4716,7 @@ async def _scene_media_start_ok(
             scene,
             include_location=False,
         )
+    prompt = append_dish_visual_brief_to_prompt(prompt, _dish_visual_brief_for_session(session, scene))
     scene["start_frame_prompt_effective"] = prompt
     scene["start_frame_ref_count"] = len(scene_refs)
     logger.info("scene=%s start_image_generation prompt_len=%s refs=%s", idx + 1, len(prompt), len(scene_refs))
@@ -3818,8 +4734,65 @@ async def _scene_media_start_ok(
             update.message,
             "Внимание: референсы для сцены указаны, но ни один файл не загрузился. Проверь пути в `references`.",
         )
+    if _is_scene_media_ai_approve_enabled(session):
+        prompt_status = await _run_ai_prompt_check(
+            update,
+            session=session,
+            scene=scene,
+            idx=idx,
+            start_frame_prompt=prompt,
+        )
+        prompt_status = _normalize_ai_status_for_session(session, prompt_status, stage="prompt")
+        if prompt_status == AI_APPROVAL_STATUS_APPROVE:
+            await _safe_reply_text(update.message, "🤖 ИИ апрув принял prompt. Перехожу к генерации стартового кадра.")
+        elif prompt_status in {AI_APPROVAL_STATUS_FIX_PROMPT, AI_APPROVAL_STATUS_REGENERATE_IMAGE}:
+            if _is_scheduled_unattended_ai_mode(session):
+                rewritten = await _regenerate_scene_prompts_from_prompt_ai_feedback(
+                    update,
+                    context,
+                    chat_id=chat_id,
+                    session=session,
+                    scene=scene,
+                    idx=idx,
+                )
+                if not rewritten:
+                    _set_ai_human_review_pending(session, stage="prompt", reason="scheduled prompt QA rewrite failed")
+                    await _safe_reply_text(
+                        update.message,
+                        "🤖 Ночной режим: prompt не принят, а автоматическая правка не удалась. "
+                        "Останавливаю сцену для повторного запуска/проверки.",
+                    )
+                return True
+            elif _ai_attempt_count(scene, "prompt") <= _ai_regenerate_attempt_limit(session):
+                scene.pop("start_frame_image_b64", None)
+                scene.pop("end_frame_image_b64", None)
+                scene["video_results_by_lang"] = {}
+                session["scene_media_substep"] = SCENE_MEDIA_SUBSTEP_START
+                await _safe_reply_text(
+                    update.message,
+                    "🤖 ИИ апрув не принял prompt и просит перегенерацию prompt/image. "
+                    "Останавливаю этот шаг для безопасной правки.",
+                )
+                _set_ai_human_review_pending(session, stage="prompt", reason="prompt QA requires prompt regeneration")
+                return True
+        else:
+            if _is_scheduled_unattended_ai_mode(session):
+                await _safe_reply_text(
+                    update.message,
+                    "🤖 Ночной режим: prompt получил неопределенный AI status, HUMAN_REVIEW отключен. Продолжаю.",
+                )
+            else:
+                _set_ai_human_review_pending(session, stage="prompt", reason="prompt QA requires manual review")
+                await _safe_reply_text(update.message, "ИИ апрув не смог уверенно принять prompt, нужна проверка.")
+                return True
     if not auto_approve:
         await reply_text_without_keyboard(update.message, "Генерируем стартовый кадр, ждите.")
+    await _send_image_reference_debug(
+        update,
+        f"Сцена {idx + 1} start image",
+        scene_refs,
+        source_counts={"scene": len(scene_reference_images), "user": len(user_reference_images)},
+    )
     image_model = _scene_image_model_for_generation(scene, "start") or primary_image_generation_model()
     try:
         image_result = await _generate_scene_image_result(
@@ -3833,7 +4806,7 @@ async def _scene_media_start_ok(
         add_scene_shared_cost(scene, estimate_image_generation_cost_usd(image_result.model))
     except Exception as e:
         logger.exception("vertex image generation failed")
-        await _ask_scene_image_model_choice(update, scene=scene, target="start", failed_model=image_model, error=e)
+        await _ask_scene_image_model_choice(update, session=session, scene=scene, target="start", failed_model=image_model, error=e)
         return True
     bio = io.BytesIO(image_bytes)
     bio.name = f"scene_{idx + 1}.png"
@@ -3876,22 +4849,36 @@ async def _scene_media_start_ok(
             idx=idx,
             image_bytes=image_bytes,
         )
+        image_status = _normalize_ai_status_for_session(session, image_status, stage="image")
         if image_status == AI_APPROVAL_STATUS_APPROVE:
             session["scene_media_substep"] = (
                 SCENE_MEDIA_SUBSTEP_END if _scene_needs_end_frame_step(scene) else SCENE_MEDIA_SUBSTEP_VIDEO
             )
             return True
         if image_status == AI_APPROVAL_STATUS_REGENERATE_IMAGE:
-            if _ai_attempt_count(scene, "image") <= get_ai_approval_config().max_regenerate_attempts:
+            if _ai_attempt_count(scene, "image") <= _ai_regenerate_attempt_limit(session):
                 scene.pop("start_frame_image_b64", None)
+                await _regenerate_start_prompt_from_ai_feedback(
+                    update,
+                    context,
+                    chat_id=chat_id,
+                    session=session,
+                    scene=scene,
+                    idx=idx,
+                )
                 retry_model_message = _prepare_ai_image_retry_model_message(scene, "start")
                 session["scene_media_substep"] = SCENE_MEDIA_SUBSTEP_START
-                await update.message.reply_text(
-                    f"🤖 ИИ апрув просит перегенерировать стартовый фрейм.{retry_model_message}"
+                await _safe_reply_text(
+                    update.message,
+                    f"🤖 ИИ апрув просит перегенерацию стартового фрейма с исправленным prompt. "
+                    f"Текущий кадр не передаю как reference.{retry_model_message}"
                 )
                 return True
+            if _is_scheduled_unattended_ai_mode(session):
+                await _safe_reply_text(update.message, "Ночной режим: лимит перегенерации стартового фрейма исчерпан, ручную проверку не запрашиваю.")
+                return True
         _set_ai_human_review_pending(session, stage="image", reason="image QA requires manual review")
-        await update.message.reply_text("ИИ апрув не смог уверенно принять стартовый фрейм, нужна ручная проверка.")
+        await _safe_reply_text(update.message, "ИИ апрув не смог уверенно принять стартовый фрейм, нужна ручная проверка.")
         await _reply_text_with_optional_markup(
             update,
             "Проверьте стартовый кадр вручную.",
@@ -4027,11 +5014,18 @@ async def _scene_media_edit_generated_image(
         "Не добавляй текст, логотипы, подписи и новые лишние объекты.\n\n"
         f"Исходный промпт кадра:\n{base_prompt or '-'}"
     )
+    edit_refs = [current_bytes]
     await update.message.reply_text("Изменяю текущий кадр по вашему описанию.")
+    await _send_image_reference_debug(
+        update,
+        f"Сцена {idx + 1} {'end' if is_end else 'start'} image edit",
+        edit_refs,
+        source_counts={"current_image": 1},
+    )
     try:
         edited_bytes = await _generate_image_with_lenient_fallback(
             edit_prompt,
-            reference_images=[current_bytes],
+            reference_images=edit_refs,
         )
     except Exception as e:
         logger.exception("generated image edit failed")
@@ -4093,7 +5087,7 @@ async def _scene_media_edit_generated_image(
 
 
 async def _scene_media_end_ok(update: Update, *, session: dict, scene: dict, idx: int) -> bool:
-    auto_approve = _is_scene_media_auto_approve_enabled(session)
+    auto_approve = _is_scene_media_auto_approve_enabled(session) or _is_scheduled_unattended_ai_mode(session)
     raw_end_mode = bool(scene.get(END_PROMPT_RAW_MODE_KEY))
     end_prompt = str(scene.get("end_frame_prompt") or scene.get("end_frame_prompt_ru") or "").strip() if raw_end_mode else _image_end_scene_prompt(scene)
     if not end_prompt:
@@ -4106,7 +5100,25 @@ async def _scene_media_end_ok(update: Update, *, session: dict, scene: dict, idx
         session["scene_media_substep"] = SCENE_MEDIA_SUBSTEP_START
         await _send_next_scene_media_step(update, session)
         return True
-    end_references = _end_frame_reference_images(session, scene, start_bytes)
+    production = session.get("production") if isinstance(session, dict) else None
+    scenes = production.get("json_plan") if isinstance(production, dict) else None
+    first_scene = scenes[0] if isinstance(scenes, list) and scenes and isinstance(scenes[0], dict) else None
+    first_scene_refs = (
+        _load_scene_reference_images(
+            first_scene,
+            include_location=False,
+            prompt_keys=("end_frame_prompt", "end_frame_prompt_ru", "video_prompt"),
+        )
+        if isinstance(first_scene, dict)
+        else []
+    )
+    current_scene_refs = _load_scene_reference_images(
+        scene,
+        include_location=False,
+        prompt_keys=("end_frame_prompt", "end_frame_prompt_ru", "video_prompt"),
+    )
+    user_end_refs = _scene_user_reference_images(scene, "end")
+    end_references = _dedupe_image_reference_bytes([start_bytes, *first_scene_refs, *current_scene_refs, *user_end_refs])
     end_full = str(end_prompt or "").strip() if raw_end_mode else _append_scene_identity_to_image_prompt(
         _append_reference_style_to_image_prompt(end_prompt, True),
         scene,
@@ -4114,6 +5126,17 @@ async def _scene_media_end_ok(update: Update, *, session: dict, scene: dict, idx
     )
     if not auto_approve:
         await reply_text_without_keyboard(update.message, "Генерируем конечный кадр (референс — стартовый), ждите.")
+    await _send_image_reference_debug(
+        update,
+        f"Сцена {idx + 1} end image",
+        end_references,
+        source_counts={
+            "start_frame": 1,
+            "first_scene": len(first_scene_refs),
+            "scene": len(current_scene_refs),
+            "user": len(user_end_refs),
+        },
+    )
     image_model = _scene_image_model_for_generation(scene, "end") or primary_image_generation_model()
     try:
         end_result = await _generate_scene_image_result(
@@ -4127,7 +5150,7 @@ async def _scene_media_end_ok(update: Update, *, session: dict, scene: dict, idx
         add_scene_shared_cost(scene, estimate_image_generation_cost_usd(end_result.model))
     except Exception as e:
         logger.exception("vertex end-frame generation failed")
-        await _ask_scene_image_model_choice(update, scene=scene, target="end", failed_model=image_model, error=e)
+        await _ask_scene_image_model_choice(update, session=session, scene=scene, target="end", failed_model=image_model, error=e)
         return True
     end_bio = io.BytesIO(end_bytes)
     end_bio.name = f"scene_{idx + 1}_end.png"
@@ -4170,20 +5193,26 @@ async def _scene_media_end_ok(update: Update, *, session: dict, scene: dict, idx
             image_bytes=end_bytes,
             start_bytes=start_bytes,
         )
+        image_status = _normalize_ai_status_for_session(session, image_status, stage="end_image")
         if image_status == AI_APPROVAL_STATUS_APPROVE:
             session["scene_media_substep"] = SCENE_MEDIA_SUBSTEP_VIDEO
             return True
         if image_status == AI_APPROVAL_STATUS_REGENERATE_IMAGE:
-            if _ai_attempt_count(scene, "end_image") <= get_ai_approval_config().max_regenerate_attempts:
+            if _ai_attempt_count(scene, "end_image") <= _ai_regenerate_attempt_limit(session):
                 scene.pop("end_frame_image_b64", None)
                 retry_model_message = _prepare_ai_image_retry_model_message(scene, "end")
                 session["scene_media_substep"] = SCENE_MEDIA_SUBSTEP_END
-                await update.message.reply_text(
-                    f"🤖 ИИ апрув просит перегенерировать конечный фрейм.{retry_model_message}"
+                await _safe_reply_text(
+                    update.message,
+                    f"🤖 ИИ апрув просит полную перегенерацию конечного фрейма. "
+                    f"Текущий конечный кадр не передаю как reference.{retry_model_message}"
                 )
                 return True
+            if _is_scheduled_unattended_ai_mode(session):
+                await _safe_reply_text(update.message, "Ночной режим: лимит перегенерации конечного фрейма исчерпан, ручную проверку не запрашиваю.")
+                return True
         _set_ai_human_review_pending(session, stage="end_image", reason="end image QA requires manual review")
-        await update.message.reply_text("ИИ апрув не смог уверенно принять конечный фрейм, нужна ручная проверка.")
+        await _safe_reply_text(update.message, "ИИ апрув не смог уверенно принять конечный фрейм, нужна ручная проверка.")
         await _reply_text_with_optional_markup(
             update,
             "Проверьте конечный кадр вручную.",
@@ -4605,6 +5634,7 @@ async def _scene_media_video_not_ok(
             _video_policy_approval_user_message(scene, _get_scene_policy_candidate(scene, language)),
             reply_markup=video_policy_retry_markup(
                 include_restart_hint=_should_suggest_regenerate_start_frame_after_video_prompt_fails(scene),
+                session=session,
             ),
         )
         return True
@@ -4672,7 +5702,7 @@ async def _maybe_shorten_scene_speech_for_video_budget(
     max_chars = max_speech_chars_for_duration(duration_sec, "ru")
     if _scene_speech_budget_override_enabled(scene, "ru"):
         return False
-    auto_approve = _is_scene_media_auto_approve_enabled(session)
+    auto_approve = _is_scene_media_auto_approve_enabled(session) or _is_scheduled_unattended_ai_mode(session)
     if _scene_phrase_origin(scene, "ru") == "user":
         _set_scene_speech_pending(
             session,
@@ -4712,6 +5742,39 @@ async def _maybe_shorten_scene_speech_for_video_budget(
         await update.message.reply_text(f"Не удалось автоматически сократить реплику: {_user_error_message(e)}")
         return True
     if shortened is None:
+        if auto_approve:
+            fallback_text = _fallback_scheduled_ru_speech_for_budget(speech_text, max_chars)
+            prompt = _sync_scene_text_into_video_prompt(
+                _compose_locked_video_prompt(scene, "ru", _scene_video_prompt_for_language(scene, "ru")),
+                fallback_text,
+            )
+            _set_scene_video_prompt_for_language(scene, "ru", prompt)
+            _apply_scene_phrase_update_to_scene(
+                session,
+                scene,
+                scene_idx=scene_idx,
+                language="ru",
+                phrase_text=fallback_text,
+                origin="auto_shorten",
+            )
+            await _sync_scene_phrase_translations(
+                update=update,
+                context=context,
+                chat_id=chat_id,
+                session=session,
+                scene=scene,
+                scene_idx=scene_idx,
+                source_language="ru",
+                source_text=fallback_text,
+            )
+            spoken_after = speech_chars_excluding_pauses(str(scene.get("text", "")).strip())
+            _refresh_scene_language_speech_metadata(scene, "ru", status="auto_shortened", auto_shortened=True)
+            _cancel_scene_speech_timeout(chat_id)
+            session.pop(SCENE_SPEECH_PENDING_KEY, None)
+            await update.message.reply_text(
+                f"Ночной режим: авто-сокращение не вернуло валидный ответ, поставила короткую реплику ({spoken_len} → {spoken_after}) и продолжаю."
+            )
+            return False
         _refresh_scene_language_speech_metadata(scene, "ru", status="overflow")
         _set_scene_speech_pending(
             session,
@@ -5032,6 +6095,8 @@ async def _scene_media_video_ok(
                 audio_enabled=True,
                 skip_initial_syntax=skip_initial_syntax,
                 disable_syntax_fallback=disable_syntax_fallback,
+                syntax_timeout_sec=_scheduled_syntax_timeout_sec(session),
+                syntax_acquire_timeout_sec=_scheduled_syntax_lock_timeout_sec(session),
             )
             return language, video, None
         except VideoProviderChoiceRequired as e:
@@ -5062,11 +6127,40 @@ async def _scene_media_video_ok(
                 update.message,
                 "Сначала отправляю все языки в Syntax одним обработчиком: " + ", ".join(req.key for req in batch_requests),
             )
-            syntax_batch_results = await _attempt_syntax_video_fallback_batch(
-                requests=batch_requests,
-                model=model,
-                duration_sec=duration_sec,
-            )
+            scheduled_syntax_mode = _is_scheduled_unattended_ai_mode(session)
+            max_syntax_attempts = _scheduled_syntax_video_retry_count(session) if scheduled_syntax_mode else 1
+            syntax_attempt = 0
+            pending_batch_requests = list(batch_requests)
+            syntax_batch_errors: list[str] = []
+            while pending_batch_requests:
+                syntax_attempt += 1
+                try:
+                    batch_result = await _attempt_scheduled_syntax_batch(
+                        requests=pending_batch_requests,
+                        model=model,
+                        duration_sec=duration_sec,
+                        session=session,
+                    )
+                except Exception as e:
+                    if not scheduled_syntax_mode:
+                        raise
+                    batch_result = {}
+                    syntax_batch_errors.append(_user_error_message(e, domain="video"))
+                syntax_batch_results.update(batch_result)
+                expected_keys_now = {str(req.key) for req in batch_requests}
+                missing_keys_now = sorted(expected_keys_now - set(syntax_batch_results))
+                if not scheduled_syntax_mode or not missing_keys_now or syntax_attempt >= max_syntax_attempts:
+                    break
+                delay_sec = _scheduled_syntax_video_retry_delay_sec(session, syntax_attempt)
+                await _safe_reply_text(
+                    update.message,
+                    "Ночной режим: Syntax вернул не все видео. "
+                    f"Повторяю недостающие языки: {', '.join(missing_keys_now)} "
+                    f"(попытка {syntax_attempt + 1}/{max_syntax_attempts}, пауза {delay_sec:g} сек).",
+                )
+                if delay_sec > 0:
+                    await asyncio.sleep(delay_sec)
+                pending_batch_requests = [req for req in batch_requests if str(req.key) in missing_keys_now]
             expected_syntax_keys = {str(req.key) for req in batch_requests}
             returned_syntax_keys = set(syntax_batch_results)
             missing_syntax_keys = sorted(expected_syntax_keys - returned_syntax_keys)
@@ -5113,6 +6207,30 @@ async def _scene_media_video_ok(
                     pending_payload=scene["video_provider_choice_pending"],
                     error_message="Syntax вернул не весь набор языков.",
                 )
+                if _is_scheduled_unattended_ai_mode(session):
+                    session[SCENE_MEDIA_AI_TECHNICAL_FAILURE_SESSION_KEY] = {
+                        "stage": "syntax_video",
+                        "attempts": syntax_attempt,
+                        "max_retries": max_syntax_attempts,
+                        "reason": (
+                            "Syntax вернул не весь набор языков. "
+                            f"Готово: {', '.join(sorted(returned_syntax_keys)) or 'ничего'}; "
+                            f"не пришли: {', '.join(missing_syntax_keys)}."
+                        ),
+                        "missing_languages": missing_syntax_keys,
+                        "ready_languages": sorted(returned_syntax_keys),
+                        "errors": syntax_batch_errors[-3:],
+                    }
+                    session["scene_media_substep"] = SCENE_MEDIA_SUBSTEP_VIDEO
+                    first_missing = missing_syntax_keys[0] if missing_syntax_keys else ""
+                    if first_missing in languages:
+                        session["scene_media_language_index"] = languages.index(first_missing)
+                    await _safe_reply_text(
+                        update.message,
+                        "Ночной режим: Syntax не вернул все языки за timeout. "
+                        "Сохраняю текущий шаг и повторю позже без отката сцены.",
+                    )
+                    return True
                 ready_syntax_keys = sorted(returned_syntax_keys)
                 await _reply_text_with_optional_markup(
                     update,
@@ -5124,7 +6242,7 @@ async def _scene_media_video_ok(
                         "Напишите `Syntax`, чтобы отправить недостающие языки ещё раз через Syntax, "
                         "или `Vertex`, чтобы запустить Vertex/Veo для недостающих языков."
                     ),
-                    reply_markup=_syntax_recovery_markup(missing_syntax_keys),
+                    reply_markup=_syntax_recovery_markup(missing_syntax_keys, session=session),
                 )
                 return True
             elif syntax_batch_results:
@@ -5182,7 +6300,7 @@ async def _scene_media_video_ok(
                     "Напишите `Syntax`, чтобы запустить эту сцену ещё раз через Syntax, "
                     "или `Vertex`, чтобы попробовать резервный канал Vertex/Veo."
                 ),
-                reply_markup=_syntax_recovery_markup([language]),
+                reply_markup=_syntax_recovery_markup([language], session=session),
             )
             continue
         if _is_video_prompt_filtered_error(err) or _is_video_policy_error(err) or _is_video_safety_error(err):
@@ -5209,6 +6327,7 @@ async def _scene_media_video_ok(
                     _video_policy_approval_user_message(scene, _get_scene_policy_candidate(scene, language)),
                     reply_markup=video_policy_retry_markup(
                         include_restart_hint=_should_suggest_regenerate_start_frame_after_video_prompt_fails(scene),
+                        session=session,
                     ),
                 )
             except ServiceUnavailableRetriesExhaustedError as rewrite_err:
@@ -5247,25 +6366,34 @@ async def _scene_media_video_ok(
             languages=languages,
         )
         if not approved_by_ai:
+            if (
+                _is_scheduled_unattended_ai_mode(session)
+                and not session.get(SCENE_MEDIA_AI_HUMAN_REVIEW_SESSION_KEY)
+                and not _all_scene_languages_have_video(scene, languages)
+            ):
+                return await _run_scene_media_ai_approve(
+                    update,
+                    context=context,
+                    chat_id=chat_id,
+                    session=session,
+                )
             return True
 
     if not requires_multilingual_approval:
         for language in languages:
             _approve_scene_video_language(scene, language, speed_coef=DEFAULT_SCENE_VIDEO_SPEED_COEF)
-        session["image_scene_index"] = idx + 1
-        if session["image_scene_index"] >= total:
+        next_idx = _advance_scene_media_after_current(session, idx, total=total)
+        if next_idx >= total:
             return await _finish_scene_media_production(update, session)
-        session["scene_media_substep"] = SCENE_MEDIA_SUBSTEP_START
         await _send_next_scene_media_step(update, session)
         return True
 
     if auto_approve:
         for language in languages:
             _approve_scene_video_language(scene, language, speed_coef=DEFAULT_SCENE_VIDEO_SPEED_COEF)
-        session["image_scene_index"] = idx + 1
-        if session["image_scene_index"] >= total:
+        next_idx = _advance_scene_media_after_current(session, idx, total=total)
+        if next_idx >= total:
             return await _finish_scene_media_production(update, session)
-        session["scene_media_substep"] = SCENE_MEDIA_SUBSTEP_START
         return True
 
     await _reply_text_with_optional_markup(
@@ -5279,10 +6407,9 @@ async def _scene_media_video_ok(
         reply_markup=scene_language_approval_markup(languages, session=session),
     )
     if _all_scene_languages_approved(scene, languages):
-        session["image_scene_index"] = idx + 1
-        if session["image_scene_index"] >= total:
+        next_idx = _advance_scene_media_after_current(session, idx, total=total)
+        if next_idx >= total:
             return await _finish_scene_media_production(update, session)
-        session["scene_media_substep"] = SCENE_MEDIA_SUBSTEP_START
         await _send_next_scene_media_step(update, session)
         return True
 
@@ -5320,6 +6447,7 @@ async def _run_scene_media_auto_approve(
             bool(scene.get("start_frame_image_b64")),
             bool(scene.get("end_frame_image_b64")),
             len(scene.get("video_results_by_lang") or {}),
+            _scene_video_progress_signature(scene),
             session.get("state"),
         )
 
@@ -5339,10 +6467,9 @@ async def _run_scene_media_auto_approve(
                 for language in languages:
                     _approve_scene_video_language(scene, language, speed_coef=DEFAULT_SCENE_VIDEO_SPEED_COEF)
                 session["scene_media_language_index"] = 0
-                session["image_scene_index"] = idx + 1
-                if session["image_scene_index"] >= len(scenes):
+                next_idx = _advance_scene_media_after_current(session, idx, total=len(scenes))
+                if next_idx >= len(scenes):
                     return await _finish_scene_media_production(update, session)
-                session["scene_media_substep"] = SCENE_MEDIA_SUBSTEP_START
             else:
                 await _scene_media_video_ok(
                     update,
@@ -5372,6 +6499,7 @@ async def _run_scene_media_auto_approve(
             bool(scene_after.get("start_frame_image_b64")),
             bool(scene_after.get("end_frame_image_b64")),
             len(scene_after.get("video_results_by_lang") or {}),
+            _scene_video_progress_signature(scene_after),
             session.get("state"),
         )
         if after == before:
@@ -5413,6 +6541,7 @@ async def _run_scene_media_ai_approve(
             bool(scene.get("start_frame_image_b64")),
             bool(scene.get("end_frame_image_b64")),
             len(scene.get("video_results_by_lang") or {}),
+            _scene_video_progress_signature(scene),
             len(scene.get("ai_approval_history") or []),
             session.get("state"),
         )
@@ -5438,20 +6567,35 @@ async def _run_scene_media_ai_approve(
                     idx=idx,
                     image_bytes=image_bytes,
                 )
+                image_status = _normalize_ai_status_for_session(session, image_status, stage="image")
                 if image_status == AI_APPROVAL_STATUS_APPROVE:
                     session["scene_media_substep"] = (
                         SCENE_MEDIA_SUBSTEP_END if _scene_needs_end_frame_step(scene) else SCENE_MEDIA_SUBSTEP_VIDEO
                     )
-                elif image_status == AI_APPROVAL_STATUS_REGENERATE_IMAGE and _ai_attempt_count(scene, "image") <= get_ai_approval_config().max_regenerate_attempts:
-                    scene.pop("start_frame_image_b64", None)
-                    retry_model_message = _prepare_ai_image_retry_model_message(scene, "start")
-                    session["scene_media_substep"] = SCENE_MEDIA_SUBSTEP_START
-                    await update.message.reply_text(
-                        f"🤖 ИИ апрув просит перегенерировать стартовый фрейм.{retry_model_message}"
-                    )
+                elif image_status == AI_APPROVAL_STATUS_REGENERATE_IMAGE:
+                    if _ai_attempt_count(scene, "image") <= _ai_regenerate_attempt_limit(session):
+                        scene.pop("start_frame_image_b64", None)
+                        await _regenerate_start_prompt_from_ai_feedback(
+                            update,
+                            context,
+                            chat_id=chat_id,
+                            session=session,
+                            scene=scene,
+                            idx=idx,
+                        )
+                        retry_model_message = _prepare_ai_image_retry_model_message(scene, "start")
+                        session["scene_media_substep"] = SCENE_MEDIA_SUBSTEP_START
+                        await _safe_reply_text(
+                            update.message,
+                            f"🤖 ИИ апрув просит перегенерацию стартового фрейма с исправленным prompt. "
+                            f"Текущий кадр не передаю как reference.{retry_model_message}"
+                        )
+                    elif _is_scheduled_unattended_ai_mode(session):
+                        await _safe_reply_text(update.message, "Ночной режим: лимит перегенерации стартового фрейма исчерпан, ручную проверку не запрашиваю.")
+                        return True
                 else:
                     _set_ai_human_review_pending(session, stage="image", reason="image QA requires manual review")
-                    await update.message.reply_text("ИИ апрув отправил стартовый фрейм на ручную проверку.")
+                    await _safe_reply_text(update.message, "ИИ апрув отправил стартовый фрейм на ручную проверку.")
                     await _reply_text_with_optional_markup(
                         update,
                         "Проверьте стартовый кадр вручную.",
@@ -5476,14 +6620,19 @@ async def _run_scene_media_ai_approve(
                     languages=languages,
                 )
                 if not approved:
+                    if (
+                        _is_scheduled_unattended_ai_mode(session)
+                        and not session.get(SCENE_MEDIA_AI_HUMAN_REVIEW_SESSION_KEY)
+                        and not _all_scene_languages_have_video(scene, languages)
+                    ):
+                        continue
                     return True
                 for language in languages:
                     _approve_scene_video_language(scene, language, speed_coef=DEFAULT_SCENE_VIDEO_SPEED_COEF)
                 session["scene_media_language_index"] = 0
-                session["image_scene_index"] = idx + 1
-                if session["image_scene_index"] >= len(scenes):
+                next_idx = _advance_scene_media_after_current(session, idx, total=len(scenes))
+                if next_idx >= len(scenes):
                     return await _finish_scene_media_production(update, session)
-                session["scene_media_substep"] = SCENE_MEDIA_SUBSTEP_START
             else:
                 await _scene_media_video_ok(
                     update,
@@ -5512,6 +6661,7 @@ async def _run_scene_media_ai_approve(
             bool(scene_after.get("start_frame_image_b64")),
             bool(scene_after.get("end_frame_image_b64")),
             len(scene_after.get("video_results_by_lang") or {}),
+            _scene_video_progress_signature(scene_after),
             len(scene_after.get("ai_approval_history") or []),
             session.get("state"),
         )
@@ -5549,11 +6699,7 @@ async def _handle_scene_syntax_fallback_pending(
         await _reply_text_with_optional_markup(
             update,
             "Нажмите «да» (запустить Syntax) или «нет» (переписать video prompt, как после отклонения Vertex).",
-            reply_markup=ReplyKeyboardMarkup(
-                [["да"], ["нет"], [NAV_BUTTON_PREVIOUS_STEP], [NAV_BUTTON_START_OVER]],
-                resize_keyboard=True,
-                one_time_keyboard=False,
-            ),
+            reply_markup=_syntax_confirmation_markup(session=session),
         )
         return True
     total = len(scenes)
@@ -5585,6 +6731,7 @@ async def _handle_scene_syntax_fallback_pending(
                 _video_policy_approval_user_message(scene, _get_scene_policy_candidate(scene, language)),
                 reply_markup=video_policy_retry_markup(
                     include_restart_hint=_should_suggest_regenerate_start_frame_after_video_prompt_fails(scene),
+                    session=session,
                 ),
             )
         except ServiceUnavailableRetriesExhaustedError as rewrite_err:
@@ -5674,10 +6821,9 @@ async def _handle_scene_syntax_fallback_pending(
     if not requires_multilingual_approval and session["scene_media_language_index"] == 0:
         for lang in languages:
             _approve_scene_video_language(scene, lang, speed_coef=DEFAULT_SCENE_VIDEO_SPEED_COEF)
-        session["image_scene_index"] = idx + 1
-        if session["image_scene_index"] >= total:
+        next_idx = _advance_scene_media_after_current(session, idx, total=total)
+        if next_idx >= total:
             return await _finish_scene_media_production(update, session)
-        session["scene_media_substep"] = SCENE_MEDIA_SUBSTEP_START
     await _send_next_scene_media_step(update, session)
     if _is_scene_media_auto_approve_enabled(session):
         return await _run_scene_media_auto_approve(
@@ -5728,14 +6874,14 @@ async def _handle_scene_image_model_choice_pending(
     if low not in retry_commands and low not in downgrade_commands:
         await update.message.reply_text(
             "Выберите, что делать с неудачной генерацией изображения: повторить сильную модель или понизить модель.",
-            reply_markup=_scene_image_model_retry_markup(lower_model=lower_model),
+            reply_markup=_scene_image_model_retry_markup(lower_model=lower_model, session=session),
         )
         return True
     if low in downgrade_commands:
         if not lower_model:
             await update.message.reply_text(
                 f"Модель ниже не настроена. Могу повторить сильную `{retry_model}`.",
-                reply_markup=_scene_image_model_retry_markup(lower_model=None),
+                reply_markup=_scene_image_model_retry_markup(lower_model=None, session=session),
             )
             return True
         selected_model = lower_model
@@ -5810,7 +6956,7 @@ async def _handle_scene_video_provider_choice_edit_command(
         await _reply_text_with_optional_markup(
             update,
             f"Обновила retry prompt для {lang}. Можно снова нажать `Syntax` или `Vertex`.",
-            reply_markup=_syntax_recovery_markup(languages),
+            reply_markup=_syntax_recovery_markup(languages, session=session),
         )
         return True
 
@@ -5840,7 +6986,7 @@ async def _handle_scene_video_provider_choice_edit_command(
         await _reply_text_with_optional_markup(
             update,
             f"Фразу для {lang} обновила. Можно снова нажать `Syntax` или `Vertex`.",
-            reply_markup=_syntax_recovery_markup(languages),
+            reply_markup=_syntax_recovery_markup(languages, session=session),
         )
         return True
 
@@ -5858,7 +7004,7 @@ async def _handle_scene_video_provider_choice_edit_command(
         await _reply_text_with_optional_markup(
             update,
             f"Обновила retry prompt для {lang}. Можно снова нажать `Syntax` или `Vertex`.",
-            reply_markup=_syntax_recovery_markup(languages),
+            reply_markup=_syntax_recovery_markup(languages, session=session),
         )
         return True
 
@@ -5889,7 +7035,7 @@ async def _handle_scene_video_provider_choice_edit_command(
             update,
             "Обновила retry prompt по фидбэку для языков: "
             f"{', '.join(applied_languages)}. Можно снова нажать `Syntax` или `Vertex`.",
-            reply_markup=_syntax_recovery_markup(applied_languages),
+            reply_markup=_syntax_recovery_markup(applied_languages, session=session),
         )
         return True
 
@@ -5943,10 +7089,9 @@ async def _continue_after_scene_video_provider_result(
                 language,
                 speed_coef=DEFAULT_SCENE_VIDEO_SPEED_COEF,
             )
-        session["image_scene_index"] = idx + 1
-        if session["image_scene_index"] >= total:
+        next_idx = _advance_scene_media_after_current(session, idx, total=total)
+        if next_idx >= total:
             return await _finish_scene_media_production(update, session)
-        session["scene_media_substep"] = SCENE_MEDIA_SUBSTEP_START
         if _is_scene_media_auto_approve_enabled(session):
             return await _run_scene_media_auto_approve(
                 update,
@@ -6019,7 +7164,7 @@ async def _handle_scene_video_provider_choice_pending(
         await _reply_text_with_optional_markup(
             update,
             "Нажмите `Syntax` для повтора через Syntax или `Vertex` для резервного Vertex/Veo.",
-            reply_markup=_syntax_recovery_markup(pending_languages),
+            reply_markup=_syntax_recovery_markup(pending_languages, session=session),
         )
         return True
 
@@ -6114,7 +7259,7 @@ async def _handle_scene_video_provider_choice_pending(
                         "Напишите `Syntax`, чтобы ещё раз отправить недостающие языки в Syntax, "
                         "или `Vertex`, чтобы переключить недостающие языки сцены на Vertex/Veo."
                     ),
-                    reply_markup=_syntax_recovery_markup(missing),
+                    reply_markup=_syntax_recovery_markup(missing, session=session),
                 )
                 return True
             scene.pop("video_provider_choice_pending", None)
@@ -6214,21 +7359,22 @@ async def _handle_scene_video_provider_choice_pending(
     languages = _scene_target_languages(session, scene)
     if choice == "syntax":
         await _safe_reply_text(update.message, "Готовлю повтор этой сцены через Syntax…")
+        syntax_payload = _scene_video_provider_payload_for_language(scene, pending, language)
         try:
-            video_bytes = await run_syntax_fallback_from_session_payload(pending)
+            video_bytes = await run_syntax_fallback_from_session_payload(syntax_payload)
         except Exception as fb_err:
             logger.exception("scene Syntax retry execution failed")
             await _reply_text_with_optional_markup(
                 update,
                 f"Не удалось отправить запрос в Syntax: {_user_error_message(fb_err, domain='video')}",
-                reply_markup=_syntax_recovery_markup(languages),
+                reply_markup=_syntax_recovery_markup(languages, session=session),
             )
             return True
         if not video_bytes:
             await _reply_text_with_optional_markup(
                 update,
                 "Syntax снова не вернул видео. Можно поправить prompt/фразу, ещё раз нажать `Syntax` или переключиться на `Vertex`.",
-                reply_markup=_syntax_recovery_markup(languages),
+                reply_markup=_syntax_recovery_markup(languages, session=session),
             )
             return True
         scene.pop("video_provider_choice_pending", None)
@@ -6246,8 +7392,9 @@ async def _handle_scene_video_provider_choice_pending(
         )
     else:
         await _safe_reply_text(update.message, "Пробую резервный канал Vertex/Veo…")
+        vertex_payload = _scene_video_provider_payload_for_language(scene, pending, language)
         try:
-            video_bytes = await run_vertex_fallback_from_session_payload(pending)
+            video_bytes = await run_vertex_fallback_from_session_payload(vertex_payload)
         except Exception as err:
             logger.exception("scene Vertex fallback execution failed")
             await _reply_current_scene_media_keyboard(
@@ -6264,7 +7411,7 @@ async def _handle_scene_video_provider_choice_pending(
             )
             return True
         scene.pop("video_provider_choice_pending", None)
-        vertex_duration_sec = int(pending.get("vertex_duration_sec") or pending.get("duration_sec") or 6)
+        vertex_duration_sec = int(vertex_payload.get("vertex_duration_sec") or vertex_payload.get("duration_sec") or 6)
         await _deliver_scene_video_result(
             update,
             chat_id=chat_id,
@@ -6297,6 +7444,14 @@ async def _handle_waiting_scene_media_state(
     session: dict,
     text: str,
 ) -> bool:
+    if str(text or "").strip().lower() == NAV_BUTTON_START_OVER.lower():
+        SESSIONS.pop(chat_id, None)
+        session.clear()
+        await update.message.reply_text(
+            "Начинаем сначала. Выберите действие на первом шаге.",
+            reply_markup=first_step_menu_markup(),
+        )
+        return True
     if _is_scene_media_stop_command(text):
         _set_scene_media_manual_approval(session)
         pending = session.get(SCENE_SPEECH_PENDING_KEY)
@@ -6483,11 +7638,10 @@ async def _handle_waiting_scene_media_state(
             f"Скорость {speed_coef:.2f}x сохранена, видео {target_lang} автоматически утверждено."
         )
         if _all_scene_languages_approved(scene, languages):
-            session["image_scene_index"] = idx + 1
             session["scene_media_language_index"] = 0
-            if session["image_scene_index"] >= len(scenes):
+            next_idx = _advance_scene_media_after_current(session, idx, total=len(scenes))
+            if next_idx >= len(scenes):
                 return await _finish_scene_media_production(update, session)
-            session["scene_media_substep"] = SCENE_MEDIA_SUBSTEP_START
             await _send_next_scene_media_step(update, session)
             return True
         await _reply_text_with_optional_markup(
@@ -7060,14 +8214,16 @@ async def _handle_waiting_scene_media_state(
                 await update.message.reply_text(
                     f"Апрув принят для языка {only_lang} со скоростью {ok_speed:.2f}x."
                 )
-                session["image_scene_index"] = idx + 1
-                session["scene_media_language_index"] = 0
-                if session["image_scene_index"] >= len(scenes):
+                next_idx = _advance_scene_media_after_current(session, idx, total=len(scenes))
+                if next_idx >= len(scenes):
                     return await _finish_scene_media_production(update, session)
-                session["scene_media_substep"] = SCENE_MEDIA_SUBSTEP_START
                 await _send_next_scene_media_step(update, session)
                 return True
-            if low in {"ок все", "ok all", "approve all"}:
+            if is_ok and len(languages) == 1:
+                only_lang = languages[0]
+                _approve_scene_video_language(scene, only_lang, speed_coef=_scene_speed_coef(scene, only_lang))
+                await update.message.reply_text(f"Апрув принят для языка {only_lang}.")
+            elif low in {"ок все", "ok all", "approve all"}:
                 for language in languages:
                     _approve_scene_video_language(scene, language, speed_coef=_scene_speed_coef(scene, language))
             else:
@@ -7185,11 +8341,9 @@ async def _handle_waiting_scene_media_state(
                     await _send_scene_video_approval_prompt(update, session, languages)
                     return True
             if _all_scene_languages_approved(scene, languages):
-                session["image_scene_index"] = idx + 1
-                session["scene_media_language_index"] = 0
-                if session["image_scene_index"] >= len(scenes):
+                next_idx = _advance_scene_media_after_current(session, idx, total=len(scenes))
+                if next_idx >= len(scenes):
                     return await _finish_scene_media_production(update, session)
-                session["scene_media_substep"] = SCENE_MEDIA_SUBSTEP_START
                 await _send_next_scene_media_step(update, session)
                 return True
             await _reply_text_with_optional_markup(

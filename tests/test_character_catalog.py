@@ -5,7 +5,7 @@ from app.character_catalog import sanitize_character_names_and_keys
 
 
 def test_maybe_choose_romantic_subplot_disabled():
-    draws = iter([0.70])
+    draws = iter([0.95])
 
     out = maybe_choose_romantic_subplot(random_fn=lambda: next(draws))
 
@@ -67,7 +67,7 @@ def test_sanitize_character_names_and_keys_removes_generated_aliases():
 
 
 def test_maybe_choose_romantic_subplot_adds_zaya_only():
-    draws = iter([0.20, 0.50])
+    draws = iter([0.20, 0.85])
 
     out = maybe_choose_romantic_subplot(random_fn=lambda: next(draws))
 

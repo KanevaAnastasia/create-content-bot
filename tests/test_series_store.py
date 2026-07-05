@@ -34,13 +34,47 @@ def test_create_series_starts_on_first_day_without_reserving(monkeypatch):
 
     monkeypatch.setattr(series_store, "SessionLocal", lambda: _Db())
 
-    payload = series_store.create_series(title_ru="Летние напитки", title_en="Summer Drinks", total_videos=10)
+    payload = series_store.create_series(
+        title_ru="Летние напитки",
+        title_en="Summer Drinks",
+        total_videos=10,
+    )
 
     assert payload.video_index == 1
     assert payload.total_videos == 10
     assert rows[0].current_video_index == 1
     assert rows[0].is_active is True
+    assert rows[0].meta_json["title_by_lang"] == {
+        "ru": "Летние напитки",
+        "en": "Summer Drinks",
+    }
     assert commits == [True]
+
+
+def test_payload_for_series_includes_extra_language_titles_from_meta():
+    row = SimpleNamespace(
+        id="series-id",
+        title_ru="летние напитки",
+        title_en="summer drinks",
+        current_video_index=2,
+        total_videos=5,
+        meta_json={
+            "title_by_lang": {
+                "ru": "летние напитки",
+                "en": "summer drinks",
+                "es": "bebidas de verano",
+            }
+        },
+    )
+
+    payload = series_store.payload_for_series(row)
+
+    assert payload.title_by_lang == {
+        "ru": "летние напитки",
+        "en": "summer drinks",
+        "es": "bebidas de verano",
+    }
+    assert payload.counter_by_lang["es"] == "day 2 of 5"
 
 
 def test_advance_series_after_successful_render_moves_counter_once(monkeypatch):

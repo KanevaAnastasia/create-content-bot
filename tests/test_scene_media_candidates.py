@@ -5,6 +5,7 @@ from app.scene_media_candidates import (
     register_video_candidate,
     resolve_candidate_by_message,
     resolve_scene_image_for_video,
+    resolve_latest_approved_scene_video_for_final_build,
     resolve_scene_video_for_production,
 )
 
@@ -44,6 +45,28 @@ def test_resolve_scene_video_for_production_prefers_liked_among_approved():
     first["liked"] = True
 
     assert resolve_scene_video_for_production(scene, "ru") is first
+
+
+def test_resolve_latest_approved_scene_video_for_final_build_uses_newest_approved_only():
+    scene = {}
+    first = register_video_candidate(scene, language="ru", video_bytes=b"one")
+    second = register_video_candidate(scene, language="ru", video_bytes=b"two")
+    third = register_video_candidate(scene, language="ru", video_bytes=b"three")
+    fourth = register_video_candidate(scene, language="ru", video_bytes=b"four")
+    first["approved_for_production"] = True
+    second["liked"] = True
+    third["approved_for_production"] = True
+
+    assert resolve_latest_approved_scene_video_for_final_build(scene, "ru") is third
+    assert fourth["approved_for_production"] is False
+
+
+def test_resolve_latest_approved_scene_video_for_final_build_rejects_unapproved_only_candidates():
+    scene = {}
+    register_video_candidate(scene, language="ru", video_bytes=b"one")
+    register_video_candidate(scene, language="ru", video_bytes=b"two")
+
+    assert resolve_latest_approved_scene_video_for_final_build(scene, "ru") is None
 
 
 def test_resolve_candidate_by_message_marks_target_candidate_liked():

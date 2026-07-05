@@ -9,6 +9,8 @@ from django.db import models
 class LenientJSONFormField(forms.JSONField):
     """Accept values already decoded by the database driver."""
 
+    empty_values = (None, "")
+
     def to_python(self, value):
         if isinstance(value, (dict, list, int, float, bool)):
             return value
@@ -32,7 +34,7 @@ class ChatSession(models.Model):
     id = models.UUIDField(primary_key=True, default=uuid.uuid4)
     chat_id = models.IntegerField(unique=True)
     state = models.CharField(max_length=128, blank=True, null=True)
-    session_json = LenientJSONField(default=dict)
+    session_json = LenientJSONField(default=dict, blank=True)
     generation_run_id = models.UUIDField(blank=True, null=True)
     created_at = models.DateTimeField()
     updated_at = models.DateTimeField()
@@ -55,8 +57,8 @@ class PipelineStepCheckpoint(models.Model):
     scene_index = models.IntegerField(blank=True, null=True)
     substep = models.CharField(max_length=128, blank=True, null=True)
     language = models.CharField(max_length=8, blank=True, null=True)
-    session_snapshot_json = LenientJSONField(default=dict)
-    payload_json = LenientJSONField(default=dict)
+    session_snapshot_json = LenientJSONField(default=dict, blank=True)
+    payload_json = LenientJSONField(default=dict, blank=True)
     restored_at = models.DateTimeField(blank=True, null=True)
     created_at = models.DateTimeField()
 
@@ -77,14 +79,24 @@ class GenerationRun(models.Model):
     id = models.UUIDField(primary_key=True, default=uuid.uuid4)
     status = models.CharField(max_length=64)
     is_active = models.BooleanField(default=True)
+    is_draft = models.BooleanField(default=False)
     current_scene_index = models.IntegerField(blank=True, null=True)
     current_media_substep = models.CharField(max_length=128, blank=True, null=True)
     current_media_language_index = models.IntegerField(blank=True, null=True)
     human_title = models.TextField(blank=True, null=True)
+    title_color = models.CharField(max_length=32, default="#c72638")
     language = models.CharField(max_length=8)
     series = models.ForeignKey("ContentSeries", db_column="series_id", blank=True, null=True, on_delete=models.DO_NOTHING)
     series_video_index = models.IntegerField(blank=True, null=True)
     series_total_videos = models.IntegerField(blank=True, null=True)
+    scheduled_item = models.ForeignKey(
+        "ScheduledGenerationItem",
+        db_column="scheduled_item_id",
+        blank=True,
+        null=True,
+        on_delete=models.DO_NOTHING,
+        related_name="runs_by_scheduled_item",
+    )
     script = models.TextField()
     created_at = models.DateTimeField()
 
@@ -99,6 +111,110 @@ class GenerationRun(models.Model):
         return self.human_title or self.script[:120] or str(self.id)
 
 
+class ScheduledGenerationItem(models.Model):
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4)
+    title = models.TextField()
+    recipe = models.TextField()
+    comment = models.TextField(blank=True, null=True)
+    title_color = models.CharField(max_length=32, default="#c72638")
+    run_at = models.DateTimeField()
+    is_draft = models.BooleanField(default=True)
+    status = models.CharField(max_length=64, default="pending")
+    generation_run = models.ForeignKey(
+        GenerationRun,
+        db_column="generation_run_id",
+        blank=True,
+        null=True,
+        on_delete=models.DO_NOTHING,
+        related_name="scheduled_generation_items_by_result",
+    )
+    series = models.ForeignKey(
+        "ContentSeries",
+        db_column="series_id",
+        blank=True,
+        null=True,
+        on_delete=models.DO_NOTHING,
+        related_name="scheduled_generation_items",
+    )
+    source_row_key = models.CharField(max_length=128, blank=True, null=True, unique=True)
+    source_file_path = models.TextField(blank=True, null=True)
+    error_text = models.TextField(blank=True, null=True)
+    payload_json = LenientJSONField(default=dict, blank=True)
+    claimed_at = models.DateTimeField(blank=True, null=True)
+    started_at = models.DateTimeField(blank=True, null=True)
+    finished_at = models.DateTimeField(blank=True, null=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        managed = False
+        db_table = "scheduled_generation_items"
+        ordering = ("run_at", "created_at")
+        verbose_name = "Scheduled generation item / ночная очередь"
+        verbose_name_plural = "Scheduled generation items / ночная очередь"
+
+    def __str__(self) -> str:
+        return f"{self.run_at:%Y-%m-%d %H:%M} {self.title}"
+
+
+class GenerationDraft(models.Model):
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4)
+    chat_id = models.IntegerField(blank=True, null=True)
+    run = models.ForeignKey(GenerationRun, db_column="run_id", blank=True, null=True, on_delete=models.DO_NOTHING)
+    title = models.TextField()
+    stage = models.CharField(max_length=128, blank=True, null=True)
+    scene_index = models.IntegerField(blank=True, null=True)
+    substep = models.CharField(max_length=128, blank=True, null=True)
+    language = models.CharField(max_length=8, blank=True, null=True)
+    session_snapshot_json = LenientJSONField(default=dict, blank=True)
+    payload_json = LenientJSONField(default=dict, blank=True)
+    created_at = models.DateTimeField()
+
+    class Meta:
+        managed = False
+        db_table = "generation_drafts"
+        ordering = ("-created_at",)
+        verbose_name = "Generation draft / черновик"
+        verbose_name_plural = "Generation drafts / черновики"
+
+    def __str__(self) -> str:
+        return self.title or str(self.id)
+
+
+class ScheduledGenerationEvent(models.Model):
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4)
+    scheduled_item = models.ForeignKey(
+        ScheduledGenerationItem,
+        db_column="scheduled_item_id",
+        on_delete=models.DO_NOTHING,
+        related_name="events",
+    )
+    generation_run = models.ForeignKey(
+        GenerationRun,
+        db_column="generation_run_id",
+        blank=True,
+        null=True,
+        on_delete=models.DO_NOTHING,
+        related_name="scheduled_generation_events",
+    )
+    event_type = models.CharField(max_length=64)
+    stage = models.CharField(max_length=64, blank=True, null=True)
+    status = models.CharField(max_length=64, blank=True, null=True)
+    message = models.TextField(blank=True)
+    payload_json = LenientJSONField(default=dict, blank=True)
+    created_at = models.DateTimeField()
+
+    class Meta:
+        managed = False
+        db_table = "scheduled_generation_events"
+        ordering = ("-created_at",)
+        verbose_name = "Scheduled generation event / событие ночной очереди"
+        verbose_name_plural = "Scheduled generation events / события ночной очереди"
+
+    def __str__(self) -> str:
+        return f"{self.created_at:%Y-%m-%d %H:%M:%S} {self.event_type}"
+
+
 class ContentSeries(models.Model):
     id = models.UUIDField(primary_key=True, default=uuid.uuid4)
     project_id = models.UUIDField(blank=True, null=True)
@@ -109,7 +225,7 @@ class ContentSeries(models.Model):
     total_videos = models.IntegerField(default=10)
     is_active = models.BooleanField(default=True)
     notes = models.TextField(blank=True, null=True)
-    meta_json = LenientJSONField(default=dict)
+    meta_json = LenientJSONField(default=dict, blank=True)
     created_at = models.DateTimeField()
     updated_at = models.DateTimeField()
 
@@ -133,8 +249,8 @@ class Project(models.Model):
     is_active = models.BooleanField(default=True)
     final_scene_prompt = models.TextField(blank=True, null=True)
     title_preset = models.TextField(blank=True, null=True)
-    hashtags_fixed_ru = LenientJSONField(default=list)
-    hashtags_fixed_en = LenientJSONField(default=list)
+    hashtags_fixed_ru = LenientJSONField(default=list, blank=True)
+    hashtags_fixed_en = LenientJSONField(default=list, blank=True)
     default_video_provider = models.CharField(max_length=64, blank=True, null=True)
     allowed_video_models = LenientJSONField(blank=True, null=True)
     background_music_asset_uri = models.TextField(blank=True, null=True)
@@ -162,7 +278,7 @@ class ProjectPublishAccount(models.Model):
     external_account_id = models.TextField(blank=True, null=True)
     publish_policy = models.CharField(max_length=64, default="auto_after_copy_approval")
     is_active = models.BooleanField(default=True)
-    meta_json = LenientJSONField(default=dict)
+    meta_json = LenientJSONField(default=dict, blank=True)
     created_at = models.DateTimeField()
     updated_at = models.DateTimeField()
 
@@ -192,10 +308,10 @@ class PublicationJob(models.Model):
     video_label = models.CharField(max_length=128, blank=True, null=True)
     title = models.TextField(blank=True, null=True)
     description = models.TextField(blank=True, null=True)
-    hashtags_json = LenientJSONField(default=list)
+    hashtags_json = LenientJSONField(default=list, blank=True)
     recipe = models.TextField(blank=True, null=True)
     publish_policy = models.CharField(max_length=64, default="auto_after_copy_approval")
-    payload_json = LenientJSONField(default=dict)
+    payload_json = LenientJSONField(default=dict, blank=True)
     scheduled_at = models.DateTimeField(blank=True, null=True)
     approved_at = models.DateTimeField(blank=True, null=True)
     published_at = models.DateTimeField(blank=True, null=True)
@@ -232,10 +348,10 @@ class Scene(models.Model):
     start_frame_prompt = models.TextField(blank=True, null=True)
     start_frame_prompt_effective = models.TextField(blank=True, null=True)
     end_frame_prompt = models.TextField(blank=True, null=True)
-    video_prompt_by_lang = LenientJSONField(default=dict)
-    speech_by_lang = LenientJSONField(default=dict)
-    syntax_prompt_by_lang = LenientJSONField(default=dict)
-    prompt_meta_json = LenientJSONField(default=dict)
+    video_prompt_by_lang = LenientJSONField(default=dict, blank=True)
+    speech_by_lang = LenientJSONField(default=dict, blank=True)
+    syntax_prompt_by_lang = LenientJSONField(default=dict, blank=True)
+    prompt_meta_json = LenientJSONField(default=dict, blank=True)
 
     class Meta:
         managed = False
@@ -248,6 +364,32 @@ class Scene(models.Model):
         return f"Scene {self.scene_order}: {self.text[:80]}"
 
 
+class SceneTextRevision(models.Model):
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4)
+    run = models.ForeignKey(GenerationRun, db_column="run_id", on_delete=models.DO_NOTHING)
+    scene = models.ForeignKey(Scene, db_column="scene_id", blank=True, null=True, on_delete=models.DO_NOTHING)
+    scene_order = models.IntegerField(blank=True, null=True)
+    field_name = models.CharField(max_length=64)
+    language = models.CharField(max_length=8, blank=True, null=True)
+    old_text = models.TextField(blank=True)
+    new_text = models.TextField(blank=True)
+    source = models.CharField(max_length=64, default="admin")
+    actor = models.CharField(max_length=256, blank=True, null=True)
+    meta_json = LenientJSONField(default=dict, blank=True)
+    created_at = models.DateTimeField()
+
+    class Meta:
+        managed = False
+        db_table = "scene_text_revisions"
+        ordering = ("-created_at",)
+        verbose_name = "Scene text revision / история текста сцены"
+        verbose_name_plural = "Scene text revisions / история текстов сцен"
+
+    def __str__(self) -> str:
+        lang = f":{self.language}" if self.language else ""
+        return f"Scene {self.scene_order or '-'} {self.field_name}{lang} @ {self.created_at:%Y-%m-%d %H:%M:%S}"
+
+
 class GenerationArtifact(models.Model):
     id = models.UUIDField(primary_key=True, default=uuid.uuid4)
     run = models.ForeignKey(GenerationRun, db_column="run_id", on_delete=models.DO_NOTHING)
@@ -257,7 +399,7 @@ class GenerationArtifact(models.Model):
     uri = models.TextField()
     language = models.CharField(max_length=8, blank=True, null=True)
     mime_type = models.CharField(max_length=128, blank=True, null=True)
-    payload_json = LenientJSONField(default=dict)
+    payload_json = LenientJSONField(default=dict, blank=True)
     created_at = models.DateTimeField()
 
     class Meta:
@@ -276,7 +418,10 @@ class SceneImageCandidate(models.Model):
     candidate_id = models.CharField(max_length=64, unique=True)
     scene = models.ForeignKey(Scene, db_column="scene_id", on_delete=models.DO_NOTHING)
     kind = models.CharField(max_length=16)
-    image_blob = models.BinaryField()
+    image_blob = models.BinaryField(blank=True, null=True)
+    media_uri = models.TextField(blank=True, null=True)
+    mime_type = models.CharField(max_length=128, blank=True, null=True)
+    byte_size = models.IntegerField(blank=True, null=True)
     liked = models.BooleanField(default=False)
     approved_for_video = models.BooleanField(default=False)
     created_at = models.DateTimeField()
@@ -296,7 +441,10 @@ class SceneVideoCandidate(models.Model):
     candidate_id = models.CharField(max_length=64, unique=True)
     scene = models.ForeignKey(Scene, db_column="scene_id", on_delete=models.DO_NOTHING)
     language = models.CharField(max_length=8)
-    video_blob = models.BinaryField()
+    video_blob = models.BinaryField(blank=True, null=True)
+    media_uri = models.TextField(blank=True, null=True)
+    mime_type = models.CharField(max_length=128, blank=True, null=True)
+    byte_size = models.IntegerField(blank=True, null=True)
     liked = models.BooleanField(default=False)
     approved_for_production = models.BooleanField(default=False)
     speed_coef = models.FloatField(default=1.2)

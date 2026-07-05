@@ -13,14 +13,18 @@ from app.ai_approval_service import (
     AI_APPROVAL_STATUS_REGENERATE_IMAGE,
     AI_APPROVAL_STATUS_REGENERATE_VIDEO,
     AIApprovalConfig,
+    AIApprovalResult,
+    ai_approval_history_entry,
     call_ai_approval_model,
     check_scene_prompts,
     check_start_frame,
     check_video,
+    format_ai_approval_summary,
     get_ai_approval_config,
     normalize_ai_approval_result,
     transcribe_video_audio,
 )
+from app.llm_queue import LLMCallTimeoutError
 
 
 def _cfg() -> AIApprovalConfig:
@@ -245,12 +249,39 @@ def test_call_ai_approval_model_reuses_vertex_helpers_and_dedupes_media(monkeypa
     assert calls == {"init": 1, "model": 1}
 
 
+def test_call_ai_approval_model_stops_fallback_chain_on_timeout(monkeypatch) -> None:
+    calls = {"safe": 0}
+
+    monkeypatch.setenv("GOOGLE_CLOUD_PROJECT", "proj")
+    monkeypatch.setenv("GOOGLE_CLOUD_LOCATION", "us-central1")
+    monkeypatch.setenv("AI_APPROVAL_MODEL_FALLBACKS", "fallback-a,fallback-b")
+
+    def _timeout(_fn, **_kwargs):
+        calls["safe"] += 1
+        raise LLMCallTimeoutError("timeout")
+
+    monkeypatch.setattr("app.ai_approval_service.safe_llm_call", _timeout)
+    monkeypatch.setattr("app.ai_approval_service.vertex_part_from_text", lambda *_args: {"text": "p"})
+    monkeypatch.setattr("app.ai_approval_service.get_vertex_safety_settings", lambda: [])
+
+    with pytest.raises(RuntimeError, match="timed out"):
+        call_ai_approval_model(
+            "primary prompt",
+            fallback_prompts=["neutral fallback"],
+            config=AIApprovalConfig(enabled=True, model="primary-model"),
+        )
+
+    assert calls == {"safe": 1}
+
+
 def test_check_scene_prompts_requires_character_and_prop_consistency(monkeypatch) -> None:
     import app.ai_approval_service as svc
 
     def _fake_model(prompt, *, images, config):
         assert images is None
         assert "missing grandma face" in prompt
+        assert "back-only, cropped, hidden, tiny, faceless" in prompt
+        assert "substituted by a different woman" in prompt
         assert "wrong cat color" in prompt
         assert "giant cat" in prompt
         assert "tiny grandma" in prompt
@@ -289,6 +320,20 @@ def test_check_scene_prompts_requires_character_and_prop_consistency(monkeypatch
     assert result.status == AI_APPROVAL_STATUS_APPROVE
 
 
+def test_ai_approval_summary_includes_stage_and_decision() -> None:
+    result = AIApprovalResult(
+        status=AI_APPROVAL_STATUS_APPROVE,
+        stage="prompt",
+        overall_score=0.93,
+        positive_notes=["prompt is clean"],
+    )
+
+    text = format_ai_approval_summary(result)
+
+    assert "decision: prompt / APPROVE" in text
+    assert "0.93" in text
+
+
 def test_character_descriptions_for_approval_hide_names_and_canonical_keys() -> None:
     import app.ai_approval_service as svc
 
@@ -311,6 +356,10 @@ def test_check_start_frame_requires_reference_identity_and_normal_scale(monkeypa
         assert "wrong cat coat color" in prompt
         assert "giant cat" in prompt
         assert "tiny grandma" in prompt
+        assert "front or three-quarter view" in prompt
+        assert "replaced by a different woman" in prompt
+        assert "split-screen, collage, stitched image" in prompt
+        assert "horizontal/vertical seam" in prompt
         assert "CHARACTER DESCRIPTIONS" in prompt
         assert "end frame image" in prompt
         return {
@@ -413,6 +462,10 @@ def test_check_video_attaches_original_mp4_for_pronunciation_review(monkeypatch,
         assert "spoken words have natural accent/stress" in prompt
         assert "Wrong stress" in prompt
         assert "giant cat" in prompt
+        assert "Grandma's face must remain visible" in prompt
+        assert "different woman's face" in prompt
+        assert "split-screen, collage-like, stitched" in prompt
+        assert "visible seam artifacts" in prompt
         assert images[-1] == video_bytes
         assert all(image.startswith(b"\x89PNG\r\n\x1a\n") for image in images[:-1])
         return {
@@ -488,6 +541,45 @@ def test_transcribe_video_audio_recognizes_russian_speech_with_model(monkeypatch
     assert result.speech_speed == "normal"
 
 
+def test_transcribe_video_audio_rejects_wrong_russian_stress(monkeypatch) -> None:
+    import app.ai_approval_service as svc
+
+    video_bytes = b"\x00\x00\x00\x18ftypmp42fake-video"
+
+    def _fake_model(prompt, *, images, config):
+        assert images == [video_bytes]
+        assert "тают / тает: stress is тАют / тАет" in prompt
+        assert "recognized_text can be correct while stress is wrong" in prompt
+        return {
+            "phrase_completed": True,
+            "match_score": 0.95,
+            "missing_words": [],
+            "extra_words": [],
+            "cut_off_detected": False,
+            "long_pauses_detected": False,
+            "speech_speed": "normal",
+            "recognized_text": "они тают во рту",
+            "pronunciation_issues": ["тают pronounced with stress on ю"],
+            "wrong_stress_words": ["тают"],
+            "phrase_overflow_detected": False,
+            "unfinished_line_detected": False,
+            "status": "APPROVE",
+        }
+
+    monkeypatch.setattr(svc, "call_ai_approval_model", _fake_model)
+
+    result = transcribe_video_audio(
+        video_bytes=video_bytes,
+        expected_speech_text="они тают во рту",
+        duration=6,
+        config=AIApprovalConfig(audio_transcription_enabled=True, model="test-model"),
+    )
+
+    assert result.status == AI_APPROVAL_STATUS_REGENERATE_VIDEO
+    assert result.wrong_stress_words == ["тают"]
+    assert result.pronunciation_issues == ["тают pronounced with stress on ю"]
+
+
 def test_check_video_marks_speech_mismatch_as_regenerate(monkeypatch) -> None:
     import app.ai_approval_service as svc
 
@@ -530,7 +622,291 @@ def test_check_video_marks_speech_mismatch_as_regenerate(monkeypatch) -> None:
     assert calls["n"] == 2
     assert result.status == AI_APPROVAL_STATUS_REGENERATE_VIDEO
     assert result.speech_completion_score == 0.2
-    assert result.critical_issues == ["speech transcription does not match expected phrase"]
+    assert result.critical_issues == ["missing spoken words: крем", "extra spoken words: кот"]
+
+
+def test_transcribe_video_audio_rejects_rising_intonation(monkeypatch) -> None:
+    import app.ai_approval_service as svc
+
+    video_bytes = b"\x00\x00\x00\x18ftypmp42fake-video"
+
+    def _fake_model(prompt, *, images, config):
+        assert images == [video_bytes]
+        assert "rises at the end like a question" in prompt
+        assert "Extra filler, paraphrase, or omitted words are defects" in prompt
+        return {
+            "phrase_completed": True,
+            "match_score": 0.97,
+            "missing_words": [],
+            "extra_words": [],
+            "cut_off_detected": False,
+            "long_pauses_detected": False,
+            "speech_speed": "normal",
+            "recognized_text": "пирожки готовы",
+            "pronunciation_issues": [],
+            "wrong_stress_words": [],
+            "rising_intonation_detected": True,
+            "intonation_issues": ["final word rises like a question"],
+            "phrase_overflow_detected": False,
+            "unfinished_line_detected": False,
+            "status": "APPROVE",
+        }
+
+    monkeypatch.setattr(svc, "call_ai_approval_model", _fake_model)
+
+    result = transcribe_video_audio(
+        video_bytes=video_bytes,
+        expected_speech_text="пирожки готовы",
+        duration=6,
+        config=AIApprovalConfig(audio_transcription_enabled=True, model="test-model"),
+    )
+
+    assert result.status == AI_APPROVAL_STATUS_REGENERATE_VIDEO
+    assert result.rising_intonation_detected is True
+    assert result.intonation_issues == ["final word rises like a question"]
+
+
+def test_check_video_marks_wrong_stress_as_regenerate(monkeypatch) -> None:
+    import app.ai_approval_service as svc
+
+    video_bytes = b"\x00\x00\x00\x18ftypmp42fake-video"
+    calls = {"n": 0}
+
+    def _fake_model(_prompt, *, images, config):
+        calls["n"] += 1
+        assert images
+        if calls["n"] == 1:
+            return {
+                "phrase_completed": True,
+                "match_score": 0.96,
+                "missing_words": [],
+                "extra_words": [],
+                "cut_off_detected": False,
+                "long_pauses_detected": False,
+                "speech_speed": "normal",
+                "recognized_text": "они тают во рту",
+                "pronunciation_issues": ["тают pronounced as таЮт"],
+                "wrong_stress_words": ["тают"],
+                "phrase_overflow_detected": False,
+                "unfinished_line_detected": False,
+                "status": "APPROVE",
+            }
+        return {
+            "status": "APPROVE",
+            "overall_score": 0.95,
+            "stage": "video",
+            "critical_issues": [],
+            "warnings": [],
+        }
+
+    monkeypatch.setattr(svc, "call_ai_approval_model", _fake_model)
+    monkeypatch.setattr(svc, "extract_video_frames", lambda **_kwargs: [b"\x89PNG\r\n\x1a\nframe"])
+
+    result = check_video(
+        video_bytes=video_bytes,
+        scene_prompt="Grandma speaks while cooking.",
+        expected_speech_text="они тают во рту",
+        config=AIApprovalConfig(audio_transcription_enabled=True, model="test-model"),
+    )
+
+    assert calls["n"] == 2
+    assert result.status == AI_APPROVAL_STATUS_REGENERATE_VIDEO
+    assert result.speech_recognized_text == "они тают во рту"
+    assert result.speech_wrong_stress_words == ["тают"]
+    assert result.critical_issues == [
+        "wrong word stress: тают",
+        "pronunciation issue: тают pronounced as таЮт",
+    ]
+
+
+def test_ai_approval_history_entry_keeps_video_speech_diagnostics() -> None:
+    result = AIApprovalResult(
+        status=AI_APPROVAL_STATUS_REGENERATE_VIDEO,
+        stage="video",
+        overall_score=0.2,
+        critical_issues=["wrong word stress: тают"],
+        warnings=["visible text uncertain"],
+        positive_notes=["cartoon style"],
+        speech_recognized_text="они тают во рту",
+        speech_wrong_stress_words=["тают"],
+        speech_missing_words=["готовы"],
+        speech_extra_words=["ну"],
+        model_name="gemini-test",
+        prompt_variant=2,
+    )
+
+    entry = ai_approval_history_entry(result, attempt=3)
+
+    assert entry["model"] == "gemini-test"
+    assert entry["prompt_variant"] == 2
+    assert entry["recognized_text"] == "они тают во рту"
+    assert entry["wrong_stress_words"] == ["тают"]
+    assert entry["critical_issues"] == ["wrong word stress: тают"]
+    assert entry["warnings"] == ["visible text uncertain"]
+    assert entry["positive_notes"] == ["cartoon style"]
+
+
+def test_check_video_prompt_hard_fails_echpochmak_visual_regressions(monkeypatch) -> None:
+    import app.ai_approval_service as svc
+
+    captured: dict[str, object] = {}
+
+    def _fake_model(prompt, *, images, fallback_prompts=None, config):
+        captured["prompt"] = prompt
+        captured["fallbacks"] = fallback_prompts or []
+        assert images
+        return {
+            "status": "APPROVE",
+            "overall_score": 0.95,
+            "stage": "video",
+            "critical_issues": [],
+            "warnings": [],
+        }
+
+    monkeypatch.setattr(svc, "call_ai_approval_model", _fake_model)
+    monkeypatch.setattr(svc, "extract_video_frames", lambda **_kwargs: [b"\x89PNG\r\n\x1a\nframe"])
+
+    result = check_video(
+        video_bytes=b"\x00\x00\x00\x18ftypmp42fake-video",
+        scene_prompt="Grandma serves echpochmaki with a white cat nearby.",
+        expected_speech_text="Эчпочмаки готовы.",
+        language="ru",
+        config=AIApprovalConfig(audio_transcription_enabled=False, model="test-model"),
+    )
+
+    assert result.status == AI_APPROVAL_STATUS_APPROVE
+    prompt = str(captured["prompt"])
+    fallback = "\n".join(str(item) for item in captured["fallbacks"])
+    for needle in (
+        "duplicated white cats",
+        "white cat with long ears",
+        "cat inside an oven",
+        "Any visible text, logo, watermark, caption",
+        "Russian speech, wrong stress",
+        "rising question-like intonation",
+    ):
+        assert needle in prompt or needle in fallback
+
+
+def test_check_scene_prompts_provides_neutral_fallback_prompt(monkeypatch) -> None:
+    import app.ai_approval_service as svc
+
+    captured: dict[str, object] = {}
+
+    def _fake_model(prompt, *, images=None, fallback_prompts=None, config):
+        captured["prompt"] = prompt
+        captured["images"] = images
+        captured["fallbacks"] = fallback_prompts or []
+        assert config.model == "test-model"
+        return {
+            "status": "APPROVE",
+            "overall_score": 0.95,
+            "stage": "prompt",
+            "critical_issues": [],
+            "warnings": [],
+        }
+
+    monkeypatch.setattr(svc, "call_ai_approval_model", _fake_model)
+
+    result = check_scene_prompts(
+        start_frame_prompt="Cartoon grandma near the table.",
+        end_frame_prompt="",
+        video_prompt="CHARACTERS SPEAKS: Эчпочмаки готовы.",
+        scene_description="Serve the dish.",
+        recipe_text="Эчпочмаки.",
+        config=AIApprovalConfig(model="test-model"),
+    )
+
+    assert result.status == AI_APPROVAL_STATUS_APPROVE
+    assert captured["images"] is None
+    fallbacks = captured["fallbacks"]
+    assert isinstance(fallbacks, list)
+    assert len(fallbacks) == 1
+    assert "neutral production QA checker" in fallbacks[0]
+
+
+def test_ru_video_without_attached_audio_is_not_silent_approve(monkeypatch, tmp_path) -> None:
+    import app.ai_approval_service as svc
+
+    missing_path = tmp_path / "missing.mp4"
+
+    def _fake_model(_prompt, *, images, fallback_prompts=None, config):
+        _ = fallback_prompts, config
+        assert images == [b"\x89PNG\r\n\x1a\nframe"]
+        return {
+            "status": "APPROVE",
+            "overall_score": 0.95,
+            "stage": "video",
+            "critical_issues": [],
+            "warnings": [],
+        }
+
+    monkeypatch.setattr(svc, "call_ai_approval_model", _fake_model)
+    monkeypatch.setattr(svc, "extract_video_frames", lambda **_kwargs: [b"\x89PNG\r\n\x1a\nframe"])
+
+    result = check_video(
+        video_path=missing_path,
+        scene_prompt="Grandma speaks.",
+        expected_speech_text="Эчпочмаки готовы.",
+        language="ru",
+        config=AIApprovalConfig(audio_transcription_enabled=True, model="test-model"),
+    )
+
+    assert result.status == AI_APPROVAL_STATUS_REGENERATE_VIDEO
+    assert "RU speech QA did not receive original MP4/audio input" in result.critical_issues
+
+
+def test_check_video_marks_rising_intonation_as_regenerate(monkeypatch) -> None:
+    import app.ai_approval_service as svc
+
+    video_bytes = b"\x00\x00\x00\x18ftypmp42fake-video"
+    calls = {"n": 0}
+
+    def _fake_model(_prompt, *, images, config):
+        calls["n"] += 1
+        assert images
+        if calls["n"] == 1:
+            return {
+                "phrase_completed": True,
+                "match_score": 0.96,
+                "missing_words": [],
+                "extra_words": [],
+                "cut_off_detected": False,
+                "long_pauses_detected": False,
+                "speech_speed": "normal",
+                "recognized_text": "пирог готов",
+                "pronunciation_issues": [],
+                "wrong_stress_words": [],
+                "rising_intonation_detected": True,
+                "intonation_issues": ["final cadence sounds like a question"],
+                "phrase_overflow_detected": False,
+                "unfinished_line_detected": False,
+                "status": "APPROVE",
+            }
+        return {
+            "status": "APPROVE",
+            "overall_score": 0.95,
+            "stage": "video",
+            "critical_issues": [],
+            "warnings": [],
+        }
+
+    monkeypatch.setattr(svc, "call_ai_approval_model", _fake_model)
+    monkeypatch.setattr(svc, "extract_video_frames", lambda **_kwargs: [b"\x89PNG\r\n\x1a\nframe"])
+
+    result = check_video(
+        video_bytes=video_bytes,
+        scene_prompt="Grandma speaks while cooking.",
+        expected_speech_text="пирог готов",
+        config=AIApprovalConfig(audio_transcription_enabled=True, model="test-model"),
+    )
+
+    assert calls["n"] == 2
+    assert result.status == AI_APPROVAL_STATUS_REGENERATE_VIDEO
+    assert result.critical_issues == [
+        "rising/question intonation at end of declarative line",
+        "intonation issue: final cadence sounds like a question",
+    ]
 
 
 def test_check_video_continues_with_start_frame_when_ffmpeg_missing(monkeypatch) -> None:

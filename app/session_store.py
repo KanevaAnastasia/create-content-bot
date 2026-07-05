@@ -88,6 +88,19 @@ def save_session(chat_id: int, session: dict[str, Any]) -> None:
         row.state = str(session.get("state") or "").strip() or None
         row.session_json = payload
         row.generation_run_id = uuid.UUID(run_id_str) if run_id_str else None
+        if row.generation_run_id is not None:
+            run = db.get(GenerationRun, row.generation_run_id)
+            if run is not None:
+                try:
+                    run.current_scene_index = int(session.get("image_scene_index"))
+                except (TypeError, ValueError):
+                    run.current_scene_index = None
+                substep = str(session.get("scene_media_substep") or "").strip()
+                run.current_media_substep = substep or None
+                try:
+                    run.current_media_language_index = int(session.get("scene_media_language_index"))
+                except (TypeError, ValueError):
+                    run.current_media_language_index = None
         db.commit()
 
 

@@ -31,6 +31,36 @@ def test_load_env_file_sets_missing_and_keeps_existing(monkeypatch, tmp_path):
     assert importlib.import_module("os").environ["C"] == "three"
 
 
+def test_load_env_file_ignores_missing_file(monkeypatch, tmp_path):
+    fake_module_file = tmp_path / "pkg" / "env_utils.py"
+    fake_module_file.parent.mkdir(parents=True)
+    fake_module_file.write_text("", encoding="utf-8")
+
+    monkeypatch.setattr(env_utils, "__file__", str(fake_module_file))
+
+    env_utils.load_env_file()
+
+
+def test_load_env_file_logs_read_errors(monkeypatch, tmp_path):
+    env_file = tmp_path / ".env"
+    env_file.write_text("A=1", encoding="utf-8")
+    fake_module_file = tmp_path / "pkg" / "env_utils.py"
+    fake_module_file.parent.mkdir(parents=True)
+    fake_module_file.write_text("", encoding="utf-8")
+    calls: list[str] = []
+
+    def boom(*_args, **_kwargs):
+        raise OSError("cannot read")
+
+    monkeypatch.setattr(env_utils, "__file__", str(fake_module_file))
+    monkeypatch.setattr(env_utils.Path, "read_text", boom)
+    monkeypatch.setattr(env_utils.logging, "exception", lambda message: calls.append(message))
+
+    env_utils.load_env_file()
+
+    assert calls == ["Failed to read .env"]
+
+
 def test_cache_roundtrip():
     cache.set_concepts(" idea ", None, None, {"ok": 1})
     assert cache.get_concepts("idea", "", []) == {"ok": 1}

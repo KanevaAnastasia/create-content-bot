@@ -115,6 +115,16 @@ def persist_post_production_artifacts(session: dict[str, Any], post: dict[str, A
                 "titled_subtitled_music": f"Final titled/subtitled/music master ({language})",
             }
             label = label_by_variant.get(str(variant_key), f"Final {variant_key} master ({language})")
+            artifact_payload = {
+                "video_path": video_path,
+                "width": payload.get("width"),
+                "height": payload.get("height"),
+                "artifact_bundle_key": post.get("artifact_bundle_key"),
+                "source_variant": payload.get("source_variant"),
+                "source_video_path": payload.get("source_video_path"),
+                "subtitle_fingerprint": payload.get("subtitle_fingerprint"),
+            }
+            artifact_payload = {key: value for key, value in artifact_payload.items() if value is not None}
             persist_generation_artifact(
                 session,
                 artifact_type=f"final_{variant_key}",
@@ -122,12 +132,7 @@ def persist_post_production_artifacts(session: dict[str, Any], post: dict[str, A
                 uri=file_uri(video_path),
                 language=str(language),
                 mime_type="video/mp4",
-                payload={
-                    "video_path": video_path,
-                    "width": payload.get("width"),
-                    "height": payload.get("height"),
-                    "artifact_bundle_key": post.get("artifact_bundle_key"),
-                },
+                payload=artifact_payload,
             )
 
 

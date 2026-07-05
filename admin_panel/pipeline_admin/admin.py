@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-import base64
+import asyncio
 import copy
 from datetime import timedelta
 import mimetypes
@@ -26,11 +26,14 @@ from django.utils.safestring import mark_safe
 from app.artifact_store import persist_post_production_artifacts
 from app.db import SessionLocal
 from app.final_video_delivery import all_final_artifacts_delivered, deliver_final_artifact_to_telegram
+from app.media_file_store import local_path_from_media_uri, read_media_uri_bytes
 from app.post_production import (
     build_post_production,
     build_subtitled_post_production_from_upscaled_master,
     build_titled_post_production_from_subtitled_master,
     build_upscaled_post_production_from_clean_master,
+    latinize_cyrillic_title,
+    subtitle_fingerprint_for_language,
 )
 from app.publications import (
     DEFAULT_PUBLICATION_VIDEO_VARIANT,
@@ -39,6 +42,13 @@ from app.publications import (
     publication_jobs_summary,
     publication_target_label,
     queue_publication_bundle,
+)
+from app.scheduled_generation import (
+    DEFAULT_TITLE_COLOR as SCHEDULED_DEFAULT_TITLE_COLOR,
+    build_scheduled_generation_template_bytes,
+    export_scheduled_generation_items_to_xlsx,
+    import_scheduled_generation_xlsx,
+    queue_scheduled_generation_item_now,
 )
 from app.scene_media_store import rebuild_production_session, rebuild_scene_db_ids_for_session
 from app.series_store import advance_series_after_successful_render
@@ -54,6 +64,7 @@ from .forms import (
 from .models import (
     ChatSession,
     ContentSeries,
+    GenerationDraft,
     GenerationArtifact,
     GenerationRun,
     PipelineStepCheckpoint,
@@ -62,7 +73,10 @@ from .models import (
     PublicationJob,
     Scene,
     SceneImageCandidate,
+    SceneTextRevision,
     SceneVideoCandidate,
+    ScheduledGenerationEvent,
+    ScheduledGenerationItem,
     VideoOverview,
 )
 
@@ -76,6 +90,10 @@ FINAL_VIDEO_VARIANT_LABELS = {
 FINAL_VIDEO_ARTIFACT_TYPES = tuple(f"final_{key}" for key in FINAL_VIDEO_VARIANT_LABELS)
 FINAL_BUILD_STATUS_ARTIFACT_TYPE = "final_build_status"
 FINAL_BUILD_ACTIVE_STATUSES = {"pending", "running"}
+TITLE_STYLE_OVERRIDE_ARTIFACT_TYPE = "title_overlay_style_override"
+TITLE_STYLE_OVERRIDE_URI_PREFIX = "admin://title-overlay-style/"
+PUBLICATION_COPY_DRAFT_ARTIFACT_TYPE = "publication_copy_draft"
+PUBLICATION_COPY_DRAFT_URI_PREFIX = "admin://publication-copy-draft/"
 FINAL_BUILD_STALE_AFTER = timedelta(minutes=30)
 FINAL_BUILD_HEARTBEAT_INTERVAL_SEC = 15
 FINAL_BUILD_WORKER_KICK_DEBOUNCE_SEC = 10
@@ -191,6 +209,35 @@ def _artifact_local_path(obj: GenerationArtifact) -> Path | None:
     return None
 
 
+def _candidate_media_bytes(obj: SceneImageCandidate | SceneVideoCandidate | None, blob_attr: str) -> bytes:
+    if obj is None:
+        return b""
+    from_uri = read_media_uri_bytes(getattr(obj, "media_uri", None))
+    if from_uri is not None:
+        return from_uri
+    blob = getattr(obj, blob_attr, None)
+    return bytes(blob or b"")
+
+
+def _candidate_media_response(
+    request,
+    obj: SceneImageCandidate | SceneVideoCandidate | None,
+    *,
+    blob_attr: str,
+    default_content_type: str,
+) -> HttpResponse | FileResponse:
+    if obj is None:
+        raise Http404("Candidate not found.")
+    path_obj = local_path_from_media_uri(getattr(obj, "media_uri", None))
+    content_type = getattr(obj, "mime_type", None) or default_content_type
+    if path_obj is not None and path_obj.is_file():
+        return _local_file_response(path_obj, content_type=content_type, request=request)
+    payload = _candidate_media_bytes(obj, blob_attr)
+    if not payload:
+        raise Http404("Candidate media not found.")
+    return HttpResponse(payload, content_type=content_type)
+
+
 def _artifact_finder_link(obj: GenerationArtifact | None) -> str:
     if obj is None:
         return ""
@@ -265,17 +312,16 @@ def _local_file_response(path_obj: Path, *, content_type: str, request) -> HttpR
 def _image_preview(obj: SceneImageCandidate | None, *, large: bool = True) -> str:
     if obj is None:
         return ""
-    image = base64.b64encode(bytes(obj.image_blob)).decode("ascii")
     media_url = reverse("admin:pipeline_admin_sceneimagecandidate_media", args=[obj.candidate_id])
     width = 420 if large else 180
     height = 320 if large else 120
     return format_html(
         '<figure style="display:inline-block;margin:0 12px 12px 0;vertical-align:top;">'
         '<a href="{}" target="_blank" rel="noopener">'
-        '<img src="data:image/png;base64,{}" style="max-width:{}px;max-height:{}px;border-radius:4px;border:1px solid var(--border-color);">'
+        '<img src="{}" loading="lazy" style="max-width:{}px;max-height:{}px;border-radius:4px;border:1px solid var(--border-color);">'
         "</a><figcaption><code>{}</code> {} {} {}</figcaption></figure>",
         media_url,
-        image,
+        media_url,
         width,
         height,
         obj.candidate_id,
@@ -291,7 +337,7 @@ def _video_preview(obj: SceneVideoCandidate | None) -> str:
     media_url = reverse("admin:pipeline_admin_scenevideocandidate_media", args=[obj.candidate_id])
     return format_html(
         '<figure style="display:block;margin:0 0 16px;">'
-        '<video src="{}" controls preload="metadata" style="max-width:520px;width:100%;border-radius:4px;border:1px solid var(--border-color);"></video>'
+        '<video src="{}" controls preload="none" style="max-width:520px;width:100%;border-radius:4px;border:1px solid var(--border-color);"></video>'
         '<figcaption><code>{}</code> lang={} speed={} {} {}</figcaption></figure>',
         media_url,
         obj.candidate_id,
@@ -340,7 +386,7 @@ def _title_from_run(run: GenerationRun) -> str:
 
 def _default_overlay_title(run: GenerationRun) -> dict[str, str]:
     title = _title_from_run(run)
-    return {"ru": title, "en": title} if title else {}
+    return {"ru": title, "en": latinize_cyrillic_title(title)} if title else {}
 
 
 def _overlay_series_title_for_admin_render(
@@ -348,16 +394,18 @@ def _overlay_series_title_for_admin_render(
     session: dict[str, Any],
     production: dict[str, Any],
 ) -> dict[str, str]:
+    values: dict[str, str] = {}
     for source in (production, session):
         value = source.get("series_title_by_lang") if isinstance(source, dict) else None
         if isinstance(value, dict) and any(str(item or "").strip() for item in value.values()):
-            return {str(key): str(item) for key, item in value.items() if str(item or "").strip()}
+            values.update({str(key): str(item) for key, item in value.items() if str(item or "").strip()})
     series = getattr(run, "series", None)
     if series is None:
-        return {}
+        return values
     title_ru = " ".join(str(getattr(series, "title_ru", "") or "").split())
     title_en = " ".join(str(getattr(series, "title_en", "") or "").split())
-    return {key: value for key, value in {"ru": title_ru, "en": title_en}.items() if value}
+    values.update({key: value for key, value in {"ru": title_ru, "en": title_en}.items() if value})
+    return values
 
 
 def _overlay_series_counter_for_admin_render(
@@ -395,6 +443,16 @@ def _russian_overlay_title(value: Any) -> str:
             "",
         )
     return " ".join(str(direct or "").split())
+
+
+def _clean_overlay_title_by_lang(value: Any) -> dict[str, str]:
+    if not isinstance(value, dict):
+        return {}
+    return {
+        str(key).strip().lower(): " ".join(str(item or "").split())
+        for key, item in value.items()
+        if str(key).strip() and " ".join(str(item or "").split())
+    }
 
 
 def _scene_db_ids_for_run(run_id) -> dict[int, str]:
@@ -512,6 +570,8 @@ def _sync_chat_sessions_for_run_scenes(
                 value = getattr(scene, key, None)
                 if isinstance(value, dict) and value:
                     payload[key] = value
+                elif key == "speech_by_lang" and isinstance(payload.get(key), dict) and payload[key]:
+                    pass
                 else:
                     payload.pop(key, None)
             new_plan.append(payload)
@@ -536,7 +596,20 @@ def _production_scenes_from_db(run: GenerationRun) -> list[dict[str, Any]]:
     scenes = list(Scene.objects.filter(run_id=run.id).order_by("scene_order"))
     scene_ids = [scene.id for scene in scenes]
     videos_by_scene: dict[str, list[SceneVideoCandidate]] = {str(scene_id): [] for scene_id in scene_ids}
-    for row in SceneVideoCandidate.objects.filter(scene_id__in=scene_ids).order_by("created_at", "candidate_id"):
+    for row in (
+        SceneVideoCandidate.objects.filter(scene_id__in=scene_ids)
+        .only(
+            "candidate_id",
+            "scene_id",
+            "language",
+            "created_at",
+            "liked",
+            "approved_for_production",
+            "speed_coef",
+            "source_image_candidate_id",
+        )
+        .order_by("created_at", "candidate_id")
+    ):
         videos_by_scene.setdefault(str(row.scene_id), []).append(row)
 
     out: list[dict[str, Any]] = []
@@ -548,7 +621,6 @@ def _production_scenes_from_db(run: GenerationRun) -> list[dict[str, Any]]:
                 {
                     "candidate_id": row.candidate_id,
                     "language": lang,
-                    "video_b64": base64.b64encode(bytes(row.video_blob)).decode("ascii"),
                     "created_at": row.created_at.isoformat() if row.created_at else "",
                     "liked": bool(row.liked),
                     "approved_for_production": bool(row.approved_for_production),
@@ -602,7 +674,7 @@ def _run_session_for_admin_render(run: GenerationRun) -> tuple[ChatSession | Non
     if not isinstance(production.get("json_plan"), list) or not production["json_plan"]:
         production["json_plan"] = _production_scenes_from_db(run)
     session["production"] = production
-    rebuild_production_session(session, str(run.id))
+    rebuild_production_session(session, str(run.id), include_media_blobs=True)
     production = session.get("production") if isinstance(session.get("production"), dict) else production
     return chat_session, session, production
 
@@ -665,7 +737,76 @@ def _project_slug_for_admin_render(run: GenerationRun, session: dict[str, Any]) 
     return None
 
 
-def _overlay_title_style_for_admin_render(session: dict[str, Any], production: dict[str, Any]) -> dict[str, Any]:
+def _title_style_override_uri(run_id: Any) -> str:
+    return f"{TITLE_STYLE_OVERRIDE_URI_PREFIX}{run_id}"
+
+
+def _latest_title_style_override_payloads_for_run(run: GenerationRun) -> list[dict[str, Any]]:
+    try:
+        artifacts = GenerationArtifact.objects.filter(
+            run_id=run.id,
+            artifact_type=TITLE_STYLE_OVERRIDE_ARTIFACT_TYPE,
+            uri=_title_style_override_uri(run.id),
+        ).order_by("-created_at")
+    except Exception:
+        return []
+    payloads: list[dict[str, Any]] = []
+    for artifact in artifacts:
+        payload = getattr(artifact, "payload_json", None)
+        if isinstance(payload, dict):
+            payloads.append(copy.deepcopy(payload))
+    return payloads
+
+
+def _active_title_style_override_for_run(run: GenerationRun | None) -> dict[str, Any]:
+    if run is None:
+        return {}
+    for payload in _latest_title_style_override_payloads_for_run(run):
+        value = payload.get("overlay_title_style")
+        if isinstance(value, dict):
+            return copy.deepcopy(value)
+    return {}
+
+
+def _pending_title_style_override_for_run(run: GenerationRun | None) -> dict[str, Any]:
+    if run is None:
+        return {}
+    payloads = _latest_title_style_override_payloads_for_run(run)
+    if not payloads or payloads[0].get("status") != "pending":
+        return {}
+    value = payloads[0].get(PENDING_OVERLAY_TITLE_STYLE_KEY)
+    return copy.deepcopy(value) if isinstance(value, dict) else {}
+
+
+def _write_title_style_override_artifact(
+    run: GenerationRun,
+    *,
+    status: str,
+    overlay_title_style: dict[str, Any] | None = None,
+    pending_overlay_title_style: dict[str, Any] | None = None,
+) -> GenerationArtifact:
+    payload: dict[str, Any] = {"status": status}
+    if isinstance(overlay_title_style, dict) and overlay_title_style:
+        payload["overlay_title_style"] = copy.deepcopy(overlay_title_style)
+    if isinstance(pending_overlay_title_style, dict) and pending_overlay_title_style:
+        payload[PENDING_OVERLAY_TITLE_STYLE_KEY] = copy.deepcopy(pending_overlay_title_style)
+    return GenerationArtifact.objects.create(
+        run=run,
+        artifact_type=TITLE_STYLE_OVERRIDE_ARTIFACT_TYPE,
+        label="Title overlay style override",
+        uri=_title_style_override_uri(run.id),
+        language=None,
+        mime_type="application/json",
+        payload_json=payload,
+        created_at=timezone.now(),
+    )
+
+
+def _overlay_title_style_for_admin_render(
+    session: dict[str, Any],
+    production: dict[str, Any],
+    run: GenerationRun | None = None,
+) -> dict[str, Any]:
     style: dict[str, Any] = {}
     for post in _post_production_sources(session, production):
         value = post.get("title_overlay_style")
@@ -675,6 +816,9 @@ def _overlay_title_style_for_admin_render(session: dict[str, Any], production: d
         value = source.get("overlay_title_style") if isinstance(source, dict) else None
         if isinstance(value, dict):
             style.update(copy.deepcopy(value))
+    run_title_color = _normalize_title_color(getattr(run, "title_color", "") if run is not None else "")
+    if run_title_color:
+        style["title_color"] = run_title_color
     raw_top = style.get("top_margin_ratio")
     try:
         top = float(raw_top)
@@ -685,7 +829,13 @@ def _overlay_title_style_for_admin_render(session: dict[str, Any], production: d
     return style
 
 
-def _pending_overlay_title_style_for_admin_render(session: dict[str, Any], production: dict[str, Any]) -> dict[str, Any]:
+def _pending_overlay_title_style_for_admin_render(
+    session: dict[str, Any],
+    production: dict[str, Any],
+    run: GenerationRun | None = None,
+) -> dict[str, Any]:
+    if _normalize_title_color(getattr(run, "title_color", "") if run is not None else ""):
+        return {}
     style: dict[str, Any] = {}
     for source in (session, production):
         value = source.get(PENDING_OVERLAY_TITLE_STYLE_KEY) if isinstance(source, dict) else None
@@ -694,9 +844,13 @@ def _pending_overlay_title_style_for_admin_render(session: dict[str, Any], produ
     return style
 
 
-def _apply_pending_overlay_title_style_for_build(session: dict[str, Any], production: dict[str, Any]) -> dict[str, Any]:
-    style = _overlay_title_style_for_admin_render(session, production)
-    pending_style = _pending_overlay_title_style_for_admin_render(session, production)
+def _apply_pending_overlay_title_style_for_build(
+    session: dict[str, Any],
+    production: dict[str, Any],
+    run: GenerationRun | None = None,
+) -> dict[str, Any]:
+    style = _overlay_title_style_for_admin_render(session, production, run=run)
+    pending_style = _pending_overlay_title_style_for_admin_render(session, production, run=run)
     if not pending_style:
         return style
     style.update(copy.deepcopy(pending_style))
@@ -711,22 +865,28 @@ def _stage_pending_title_color_for_run(run: GenerationRun, title_color: str) -> 
     normalized = _normalize_title_color(title_color)
     if not normalized:
         raise ValueError("Use a 6-digit hex color, for example #c72638.")
+    run.title_color = normalized
+    save = getattr(run, "save", None)
+    if callable(save):
+        save(update_fields=["title_color"])
     chat_session = ChatSession.objects.filter(generation_run_id=run.id).order_by("-updated_at").first()
     if chat_session is None or not isinstance(chat_session.session_json, dict):
-        raise ValueError("No linked ChatSession found for this generation run.")
+        return {"title_color": normalized}
     session = copy.deepcopy(chat_session.session_json or {})
     production = session.get("production")
     if not isinstance(production, dict):
         production = {}
-    pending_style = _pending_overlay_title_style_for_admin_render(session, production)
-    pending_style["title_color"] = normalized
-    production[PENDING_OVERLAY_TITLE_STYLE_KEY] = pending_style
-    session[PENDING_OVERLAY_TITLE_STYLE_KEY] = pending_style
+    style = _overlay_title_style_for_admin_render(session, production, run=run)
+    style["title_color"] = normalized
+    production["overlay_title_style"] = style
+    session["overlay_title_style"] = style
+    production.pop(PENDING_OVERLAY_TITLE_STYLE_KEY, None)
+    session.pop(PENDING_OVERLAY_TITLE_STYLE_KEY, None)
     session["production"] = production
     chat_session.session_json = _strip_inline_media_payloads(session)
     chat_session.updated_at = timezone.now()
     chat_session.save(update_fields=["session_json", "updated_at"])
-    return pending_style
+    return {"title_color": normalized}
 
 
 def _style_title_color(style: dict[str, Any]) -> str:
@@ -751,8 +911,8 @@ def _title_color_picker_html(run: GenerationRun) -> str:
         _chat_session, session, production = _run_session_for_admin_render(run)
     except Exception:
         session, production = {}, {}
-    active_style = _overlay_title_style_for_admin_render(session, production)
-    pending_style = _pending_overlay_title_style_for_admin_render(session, production)
+    active_style = _overlay_title_style_for_admin_render(session, production, run=run)
+    pending_style = _pending_overlay_title_style_for_admin_render(session, production, run=run)
     current_color = _style_title_color(pending_style or active_style)
     active_color = _style_title_color(active_style)
     url = reverse("admin:pipeline_admin_generationrun_title_color", args=[run.pk])
@@ -806,9 +966,13 @@ def _title_color_picker_html(run: GenerationRun) -> str:
     )
 
 
-def _title_color_status_html(session: dict[str, Any], production: dict[str, Any]) -> str:
-    active_style = _overlay_title_style_for_admin_render(session, production)
-    pending_style = _pending_overlay_title_style_for_admin_render(session, production)
+def _title_color_status_html(
+    session: dict[str, Any],
+    production: dict[str, Any],
+    run: GenerationRun | None = None,
+) -> str:
+    active_style = _overlay_title_style_for_admin_render(session, production, run=run)
+    pending_style = _pending_overlay_title_style_for_admin_render(session, production, run=run)
     active_color = _style_title_color(active_style)
     pending_color = _style_title_color(pending_style) if pending_style else ""
     if pending_color and pending_color.lower() != active_color.lower():
@@ -828,8 +992,9 @@ def _title_color_status_html(session: dict[str, Any], production: dict[str, Any]
 def _merge_post_production(existing: Any, update: dict[str, Any]) -> dict[str, Any]:
     merged = copy.deepcopy(existing) if isinstance(existing, dict) else {}
     for key, value in update.items():
-        if key in {"renders_by_language", "subtitle_entries_by_language", "title_overlay_by_language",
-                   "series_overlay_by_language", "speech_budget_by_language", "original_audio_preserved_by_language"}:
+        if key in {"renders_by_language", "subtitle_entries_by_language", "subtitle_fingerprint_by_language",
+                   "title_overlay_by_language", "series_overlay_by_language", "speech_budget_by_language",
+                   "original_audio_preserved_by_language"}:
             current = merged.get(key)
             if not isinstance(current, dict):
                 current = {}
@@ -868,14 +1033,26 @@ def _build_final_videos_for_run(
     requested_variants = list(target_variants) if target_variants else ([target_variant] if target_variant else None)
     applies_title_overlay = requested_variants is None or "titled_subtitled_music" in requested_variants
     overlay_title_style = (
-        _apply_pending_overlay_title_style_for_build(session, production)
+        _apply_pending_overlay_title_style_for_build(session, production, run=run)
         if applies_title_overlay
-        else _overlay_title_style_for_admin_render(session, production)
+        else _overlay_title_style_for_admin_render(session, production, run=run)
     )
     overlay_series_title_by_lang = _overlay_series_title_for_admin_render(run, session, production)
     overlay_series_counter_by_lang = _overlay_series_counter_for_admin_render(run, session, production)
 
     project_slug = _project_slug_for_admin_render(run, session)
+    if (
+        source_subtitled_video_path
+        and target_language
+        and requested_variants == ["titled_subtitled_music"]
+        and not _subtitled_artifact_matches_current_subtitles(
+            run,
+            scenes,
+            target_language,
+            source_subtitled_video_path,
+        )
+    ):
+        source_subtitled_video_path = None
     if (
         source_clean_video_path
         and target_language
@@ -1231,6 +1408,42 @@ def _latest_final_artifact(run_id: Any, language: str, variant: str) -> Generati
     )
 
 
+def _render_video_path_from_post(post: dict[str, Any], language: str, variant: str) -> Path | None:
+    renders = post.get("renders_by_language") if isinstance(post, dict) else None
+    if not isinstance(renders, dict):
+        return None
+    variants = renders.get(language)
+    if not isinstance(variants, dict):
+        return None
+    payload = variants.get(variant)
+    if not isinstance(payload, dict):
+        return None
+    raw_path = str(payload.get("video_path") or "").strip()
+    if not raw_path:
+        return None
+    path = Path(raw_path)
+    return path if path.exists() else None
+
+
+def _subtitled_artifact_matches_current_subtitles(
+    run: GenerationRun,
+    scenes: list[dict[str, Any]],
+    language: str,
+    source_path: str | Path,
+) -> bool:
+    artifact = _latest_final_artifact(run.id, language, "subtitled_music")
+    if artifact is None:
+        return False
+    artifact_path = _artifact_local_path(artifact)
+    if artifact_path is not None and Path(source_path).resolve() != artifact_path.resolve():
+        return False
+    payload = artifact.payload_json if isinstance(artifact.payload_json, dict) else {}
+    stored = str(payload.get("subtitle_fingerprint") or "").strip()
+    if not stored:
+        return False
+    return stored == subtitle_fingerprint_for_language(scenes, language)
+
+
 def _heartbeat_final_build_job(run: GenerationRun, language: str, variant: str, worker_id: str, stop_event: threading.Event) -> None:
     while not stop_event.wait(FINAL_BUILD_HEARTBEAT_INTERVAL_SEC):
         close_old_connections()
@@ -1353,9 +1566,6 @@ def _run_final_build_batch(
                 raise RuntimeError("Cannot build 4K upscale because clean master is missing.")
             if active_variant == "subtitled_music" and source_upscaled_video_path is None:
                 raise RuntimeError("Cannot build subtitled/music master because 4K master is missing.")
-            if active_variant == "titled_subtitled_music" and source_subtitled_video_path is None:
-                raise RuntimeError("Cannot build title/subtitled/music master because subtitled/music master is missing.")
-
             def progress_callback(event: dict[str, Any], *, variant: str = active_variant) -> None:
                 event_language = str(event.get("language") or "").strip().lower()
                 if event_language and event_language != language:
@@ -1378,7 +1588,7 @@ def _run_final_build_batch(
                 finally:
                     close_old_connections()
 
-            _build_final_videos_for_run(
+            post = _build_final_videos_for_run(
                 run,
                 target_language=language,
                 target_variants=[active_variant],
@@ -1388,7 +1598,7 @@ def _run_final_build_batch(
                 source_subtitled_video_path=source_subtitled_video_path,
             )
             artifact = _latest_final_artifact(run.id, language, active_variant)
-            latest_paths[active_variant] = latest_variant_path(active_variant)
+            latest_paths[active_variant] = _render_video_path_from_post(post, language, active_variant) or latest_variant_path(active_variant)
             _set_final_build_status(
                 run,
                 language=language,
@@ -1487,7 +1697,10 @@ def _queue_final_build(run: GenerationRun, *, language: str, variant: str, kick_
     try:
         GenerationRun.objects.filter(id=run.id).update(status="final_render_pending", is_active=True)
     except Exception:
-        GenerationRun.objects.filter(id=run.id).update(status="final_render_pending")
+        # This admin helper is often exercised with lightweight run stubs in tests
+        # or from queue paths where status artifacts are the source of truth.
+        # A DB status update failure must not prevent the final worker kick.
+        pass
     if kick_worker:
         _kick_final_build_worker(run.id)
     return "pending"
@@ -1683,11 +1896,127 @@ def _latest_chat_session_for_run(run: GenerationRun) -> tuple[ChatSession | None
     return row, session
 
 
+def _publication_copy_from_latest_jobs(run: GenerationRun) -> dict[str, str]:
+    try:
+        recent_jobs = list(PublicationJob.objects.order_by("-created_at")[:500])
+    except Exception:
+        return {}
+    run_jobs = [
+        job for job in recent_jobs
+        if isinstance(job.payload_json, dict) and str(job.payload_json.get("run_id") or "") == str(run.id)
+    ]
+    if not run_jobs:
+        return {}
+    latest_bundle = str(run_jobs[0].bundle_key or "")
+    if latest_bundle:
+        run_jobs = [job for job in run_jobs if str(job.bundle_key or "") == latest_bundle]
+    copy_payload = {key: "" for key, _label in SOCIAL_COPY_FIELD_LABELS}
+    for job in run_jobs:
+        platform = str(job.platform or "").strip().lower()
+        language = str(job.language or "").strip().lower()
+        description = str(job.description or "")
+        title = str(job.title or "")
+        if platform == "youtube" and language == "ru":
+            copy_payload["youtube_ru_title"] = title
+            copy_payload["youtube_ru_description"] = description
+        elif platform == "rutube" and language == "ru":
+            copy_payload["rutube_ru_title"] = title
+            copy_payload["rutube_ru_description"] = description
+        elif platform == "instagram" and language == "ru":
+            copy_payload["instagram_ru"] = description
+        elif platform == "vk" and language == "ru":
+            copy_payload["vk_ru"] = description
+        elif platform == "tiktok" and language == "ru":
+            copy_payload["tiktok_ru"] = description
+        elif platform == "instagram" and language == "en":
+            copy_payload["instagram_en"] = description
+        elif platform == "youtube" and language == "en":
+            copy_payload["youtube_en_title"] = title
+            copy_payload["youtube_en_description"] = description
+    return copy_payload if any(str(value or "").strip() for value in copy_payload.values()) else {}
+
+
+def _publication_copy_draft_uri(run_id: Any) -> str:
+    return f"{PUBLICATION_COPY_DRAFT_URI_PREFIX}{run_id}"
+
+
+def _publication_copy_draft_payload(run: GenerationRun) -> dict[str, Any]:
+    try:
+        artifact = (
+            GenerationArtifact.objects.filter(
+                run_id=run.id,
+                artifact_type=PUBLICATION_COPY_DRAFT_ARTIFACT_TYPE,
+                uri=_publication_copy_draft_uri(run.id),
+            )
+            .order_by("-created_at")
+            .first()
+        )
+    except Exception:
+        return {}
+    payload = artifact.payload_json if artifact is not None and isinstance(artifact.payload_json, dict) else {}
+    return copy.deepcopy(payload) if isinstance(payload, dict) else {}
+
+
+def _publication_copy_from_draft(run: GenerationRun) -> dict[str, str]:
+    payload = _publication_copy_draft_payload(run)
+    copy_payload = payload.get("copy")
+    if not isinstance(copy_payload, dict):
+        return {}
+    out = {
+        key: str(copy_payload.get(key) or "")
+        for key, _label in SOCIAL_COPY_FIELD_LABELS
+    }
+    return out if any(str(value or "").strip() for value in out.values()) else {}
+
+
+def _publication_recipe_from_draft(run: GenerationRun) -> str:
+    payload = _publication_copy_draft_payload(run)
+    return str(payload.get("recipe") or "").strip()
+
+
+def _save_publication_copy_draft(
+    run: GenerationRun,
+    *,
+    copy_payload: dict[str, str],
+    recipe: str = "",
+    feedback: str = "",
+) -> None:
+    clean_copy = {
+        key: str(copy_payload.get(key) or "")
+        for key, _label in SOCIAL_COPY_FIELD_LABELS
+    }
+    if not any(value.strip() for value in clean_copy.values()):
+        return
+    payload = {
+        "copy": clean_copy,
+        "recipe": str(recipe or "").strip(),
+        "feedback": str(feedback or "").strip(),
+        "updated_at": timezone.now().isoformat(),
+    }
+    GenerationArtifact.objects.create(
+        run_id=run.id,
+        scene_id=None,
+        artifact_type=PUBLICATION_COPY_DRAFT_ARTIFACT_TYPE,
+        label="Publication copy draft",
+        uri=_publication_copy_draft_uri(run.id),
+        language=None,
+        mime_type="application/json",
+        payload_json=payload,
+        created_at=timezone.now(),
+    )
+
+
 def _publication_copy_from_run(run: GenerationRun) -> dict[str, str]:
     _row, session = _latest_chat_session_for_run(run)
     pending = session.get("social_descriptions_pending")
     if isinstance(pending, dict) and isinstance(pending.get("copy"), dict):
         return {key: str(pending["copy"].get(key) or "") for key, _label in SOCIAL_COPY_FIELD_LABELS}
+    draft_copy = _publication_copy_from_draft(run)
+    if draft_copy:
+        return draft_copy
+    latest_job_copy = _publication_copy_from_latest_jobs(run)
+    if latest_job_copy:
+        return latest_job_copy
     title = _title_from_run(run) or _short(run.script, 80)
     description = str(run.script or "").strip()
     return {
@@ -1702,6 +2031,106 @@ def _publication_copy_from_run(run: GenerationRun) -> dict[str, str]:
         "youtube_en_title": title,
         "youtube_en_description": description,
     }
+
+
+def _looks_like_url_text(value: str) -> bool:
+    text = str(value or "").strip().lower()
+    return text.startswith(("http://", "https://"))
+
+
+def _publication_recipe_candidates_for_run(run: GenerationRun) -> list[str]:
+    candidates: list[str] = []
+    try:
+        _row, session = _latest_chat_session_for_run(run)
+    except Exception:
+        session = {}
+    if isinstance(session, dict):
+        for key in ("recipe_full_text", "approved_recipe_text", "user_input"):
+            value = str(session.get(key) or "").strip()
+            if value:
+                candidates.append(value)
+    try:
+        drafts = GenerationDraft.objects.filter(run_id=run.id).order_by("-created_at")[:20]
+        for draft in drafts:
+            snapshot = draft.session_snapshot_json if isinstance(draft.session_snapshot_json, dict) else {}
+            payload = draft.payload_json if isinstance(draft.payload_json, dict) else {}
+            for source in (snapshot, payload):
+                for key in ("recipe_full_text", "approved_recipe_text", "user_input", "recipe"):
+                    value = str(source.get(key) or "").strip()
+                    if value:
+                        candidates.append(value)
+    except Exception:
+        pass
+    scheduled_item = getattr(run, "scheduled_item", None)
+    if scheduled_item is not None:
+        value = str(getattr(scheduled_item, "recipe", "") or "").strip()
+        if value:
+            candidates.append(value)
+    script = str(getattr(run, "script", "") or "").strip()
+    if script:
+        candidates.append(script)
+    out: list[str] = []
+    for value in candidates:
+        if value and value not in out:
+            out.append(value)
+    return out
+
+
+def _publication_recipe_for_run(run: GenerationRun) -> str:
+    candidates = _publication_recipe_candidates_for_run(run)
+    for value in candidates:
+        if value and not _looks_like_url_text(value):
+            return value
+    url = next((value for value in candidates if _looks_like_url_text(value)), "")
+    if url:
+        try:
+            from app.handlers.handlers_generation_utils import fetch_recipe_text_from_url
+            from app.pipeline import generate_recipe_from_source_text
+
+            source_text = fetch_recipe_text_from_url(url, timeout_sec=10, max_chars=10000)
+            return asyncio.run(generate_recipe_from_source_text(source_text, source_url=url))
+        except Exception:
+            try:
+                from app.handlers.handlers_generation_utils import fetch_recipe_text_from_url
+
+                return fetch_recipe_text_from_url(url, timeout_sec=10, max_chars=10000)
+            except Exception:
+                return url
+    return ""
+
+
+def _generate_publication_copy_for_admin(
+    run: GenerationRun,
+    *,
+    current_copy: dict[str, str],
+    recipe: str | None = None,
+    feedback: str = "",
+) -> dict[str, str]:
+    recipe_text = str(recipe if recipe is not None else _publication_recipe_for_run(run)).strip()
+    if not recipe_text:
+        raise ValueError("Generation run has no recipe/script text for description generation.")
+    from app.handlers.handlers_state_media import (
+        _generate_social_copy_from_recipe,
+        _refine_social_copy_from_feedback,
+    )
+
+    base_copy = {
+        key: str(current_copy.get(key) or "")
+        for key, _label in SOCIAL_COPY_FIELD_LABELS
+    }
+    clean_feedback = str(feedback or "").strip()
+    if not clean_feedback:
+        return asyncio.run(_generate_social_copy_from_recipe(recipe_text))
+    has_existing_copy = any(str(value or "").strip() for value in base_copy.values())
+    if not has_existing_copy:
+        base_copy = asyncio.run(_generate_social_copy_from_recipe(recipe_text))
+    return asyncio.run(
+        _refine_social_copy_from_feedback(
+            recipe=recipe_text,
+            previous_copy=base_copy,
+            feedback=clean_feedback,
+        )
+    )
 
 
 def _project_slug_for_publication_run(run: GenerationRun) -> str | None:
@@ -1731,6 +2160,16 @@ def _publication_post_production_from_final_artifacts(run: GenerationRun) -> dic
     return {"renders_by_language": renders}
 
 
+def _publication_post_production_has_video(post: dict[str, Any]) -> bool:
+    renders = post.get("renders_by_language") if isinstance(post, dict) else None
+    if not isinstance(renders, dict):
+        return False
+    for variants in renders.values():
+        if isinstance(variants, dict) and any(isinstance(payload, dict) and payload for payload in variants.values()):
+            return True
+    return False
+
+
 def _publication_project_for_run(run: GenerationRun) -> Project | None:
     slug = _project_slug_for_publication_run(run)
     if slug:
@@ -1748,7 +2187,14 @@ def _publication_account_index(run: GenerationRun) -> dict[tuple[str, str], Proj
     return {(row.platform, row.language): row for row in rows}
 
 
-def _publication_queue_form_html(form: PublicationQueueAdminForm, run: GenerationRun, copy_payload: dict[str, str]) -> str:
+def _publication_queue_form_html(
+    form: PublicationQueueAdminForm,
+    run: GenerationRun,
+    copy_payload: dict[str, str],
+    *,
+    recipe: str = "",
+    generation_feedback: str = "",
+) -> str:
     targets = build_publication_targets(copy_payload)
     selected_raw = form["target_keys"].value() or []
     selected = set(selected_raw if isinstance(selected_raw, list) else [selected_raw])
@@ -1810,6 +2256,16 @@ def _publication_queue_form_html(form: PublicationQueueAdminForm, run: Generatio
         + f'<p>{form["scheduled_at"].label_tag()}{form["scheduled_at"]}<br><span class="cf-pub-muted">{escape(form.fields["scheduled_at"].help_text)}</span></p>'
         + '<p class="cf-pub-muted">Jobs with ready account + publication time become scheduled; missing account stays manual but keeps the chosen time.</p>'
         + '</section></div>'
+        + '<section class="cf-pub-card" style="margin-top:18px;"><h2>Recipe</h2>'
+        + f'<textarea name="publication_recipe" rows="8" style="width:100%;">{escape(recipe)}</textarea>'
+        + '<p class="cf-pub-muted">This recipe is the base text sent to description generation and saved into publication jobs.</p>'
+        + '</section>'
+        + '<section class="cf-pub-card" style="margin-top:18px;"><h2>Generate descriptions</h2>'
+        + '<p><label for="id_generation_feedback">Feedback</label>'
+        + f'<textarea id="id_generation_feedback" name="generation_feedback" rows="3" style="width:100%;">{escape(generation_feedback)}</textarea></p>'
+        + '<p><button type="submit" class="button" name="generate_descriptions" value="1">Generate descriptions</button></p>'
+        + '<p class="cf-pub-muted">Leave feedback empty to generate descriptions from the recipe using the same flow as the bot.</p>'
+        + '</section>'
         + '<section class="cf-pub-card cf-pub-fields" style="margin-top:18px;"><h2>Copy</h2>'
         + "".join(text_fields)
         + "</section>"
@@ -1921,9 +2377,25 @@ def _media_approval_overview(run_id) -> str:
     scene_ids = [scene.id for scene in scenes]
     images_by_scene: dict[str, list[SceneImageCandidate]] = {str(scene_id): [] for scene_id in scene_ids}
     videos_by_scene: dict[str, list[SceneVideoCandidate]] = {str(scene_id): [] for scene_id in scene_ids}
-    for row in SceneImageCandidate.objects.filter(scene_id__in=scene_ids).order_by("created_at", "candidate_id"):
+    for row in (
+        SceneImageCandidate.objects.filter(scene_id__in=scene_ids)
+        .only("candidate_id", "scene_id", "kind", "created_at", "liked", "approved_for_video")
+        .order_by("created_at", "candidate_id")
+    ):
         images_by_scene.setdefault(str(row.scene_id), []).append(row)
-    for row in SceneVideoCandidate.objects.filter(scene_id__in=scene_ids).order_by("created_at", "candidate_id"):
+    for row in (
+        SceneVideoCandidate.objects.filter(scene_id__in=scene_ids)
+        .only(
+            "candidate_id",
+            "scene_id",
+            "language",
+            "created_at",
+            "liked",
+            "approved_for_production",
+            "speed_coef",
+        )
+        .order_by("created_at", "candidate_id")
+    ):
         videos_by_scene.setdefault(str(row.scene_id), []).append(row)
 
     parts = [
@@ -2126,7 +2598,7 @@ def _artifact_video_preview(artifact: GenerationArtifact) -> str:
     if not str(artifact.mime_type or "").startswith("video/"):
         return ""
     return format_html(
-        '<video src="{}" controls preload="metadata" '
+        '<video src="{}" controls preload="none" '
         'style="display:block;max-width:340px;width:100%;margin:6px 0;border:1px solid var(--border-color);border-radius:4px;"></video>',
         media_url or raw,
     )
@@ -2146,7 +2618,7 @@ def _final_videos_panel(run: GenerationRun) -> str:
     parts = ['<div class="cf-final-videos">']
     try:
         _chat_session, session, production = _run_session_for_admin_render(run)
-        parts.append(_title_color_status_html(session, production))
+        parts.append(_title_color_status_html(session, production, run=run))
     except Exception:
         pass
     parts.append(
@@ -2285,11 +2757,269 @@ def _final_videos_panel(run: GenerationRun) -> str:
     return mark_safe("".join(str(part) for part in parts))
 
 
+def _clean_admin_inline_speech(value: Any) -> str:
+    return " ".join(str(value or "").split())
+
+
+def _admin_actor(request) -> str:
+    user = getattr(request, "user", None)
+    if user is None:
+        return ""
+    getter = getattr(user, "get_username", None)
+    if callable(getter):
+        return str(getter() or "").strip()
+    return str(getattr(user, "username", "") or "").strip()
+
+
+def _sync_series_context_from_run(session: dict[str, Any], run: GenerationRun) -> None:
+    series = getattr(run, "series", None)
+    if series is None:
+        for key in (
+            "series",
+            "series_title_by_lang",
+            "series_video_index",
+            "series_total_videos",
+            "series_counter_by_lang",
+            "series_render_counter_advanced",
+        ):
+            session.pop(key, None)
+        return
+    video_index = int(run.series_video_index or series.current_video_index or 1)
+    total_videos = int(run.series_total_videos or series.total_videos or 1)
+    title_by_lang = {
+        "ru": " ".join(str(series.title_ru or "").split()),
+        "en": " ".join(str(series.title_en or "").split()),
+    }
+    counter_by_lang = {
+        "ru": f"день {video_index} из {total_videos}",
+        "en": f"day {video_index} of {total_videos}",
+    }
+    session["series"] = {
+        "id": str(series.id),
+        "title_by_lang": title_by_lang,
+        "video_index": video_index,
+        "total_videos": total_videos,
+        "counter_by_lang": counter_by_lang,
+    }
+    session["series_title_by_lang"] = title_by_lang
+    session["series_video_index"] = video_index
+    session["series_total_videos"] = total_videos
+    session["series_counter_by_lang"] = counter_by_lang
+
+
+def _sync_overlay_title_from_run(
+    session: dict[str, Any],
+    run: GenerationRun,
+    title_by_lang: dict[str, str] | None = None,
+) -> None:
+    production = session.get("production")
+    if not isinstance(production, dict):
+        production = {}
+    title_by_lang = _clean_overlay_title_by_lang(title_by_lang) or _default_overlay_title(run)
+    if title_by_lang:
+        ru_title = _russian_overlay_title(title_by_lang)
+        session["overlay_title_by_lang"] = title_by_lang
+        production["overlay_title_by_lang"] = title_by_lang
+        if ru_title:
+            session["overlay_title"] = ru_title
+            production["overlay_title"] = ru_title
+    else:
+        session.pop("overlay_title_by_lang", None)
+        session.pop("overlay_title", None)
+        production.pop("overlay_title_by_lang", None)
+        production.pop("overlay_title", None)
+    session["production"] = production
+
+
+def _record_scene_text_revision(
+    scene: Scene,
+    *,
+    field_name: str,
+    old_text: Any,
+    new_text: Any,
+    request=None,
+    source: str = "admin",
+    language: str | None = None,
+    meta_json: dict[str, Any] | None = None,
+) -> SceneTextRevision | None:
+    old_clean = _clean_admin_inline_speech(old_text)
+    new_clean = _clean_admin_inline_speech(new_text)
+    if old_clean == new_clean:
+        return None
+    return SceneTextRevision.objects.create(
+        run_id=scene.run_id,
+        scene_id=scene.id,
+        scene_order=scene.scene_order,
+        field_name=field_name,
+        language=language,
+        old_text=old_clean,
+        new_text=new_clean,
+        source=source,
+        actor=_admin_actor(request) or None,
+        meta_json=meta_json or {},
+    )
+
+
+def _record_scene_text_revision_changes(
+    scene: Scene,
+    changes: list[dict[str, Any]],
+    *,
+    request=None,
+    source: str,
+) -> None:
+    for change in changes:
+        _record_scene_text_revision(
+            scene,
+            field_name=str(change.get("field_name") or ""),
+            language=change.get("language"),
+            old_text=change.get("old_text"),
+            new_text=change.get("new_text"),
+            request=request,
+            source=source,
+            meta_json=change.get("meta_json") if isinstance(change.get("meta_json"), dict) else None,
+        )
+
+
+def _scene_text_revision_table(rows) -> str:
+    rows = list(rows)
+    if not rows:
+        return "No text revisions yet."
+    body = []
+    for row in rows:
+        field = f"{row.field_name}:{row.language}" if row.language else row.field_name
+        body.append(
+            format_html(
+                "<tr><td>{}</td><td>{}</td><td>{}</td><td>{}</td><td><pre style='white-space:pre-wrap;margin:0'>{}</pre></td><td><pre style='white-space:pre-wrap;margin:0'>{}</pre></td></tr>",
+                row.created_at.strftime("%Y-%m-%d %H:%M:%S"),
+                row.scene_order or "-",
+                field,
+                row.actor or row.source,
+                row.old_text,
+                row.new_text,
+            )
+        )
+    return format_html(
+        "<table><thead><tr><th>Time</th><th>Scene</th><th>Field</th><th>Actor</th><th>Old</th><th>New</th></tr></thead><tbody>{}</tbody></table>",
+        mark_safe("".join(str(item) for item in body)),
+    )
+
+
+class SceneInlineForm(django_forms.ModelForm):
+    speech_ru = django_forms.CharField(
+        required=False,
+        label="Speech RU",
+        widget=django_forms.Textarea(attrs={"rows": 2}),
+        help_text="Русская речь для озвучки/субтитров.",
+    )
+    speech_en = django_forms.CharField(
+        required=False,
+        label="Speech EN",
+        widget=django_forms.Textarea(attrs={"rows": 2}),
+        help_text="Английская речь для EN-версии.",
+    )
+
+    class Meta:
+        model = Scene
+        fields = ("id", "scene_order", "duration_sec", "text")
+        widgets = {"id": django_forms.HiddenInput}
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.fields["text"].required = False
+        self.fields["scene_order"].required = False
+        self.fields["duration_sec"].required = False
+        speech: dict[str, Any] = {}
+        if self.instance and self.instance.pk and not self.instance._state.adding:
+            payload = _latest_scene_payload_for_admin(self.instance)
+            payload_speech = payload.get("speech_by_lang") if isinstance(payload, dict) else None
+            if isinstance(payload_speech, dict):
+                speech.update(payload_speech)
+            model_speech = self.instance.speech_by_lang
+            if isinstance(model_speech, dict) and model_speech:
+                speech.update(model_speech)
+        self._initial_speech_by_lang = {
+            str(key).strip().lower(): _clean_admin_inline_speech(value)
+            for key, value in speech.items()
+            if str(key).strip() and _clean_admin_inline_speech(value)
+        }
+        self.fields["speech_ru"].initial = self._initial_speech_by_lang.get(
+            "ru",
+            _clean_admin_inline_speech(getattr(self.instance, "text", "")),
+        )
+        self.fields["speech_en"].initial = self._initial_speech_by_lang.get("en", "")
+
+    def clean_scene_order(self):
+        value = self.cleaned_data.get("scene_order")
+        return value if value is not None else self.instance.scene_order
+
+    def clean_duration_sec(self):
+        value = self.cleaned_data.get("duration_sec")
+        return value if value is not None else self.instance.duration_sec
+
+    def clean_text(self):
+        value = str(self.cleaned_data.get("text") or "").strip()
+        return value or str(getattr(self.instance, "text", "") or "")
+
+    def save(self, commit=True):
+        obj: Scene = super().save(commit=False)
+        speech = dict(self._initial_speech_by_lang)
+        revision_changes: list[dict[str, Any]] = []
+        initial_text = _clean_admin_inline_speech(getattr(self.instance, "text", ""))
+        cleaned_text = _clean_admin_inline_speech(self.cleaned_data.get("text"))
+        if initial_text != cleaned_text:
+            revision_changes.append(
+                {
+                    "field_name": "text",
+                    "language": None,
+                    "old_text": initial_text,
+                    "new_text": cleaned_text,
+                }
+            )
+        if "speech_ru" in self.changed_data:
+            old_ru_speech = _clean_admin_inline_speech(self.fields["speech_ru"].initial)
+            ru_speech = _clean_admin_inline_speech(self.cleaned_data.get("speech_ru"))
+            if ru_speech:
+                speech["ru"] = ru_speech
+            else:
+                speech.pop("ru", None)
+            if old_ru_speech != ru_speech:
+                revision_changes.append(
+                    {
+                        "field_name": "speech",
+                        "language": "ru",
+                        "old_text": old_ru_speech,
+                        "new_text": ru_speech,
+                    }
+                )
+        if "speech_en" in self.changed_data:
+            old_en_speech = _clean_admin_inline_speech(self.fields["speech_en"].initial)
+            en_speech = _clean_admin_inline_speech(self.cleaned_data.get("speech_en"))
+            if en_speech:
+                speech["en"] = en_speech
+            else:
+                speech.pop("en", None)
+            if old_en_speech != en_speech:
+                revision_changes.append(
+                    {
+                        "field_name": "speech",
+                        "language": "en",
+                        "old_text": old_en_speech,
+                        "new_text": en_speech,
+                    }
+                )
+        obj.speech_by_lang = speech
+        obj._scene_text_revision_changes = revision_changes
+        if commit:
+            obj.save()
+        return obj
+
+
 class SceneInline(admin.TabularInline):
     model = Scene
+    form = SceneInlineForm
     extra = 0
     can_delete = True
-    fields = ("scene_order", "duration_sec", "text", "scene_link")
+    fields = ("id", "scene_order", "duration_sec", "text", "speech_ru", "speech_en", "scene_link")
     readonly_fields = ("scene_link",)
     show_change_link = True
 
@@ -2304,12 +3034,20 @@ class SceneInline(admin.TabularInline):
         return _admin_change_link(obj, "open scene")
 
 
+class GenerationArtifactInlineForm(django_forms.ModelForm):
+    class Meta:
+        model = GenerationArtifact
+        fields = ("id",)
+        widgets = {"id": django_forms.HiddenInput}
+
+
 class GenerationArtifactInline(admin.TabularInline):
     model = GenerationArtifact
+    form = GenerationArtifactInlineForm
     extra = 0
     can_delete = False
-    fields = ("label", "artifact_type", "scene", "language", "mime_type", "uri_link", "created_at")
-    readonly_fields = fields
+    fields = ("id", "label", "artifact_type", "scene", "language", "mime_type", "uri_link", "created_at")
+    readonly_fields = ("label", "artifact_type", "scene", "language", "mime_type", "uri_link", "created_at")
     show_change_link = True
 
     @admin.display(description="URI")
@@ -2317,12 +3055,80 @@ class GenerationArtifactInline(admin.TabularInline):
         return _generation_artifact_link(obj, "open")
 
 
+def _overlay_title_for_admin_edit(run: GenerationRun) -> dict[str, str]:
+    session: dict[str, Any] = {}
+    chat_session = ChatSession.objects.filter(generation_run_id=run.id).order_by("-updated_at").first()
+    if chat_session is not None and isinstance(chat_session.session_json, dict):
+        session = copy.deepcopy(chat_session.session_json or {})
+    production = session.get("production") if isinstance(session.get("production"), dict) else {}
+    title_by_lang: dict[str, str] = {}
+    for source in (production, session):
+        title_by_lang.update(_clean_overlay_title_by_lang(source.get("overlay_title_by_lang")))
+    return title_by_lang or _default_overlay_title(run)
+
+
+class GenerationRunAdminForm(django_forms.ModelForm):
+    overlay_title_ru = django_forms.CharField(
+        required=False,
+        label="Title RU",
+        widget=django_forms.Textarea(attrs={"rows": 2}),
+    )
+    overlay_title_en = django_forms.CharField(
+        required=False,
+        label="Title EN",
+        widget=django_forms.Textarea(attrs={"rows": 2}),
+    )
+
+    class Meta:
+        model = GenerationRun
+        fields = "__all__"
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        if self.instance and self.instance.pk:
+            title_by_lang = _overlay_title_for_admin_edit(self.instance)
+        else:
+            title_by_lang = _default_overlay_title(self.instance)
+        self.fields["overlay_title_ru"].initial = title_by_lang.get("ru", "")
+        self.fields["overlay_title_en"].initial = title_by_lang.get("en", "")
+
+    def clean(self):
+        cleaned = super().clean()
+        ru_title = " ".join(str(cleaned.get("overlay_title_ru") or "").split())
+        en_title = " ".join(str(cleaned.get("overlay_title_en") or "").split())
+        if ru_title and not en_title:
+            en_title = latinize_cyrillic_title(ru_title)
+        if en_title and not ru_title:
+            ru_title = en_title
+        cleaned["overlay_title_ru"] = ru_title
+        cleaned["overlay_title_en"] = en_title
+        return cleaned
+
+    def overlay_title_by_lang(self) -> dict[str, str]:
+        title_by_lang = {
+            "ru": " ".join(str(self.cleaned_data.get("overlay_title_ru") or "").split()),
+            "en": " ".join(str(self.cleaned_data.get("overlay_title_en") or "").split()),
+        }
+        return {key: value for key, value in title_by_lang.items() if value}
+
+    def save(self, commit=True):
+        obj: GenerationRun = super().save(commit=False)
+        title_by_lang = self.overlay_title_by_lang() if self.is_valid() else {}
+        obj.human_title = title_by_lang.get("ru") or title_by_lang.get("en") or None
+        if commit:
+            obj.save()
+            self.save_m2m()
+        return obj
+
+
 @admin.register(GenerationRun)
 class GenerationRunAdmin(admin.ModelAdmin):
+    form = GenerationRunAdminForm
     list_display = (
         "display_title",
         "status",
         "is_active",
+        "is_draft",
         "active_cursor",
         "language",
         "series",
@@ -2331,9 +3137,9 @@ class GenerationRunAdmin(admin.ModelAdmin):
         "created_at",
         "artifact_count",
     )
-    list_editable = ("is_active", "series", "series_video_index", "series_total_videos")
+    list_editable = ("is_active", "is_draft", "series", "series_video_index", "series_total_videos")
     search_fields = ("human_title", "script", "id", "series__title_ru", "series__title_en")
-    list_filter = ("status", "language", "series")
+    list_filter = ("status", "language", "series", "is_draft")
     autocomplete_fields = ("series",)
     actions = (build_final_title_and_videos,)
     readonly_fields = (
@@ -2345,12 +3151,15 @@ class GenerationRunAdmin(admin.ModelAdmin):
         "publication_prep",
         "prompt_overview",
         "media_approval_overview",
+        "scene_text_history",
     )
     fields = (
         "id",
-        "human_title",
+        "overlay_title_ru",
+        "overlay_title_en",
         "status",
         "is_active",
+        "is_draft",
         "current_scene_index",
         "current_media_substep",
         "current_media_language_index",
@@ -2358,20 +3167,28 @@ class GenerationRunAdmin(admin.ModelAdmin):
         "series",
         "series_video_index",
         "series_total_videos",
+        "scheduled_item",
         "created_at",
         "overlay_title_color",
         "final_videos",
         "publication_prep",
         "prompt_overview",
         "media_approval_overview",
+        "scene_text_history",
         "script",
     )
     inlines = (SceneInline, GenerationArtifactInline)
 
     def save_model(self, request, obj: GenerationRun, form, change):
+        changed_fields = set(getattr(form, "changed_data", []) or [])
+        sync_overlay_title = (not change) or bool({"human_title", "overlay_title_ru", "overlay_title_en"} & changed_fields)
+        title_by_lang = form.overlay_title_by_lang() if hasattr(form, "overlay_title_by_lang") else None
         super().save_model(request, obj, form, change)
         for chat_session in ChatSession.objects.filter(generation_run_id=obj.id):
             session = copy.deepcopy(chat_session.session_json or {})
+            if sync_overlay_title:
+                _sync_overlay_title_from_run(session, obj, title_by_lang=title_by_lang)
+            _sync_series_context_from_run(session, obj)
             if obj.current_scene_index is not None:
                 session["image_scene_index"] = int(obj.current_scene_index)
             if obj.current_media_substep:
@@ -2388,6 +3205,16 @@ class GenerationRunAdmin(admin.ModelAdmin):
     def save_formset(self, request, form, formset, change):
         super().save_formset(request, form, formset, change)
         if formset.model is Scene and form.instance and form.instance.pk:
+            for scene_form in getattr(formset, "forms", []):
+                scene = getattr(scene_form, "instance", None)
+                changes = getattr(scene, "_scene_text_revision_changes", None)
+                if scene is not None and changes:
+                    _record_scene_text_revision_changes(
+                        scene,
+                        changes,
+                        request=request,
+                        source="generation_run_admin_inline",
+                    )
             _renumber_scenes_for_run(form.instance.pk)
             _sync_chat_sessions_for_run_scenes(form.instance.pk)
 
@@ -2424,6 +3251,11 @@ class GenerationRunAdmin(admin.ModelAdmin):
             )
         parts.append("</div>")
         return mark_safe("".join(parts))
+
+    @admin.display(description="Scene text history")
+    def scene_text_history(self, obj: GenerationRun) -> str:
+        rows = SceneTextRevision.objects.filter(run_id=obj.id).order_by("-created_at")[:50]
+        return _scene_text_revision_table(rows)
 
     def get_queryset(self, request):
         queryset = super().get_queryset(request)
@@ -2526,46 +3358,116 @@ class GenerationRunAdmin(admin.ModelAdmin):
         run = self.get_object(request, object_id)
         if run is None:
             raise Http404("Generation run not found.")
-        if not all_final_artifacts_delivered(run.id):
+        post_production = _publication_post_production_from_final_artifacts(run)
+        has_publication_video = _publication_post_production_has_video(post_production)
+        if not has_publication_video:
             self.message_user(
                 request,
-                f"{run}: final videos are not confirmed delivered to Telegram yet; publication queue is blocked.",
-                level=messages.ERROR,
+                f"{run}: no final video artifacts are available yet; descriptions can still be generated from the recipe.",
+                level=messages.WARNING,
             )
-            return HttpResponseRedirect(reverse("admin:pipeline_admin_generationrun_change", args=[run.pk]))
+        if has_publication_video and not all_final_artifacts_delivered(run.id):
+            self.message_user(
+                request,
+                f"{run}: final videos are not confirmed delivered to Telegram yet; queueing from existing final artifacts is still available.",
+                level=messages.WARNING,
+            )
         initial_copy = _publication_copy_from_run(run)
-        form = PublicationQueueAdminForm(
-            request.POST or None,
-            copy=initial_copy,
-            initial={
-                "target_keys": [target.key for target in build_publication_targets(initial_copy) if target.description],
-                "video_variant": DEFAULT_PUBLICATION_VIDEO_VARIANT,
-                **initial_copy,
-            },
-        )
-        if request.method == "POST" and form.is_valid():
-            post_production = _publication_post_production_from_final_artifacts(run)
+        recipe_text = str(
+            request.POST.get("publication_recipe")
+            if request.method == "POST"
+            else (_publication_recipe_from_draft(run) or _publication_recipe_for_run(run))
+        ).strip()
+        generation_feedback = str(request.POST.get("generation_feedback") or "") if request.method == "POST" else ""
+        if request.method == "POST" and "generate_descriptions" in request.POST:
+            posted_copy = {
+                key: str(request.POST.get(key) or initial_copy.get(key) or "")
+                for key, _label in SOCIAL_COPY_FIELD_LABELS
+            }
             try:
-                with SessionLocal() as db:
-                    jobs = queue_publication_bundle(
-                        db,
-                        project_slug=_project_slug_for_publication_run(run),
-                        recipe=f"{run.id}\n\n{run.script}",
-                        copy=form.copy_payload(),
-                        post_production=post_production,
-                        origin="admin_generation_run",
-                        selected_target_keys=form.cleaned_data["target_keys"],
-                        video_variant=str(form.cleaned_data["video_variant"]),
-                        scheduled_at=form.cleaned_data.get("scheduled_at"),
-                    )
-                    for job in jobs:
-                        job.payload_json = {**(job.payload_json or {}), "run_id": str(run.id)}
-                    db.commit()
+                initial_copy = _generate_publication_copy_for_admin(
+                    run,
+                    current_copy=posted_copy,
+                    recipe=recipe_text,
+                    feedback=generation_feedback,
+                )
             except Exception as exc:
-                self.message_user(request, f"{run}: publication jobs were not queued: {exc}", level=messages.ERROR)
+                self.message_user(request, f"{run}: descriptions were not generated: {exc}", level=messages.ERROR)
+                initial_copy = posted_copy
             else:
-                self.message_user(request, publication_jobs_summary(jobs), level=messages.SUCCESS if jobs else messages.WARNING)
-                return HttpResponseRedirect(reverse("admin:pipeline_admin_generationrun_change", args=[run.pk]))
+                try:
+                    _save_publication_copy_draft(
+                        run,
+                        copy_payload=initial_copy,
+                        recipe=recipe_text,
+                        feedback=generation_feedback,
+                    )
+                except Exception as exc:
+                    self.message_user(request, f"{run}: descriptions generated but were not saved: {exc}", level=messages.WARNING)
+                self.message_user(
+                    request,
+                    f"{run}: descriptions generated and saved; review/edit copy below before queueing publication jobs.",
+                    level=messages.SUCCESS,
+                )
+                generation_feedback = ""
+            form = PublicationQueueAdminForm(
+                None,
+                copy=initial_copy,
+                initial={
+                    "target_keys": [target.key for target in build_publication_targets(initial_copy) if target.description],
+                    "video_variant": str(request.POST.get("video_variant") or DEFAULT_PUBLICATION_VIDEO_VARIANT),
+                    "scheduled_at": request.POST.get("scheduled_at") or None,
+                    **initial_copy,
+                },
+            )
+        else:
+            form = PublicationQueueAdminForm(
+                request.POST or None,
+                copy=initial_copy,
+                initial={
+                    "target_keys": [target.key for target in build_publication_targets(initial_copy) if target.description],
+                    "video_variant": DEFAULT_PUBLICATION_VIDEO_VARIANT,
+                    **initial_copy,
+                },
+            )
+        if request.method == "POST" and "generate_descriptions" not in request.POST and form.is_valid():
+            try:
+                _save_publication_copy_draft(
+                    run,
+                    copy_payload=form.copy_payload(),
+                    recipe=recipe_text,
+                    feedback=generation_feedback,
+                )
+            except Exception as exc:
+                self.message_user(request, f"{run}: descriptions were not saved as draft: {exc}", level=messages.WARNING)
+            if not has_publication_video:
+                self.message_user(
+                    request,
+                    f"{run}: publication jobs were not queued because no final video artifacts are available yet.",
+                    level=messages.ERROR,
+                )
+            else:
+                try:
+                    with SessionLocal() as db:
+                        jobs = queue_publication_bundle(
+                            db,
+                            project_slug=_project_slug_for_publication_run(run),
+                            recipe=f"{run.id}\n\n{recipe_text}",
+                            copy=form.copy_payload(),
+                            post_production=post_production,
+                            origin="admin_generation_run",
+                            selected_target_keys=form.cleaned_data["target_keys"],
+                            video_variant=str(form.cleaned_data["video_variant"]),
+                            scheduled_at=form.cleaned_data.get("scheduled_at"),
+                        )
+                        for job in jobs:
+                            job.payload_json = {**(job.payload_json or {}), "run_id": str(run.id)}
+                        db.commit()
+                except Exception as exc:
+                    self.message_user(request, f"{run}: publication jobs were not queued: {exc}", level=messages.ERROR)
+                else:
+                    self.message_user(request, publication_jobs_summary(jobs), level=messages.SUCCESS if jobs else messages.WARNING)
+                    return HttpResponseRedirect(reverse("admin:pipeline_admin_generationrun_change", args=[run.pk]))
         csrf = get_token(request)
         back_url = reverse("admin:pipeline_admin_generationrun_change", args=[run.pk])
         display_copy = {
@@ -2585,7 +3487,13 @@ class GenerationRunAdmin(admin.ModelAdmin):
             run.human_title or run.id,
             back_url,
             csrf,
-            _publication_queue_form_html(form, run, display_copy),
+            _publication_queue_form_html(
+                form,
+                run,
+                display_copy,
+                recipe=recipe_text,
+                generation_feedback=generation_feedback,
+            ),
         )
         return HttpResponse(html)
 
@@ -2666,6 +3574,298 @@ class ContentSeriesAdmin(admin.ModelAdmin):
             for row in rows
         ]
         return format_html("<ul>{}</ul>", mark_safe("".join(str(item) for item in items)))
+
+
+class ScheduledGenerationImportForm(django_forms.Form):
+    file = django_forms.FileField(label="Excel .xlsx file")
+
+
+class ScheduledGenerationItemAdminForm(django_forms.ModelForm):
+    title_color = django_forms.CharField(
+        label="Title color",
+        required=False,
+        widget=django_forms.TextInput(attrs={"type": "color"}),
+    )
+    comment = django_forms.CharField(
+        label="Comment for viral plan",
+        required=False,
+        widget=django_forms.Textarea(attrs={"rows": 4}),
+    )
+
+    class Meta:
+        model = ScheduledGenerationItem
+        fields = "__all__"
+
+    def clean_title_color(self) -> str:
+        normalized = _normalize_title_color(self.cleaned_data.get("title_color"))
+        return normalized or SCHEDULED_DEFAULT_TITLE_COLOR
+
+    def clean_source_row_key(self) -> str | None:
+        return str(self.cleaned_data.get("source_row_key") or "").strip() or None
+
+
+class ScheduledGenerationEventInline(admin.TabularInline):
+    model = ScheduledGenerationEvent
+    extra = 0
+    can_delete = False
+    readonly_fields = ("created_at", "event_type", "stage", "status", "message", "generation_run", "payload_json")
+    fields = readonly_fields
+    ordering = ("-created_at",)
+    show_change_link = True
+
+    def has_add_permission(self, request, obj=None):
+        return False
+
+
+@admin.action(description="Mark selected items pending now")
+def mark_scheduled_items_pending_now(modeladmin, request, queryset):
+    now = timezone.now()
+    updated = queryset.update(status="pending", run_at=now, error_text=None, claimed_at=None, started_at=None, finished_at=None)
+    modeladmin.message_user(request, f"{updated} scheduled item(s) marked pending for immediate processing.", messages.SUCCESS)
+
+
+@admin.action(description="Run selected scheduled items now")
+def run_scheduled_items_now(modeladmin, request, queryset):
+    results: list[str] = []
+    for item in queryset.order_by("run_at", "created_at"):
+        queued = queue_scheduled_generation_item_now(item.id)
+        detail = f" ({queued.backend}: {queued.detail})" if queued.detail else f" ({queued.backend})"
+        results.append(f"{item.title}: {queued.status}{detail}")
+    level = messages.SUCCESS if results else messages.WARNING
+    modeladmin.message_user(
+        request,
+        "Run-now complete.\n" + ("\n".join(results) if results else "No scheduled items selected."),
+        level,
+    )
+
+
+@admin.register(ScheduledGenerationItem)
+class ScheduledGenerationItemAdmin(admin.ModelAdmin):
+    form = ScheduledGenerationItemAdminForm
+    change_list_template = "admin/pipeline_admin/scheduledgenerationitem/change_list.html"
+    list_display = (
+        "run_at",
+        "title_short",
+        "status",
+        "is_draft",
+        "title_color",
+        "comment_short",
+        "series",
+        "source_row_key",
+        "linked_run",
+        "run_now_link",
+        "error_short",
+    )
+    list_filter = ("status", "is_draft", "series")
+    search_fields = ("title", "recipe", "comment", "series__title_ru", "series__title_en", "source_row_key", "source_file_path", "error_text")
+    autocomplete_fields = ("series", "generation_run")
+    readonly_fields = (
+        "id",
+        "created_at",
+        "updated_at",
+        "claimed_at",
+        "started_at",
+        "finished_at",
+        "linked_run",
+        "source_file_path",
+        "payload_json",
+    )
+    fields = (
+        "id",
+        "title",
+        "recipe",
+        "comment",
+        "title_color",
+        "run_at",
+        "is_draft",
+        "series",
+        "status",
+        "generation_run",
+        "linked_run",
+        "source_row_key",
+        "source_file_path",
+        "error_text",
+        "payload_json",
+        "claimed_at",
+        "started_at",
+        "finished_at",
+        "created_at",
+        "updated_at",
+    )
+    actions = (mark_scheduled_items_pending_now, run_scheduled_items_now)
+    inlines = (ScheduledGenerationEventInline,)
+
+    def get_urls(self):
+        urls = super().get_urls()
+        custom = [
+            path(
+                "download-template/",
+                self.admin_site.admin_view(self.download_template_view),
+                name="pipeline_admin_scheduledgenerationitem_download_template",
+            ),
+            path(
+                "import-xlsx/",
+                self.admin_site.admin_view(self.import_xlsx_view),
+                name="pipeline_admin_scheduledgenerationitem_import_xlsx",
+            ),
+            path(
+                "export-xlsx/",
+                self.admin_site.admin_view(self.export_xlsx_view),
+                name="pipeline_admin_scheduledgenerationitem_export_xlsx",
+            ),
+            path(
+                "<path:object_id>/run-now/",
+                self.admin_site.admin_view(self.run_now_view),
+                name="pipeline_admin_scheduledgenerationitem_run_now",
+            ),
+        ]
+        return custom + urls
+
+    def changelist_view(self, request, extra_context=None):
+        extra = dict(extra_context or {})
+        extra["scheduled_generation_links"] = {
+            "template": reverse("admin:pipeline_admin_scheduledgenerationitem_download_template"),
+            "import": reverse("admin:pipeline_admin_scheduledgenerationitem_import_xlsx"),
+            "export": reverse("admin:pipeline_admin_scheduledgenerationitem_export_xlsx"),
+        }
+        return super().changelist_view(request, extra_context=extra)
+
+    @admin.display(description="Title")
+    def title_short(self, obj: ScheduledGenerationItem) -> str:
+        return _short(obj.title, 80)
+
+    @admin.display(description="Comment")
+    def comment_short(self, obj: ScheduledGenerationItem) -> str:
+        return _short(obj.comment, 60)
+
+    @admin.display(description="Run")
+    def linked_run(self, obj: ScheduledGenerationItem) -> str:
+        run = obj.generation_run
+        if run is None:
+            return ""
+        return _admin_change_link(run, run.human_title or str(run.id))
+
+    @admin.display(description="Error")
+    def error_short(self, obj: ScheduledGenerationItem) -> str:
+        return _short(obj.error_text, 90)
+
+    @admin.display(description="Run now")
+    def run_now_link(self, obj: ScheduledGenerationItem) -> str:
+        if not obj.pk:
+            return ""
+        url = reverse("admin:pipeline_admin_scheduledgenerationitem_run_now", args=[obj.pk])
+        return format_html('<a href="{}">run now</a>', url)
+
+    def download_template_view(self, request):
+        data = build_scheduled_generation_template_bytes()
+        response = HttpResponse(
+            data,
+            content_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        )
+        response["Content-Disposition"] = 'attachment; filename="scheduled_generation_template.xlsx"'
+        return response
+
+    def export_xlsx_view(self, request):
+        data = export_scheduled_generation_items_to_xlsx(self.get_queryset(request).order_by("run_at", "created_at"))
+        response = HttpResponse(
+            data,
+            content_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        )
+        response["Content-Disposition"] = 'attachment; filename="scheduled_generation_export.xlsx"'
+        return response
+
+    def import_xlsx_view(self, request):
+        if request.method == "POST":
+            form = ScheduledGenerationImportForm(request.POST, request.FILES)
+            if form.is_valid():
+                upload = form.cleaned_data["file"]
+                try:
+                    result = import_scheduled_generation_xlsx(upload, original_name=getattr(upload, "name", "upload.xlsx"))
+                except Exception as exc:
+                    self.message_user(request, str(exc), messages.ERROR)
+                else:
+                    level = messages.WARNING if result.errors else messages.SUCCESS
+                    message = (
+                        f"Import complete: created={result.created}, updated={result.updated}, "
+                        f"skipped={result.skipped}. Saved copy: {result.saved_path}"
+                    )
+                    if result.errors:
+                        message += "\n" + "\n".join(result.errors[:10])
+                    self.message_user(request, message, level)
+                    return HttpResponseRedirect(reverse("admin:pipeline_admin_scheduledgenerationitem_changelist"))
+        else:
+            form = ScheduledGenerationImportForm()
+        csrf = get_token(request)
+        html = (
+            "<h1>Import scheduled generation Excel .xlsx</h1>"
+            "<p>Upload an .xlsx file with columns: title, recipe, comment, title_color, run_at, is_draft, source_row_key.</p>"
+            f'<form method="post" enctype="multipart/form-data">'
+            f'<input type="hidden" name="csrfmiddlewaretoken" value="{escape(csrf)}">'
+            f"{form.as_p()}"
+            '<button type="submit" class="default">Import .xlsx</button>'
+            "</form>"
+            f'<p><a href="{reverse("admin:pipeline_admin_scheduledgenerationitem_changelist")}">Back to queue</a></p>'
+        )
+        return HttpResponse(html)
+
+    def run_now_view(self, request, object_id):
+        obj = self.get_queryset(request).filter(pk=object_id).first()
+        if obj is None:
+            raise Http404("Scheduled generation item not found.")
+        try:
+            queued = queue_scheduled_generation_item_now(obj.id)
+        except Exception as exc:
+            self.message_user(request, f"{obj.title}: run-now failed: {exc}", messages.ERROR)
+        else:
+            detail = f" ({queued.backend}: {queued.detail})" if queued.detail else f" ({queued.backend})"
+            self.message_user(request, f"{obj.title}: queued, status={queued.status}{detail}", messages.SUCCESS)
+        return HttpResponseRedirect(reverse("admin:pipeline_admin_scheduledgenerationitem_changelist"))
+
+
+@admin.register(ScheduledGenerationEvent)
+class ScheduledGenerationEventAdmin(admin.ModelAdmin):
+    list_display = ("created_at", "scheduled_item", "event_type", "stage", "status", "message_short", "generation_run")
+    list_filter = ("event_type", "stage", "status", "created_at")
+    search_fields = ("scheduled_item__title", "scheduled_item__recipe", "message", "generation_run__human_title", "generation_run__id")
+    readonly_fields = ("id", "scheduled_item", "generation_run", "event_type", "stage", "status", "message", "payload_json", "created_at")
+    fields = readonly_fields
+
+    @admin.display(description="Message")
+    def message_short(self, obj: ScheduledGenerationEvent) -> str:
+        return _short(obj.message, 120)
+
+
+@admin.register(GenerationDraft)
+class GenerationDraftAdmin(admin.ModelAdmin):
+    list_display = ("created_at", "title_short", "chat_id", "stage", "scene_index", "substep", "language", "linked_run")
+    list_filter = ("stage", "substep", "language")
+    search_fields = ("title", "chat_id", "run__human_title", "run__id")
+    readonly_fields = ("id", "created_at", "linked_run", "session_snapshot_json", "payload_json")
+    fields = (
+        "id",
+        "title",
+        "chat_id",
+        "run",
+        "linked_run",
+        "stage",
+        "scene_index",
+        "substep",
+        "language",
+        "session_snapshot_json",
+        "payload_json",
+        "created_at",
+    )
+
+    @admin.display(description="Title")
+    def title_short(self, obj: GenerationDraft) -> str:
+        return _short(obj.title, 90)
+
+    @admin.display(description="Run")
+    def linked_run(self, obj: GenerationDraft) -> str:
+        run = obj.run
+        if run is None:
+            return ""
+        return _admin_change_link(run, run.human_title or str(run.id))
 
 
 @admin.register(Project)
@@ -2918,7 +4118,7 @@ class SceneAdmin(admin.ModelAdmin):
     list_display = ("scene_order", "run_link", "duration_sec", "short_text")
     list_filter = ("run__language", "run__status")
     search_fields = ("text", "run__human_title", "run__script", "run__id")
-    readonly_fields = ("id", "run_link", "artifacts", "images", "videos")
+    readonly_fields = ("id", "run_link", "artifacts", "images", "videos", "text_history")
     fields = (
         "id",
         "run",
@@ -2934,6 +4134,7 @@ class SceneAdmin(admin.ModelAdmin):
         "syntax_prompt_by_lang",
         "prompt_meta_json",
         "production_scene_json",
+        "text_history",
         "artifacts",
         "images",
         "videos",
@@ -2967,9 +4168,32 @@ class SceneAdmin(admin.ModelAdmin):
 
     def save_model(self, request, obj: Scene, form, change):
         old_run_id = None
+        old_scene = None
         if change and obj.pk:
-            old_run_id = Scene.objects.filter(pk=obj.pk).values_list("run_id", flat=True).first()
+            old_scene = Scene.objects.filter(pk=obj.pk).first()
+            old_run_id = old_scene.run_id if old_scene is not None else None
         super().save_model(request, obj, form, change)
+        if old_scene is not None:
+            _record_scene_text_revision(
+                obj,
+                field_name="text",
+                old_text=old_scene.text,
+                new_text=obj.text,
+                request=request,
+                source="scene_admin",
+            )
+            old_speech = old_scene.speech_by_lang if isinstance(old_scene.speech_by_lang, dict) else {}
+            new_speech = obj.speech_by_lang if isinstance(obj.speech_by_lang, dict) else {}
+            for lang in sorted(set(old_speech) | set(new_speech)):
+                _record_scene_text_revision(
+                    obj,
+                    field_name="speech",
+                    language=str(lang).strip().lower() or None,
+                    old_text=old_speech.get(lang, ""),
+                    new_text=new_speech.get(lang, ""),
+                    request=request,
+                    source="scene_admin",
+                )
         payload = form.cleaned_data.get("production_scene_json") if hasattr(form, "cleaned_data") else None
         payloads = {str(obj.id): payload} if isinstance(payload, dict) and payload else {}
         if old_run_id and old_run_id != obj.run_id:
@@ -2977,6 +4201,13 @@ class SceneAdmin(admin.ModelAdmin):
             _sync_chat_sessions_for_run_scenes(old_run_id)
         _renumber_scenes_for_run(obj.run_id)
         _sync_chat_sessions_for_run_scenes(obj.run_id, override_payloads_by_scene_id=payloads)
+
+    @admin.display(description="Text history")
+    def text_history(self, obj: Scene) -> str:
+        if not obj.pk:
+            return "Save the scene first."
+        rows = SceneTextRevision.objects.filter(scene_id=obj.id).order_by("-created_at")[:30]
+        return _scene_text_revision_table(rows)
 
     def delete_model(self, request, obj: Scene):
         run_id = obj.run_id
@@ -3020,6 +4251,32 @@ class SceneAdmin(admin.ModelAdmin):
         if not rows:
             return "No videos yet."
         return mark_safe("".join(str(_video_preview(row)) for row in rows))
+
+
+@admin.register(SceneTextRevision)
+class SceneTextRevisionAdmin(admin.ModelAdmin):
+    list_display = ("created_at", "run", "scene_order", "field_name", "language", "source", "actor", "short_new_text")
+    list_filter = ("field_name", "language", "source", "created_at")
+    search_fields = ("run__human_title", "run__id", "old_text", "new_text", "actor")
+    readonly_fields = (
+        "id",
+        "run",
+        "scene",
+        "scene_order",
+        "field_name",
+        "language",
+        "old_text",
+        "new_text",
+        "source",
+        "actor",
+        "meta_json",
+        "created_at",
+    )
+    fields = readonly_fields
+
+    @admin.display(description="New text")
+    def short_new_text(self, obj: SceneTextRevision) -> str:
+        return _short(obj.new_text, 120)
 
 
 @admin.register(GenerationArtifact)
@@ -3080,15 +4337,11 @@ class GenerationArtifactAdmin(admin.ModelAdmin):
         if raw.startswith("db://scene_image_candidates/"):
             candidate_id = raw.rsplit("/", 1)[-1]
             row = SceneImageCandidate.objects.filter(candidate_id=candidate_id).first()
-            if row is None:
-                raise Http404("Image candidate not found.")
-            return HttpResponse(bytes(row.image_blob), content_type="image/png")
+            return _candidate_media_response(request, row, blob_attr="image_blob", default_content_type="image/png")
         if raw.startswith("db://scene_video_candidates/"):
             candidate_id = raw.rsplit("/", 1)[-1]
             row = SceneVideoCandidate.objects.filter(candidate_id=candidate_id).first()
-            if row is None:
-                raise Http404("Video candidate not found.")
-            return HttpResponse(bytes(row.video_blob), content_type="video/mp4")
+            return _candidate_media_response(request, row, blob_attr="video_blob", default_content_type="video/mp4")
         if raw.startswith(("http://", "https://")):
             return HttpResponseRedirect(raw)
         path_obj = _artifact_local_path(obj)
@@ -3116,7 +4369,7 @@ class GenerationArtifactAdmin(admin.ModelAdmin):
         if str(obj.mime_type or "").startswith("image/") and media_url:
             return format_html('<img src="{}" style="max-width:420px;max-height:320px;border-radius:4px;">', media_url)
         if str(obj.mime_type or "").startswith("video/") and media_url:
-            return format_html('<video src="{}" controls preload="metadata" style="max-width:520px;width:100%;"></video>', media_url)
+            return format_html('<video src="{}" controls preload="none" style="max-width:520px;width:100%;"></video>', media_url)
         return "No inline preview for this artifact."
 
 
@@ -3151,9 +4404,7 @@ class SceneImageCandidateAdmin(admin.ModelAdmin):
 
     def media_view(self, request, candidate_id: str):
         row = SceneImageCandidate.objects.filter(candidate_id=candidate_id).first()
-        if row is None:
-            raise Http404("Image candidate not found.")
-        return HttpResponse(bytes(row.image_blob), content_type="image/png")
+        return _candidate_media_response(request, row, blob_attr="image_blob", default_content_type="image/png")
 
     @admin.display(description="Preview")
     def preview(self, obj: SceneImageCandidate) -> str:
@@ -3207,9 +4458,7 @@ class SceneVideoCandidateAdmin(admin.ModelAdmin):
 
     def media_view(self, request, candidate_id: str):
         row = SceneVideoCandidate.objects.filter(candidate_id=candidate_id).first()
-        if row is None:
-            raise Http404("Video candidate not found.")
-        return HttpResponse(bytes(row.video_blob), content_type="video/mp4")
+        return _candidate_media_response(request, row, blob_attr="video_blob", default_content_type="video/mp4")
 
     @admin.display(description="Preview")
     def preview(self, obj: SceneVideoCandidate) -> str:

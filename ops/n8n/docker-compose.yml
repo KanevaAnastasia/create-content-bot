@@ -23,6 +23,11 @@ services:
     volumes:
       - n8n_data:/home/node/.n8n
       - "${CONTENT_FABRIC_PUBLICATION_DIR:-/private/tmp/content_fabric_publications}:${CONTENT_FABRIC_PUBLICATION_DIR:-/private/tmp/content_fabric_publications}"
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
 
 volumes:
   n8n_data:

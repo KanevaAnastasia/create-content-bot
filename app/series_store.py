@@ -59,15 +59,30 @@ def _project_id_for_slug(db, project_slug: str | None) -> uuid.UUID | None:
 def payload_for_series(row: ContentSeries) -> SeriesPayload:
     video_index = max(1, int(row.current_video_index or 1))
     total_videos = max(1, int(row.total_videos or 1))
+    title_by_lang = {"ru": row.title_ru, "en": row.title_en}
+    raw_meta = getattr(row, "meta_json", None)
+    meta = raw_meta if isinstance(raw_meta, dict) else {}
+    meta_titles = meta.get("title_by_lang")
+    if isinstance(meta_titles, dict):
+        for key, value in meta_titles.items():
+            lang = str(key or "").strip().lower()
+            title = " ".join(str(value or "").split())
+            if lang and title:
+                title_by_lang[lang] = title
+    title_by_lang["ru"] = " ".join(str(row.title_ru or "").split())
+    title_by_lang["en"] = " ".join(str(row.title_en or "").split())
+    counter_by_lang = {
+        "ru": f"день {video_index} из {total_videos}",
+        "en": f"day {video_index} of {total_videos}",
+    }
+    for lang in title_by_lang:
+        counter_by_lang.setdefault(lang, counter_by_lang["en"])
     return SeriesPayload(
         id=str(row.id),
-        title_by_lang={"ru": row.title_ru, "en": row.title_en},
+        title_by_lang=title_by_lang,
         video_index=video_index,
         total_videos=total_videos,
-        counter_by_lang={
-            "ru": f"день {video_index} из {total_videos}",
-            "en": f"day {video_index} of {total_videos}",
-        },
+        counter_by_lang=counter_by_lang,
     )
 
 
@@ -156,6 +171,7 @@ def create_series(
     *,
     title_ru: str,
     title_en: str | None = None,
+    title_by_lang: dict[str, str] | None = None,
     total_videos: int,
     project_slug: str | None = None,
 ) -> SeriesPayload:
@@ -163,6 +179,15 @@ def create_series(
     en = " ".join(str(title_en or "").split()) if title_en else ru
     if not ru or not en:
         raise ValueError("Series needs both Russian and English titles.")
+    titles = {"ru": ru, "en": en}
+    if isinstance(title_by_lang, dict):
+        for key, value in title_by_lang.items():
+            lang = str(key or "").strip().lower()
+            title = " ".join(str(value or "").split())
+            if lang and title:
+                titles[lang] = title
+    titles["ru"] = ru
+    titles["en"] = en
     total = max(1, int(total_videos or 10))
     with SessionLocal() as db:
         project_id = _project_id_for_slug(db, project_slug)
@@ -182,7 +207,7 @@ def create_series(
             current_video_index=1,
             total_videos=total,
             is_active=True,
-            meta_json={},
+            meta_json={"title_by_lang": titles},
         )
         db.add(row)
         db.flush()

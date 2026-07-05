@@ -205,6 +205,13 @@ def test_append_veo3_video_framing_constraints_adds_cooking_cast_rule_by_default
     assert "cartoon cat" not in out
 
 
+def test_recipe_visual_rules_cover_cutting_and_stovetop_physics():
+    assert "для каждого такого ингредиента" in START_FRAME_RECIPE_VISUAL_DETAIL_RULE
+    assert "полукольца" in START_FRAME_RECIPE_VISUAL_DETAIL_RULE
+    assert "boiling, simmering, frying" in pipeline.VIDEO_KITCHEN_PHYSICS_RULE
+    assert "visible stovetop burner/hob" in pipeline.VIDEO_KITCHEN_PHYSICS_RULE
+
+
 def test_append_veo3_video_framing_constraints_skips_cooking_cast_rule_for_other_scope(monkeypatch):
     monkeypatch.setenv("CONTENT_FABRIC_PROJECT_SCOPE", "travel_blog")
     out = append_veo3_video_framing_constraints("close-up kitchen", {"model": "veo3_fast"})
@@ -267,7 +274,10 @@ def test_pipeline_llm_steps_scenes_payload_carries_feedback_and_previous():
     assert p["feedback"] == "больше хука"
     assert p["dialogue_feedback_hint"] == {}
     assert p["previous_scenes"] == [{"scene": 1}]
+    assert "ingredient_source_of_truth_rule" in p["requirements"]
     prompt = pipeline_llm_steps.build_scenes_plan_prompt(p)
+    assert "INGREDIENT SOURCE OF TRUTH" in prompt
+    assert "Не добавляй продукты" in prompt
     assert "больше хука" in prompt
     assert "previous_scenes" in prompt
     assert "speech_first_person_pov" in prompt
@@ -1043,6 +1053,7 @@ def test_generate_full_production_with_approved_frames(monkeypatch):
             approved,
             user_feedback="чуть динамичнее",
             previous_enriched_scenes=[{"video_prompt": "old"}],
+            generation_comment="сделай больше семейного тепла",
         )
     )
     scene = out["json_plan"][0]
@@ -1071,16 +1082,24 @@ def test_generate_full_production_with_approved_frames(monkeypatch):
     assert "kitchen_physics_rule" in captured_prompt["text"]
     assert "blender" in captured_prompt["text"]
     assert "do not invent extra characters" in captured_prompt["text"].lower()
+    assert "Use the start/end frames as the visual source of truth" in captured_prompt["text"]
+    assert "ingredient inventory" in captured_prompt["text"]
+    assert "never introduce new food" in captured_prompt["text"]
     assert "scene1_spoken_dish_name_rule" in captured_prompt["text"]
     assert "viewer must hear the dish name in the first scene" in captured_prompt["text"]
     assert "title_safe_top_30" in captured_prompt["text"]
     assert "romantic_drama_rule" in captured_prompt["text"]
     assert "character_identity_rule:" not in scene["video_prompt"]
+    assert "visual_source_lock:" not in scene["video_prompt"]
+    assert "Describe only motion" not in scene["video_prompt"]
     assert "character_descriptions" not in captured_prompt["text"]
     assert "Описание персонажей" not in scene["video_prompt"]
     assert START_FRAME_RECIPE_VISUAL_DETAIL_RULE not in scene["start_frame_prompt"]
     assert "Визуальные константы предметов:" not in scene["video_prompt"]
     assert '"location"' not in captured_prompt["text"]
+    assert "MANDATORY GENERATION COMMENT FROM QUEUE/USER" in captured_prompt["text"]
+    assert "сделай больше семейного тепла" in captured_prompt["text"]
+    assert "Describe only motion, actions, speech, lipsync, reactions, camera movement" in captured_prompt["text"]
 
 
 def test_generate_full_production_with_approved_frames_marks_end_frame_requested(monkeypatch):
@@ -1145,6 +1164,9 @@ def test_generate_full_production_without_approved_frames_fills_placeholders(mon
     assert "speech_timing_plan:" in scene["video_prompt_by_lang"]["ru"]
     assert "подробные описания ингредиентов" in captured_prompt["text"]
     assert "kitchen_physics_rule" in captured_prompt["text"]
+    assert "Use the start/end frames as the visual source of truth" in captured_prompt["text"]
+    assert "ingredient inventory" in captured_prompt["text"]
+    assert "never introduce new food" in captured_prompt["text"]
     assert "title_safe_top_30" in captured_prompt["text"]
     assert "do not invent extra characters" in captured_prompt["text"].lower()
     assert '"location"' not in captured_prompt["text"]
@@ -1323,6 +1345,12 @@ def test_generate_full_production_translates_dialogue_by_language(monkeypatch):
     assert scene["speech_by_lang"]["en"] == "EN::Ух ты, какие крылья [пауза] EN::Сейчас попробуем вместе"
     assert scene["speech_plan_by_lang"]["en"][0]["speaker"] == "grandson"
     assert "CHARACTERS SPEAKS: EN::Ух ты, какие крылья [пауза] EN::Сейчас попробуем вместе" in scene["video_prompt_by_lang"]["en"]
+    assert "speaker_dialogue_order: GRANDSON, GRANDMA" in scene["video_prompt_by_lang"]["ru"]
+    assert "GRANDSON: Ух ты, какие крылья" in scene["video_prompt_by_lang"]["ru"]
+    assert "GRANDMA: Сейчас попробуем вместе" in scene["video_prompt_by_lang"]["ru"]
+    assert "voice_lock_full_grandson:" in scene["video_prompt_by_lang"]["ru"]
+    assert "voice_lock_full_grandma:" in scene["video_prompt_by_lang"]["ru"]
+    assert "GRANDSON: EN::Ух ты, какие крылья" in scene["video_prompt_by_lang"]["en"]
 
 
 def test_generate_script_composes_full_text_and_scenes(monkeypatch):

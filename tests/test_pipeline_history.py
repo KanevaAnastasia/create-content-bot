@@ -78,6 +78,38 @@ def test_checkpoint_record_updates_duplicate_visible_step(monkeypatch):
     assert rows[0].session_snapshot_json["selected_concept"] == "b"
 
 
+def test_checkpoint_record_omits_large_media_payloads(monkeypatch):
+    _install_sqlite(monkeypatch)
+    chat_id = 8106
+    large_b64 = "a" * 250_000
+    session = {
+        "state": "waiting_scene_media",
+        "image_scene_index": 0,
+        "scene_media_substep": "start_prompt",
+        "production": {
+            "json_plan": [
+                {
+                    "scene": 1,
+                    "start_frame_prompt": "prompt",
+                    "start_frame_image_b64": large_b64,
+                    "video_candidates_by_lang": {"ru": [{"video_b64": large_b64}]},
+                }
+            ]
+        },
+    }
+
+    record_checkpoint(chat_id, session)
+
+    with db.SessionLocal() as dbs:
+        row = dbs.query(PipelineStepCheckpoint).filter_by(chat_id=chat_id).one()
+
+    scene = row.session_snapshot_json["production"]["json_plan"][0]
+    assert scene["start_frame_prompt"] == "prompt"
+    assert scene["start_frame_image_b64"] is None
+    assert scene["video_candidates_by_lang"] == {}
+    assert row.payload_json["checkpoint_omitted_media"]["omitted_values"] >= 2
+
+
 def test_previous_button_uses_deterministic_media_substep_navigation(monkeypatch):
     _install_sqlite(monkeypatch)
     monkeypatch.setattr("app.handlers.handlers_state_scene.DEBOUNCE_DELAY_SEC", 0)

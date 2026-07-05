@@ -7,6 +7,8 @@ import uuid
 from datetime import datetime, UTC
 from typing import Any
 
+from .media_file_store import read_media_uri_bytes
+
 DEFAULT_SCENE_VIDEO_SPEED_COEF = 1.2
 SCENE_MEDIA_MESSAGE_INDEX_KEY = "scene_media_message_index"
 
@@ -198,6 +200,23 @@ def resolve_scene_video_for_production(scene: dict[str, Any], language: str) -> 
     return candidates[-1]
 
 
+def resolve_latest_approved_scene_video_for_final_build(
+    scene: dict[str, Any],
+    language: str,
+) -> dict[str, Any] | None:
+    lang = str(language or "ru").strip().lower() or "ru"
+    mapping = _ensure_video_candidates(scene)
+    bucket = mapping.get(lang)
+    candidates = [item for item in bucket if isinstance(item, dict)] if isinstance(bucket, list) else []
+    approved = [item for item in candidates if bool(item.get("approved_for_production"))]
+    if approved:
+        return approved[-1]
+    legacy = _legacy_video_candidate(scene, lang)
+    if legacy is not None and bool(legacy.get("approved_for_production")):
+        return legacy
+    return None
+
+
 def latest_scene_video_candidate(scene: dict[str, Any], language: str) -> dict[str, Any] | None:
     lang = str(language or "ru").strip().lower() or "ru"
     mapping = _ensure_video_candidates(scene)
@@ -336,14 +355,14 @@ def selected_image_bytes_for_video(scene: dict[str, Any], *, kind: str = "start"
     selected = resolve_scene_image_for_video(scene, kind=kind)
     if selected is None:
         return None
-    return _decode_b64(str(selected.get("image_b64") or ""))
+    return _decode_b64(str(selected.get("image_b64") or "")) or read_media_uri_bytes(str(selected.get("media_uri") or ""))
 
 
 def selected_video_bytes_for_production(scene: dict[str, Any], language: str) -> bytes | None:
     selected = resolve_scene_video_for_production(scene, language)
     if selected is None:
         return None
-    return _decode_b64(str(selected.get("video_b64") or ""))
+    return _decode_b64(str(selected.get("video_b64") or "")) or read_media_uri_bytes(str(selected.get("media_uri") or ""))
 
 
 def parse_speed_coef(value: str | float | int | None) -> float | None:

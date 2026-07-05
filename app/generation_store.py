@@ -3,13 +3,14 @@
 from __future__ import annotations
 
 import json
+import re
 import uuid
 from typing import Any
 
 import sqlalchemy as sa
 
 from .db import SessionLocal
-from .models import GenerationRun, Scene, VideoResult
+from .models import GenerationRun, Scene, SceneTextRevision, VideoResult
 
 MEDIA_CURSOR_STATE = "waiting_scene_media"
 SCENE_PROMPT_TEXT_KEYS = (
@@ -23,6 +24,33 @@ SCENE_PROMPT_JSON_KEYS = (
     "syntax_prompt_by_lang",
     "prompt_meta_json",
 )
+DEFAULT_GENERATION_TITLE_COLOR = "#c72638"
+HEX_TITLE_COLOR_RE = re.compile(r"^#?[0-9a-fA-F]{6}$")
+
+
+def _normalize_generation_title_color(value: Any) -> str:
+    raw = str(value or "").strip()
+    if not HEX_TITLE_COLOR_RE.fullmatch(raw):
+        return ""
+    return raw.lower() if raw.startswith("#") else f"#{raw.lower()}"
+
+
+def _title_color_for_session(session: dict[str, Any]) -> str:
+    production = session.get("production") if isinstance(session.get("production"), dict) else {}
+    candidates = [
+        session.get("title_color"),
+        (session.get("overlay_title_style") or {}).get("title_color")
+        if isinstance(session.get("overlay_title_style"), dict)
+        else None,
+        (production.get("overlay_title_style") or {}).get("title_color")
+        if isinstance(production.get("overlay_title_style"), dict)
+        else None,
+    ]
+    for candidate in candidates:
+        normalized = _normalize_generation_title_color(candidate)
+        if normalized:
+            return normalized
+    return DEFAULT_GENERATION_TITLE_COLOR
 
 
 def _safe_int_or_none(value: Any) -> int | None:
@@ -55,11 +83,81 @@ def _apply_prompt_payload_to_scene_row(row: Scene, scene: dict[str, Any]) -> boo
             changed = True
     for key in SCENE_PROMPT_JSON_KEYS:
         value = scene.get(key)
+        if key == "speech_by_lang" and not isinstance(value, dict) and isinstance(row.speech_by_lang, dict) and row.speech_by_lang:
+            continue
         json_value = value if isinstance(value, dict) else {}
         if getattr(row, key) != json_value:
             setattr(row, key, json_value)
             changed = True
     return changed
+
+
+def _clean_revision_text(value: Any) -> str:
+    return " ".join(str(value or "").split())
+
+
+def _add_scene_text_revision(
+    db,
+    row: Scene,
+    *,
+    field_name: str,
+    old_text: Any,
+    new_text: Any,
+    language: str | None = None,
+    source: str = "generation_store_session_sync",
+) -> None:
+    old_clean = _clean_revision_text(old_text)
+    new_clean = _clean_revision_text(new_text)
+    if old_clean == new_clean:
+        return
+    db.add(
+        SceneTextRevision(
+            run_id=row.run_id,
+            scene_id=row.id,
+            scene_order=row.scene_order,
+            field_name=field_name,
+            language=language,
+            old_text=old_clean,
+            new_text=new_clean,
+            source=source,
+            meta_json={},
+        )
+    )
+
+
+def _record_scene_text_payload_revisions(db, row: Scene, scene: dict[str, Any]) -> None:
+    new_text = str(scene.get("text") or row.text or "")
+    _add_scene_text_revision(
+        db,
+        row,
+        field_name="text",
+        old_text=row.text,
+        new_text=new_text,
+    )
+    old_speech_raw = row.speech_by_lang if isinstance(row.speech_by_lang, dict) else {}
+    raw_speech = scene.get("speech_by_lang")
+    if not isinstance(raw_speech, dict):
+        return
+    new_speech_raw = raw_speech
+    old_speech = {
+        str(key).strip().lower(): value
+        for key, value in old_speech_raw.items()
+        if str(key).strip()
+    }
+    new_speech = {
+        str(key).strip().lower(): value
+        for key, value in new_speech_raw.items()
+        if str(key).strip()
+    }
+    for lang in sorted(set(old_speech) | set(new_speech)):
+        _add_scene_text_revision(
+            db,
+            row,
+            field_name="speech",
+            language=lang,
+            old_text=old_speech.get(lang, ""),
+            new_text=new_speech.get(lang, ""),
+        )
 
 
 def merge_scene_prompt_payload(scene: dict[str, Any], payload: dict[str, Any]) -> None:
@@ -118,6 +216,8 @@ def _update_scene_prompt_rows(db, run_id: uuid.UUID, scenes_plan: list[dict[str,
             db.add(row)
             db.flush()
             rows_by_order[order] = row
+        else:
+            _record_scene_text_payload_revisions(db, row, scene)
         row.text = str(scene.get("text") or row.text or "")
         row.duration_sec = float(scene.get("duration_sec") or row.duration_sec or 0.0)
         _apply_prompt_payload_to_scene_row(row, scene)
@@ -215,6 +315,16 @@ def _series_fields_for_session(session: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def _scheduled_item_uuid(session: dict[str, Any]) -> uuid.UUID | None:
+    raw = str(session.get("scheduled_item_id") or "").strip()
+    if not raw:
+        return None
+    try:
+        return uuid.UUID(raw)
+    except ValueError:
+        return None
+
+
 def ensure_generation_run_for_session(session: dict[str, Any]) -> tuple[str | None, dict[int, str]]:
     """Create a lightweight run+scene snapshot in DB on first persistence."""
     existing = str(session.get("generation_run_id") or "").strip()
@@ -243,6 +353,15 @@ def ensure_generation_run_for_session(session: dict[str, Any]) -> tuple[str | No
                     run.series_video_index = series_fields["series_video_index"]
                     run.series_total_videos = series_fields["series_total_videos"]
                     changed = True
+                if run is not None:
+                    scheduled_item_id = _scheduled_item_uuid(session)
+                    is_draft = bool(session.get("is_draft") or session.get("scheduled_generation_mode"))
+                    if scheduled_item_id and getattr(run, "scheduled_item_id", None) != scheduled_item_id:
+                        run.scheduled_item_id = scheduled_item_id
+                        changed = True
+                    if is_draft and not bool(getattr(run, "is_draft", False)):
+                        run.is_draft = True
+                        changed = True
                 if changed:
                     db.commit()
         except Exception:
@@ -266,9 +385,12 @@ def ensure_generation_run_for_session(session: dict[str, Any]) -> tuple[str | No
         run = GenerationRun(
             status="media_in_progress",
             **_run_cursor_from_session(session),
+            is_draft=bool(session.get("is_draft") or session.get("scheduled_generation_mode")),
             human_title=_human_title_for_session(session, scenes_plan),
+            title_color=_title_color_for_session(session),
             language=_language_for_session(session),
             **series_fields,
+            scheduled_item_id=_scheduled_item_uuid(session),
             script=script,
         )
         db.add(run)
@@ -291,6 +413,28 @@ def ensure_generation_run_for_session(session: dict[str, Any]) -> tuple[str | No
         session["generation_run_id"] = str(run.id)
         session["scene_db_ids_by_index"] = scene_map
         return str(run.id), scene_map
+
+
+def set_generation_run_title_color_for_session(session: dict[str, Any], title_color: Any) -> str:
+    """Persist an explicitly chosen title color on the linked GenerationRun."""
+    normalized = _normalize_generation_title_color(title_color)
+    if not normalized:
+        return ""
+    run_id_str = str(session.get("generation_run_id") or "").strip()
+    if not run_id_str:
+        run_id_str, _scene_map = ensure_generation_run_for_session(session)
+    if not run_id_str:
+        return normalized
+    try:
+        run_id = uuid.UUID(run_id_str)
+    except (TypeError, ValueError, AttributeError):
+        return normalized
+    with SessionLocal() as db:
+        run = db.get(GenerationRun, run_id)
+        if run is not None and getattr(run, "title_color", "") != normalized:
+            run.title_color = normalized
+            db.commit()
+    return normalized
 
 
 def update_generation_run_cursor_from_session(session: dict[str, Any]) -> None:

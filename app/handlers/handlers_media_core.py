@@ -24,7 +24,11 @@ from ..llm_utils import (
     set_prefer_vertex_api,
 )
 from ..scene_utils import normalize_recipe_steps, extract_recipe_steps_text
-from ..pipeline import GRANDMA_VOICE_LOCK_FULL, append_veo3_video_framing_constraints
+from ..pipeline import (
+    GRANDMA_VOICE_LOCK_FULL,
+    VIDEO_PROMPT_VISUAL_SOURCE_GENERATION_RULE,
+    append_veo3_video_framing_constraints,
+)
 from ..pipeline_llm_steps import RUSSIAN_YO_RULE
 from ..multilingual import language_name, normalize_language_code
 from .handlers_media_core_recipe import (
@@ -111,6 +115,12 @@ _NON_REALISM_RULE = "visual style is strictly non-photorealistic, non-realistic,
 _NO_SUBTITLES_MUSIC_RULE = (
     "no on-screen text or subtitles; no background music or soundtrack"
 )
+_VIDEO_PROMPT_VISUAL_SOURCE_RULE = (
+    "visual_source_lock: use the provided start/end frame or uploaded source image as the complete visual source of truth; "
+    "describe only motion, actions, speech, lipsync, reactions, and camera movement; "
+    "do not describe location, background, static dish layout, serving composition, or ingredient inventory; "
+    "do not introduce new food, garnish, topping, side dish, tableware, decor, or scenery"
+)
 _VOICE_LOCK_LANGUAGE_TOKEN_BY_LANG = {
     "ru": "Russian language",
     "en": "English language",
@@ -154,6 +164,25 @@ def _sanitize_video_prompt_language_references(video_prompt: str, target_languag
     out = prompt
     for source, target in replacements.items():
         out = out.replace(source, target)
+    return out
+
+
+def enforce_video_prompt_visual_source_rule(video_prompt: str) -> str:
+    """Strip internal visual-source instructions before sending/storing runtime video prompts."""
+    vp = (video_prompt or "").strip()
+    if not vp:
+        return ""
+    out = vp
+    escaped_rule = re.escape(VIDEO_PROMPT_VISUAL_SOURCE_GENERATION_RULE)
+    out = re.sub(escaped_rule, "", out, flags=re.IGNORECASE)
+    visual_source_patterns = (
+        r"\s*\.?\s*visual_source_lock:\s*use the provided start/end frame or uploaded source image as the complete visual source of truth;\s*describe only motion, actions, speech, lipsync, reactions, and camera movement;\s*do not describe location, background, static dish layout, serving composition, or ingredient inventory;\s*do not introduce new food, garnish, topping, side dish, tableware, decor, or scenery\.?",
+        r"\s*\.?\s*visual_source_lock:\s*[^\n]*",
+    )
+    for pattern in visual_source_patterns:
+        out = re.sub(pattern, "", out, flags=re.IGNORECASE).strip()
+    out = re.sub(r"\s{2,}", " ", out).strip()
+    out = re.sub(r"\s+\.", ".", out).strip()
     return out
 
 
@@ -759,15 +788,25 @@ def video_provider_choice_parse_user_selection(text: str) -> str | None:
     return None
 
 
+def _decode_fallback_payload_image(payload: dict[str, Any], *keys: str, required: bool = True) -> bytes | None:
+    for key in keys:
+        raw = str(payload.get(key) or "").strip()
+        if raw:
+            return base64.b64decode(raw)
+    if required:
+        raise KeyError(keys[0] if keys else "image_b64")
+    return None
+
+
 async def run_syntax_fallback_from_session_payload(payload: dict[str, Any]) -> bytes | None:
     """Runs Syntax fallback using a dict from :func:`encode_syntax_fallback_pending_for_session`."""
-    end_raw = (payload.get("end_image_b64") or "").strip()
-    end_im: bytes | None = base64.b64decode(end_raw) if end_raw else None
+    start_im = _decode_fallback_payload_image(payload, "start_image_b64", "start_frame_image_b64")
+    end_im = _decode_fallback_payload_image(payload, "end_image_b64", "end_frame_image_b64", required=False)
     return await _attempt_syntax_video_fallback_bytes(
-        prompt=str(payload["prompt"]),
+        prompt=enforce_video_prompt_visual_source_rule(str(payload["prompt"])),
         model=str(payload["model"]),
         duration_sec=int(payload["duration_sec"]),
-        start_image=base64.b64decode(str(payload["start_image_b64"])),
+        start_image=start_im,
         end_image=end_im,
         raise_on_dispatch_failure=True,
     )
@@ -775,14 +814,14 @@ async def run_syntax_fallback_from_session_payload(payload: dict[str, Any]) -> b
 
 async def run_vertex_fallback_from_session_payload(payload: dict[str, Any]) -> bytes:
     """Runs the reserve Vertex path from a serialized pending payload."""
-    end_raw = (payload.get("end_image_b64") or "").strip()
-    end_im: bytes | None = base64.b64decode(end_raw) if end_raw else None
+    start_im = _decode_fallback_payload_image(payload, "start_image_b64", "start_frame_image_b64")
+    end_im = _decode_fallback_payload_image(payload, "end_image_b64", "end_frame_image_b64", required=False)
     return await asyncio.to_thread(
         generate_video_bytes,
-        prompt=str(payload["prompt"]),
+        prompt=enforce_video_prompt_visual_source_rule(str(payload["prompt"])),
         model=str(payload["model"]),
         duration_sec=int(payload.get("vertex_duration_sec") or payload["duration_sec"]),
-        start_image=base64.b64decode(str(payload["start_image_b64"])),
+        start_image=start_im,
         end_image=end_im,
         quality=str(payload.get("quality") or "720"),
         aspect_ratio=str(payload.get("aspect_ratio") or "9:16"),
@@ -808,12 +847,14 @@ async def _attempt_syntax_video_fallback_bytes(
     start_image: bytes,
     end_image: bytes | None,
     raise_on_dispatch_failure: bool = False,
+    timeout_sec: int | None = None,
+    acquire_timeout_sec: int | None = None,
 ) -> bytes | None:
     """Runs Syntax adapter in a worker thread; returns bytes or None."""
     if not _syntax_fallback_env_enabled():
         return None
-    timeout_sec = _positive_int_env("SYNTAX_FALLBACK_TIMEOUT_SEC", SYNTAX_FALLBACK_DEFAULT_TIMEOUT_SEC)
-    lock_timeout_sec = _positive_int_env("SYNTAX_FALLBACK_LOCK_TIMEOUT_SEC", timeout_sec)
+    timeout_sec = int(timeout_sec or _positive_int_env("SYNTAX_FALLBACK_TIMEOUT_SEC", SYNTAX_FALLBACK_DEFAULT_TIMEOUT_SEC))
+    lock_timeout_sec = int(acquire_timeout_sec or _positive_int_env("SYNTAX_FALLBACK_LOCK_TIMEOUT_SEC", timeout_sec))
     try:
         result = await asyncio.wait_for(
             asyncio.to_thread(
@@ -916,12 +957,14 @@ async def _attempt_syntax_video_fallback_batch(
     requests: list[BatchFallbackRequest],
     model: str,
     duration_sec: int,
+    timeout_sec: int | None = None,
+    acquire_timeout_sec: int | None = None,
 ) -> dict[str, bytes]:
     """Runs one batched Syntax session and returns only successful mp4 payloads by request key."""
     if not _syntax_fallback_env_enabled() or not requests:
         return {}
-    timeout_sec = _positive_int_env("SYNTAX_FALLBACK_TIMEOUT_SEC", SYNTAX_FALLBACK_DEFAULT_TIMEOUT_SEC)
-    lock_timeout_sec = _positive_int_env("SYNTAX_FALLBACK_LOCK_TIMEOUT_SEC", timeout_sec)
+    timeout_sec = int(timeout_sec or _positive_int_env("SYNTAX_FALLBACK_TIMEOUT_SEC", SYNTAX_FALLBACK_DEFAULT_TIMEOUT_SEC))
+    lock_timeout_sec = int(acquire_timeout_sec or _positive_int_env("SYNTAX_FALLBACK_LOCK_TIMEOUT_SEC", timeout_sec))
     try:
         results = await asyncio.wait_for(
             asyncio.to_thread(
@@ -1016,9 +1059,12 @@ async def _generate_video_bytes_with_high_load_retry(
     skip_initial_syntax: bool = False,
     disable_syntax_fallback: bool = False,
     force_vertex_fallback: bool = False,
+    syntax_timeout_sec: int | None = None,
+    syntax_acquire_timeout_sec: int | None = None,
 ) -> bytes:
     """Generate video through the current policy: auto Syntax, manual Vertex fallback."""
 
+    prompt = enforce_video_prompt_visual_source_rule(prompt)
     syntax_enabled = _syntax_fallback_env_enabled() and not disable_syntax_fallback
     if not force_vertex_fallback and syntax_enabled and not skip_initial_syntax:
         if update.message is not None:
@@ -1032,6 +1078,8 @@ async def _generate_video_bytes_with_high_load_retry(
             duration_sec=duration_sec,
             start_image=start_image,
             end_image=end_image,
+            timeout_sec=syntax_timeout_sec,
+            acquire_timeout_sec=syntax_acquire_timeout_sec,
         )
         if syntax_bytes is not None:
             _LAST_VIDEO_PROVIDER.set("telegram")
@@ -1170,11 +1218,16 @@ async def _regenerate_video_prompt_from_error(scene: dict, error_text: str) -> s
         "Верни только один готовый prompt, без пояснений, заголовков и служебных меток.\n"
         "Не копируй в ответ строки `ТЕКУЩИЙ VIDEO PROMPT`, `ФИДБЕК ПОЛЬЗОВАТЕЛЯ` или `ТЕКСТ ОШИБКИ ПРОВАЙДЕРА`.\n"
         "Сохрани действие сцены, персонажей, стиль референсов и предметную непрерывность кадра.\n"
+        "Video prompt должен быть только про движение, действия, речь, lipsync, реакцию персонажей и движение камеры. "
+        "Не описывай местность, фон, статичную раскладку блюда, состав блюда или список ингредиентов: это берётся из start/end frame. "
+        "Не добавляй новые визуальные продукты, гарниры, посуду или декор.\n"
         "Стиль кадра должен быть не-реалистичным: без реализма и без фотореализма.\n"
         "Бабушка и кот обязательно мультяшные; при необходимости мягко уточни cartoon style без громоздких служебных блоков.\n"
         "Запрети любые субтитры/текст в кадре и любую фоновую музыку/саундтрек.\n"
         "Если указана реплика сцены выше — твой ответ ДОЛЖЕН содержать подстроку `CHARACTERS SPEAKS: ` + дословная реплика; "
         "код её не допишет.\n"
+        "Для озвучки: произносить реплику дословно, без добавленных слов и без пропусков; финал обычной повествовательной фразы "
+        "должен звучать завершенно и спокойно, без вопросительной/повышающейся интонации.\n"
         f"{RUSSIAN_YO_RULE}\n"
         "Обязательно включи точный фрагмент: "
         f"voice_lock_full: {GRANDMA_VOICE_LOCK_FULL}\n"
@@ -1208,6 +1261,9 @@ def _build_video_prompt_rewrite_llm_prompt(
         "Перепиши video prompt для генерации ролика так, чтобы пройти модерацию политики (RAI/safety).\n"
         "Верни только один готовый prompt, без пояснений.\n"
         "Сохрани действие сцены и визуальный стиль, убери рискованные формулировки.\n"
+        "Video prompt должен быть только про движение, действия, речь, lipsync, реакцию персонажей и движение камеры. "
+        "Не описывай местность, фон, статичную раскладку блюда, состав блюда или список ингредиентов: это берётся из start/end frame. "
+        "Не добавляй новые визуальные продукты, гарниры, посуду или декор.\n"
         "Стиль кадра должен быть не-реалистичным: без реализма и без фотореализма.\n"
         "Бабушка и кот обязательно мультяшные; при необходимости мягко уточни cartoon style без громоздких служебных блоков.\n"
         "Запрети любые субтитры/текст в кадре и любую фоновую музыку/саундтрек.\n"
@@ -1283,6 +1339,7 @@ def enforce_video_prompt_voice_requirements(
             vp = f"{vp}. {_NON_REALISM_RULE}".strip()
         if "subtitles" not in vp.lower() or "music" not in vp.lower():
             vp = f"{vp}. {_NO_SUBTITLES_MUSIC_RULE}".strip()
+    vp = enforce_video_prompt_visual_source_rule(vp)
     return _sanitize_video_prompt_language_references(append_veo3_video_framing_constraints(vp, scene), lang)
 
 

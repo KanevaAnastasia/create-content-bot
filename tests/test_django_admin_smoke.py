@@ -13,6 +13,20 @@ import pytest
 pytestmark = pytest.mark.skipif(importlib.util.find_spec("django") is None, reason="django is not installed")
 
 
+def test_django_settings_uses_sqlite_for_unsafe_database_under_pytest(monkeypatch):
+    admin_dir = Path(__file__).resolve().parents[1] / "admin_panel"
+    sys.path.insert(0, str(admin_dir))
+    monkeypatch.setenv("PYTEST_CURRENT_TEST", "tests/test_django_admin_smoke.py::guard (call)")
+    monkeypatch.setenv("DATABASE_URL", "postgresql+psycopg2://postgres:postgres@localhost:5432/content_fabric")
+
+    from cf_admin import settings
+
+    database = settings._database_from_url()
+
+    assert database["ENGINE"] == "django.db.backends.sqlite3"
+    assert "pytest" in database["NAME"]
+
+
 def test_django_admin_session_form_updates_scene_json():
     admin_dir = Path(__file__).resolve().parents[1] / "admin_panel"
     sys.path.insert(0, str(admin_dir))
@@ -157,6 +171,9 @@ def test_django_generation_admin_title_color_field_is_after_created_at():
 
     fields = list(admin_module.GenerationRunAdmin.fields)
 
+    assert "overlay_title_ru" in fields
+    assert "overlay_title_en" in fields
+    assert "human_title" not in fields
     assert fields[fields.index("created_at") + 1] == "overlay_title_color"
     assert "overlay_title_color" in admin_module.GenerationRunAdmin.readonly_fields
 
@@ -188,6 +205,12 @@ def test_django_generation_admin_ajax_stages_title_color_until_build(monkeypatch
             saved_sessions.append({"session_json": self.session_json, "kwargs": kwargs})
 
     chat_session = ChatSessionStub()
+    run = SimpleNamespace(id=run_id, title_color="#c72638", saved=[])
+
+    def save_run(**kwargs):
+        run.saved.append(kwargs)
+
+    run.save = save_run
 
     class QuerySetStub:
         def order_by(self, *_args):
@@ -203,12 +226,14 @@ def test_django_generation_admin_ajax_stages_title_color_until_build(monkeypatch
 
     monkeypatch.setattr(admin_module.ChatSession, "objects", ManagerStub())
 
-    pending = admin_module._stage_pending_title_color_for_run(SimpleNamespace(id=run_id), "#1a2b3c")
+    pending = admin_module._stage_pending_title_color_for_run(run, "#1a2b3c")
 
     assert saved_sessions
     assert pending == {"title_color": "#1a2b3c"}
-    assert chat_session.session_json["production"]["overlay_title_style"]["title_color"] == "#c72638"
-    assert chat_session.session_json["production"]["pending_overlay_title_style"] == {"title_color": "#1a2b3c"}
+    assert run.title_color == "#1a2b3c"
+    assert run.saved == [{"update_fields": ["title_color"]}]
+    assert chat_session.session_json["production"]["overlay_title_style"]["title_color"] == "#1a2b3c"
+    assert "pending_overlay_title_style" not in chat_session.session_json["production"]
 
 
 def test_django_admin_session_form_syncs_ru_overlay_title_to_generation_name(monkeypatch):
@@ -284,6 +309,122 @@ def test_django_admin_session_form_syncs_ru_overlay_title_to_generation_name(mon
     ]
 
 
+def test_django_generation_admin_syncs_changed_name_to_overlay_title():
+    admin_dir = Path(__file__).resolve().parents[1] / "admin_panel"
+    sys.path.insert(0, str(admin_dir))
+    os.environ.setdefault("DJANGO_SETTINGS_MODULE", "cf_admin.settings")
+
+    import django
+
+    django.setup()
+
+    import pipeline_admin.admin as admin_module
+
+    run = SimpleNamespace(human_title="Манты")
+    session = {
+        "overlay_title_by_lang": {"ru": "Beshbarmak", "en": "Beshbarmak"},
+        "production": {
+            "overlay_title_by_lang": {"ru": "Beshbarmak", "en": "Beshbarmak"},
+            "post_production": {
+                "title_overlay_by_language": {
+                    "ru": {"title": "Beshbarmak", "start_sec": 0.0, "end_sec": 4.0},
+                    "en": {"title": "Beshbarmak", "start_sec": 0.0, "end_sec": 4.0},
+                }
+            },
+        },
+    }
+    production = session["production"]
+
+    admin_module._sync_overlay_title_from_run(session, run)
+    rendered = admin_module._overlay_title_for_admin_render(run, session, production)
+
+    assert session["overlay_title_by_lang"]["ru"] == "Манты"
+    assert production["overlay_title_by_lang"]["ru"] == "Манты"
+    assert rendered["ru"] == "Манты"
+
+
+def test_django_generation_admin_form_saves_ru_and_en_overlay_titles(monkeypatch):
+    admin_dir = Path(__file__).resolve().parents[1] / "admin_panel"
+    sys.path.insert(0, str(admin_dir))
+    os.environ.setdefault("DJANGO_SETTINGS_MODULE", "cf_admin.settings")
+
+    import django
+
+    django.setup()
+
+    import pipeline_admin.admin as admin_module
+    from pipeline_admin.models import GenerationRun
+
+    class QuerySetStub:
+        def order_by(self, *_args):
+            return self
+
+        def first(self):
+            return None
+
+    class ManagerStub:
+        def filter(self, **_kwargs):
+            return QuerySetStub()
+
+    monkeypatch.setattr(admin_module.ChatSession, "objects", ManagerStub())
+
+    run = GenerationRun(
+        id=uuid.uuid4(),
+        human_title="Beshbarmak",
+        status="final_videos_delivered",
+        language="ru",
+        script="recipe",
+    )
+    form = admin_module.GenerationRunAdminForm(
+        data={
+            "overlay_title_ru": " Бешбармак ",
+            "overlay_title_en": " Beshbarmak Feast ",
+            "status": run.status,
+            "is_active": "on",
+            "id": str(run.id),
+            "language": run.language,
+            "script": run.script,
+            "title_color": "#e2b512",
+            "created_at": "2026-07-01 12:00:00",
+            "current_scene_index": "",
+            "current_media_substep": "",
+            "current_media_language_index": "",
+            "series": "",
+            "series_video_index": "",
+            "series_total_videos": "",
+            "scheduled_item": "",
+        },
+        instance=run,
+    )
+    form.validate_unique = lambda: None
+
+    assert form.is_valid(), form.errors
+    saved = form.save(commit=False)
+
+    assert saved.human_title == "Бешбармак"
+    assert form.overlay_title_by_lang() == {"ru": "Бешбармак", "en": "Beshbarmak Feast"}
+
+
+def test_django_generation_admin_inlines_render_hidden_primary_keys():
+    admin_dir = Path(__file__).resolve().parents[1] / "admin_panel"
+    sys.path.insert(0, str(admin_dir))
+    os.environ.setdefault("DJANGO_SETTINGS_MODULE", "cf_admin.settings")
+
+    import django
+
+    django.setup()
+
+    import pipeline_admin.admin as admin_module
+
+    scene_form = admin_module.SceneInlineForm()
+    artifact_form = admin_module.GenerationArtifactInlineForm()
+
+    assert scene_form.fields["id"].widget.is_hidden
+    assert artifact_form.fields["id"].widget.is_hidden
+    assert "id" in admin_module.SceneInline.fields
+    assert "id" in admin_module.GenerationArtifactInline.fields
+
+
 def test_django_content_series_model_string():
     admin_dir = Path(__file__).resolve().parents[1] / "admin_panel"
     sys.path.insert(0, str(admin_dir))
@@ -337,6 +478,195 @@ def test_django_admin_allows_series_binding_and_day_editing():
     assert "publication_prep" in GenerationRunAdmin.fields
     assert "status" in PublicationJobAdmin.list_editable
     assert "is_active" in ProjectPublishAccountAdmin.list_editable
+
+
+def test_django_content_series_admin_accepts_empty_meta_json():
+    admin_dir = Path(__file__).resolve().parents[1] / "admin_panel"
+    sys.path.insert(0, str(admin_dir))
+    os.environ.setdefault("DJANGO_SETTINGS_MODULE", "cf_admin.settings")
+
+    import django
+
+    django.setup()
+
+    from django.contrib.admin.sites import AdminSite
+    from django.test import RequestFactory
+    from pipeline_admin.admin import ContentSeriesAdmin
+    from pipeline_admin.models import ContentSeries
+
+    series = ContentSeries(
+        id=uuid.uuid4(),
+        project_id=uuid.uuid4(),
+        slug="karta-vkusov",
+        title_ru="Карта вкусов",
+        title_en="Flavor map",
+        current_video_index=2,
+        total_videos=10,
+        is_active=True,
+        meta_json={},
+    )
+    model_admin = ContentSeriesAdmin(ContentSeries, AdminSite())
+    request = RequestFactory().post("/")
+    form_class = model_admin.get_form(request, series)
+    form = form_class(
+        data={
+            "project_id": str(series.project_id),
+            "slug": series.slug,
+            "title_ru": series.title_ru,
+            "title_en": series.title_en,
+            "current_video_index": str(series.current_video_index),
+            "total_videos": str(series.total_videos),
+            "is_active": "on",
+            "notes": "",
+            "meta_json": "{}",
+        },
+        instance=series,
+    )
+
+    assert form.is_valid(), form.errors
+    assert form.cleaned_data["meta_json"] == {}
+
+
+def test_django_scene_admin_speech_accepts_plain_text():
+    admin_dir = Path(__file__).resolve().parents[1] / "admin_panel"
+    sys.path.insert(0, str(admin_dir))
+    os.environ.setdefault("DJANGO_SETTINGS_MODULE", "cf_admin.settings")
+
+    import django
+
+    django.setup()
+
+    from django import forms
+    from pipeline_admin.forms import _speech_by_lang_from_admin_text
+
+    assert _speech_by_lang_from_admin_text(
+        " Новая речь сцены ",
+        existing={"ru": "Старая речь", "en": "Old speech"},
+    ) == {"ru": "Новая речь сцены", "en": "Old speech"}
+    assert _speech_by_lang_from_admin_text('{"ru": "Новая речь", "en": "New speech"}') == {
+        "ru": "Новая речь",
+        "en": "New speech",
+    }
+    with pytest.raises(forms.ValidationError):
+        _speech_by_lang_from_admin_text('{"ru": ')
+
+
+def test_django_generation_run_scene_inline_speech_preserves_en(monkeypatch):
+    admin_dir = Path(__file__).resolve().parents[1] / "admin_panel"
+    sys.path.insert(0, str(admin_dir))
+    os.environ.setdefault("DJANGO_SETTINGS_MODULE", "cf_admin.settings")
+
+    import django
+
+    django.setup()
+
+    import pipeline_admin.admin as admin_module
+    from pipeline_admin.models import GenerationRun, Scene
+
+    run = GenerationRun(id=uuid.uuid4(), human_title="Лагман", status="ok", language="ru", script="Лагман")
+    scene = Scene(
+        id=uuid.uuid4(),
+        run=run,
+        scene_order=6,
+        duration_sec=6.0,
+        text="old text",
+        speech_by_lang={},
+    )
+    scene._state.adding = False
+    monkeypatch.setattr(
+        admin_module,
+        "_latest_scene_payload_for_admin",
+        lambda _scene: {"speech_by_lang": {"ru": "Старая речь", "en": "Old speech"}},
+    )
+    form = admin_module.SceneInlineForm(
+        data={
+            "id": str(scene.id),
+            "scene_order": "6",
+            "duration_sec": "6.0",
+            "text": "",
+            "speech_ru": "Новая речь",
+            "speech_en": "Old speech",
+        },
+        instance=scene,
+    )
+    form.validate_unique = lambda: None
+
+    assert form.is_valid(), form.errors
+    saved = form.save(commit=False)
+    assert saved.text == "old text"
+    assert saved.speech_by_lang == {"ru": "Новая речь", "en": "Old speech"}
+    assert saved._scene_text_revision_changes == [
+        {
+            "field_name": "speech",
+            "language": "ru",
+            "old_text": "Старая речь",
+            "new_text": "Новая речь",
+        }
+    ]
+
+
+def test_django_generation_run_scene_inline_shows_ru_text_fallback_and_saves_en(monkeypatch):
+    admin_dir = Path(__file__).resolve().parents[1] / "admin_panel"
+    sys.path.insert(0, str(admin_dir))
+    os.environ.setdefault("DJANGO_SETTINGS_MODULE", "cf_admin.settings")
+
+    import django
+
+    django.setup()
+
+    import pipeline_admin.admin as admin_module
+    from pipeline_admin.models import GenerationRun, Scene
+
+    run = GenerationRun(id=uuid.uuid4(), human_title="Лагман", status="ok", language="ru", script="Лагман")
+    scene = Scene(
+        id=uuid.uuid4(),
+        run=run,
+        scene_order=1,
+        duration_sec=6.0,
+        text="Русский текст из Text",
+        speech_by_lang={},
+    )
+    scene._state.adding = False
+    monkeypatch.setattr(
+        admin_module,
+        "_latest_scene_payload_for_admin",
+        lambda _scene: {"speech_by_lang": {"en": "Existing English"}},
+    )
+    initial_form = admin_module.SceneInlineForm(instance=scene)
+
+    assert initial_form.fields["speech_ru"].initial == "Русский текст из Text"
+    assert initial_form.fields["speech_en"].initial == "Existing English"
+
+    form = admin_module.SceneInlineForm(
+        data={
+            "id": str(scene.id),
+            "scene_order": "1",
+            "duration_sec": "6.0",
+            "text": "Русский текст из Text",
+            "speech_ru": "Новая русская речь",
+            "speech_en": "New English speech",
+        },
+        instance=scene,
+    )
+    form.validate_unique = lambda: None
+
+    assert form.is_valid(), form.errors
+    saved = form.save(commit=False)
+    assert saved.speech_by_lang == {"ru": "Новая русская речь", "en": "New English speech"}
+    assert saved._scene_text_revision_changes == [
+        {
+            "field_name": "speech",
+            "language": "ru",
+            "old_text": "Русский текст из Text",
+            "new_text": "Новая русская речь",
+        },
+        {
+            "field_name": "speech",
+            "language": "en",
+            "old_text": "Existing English",
+            "new_text": "New English speech",
+        },
+    ]
 
 
 def test_django_generation_admin_shows_final_videos_panel(monkeypatch):
@@ -748,6 +1078,7 @@ def test_django_admin_titled_only_build_uses_subtitled_source_fast_path(monkeypa
         return {"renders_by_language": {"ru": {"titled_subtitled_music": {"video_path": "/tmp/titled.mp4"}}}}
 
     monkeypatch.setattr(admin_module, "_run_session_for_admin_render", lambda _run: (None, session, production))
+    monkeypatch.setattr(admin_module, "_subtitled_artifact_matches_current_subtitles", lambda *_args, **_kwargs: True)
     monkeypatch.setattr(admin_module, "build_titled_post_production_from_subtitled_master", fake_fast_path)
     monkeypatch.setattr(
         admin_module,
@@ -771,6 +1102,70 @@ def test_django_admin_titled_only_build_uses_subtitled_source_fast_path(monkeypa
     assert production["overlay_title_style"]["title_color"] == "#1a2b3c"
     assert "pending_overlay_title_style" not in session
     assert "pending_overlay_title_style" not in production
+
+
+def test_django_admin_default_overlay_title_latinizes_english_fallback():
+    admin_dir = Path(__file__).resolve().parents[1] / "admin_panel"
+    sys.path.insert(0, str(admin_dir))
+    os.environ.setdefault("DJANGO_SETTINGS_MODULE", "cf_admin.settings")
+
+    import django
+
+    django.setup()
+
+    import pipeline_admin.admin as admin_module
+
+    run = SimpleNamespace(human_title="Лагман")
+
+    assert admin_module._default_overlay_title(run) == {"ru": "Лагман", "en": "Lagman"}
+
+
+def test_django_admin_titled_build_prefers_current_series_titles_over_snapshot(monkeypatch):
+    admin_dir = Path(__file__).resolve().parents[1] / "admin_panel"
+    sys.path.insert(0, str(admin_dir))
+    os.environ.setdefault("DJANGO_SETTINGS_MODULE", "cf_admin.settings")
+
+    import django
+
+    django.setup()
+
+    import pipeline_admin.admin as admin_module
+
+    production = {
+        "json_plan": [{"duration_sec": 8, "text": "scene"}],
+        "overlay_title_by_lang": {"ru": "Лагман", "en": "Lagman"},
+        "series_title_by_lang": {"ru": "Карта вкусов", "en": "Карта вкусов"},
+    }
+    session = {"production": production, "series_title_by_lang": {"ru": "Карта вкусов", "en": "Карта вкусов"}}
+    calls = []
+
+    class RunStub(SimpleNamespace):
+        def save(self, **_kwargs):
+            pass
+
+    def fake_fast_path(scenes, **kwargs):
+        calls.append({"scenes": scenes, **kwargs})
+        return {"renders_by_language": {"en": {"titled_subtitled_music": {"video_path": "/tmp/titled-en.mp4"}}}}
+
+    monkeypatch.setattr(admin_module, "_run_session_for_admin_render", lambda _run: (None, session, production))
+    monkeypatch.setattr(admin_module, "_subtitled_artifact_matches_current_subtitles", lambda *_args, **_kwargs: True)
+    monkeypatch.setattr(admin_module, "build_titled_post_production_from_subtitled_master", fake_fast_path)
+    monkeypatch.setattr(admin_module, "persist_post_production_artifacts", lambda _session, _post: None)
+
+    run = RunStub(
+        id=uuid.uuid4(),
+        human_title="Лагман",
+        series=SimpleNamespace(title_ru="Карта вкусов", title_en="Flavor map"),
+    )
+    admin_module._build_final_videos_for_run(
+        run,
+        target_language="en",
+        target_variants=["titled_subtitled_music"],
+        source_subtitled_video_path=Path("/tmp/source_subtitled.mp4"),
+    )
+
+    assert calls[0]["overlay_series_title_by_lang"] == {"ru": "Карта вкусов", "en": "Flavor map"}
+    assert production["series_title_by_lang"] == {"ru": "Карта вкусов", "en": "Flavor map"}
 
 
 def test_django_admin_non_title_build_keeps_pending_title_color(monkeypatch):
@@ -904,6 +1299,157 @@ def test_django_publication_queue_form_renders_rich_preflight(monkeypatch):
     assert "Publication time" in html
     assert "manual account" in html
     assert "no video" in html
+
+
+def test_django_publication_queue_view_allows_undelivered_final_artifacts(monkeypatch):
+    admin_dir = Path(__file__).resolve().parents[1] / "admin_panel"
+    sys.path.insert(0, str(admin_dir))
+    os.environ.setdefault("DJANGO_SETTINGS_MODULE", "cf_admin.settings")
+
+    import django
+
+    django.setup()
+
+    from django.test import RequestFactory
+    import pipeline_admin.admin as admin_module
+
+    run_id = uuid.uuid4()
+    copy_payload = {
+        "youtube_ru_title": "RU title",
+        "youtube_ru_description": "RU desc",
+        "rutube_ru_title": "RT title",
+        "rutube_ru_description": "RT desc",
+        "instagram_ru": "IG ru",
+        "vk_ru": "VK ru",
+        "tiktok_ru": "TT ru",
+        "instagram_en": "IG en",
+        "youtube_en_title": "EN title",
+        "youtube_en_description": "EN desc",
+    }
+    messages_seen = []
+    run = SimpleNamespace(id=run_id, pk=run_id, human_title="Лагман", script="recipe")
+
+    monkeypatch.setattr(admin_module, "_publication_copy_from_run", lambda _run: copy_payload)
+    monkeypatch.setattr(
+        admin_module,
+        "_publication_post_production_from_final_artifacts",
+        lambda _run: {"renders_by_language": {"ru": {"titled_subtitled_music": {"video_path": "/tmp/ru.mp4"}}}},
+    )
+    monkeypatch.setattr(admin_module, "_publication_account_index", lambda _run: {})
+    monkeypatch.setattr(admin_module, "all_final_artifacts_delivered", lambda _run_id: False)
+
+    modeladmin = SimpleNamespace(
+        get_object=lambda _request, _object_id: run,
+        message_user=lambda _request, message, **kwargs: messages_seen.append((message, kwargs)),
+    )
+    request = RequestFactory().get("/")
+
+    response = admin_module.GenerationRunAdmin.queue_publications_view(modeladmin, request, str(run_id))
+
+    assert response.status_code == 200
+    html = response.content.decode()
+    assert "Queue publications for" in html
+    assert "Queue publication jobs" in html
+    assert messages_seen
+    assert messages_seen[0][1]["level"] == admin_module.messages.WARNING
+
+
+def test_django_publication_generate_descriptions_saves_draft(monkeypatch):
+    admin_dir = Path(__file__).resolve().parents[1] / "admin_panel"
+    sys.path.insert(0, str(admin_dir))
+    os.environ.setdefault("DJANGO_SETTINGS_MODULE", "cf_admin.settings")
+
+    import django
+
+    django.setup()
+
+    from django.test import RequestFactory
+    import pipeline_admin.admin as admin_module
+
+    run_id = uuid.uuid4()
+    run = SimpleNamespace(id=run_id, pk=run_id, human_title="Баурсаки", script="recipe")
+    generated = {
+        key: ""
+        for key, _label in admin_module.SOCIAL_COPY_FIELD_LABELS
+    }
+    generated["instagram_ru"] = "Новые описания"
+    generated["youtube_en_description"] = "Fresh descriptions"
+    saved = []
+
+    monkeypatch.setattr(admin_module, "_publication_copy_from_run", lambda _run: {})
+    monkeypatch.setattr(admin_module, "_publication_recipe_for_run", lambda _run: "base recipe")
+    monkeypatch.setattr(admin_module, "_publication_recipe_from_draft", lambda _run: "")
+    monkeypatch.setattr(admin_module, "_generate_publication_copy_for_admin", lambda *_args, **_kwargs: generated)
+    monkeypatch.setattr(admin_module, "_save_publication_copy_draft", lambda *args, **kwargs: saved.append(kwargs))
+    monkeypatch.setattr(admin_module, "_publication_post_production_from_final_artifacts", lambda _run: {})
+    monkeypatch.setattr(admin_module, "_publication_account_index", lambda _run: {})
+
+    modeladmin = SimpleNamespace(
+        get_object=lambda _request, _object_id: run,
+        message_user=lambda *_args, **_kwargs: None,
+    )
+    request = RequestFactory().post(
+        "/",
+        {
+            "generate_descriptions": "1",
+            "publication_recipe": "edited recipe",
+            "generation_feedback": "make it brighter",
+        },
+    )
+
+    response = admin_module.GenerationRunAdmin.queue_publications_view(modeladmin, request, str(run_id))
+
+    assert response.status_code == 200
+    assert saved == [
+        {
+            "copy_payload": generated,
+            "recipe": "edited recipe",
+            "feedback": "make it brighter",
+        }
+    ]
+    assert "Новые описания" in response.content.decode()
+
+
+def test_django_publication_queue_view_reloads_saved_draft(monkeypatch):
+    admin_dir = Path(__file__).resolve().parents[1] / "admin_panel"
+    sys.path.insert(0, str(admin_dir))
+    os.environ.setdefault("DJANGO_SETTINGS_MODULE", "cf_admin.settings")
+
+    import django
+
+    django.setup()
+
+    from django.test import RequestFactory
+    import pipeline_admin.admin as admin_module
+
+    run_id = uuid.uuid4()
+    run = SimpleNamespace(id=run_id, pk=run_id, human_title="Баурсаки", script="old recipe")
+    copy_payload = {
+        key: ""
+        for key, _label in admin_module.SOCIAL_COPY_FIELD_LABELS
+    }
+    copy_payload["instagram_ru"] = "Сохраненный черновик"
+    copy_payload["youtube_ru_title"] = "Черновик"
+
+    monkeypatch.setattr(admin_module, "_publication_copy_from_run", lambda _run: copy_payload)
+    monkeypatch.setattr(admin_module, "_publication_recipe_from_draft", lambda _run: "saved recipe")
+    monkeypatch.setattr(admin_module, "_publication_recipe_for_run", lambda _run: "base recipe")
+    monkeypatch.setattr(admin_module, "_publication_post_production_from_final_artifacts", lambda _run: {})
+    monkeypatch.setattr(admin_module, "_publication_account_index", lambda _run: {})
+
+    modeladmin = SimpleNamespace(
+        get_object=lambda _request, _object_id: run,
+        message_user=lambda *_args, **_kwargs: None,
+    )
+    request = RequestFactory().get("/")
+
+    response = admin_module.GenerationRunAdmin.queue_publications_view(modeladmin, request, str(run_id))
+    html = response.content.decode()
+
+    assert response.status_code == 200
+    assert "Сохраненный черновик" in html
+    assert "saved recipe" in html
+    assert "base recipe" not in html
 
 
 def test_django_generation_artifact_media_supports_byte_ranges():

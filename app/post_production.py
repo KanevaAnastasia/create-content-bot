@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import base64
 from dataclasses import dataclass
+import hashlib
 import json
 import logging
 import os
@@ -26,7 +27,7 @@ from .models import Project
 from .scene_media_candidates import (
     DEFAULT_SCENE_VIDEO_SPEED_COEF,
     parse_speed_coef,
-    resolve_scene_video_for_production,
+    resolve_latest_approved_scene_video_for_final_build,
 )
 
 logger = logging.getLogger("bot.video")
@@ -88,35 +89,36 @@ TITLE_OVERLAY_SQUARE_FONT_SIZE = 92
 TITLE_OVERLAY_MARGIN_RATIO = 0.10
 TITLE_OVERLAY_TOP_MARGIN_RATIO = 0.05
 TITLE_OVERLAY_MAX_HEIGHT_RATIO = 0.08
-TITLE_OVERLAY_OUTLINE = 3
-TITLE_OVERLAY_SHADOW = 7
+TITLE_OVERLAY_OUTLINE = 5
+TITLE_OVERLAY_SHADOW = 12
 TITLE_OVERLAY_SPACING = 0
 TITLE_OVERLAY_ASS_SAFE_WIDTH_RATIO = 1.0
 TITLE_OVERLAY_ASS_SAFE_WIDTH_RATIO_BY_LANGUAGE = {
     "ru": 0.88,
 }
 TITLE_OVERLAY_RU_SCALE_X = 100
-TITLE_SERIES_WIDTH_RATIO = 0.60
+TITLE_SERIES_WIDTH_RATIO = 0.50
 TITLE_SERIES_WIDTH_RATIO_BY_LANGUAGE = {
+    "en": 0.50,
+    "ru": 0.45,
+}
+TITLE_SERIES_DAY_WIDTH_RATIO = 0.30
+TITLE_SERIES_DAY_START_RATIO_BY_LANGUAGE = {
     "en": 0.60,
     "ru": 0.60,
 }
-TITLE_SERIES_DAY_WIDTH_RATIO = 0.20
-TITLE_SERIES_DAY_START_RATIO_BY_LANGUAGE = {
-    "en": 0.70,
-    "ru": 0.70,
-}
 TITLE_SERIES_DAY_BASELINE_Y_SHIFT_BY_LANGUAGE = {
-    "en": 0.14,
-    "ru": 0.27,
+    "en": 0.30,
+    "ru": 0.42,
 }
 TITLE_SERIES_MAIN_TITLE_OFFSET_FONT_SCALE_BY_LANGUAGE = {
     "en": 0.48,
     "ru": 0.52,
 }
-TITLE_SERIES_DAY_GAP_RATIO = 0.005
-TITLE_SERIES_ROW_GAP_RATIO = -0.010
-TITLE_SERIES_WORD_SEPARATOR = "\u2005"
+TITLE_SERIES_MAIN_TITLE_OFFSET_MAX_FONT_SCALE = 0.95
+TITLE_SERIES_DAY_GAP_RATIO = 0.003
+TITLE_SERIES_ROW_GAP_RATIO = -0.004
+TITLE_SERIES_WORD_SEPARATOR = r"\h"
 TITLE_OVERLAY_OUTLINE_COLOUR = "&H00000000"
 TITLE_OVERLAY_SHADOW_COLOUR = "&H00000000"
 TITLE_SERIES_STYLE_PREFIX = "TitleSeries"
@@ -155,14 +157,85 @@ TITLE_SERIES_DAY_ASS_SCALE_X_BY_LANGUAGE = {
     "en": 100,
     "ru": 100,
 }
-TITLE_SERIES_OUTLINE = 3
-TITLE_SERIES_SHADOW = 6
+TITLE_SERIES_OUTLINE = 5
+TITLE_SERIES_SHADOW = 10
 TITLE_SERIES_PRIMARY_COLOUR = "&H00FFFFFF"
 TITLE_SERIES_OUTLINE_COLOUR = "&H00000000"
 TITLE_SERIES_SHADOW_COLOUR = "&H00000000"
 COMBINING_ACCENT_MARKS_RE = re.compile(r"[\u0300-\u036f]")
 CYRILLIC_WORD_RE = re.compile(r"[А-Яа-яЁё]+(?:[А-Яа-яЁё]+)?")
 SUBTITLE_PAUSE_MARKER_RE = re.compile(r"\[\s*(?:pause|пауза)\s*\]", re.IGNORECASE)
+CYRILLIC_CHAR_RE = re.compile(r"[А-Яа-яЁё]")
+CYRILLIC_TO_LATIN_TITLE_MAP = str.maketrans(
+    {
+        "А": "A",
+        "Б": "B",
+        "В": "V",
+        "Г": "G",
+        "Д": "D",
+        "Е": "E",
+        "Ё": "E",
+        "Ж": "Zh",
+        "З": "Z",
+        "И": "I",
+        "Й": "Y",
+        "К": "K",
+        "Л": "L",
+        "М": "M",
+        "Н": "N",
+        "О": "O",
+        "П": "P",
+        "Р": "R",
+        "С": "S",
+        "Т": "T",
+        "У": "U",
+        "Ф": "F",
+        "Х": "Kh",
+        "Ц": "Ts",
+        "Ч": "Ch",
+        "Ш": "Sh",
+        "Щ": "Shch",
+        "Ъ": "",
+        "Ы": "Y",
+        "Ь": "",
+        "Э": "E",
+        "Ю": "Yu",
+        "Я": "Ya",
+        "а": "a",
+        "б": "b",
+        "в": "v",
+        "г": "g",
+        "д": "d",
+        "е": "e",
+        "ё": "e",
+        "ж": "zh",
+        "з": "z",
+        "и": "i",
+        "й": "y",
+        "к": "k",
+        "л": "l",
+        "м": "m",
+        "н": "n",
+        "о": "o",
+        "п": "p",
+        "р": "r",
+        "с": "s",
+        "т": "t",
+        "у": "u",
+        "ф": "f",
+        "х": "kh",
+        "ц": "ts",
+        "ч": "ch",
+        "ш": "sh",
+        "щ": "shch",
+        "ъ": "",
+        "ы": "y",
+        "ь": "",
+        "э": "e",
+        "ю": "yu",
+        "я": "ya",
+    }
+)
 DEFAULT_BACKGROUND_MUSIC_FALLBACKS = (
     "/Users/anastasia/Downloads/Cooking-Show-chosic.com_.mp3",
 )
@@ -694,6 +767,14 @@ def _title_series_day_gap(layout: SubtitleLayout) -> int:
     return max(6, int(round(layout.width * TITLE_SERIES_DAY_GAP_RATIO)))
 
 
+def _title_series_main_row_offset(layout: SubtitleLayout, fit: TitleSeriesFit) -> int:
+    visual_height = min(
+        int(fit.series_actual_height or fit.height),
+        int(round(fit.series_font_size * TITLE_SERIES_MAIN_TITLE_OFFSET_MAX_FONT_SCALE)),
+    )
+    return max(0, int(round(visual_height + (layout.height * TITLE_SERIES_ROW_GAP_RATIO))))
+
+
 def _title_series_day_x(
     *,
     layout: SubtitleLayout,
@@ -705,9 +786,8 @@ def _title_series_day_x(
 ) -> int:
     if fit is None:
         return int(round(layout.width * _title_series_day_start_ratio(language, side_margin_ratio=side_margin_ratio)))
-    series_width = int(fit.series_actual_width or fit.series_width)
     counter_width = int(fit.counter_actual_width or fit.counter_width)
-    preferred_x = series_left + series_width + _title_series_day_gap(layout)
+    preferred_x = int(round(layout.width * _title_series_day_start_ratio(language, side_margin_ratio=side_margin_ratio)))
     max_x = layout.width - title_margin_h - counter_width
     return max(series_left, min(preferred_x, max_x))
 
@@ -1150,12 +1230,22 @@ def _escape_ass_no_wrap_spaces(text: str) -> str:
     return _escape_ass_text(text).replace(" ", r"\h")
 
 
+def latinize_cyrillic_title(text: str) -> str:
+    clean = " ".join(str(text or "").split())
+    if not clean:
+        return ""
+    latinized = clean.translate(CYRILLIC_TO_LATIN_TITLE_MAP)
+    latinized = re.sub(r"[^0-9A-Za-z .,'&!?:;()/\\\\-]+", "", latinized)
+    latinized = " ".join(latinized.split())
+    return latinized.title() if clean.isupper() else latinized[:1].upper() + latinized[1:]
+
+
 def _title_series_visual_text(text: str) -> str:
-    return " ".join(str(text or "").split()).replace(" ", TITLE_SERIES_WORD_SEPARATOR)
+    return " ".join(str(text or "").split())
 
 
 def _escape_title_series_ass_text(text: str) -> str:
-    return _escape_ass_text(_title_series_visual_text(text))
+    return _escape_ass_no_wrap_spaces(text)
 
 
 def _format_title_series_counter_ass_text(
@@ -1273,7 +1363,11 @@ def _overlay_title_for_language(overlay_title_by_lang: dict[str, Any] | None, la
     if direct:
         return direct
     if lang != "ru":
-        fallback = str(overlay_title_by_lang.get("en") or overlay_title_by_lang.get("ru") or "").strip()
+        fallback = str(overlay_title_by_lang.get("en") or "").strip()
+        if fallback:
+            return fallback
+        ru_fallback = str(overlay_title_by_lang.get("ru") or "").strip()
+        return latinize_cyrillic_title(ru_fallback) if CYRILLIC_CHAR_RE.search(ru_fallback) else ru_fallback
     else:
         fallback = str(overlay_title_by_lang.get("ru") or overlay_title_by_lang.get("en") or "").strip()
     return fallback
@@ -1376,7 +1470,7 @@ def _write_burned_subtitle_ass(
         )
         if fit is not None:
             series_row_offsets.append(
-                max(0, int(round(fit.series_actual_height + (layout.height * TITLE_SERIES_ROW_GAP_RATIO))))
+                _title_series_main_row_offset(layout, fit)
             )
         else:
             series_row_offsets.append(_title_series_row_offset(layout, language))
@@ -1699,6 +1793,8 @@ def _scene_subtitle_entries(
             if safe_duration > 0:
                 start_sec = min(max(0.0, start_sec), safe_duration)
                 end_sec = min(max(start_sec, end_sec), safe_duration)
+            if not text or end_sec <= start_sec:
+                continue
             entries.append(
                 {
                     "scene": int(scene.get("scene") or 0) or None,
@@ -1713,9 +1809,25 @@ def _scene_subtitle_entries(
         for entry in entries:
             expanded.extend(_expand_dense_subtitle_entry(entry))
         return expanded
-    text = _normalize_subtitle_text(
-        str((scene.get("speech_by_lang") or {}).get(language) or scene.get("text") or "").strip()
+    raw_text = _subtitle_source_text_for_scene(scene, language)
+    pause_entries = _subtitle_entries_from_pause_markers(
+        raw_text,
+        scene=int(scene.get("scene") or 0) or None,
+        language=language,
+        start_sec=start_offset,
+        end_sec=start_offset + fallback_duration,
     )
+    if pause_entries:
+        expanded: list[dict[str, Any]] = []
+        for entry in pause_entries:
+            expanded.extend(_expand_dense_subtitle_entry(entry))
+        return expanded
+    text = _normalize_subtitle_text(raw_text)
+    if not text and str(language or "").strip().lower() != "ru":
+        scene_no = int(scene.get("scene") or 0) or None
+        raise RuntimeError(
+            f"Missing language-specific subtitle text for scene {scene_no or '?'} ({language})."
+        )
     return _expand_dense_subtitle_entry(
         {
             "scene": int(scene.get("scene") or 0) or None,
@@ -1725,6 +1837,86 @@ def _scene_subtitle_entries(
             "end_sec": start_offset + fallback_duration,
         }
     )
+
+
+def _subtitle_entries_from_pause_markers(
+    text: str,
+    *,
+    scene: int | None,
+    language: str,
+    start_sec: float,
+    end_sec: float,
+) -> list[dict[str, Any]]:
+    raw = str(text or "")
+    if not SUBTITLE_PAUSE_MARKER_RE.search(raw):
+        return []
+    parts = [_normalize_subtitle_text(part) for part in SUBTITLE_PAUSE_MARKER_RE.split(raw)]
+    parts = [part for part in parts if part]
+    if len(parts) <= 1 or end_sec <= start_sec:
+        return []
+    weights = [max(1, len(part.split())) for part in parts]
+    total_weight = sum(weights)
+    duration = end_sec - start_sec
+    cursor = start_sec
+    out: list[dict[str, Any]] = []
+    for index, part in enumerate(parts):
+        if index == len(parts) - 1:
+            next_cursor = end_sec
+        else:
+            next_cursor = start_sec + (duration * (sum(weights[: index + 1]) / float(total_weight)))
+        out.append(
+            {
+                "scene": scene,
+                "language": language,
+                "text": part,
+                "start_sec": cursor,
+                "end_sec": next_cursor,
+            }
+        )
+        cursor = next_cursor
+    return out
+
+
+def _scene_with_candidate_subtitle_snapshot(
+    scene: dict[str, Any],
+    selected: dict[str, Any] | None,
+    language: str,
+) -> dict[str, Any]:
+    if not isinstance(selected, dict):
+        return scene
+    lang = str(language or "").strip().lower()
+    out = dict(scene)
+    for key in ("speech_by_lang", "speech_cues_by_lang", "speech_plan_by_lang", "video_prompt_by_lang"):
+        snapshot = selected.get(key)
+        if not isinstance(snapshot, dict) or not snapshot.get(lang):
+            continue
+        merged = dict(out.get(key) or {}) if isinstance(out.get(key), dict) else {}
+        merged[lang] = snapshot.get(lang)
+        out[key] = merged
+    return out
+
+
+def _speech_text_from_prompt(prompt: Any) -> str:
+    raw = str(prompt or "")
+    match = re.search(r"(?is)\bCHARACTERS\s+SPEAKS:\s*(.+?)(?:\n|$)", raw)
+    return " ".join(str(match.group(1) if match else "").split())
+
+
+def _subtitle_source_text_for_scene(scene: dict[str, Any], language: str) -> str:
+    lang = str(language or "").strip().lower()
+    speech_map = scene.get("speech_by_lang")
+    if isinstance(speech_map, dict):
+        direct = str(speech_map.get(lang) or "").strip()
+        if direct:
+            return direct
+    prompt_map = scene.get("video_prompt_by_lang")
+    if isinstance(prompt_map, dict):
+        from_prompt = _speech_text_from_prompt(prompt_map.get(lang))
+        if from_prompt:
+            return from_prompt
+    if lang == "ru":
+        return str(scene.get("text") or _speech_text_from_prompt(scene.get("video_prompt")) or "").strip()
+    return ""
 
 
 def _selected_video_source_duration(selected: dict[str, Any] | None) -> float | None:
@@ -2046,7 +2238,7 @@ def production_languages_for_scenes(scenes: list[dict[str, Any]]) -> list[str]:
                 union.append(language)
     ready: list[str] = []
     for language in union:
-        if all(resolve_scene_video_for_production(scene, language) is not None for scene in scenes):
+        if all(resolve_latest_approved_scene_video_for_final_build(scene, language) is not None for scene in scenes):
             ready.append(language)
     return ready
 
@@ -2100,6 +2292,7 @@ def build_post_production(
     music_path, music_volume = _resolve_music_path(project_slug)
     renders_by_language: dict[str, dict[str, Any]] = {}
     subtitle_entries_by_language: dict[str, list[dict[str, Any]]] = {}
+    subtitle_fingerprint_by_language: dict[str, str] = {}
     original_audio_preserved_by_language: dict[str, bool] = {}
     title_overlay_by_language: dict[str, dict[str, Any]] = {}
     series_overlay_by_language: dict[str, dict[str, Any]] = {}
@@ -2108,7 +2301,7 @@ def build_post_production(
     for language in languages:
         selected_segments: list[dict[str, Any]] = []
         for scene_index, scene in enumerate(scenes):
-            selected = resolve_scene_video_for_production(scene, language)
+            selected = resolve_latest_approved_scene_video_for_final_build(scene, language)
             if selected is None:
                 continue
             video_b64 = str(selected.get("video_b64") or "").strip()
@@ -2125,8 +2318,10 @@ def build_post_production(
                 {
                     "scene_index": scene_index,
                     "scene": scene,
+                    "selected": selected,
                     "language": language,
                     "video_bytes": video_bytes,
+                    "candidate_id": selected.get("candidate_id"),
                     "speed_coef": speed_coef,
                     "source_duration": source_duration,
                     "planned_final_duration": planned_final_duration,
@@ -2197,7 +2392,7 @@ def build_post_production(
                     planned_duration = float(item.get("planned_final_duration") or 0.0)
                     timing_scale = (actual_duration / planned_duration) if planned_duration > 0 else 1.0
                     scene_entries = _scene_subtitle_entries(
-                        item["scene"],
+                        _scene_with_candidate_subtitle_snapshot(item["scene"], item.get("selected"), language),
                         language,
                         start_offset=current_start,
                         fallback_duration=actual_duration,
@@ -2206,11 +2401,13 @@ def build_post_production(
                     )
                     for entry in scene_entries:
                         entry["scene"] = int(item["scene_index"]) + 1
+                        entry["candidate_id"] = str(item.get("candidate_id") or "")
                         entry["speed_coef"] = float(item["speed_coef"])
                         entry["timing_scale"] = timing_scale
                     subtitle_entries.extend(scene_entries)
                     current_start += actual_duration
                 subtitle_entries_by_language[language] = subtitle_entries
+                subtitle_fingerprint_by_language[language] = subtitle_entries_fingerprint(subtitle_entries)
 
             subtitle_cues: list[dict[str, Any]] = []
             if needs_subtitled:
@@ -2370,6 +2567,7 @@ def build_post_production(
                     "music_asset_uri": music_path,
                     "music_volume": music_volume,
                     "source_audio_preserved": original_audio_preserved,
+                    "subtitle_fingerprint": subtitle_fingerprint_by_language.get(language),
                 }
             if titled_subtitled_path:
                 titled_bytes = titled_subtitled_path.read_bytes()
@@ -2396,6 +2594,7 @@ def build_post_production(
                     "music_asset_uri": music_path,
                     "music_volume": music_volume,
                     "source_audio_preserved": titled_original_audio_preserved,
+                    "subtitle_fingerprint": subtitle_fingerprint_by_language.get(language),
                 }
             if not renders_by_language[language]:
                 renders_by_language.pop(language, None)
@@ -2419,6 +2618,7 @@ def build_post_production(
         "renders_by_language": renders_by_language,
         "subtitle_entries": subtitle_entries_by_language.get(first_lang, []),
         "subtitle_entries_by_language": subtitle_entries_by_language,
+        "subtitle_fingerprint_by_language": subtitle_fingerprint_by_language,
         "title_overlay_by_language": title_overlay_by_language,
         "series_overlay_by_language": series_overlay_by_language,
         "title_overlay_style": dict(overlay_title_style or {}),
@@ -2503,7 +2703,7 @@ def _subtitle_entries_for_language_from_plan(scenes: list[dict[str, Any]], langu
     current_start = 0.0
     subtitle_entries: list[dict[str, Any]] = []
     for scene_index, scene in enumerate(scenes):
-        selected = resolve_scene_video_for_production(scene, language)
+        selected = resolve_latest_approved_scene_video_for_final_build(scene, language)
         speed_coef = (
             parse_speed_coef(selected.get("speed_coef"))
             if isinstance(selected, dict)
@@ -2517,7 +2717,7 @@ def _subtitle_entries_for_language_from_plan(scenes: list[dict[str, Any]], langu
                 source_duration = 0.0
         planned_duration = source_duration / float(speed_coef or DEFAULT_SCENE_VIDEO_SPEED_COEF) if source_duration > 0 else 0.0
         scene_entries = _scene_subtitle_entries(
-            scene,
+            _scene_with_candidate_subtitle_snapshot(scene, selected, language),
             language,
             start_offset=current_start,
             fallback_duration=planned_duration,
@@ -2526,11 +2726,34 @@ def _subtitle_entries_for_language_from_plan(scenes: list[dict[str, Any]], langu
         )
         for entry in scene_entries:
             entry["scene"] = int(scene_index) + 1
+            entry["candidate_id"] = str(selected.get("candidate_id") or "") if isinstance(selected, dict) else ""
             entry["speed_coef"] = float(speed_coef)
             entry["timing_scale"] = 1.0
         subtitle_entries.extend(scene_entries)
         current_start += planned_duration
     return subtitle_entries
+
+
+def subtitle_entries_fingerprint(entries: list[dict[str, Any]]) -> str:
+    normalized: list[dict[str, Any]] = []
+    for entry in entries:
+        if not isinstance(entry, dict):
+            continue
+        normalized.append(
+            {
+                "scene": entry.get("scene"),
+                "language": str(entry.get("language") or "").strip().lower(),
+                "candidate_id": str(entry.get("candidate_id") or ""),
+                "text": str(entry.get("text") or ""),
+                "speed_coef": round(float(entry.get("speed_coef") or 0.0), 4),
+            }
+        )
+    raw = json.dumps(normalized, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(raw.encode("utf-8")).hexdigest()
+
+
+def subtitle_fingerprint_for_language(scenes: list[dict[str, Any]], language: str) -> str:
+    return subtitle_entries_fingerprint(_subtitle_entries_for_language_from_plan(scenes, language))
 
 
 def build_subtitled_post_production_from_upscaled_master(
@@ -2568,6 +2791,7 @@ def build_subtitled_post_production_from_upscaled_master(
     source_w, source_h = _video_dimensions(source_path)
     music_path, music_volume = _resolve_music_path(project_slug)
     subtitle_entries = _subtitle_entries_for_language_from_plan(scenes, lang)
+    subtitle_fingerprint = subtitle_entries_fingerprint(subtitle_entries)
     subtitle_cues: list[dict[str, Any]] = []
     for item in subtitle_entries:
         subtitle_cues.extend(_build_burned_subtitle_cues(item, video_width=source_w, video_height=source_h))
@@ -2611,12 +2835,14 @@ def build_subtitled_post_production_from_upscaled_master(
             "source_audio_preserved": bool(source_audio_preserved),
             "source_variant": "upscaled_4k",
             "source_video_path": str(source_path),
+            "subtitle_fingerprint": subtitle_fingerprint,
         }
     return {
         "final_subtitled_music_video": payload,
         "renders_by_language": {lang: {"subtitled_music": payload}},
         "subtitle_entries": subtitle_entries,
         "subtitle_entries_by_language": {lang: subtitle_entries},
+        "subtitle_fingerprint_by_language": {lang: subtitle_fingerprint},
         "title_overlay_by_language": {},
         "series_overlay_by_language": {},
         "speech_budget_by_language": {},
@@ -2631,7 +2857,7 @@ def _estimated_title_duration_for_language(scenes: list[dict[str, Any]], languag
     if not scenes:
         return max(0.0, min(float(fallback_duration or 0.0), 6.0))
     first_scene = scenes[0]
-    selected = resolve_scene_video_for_production(first_scene, language)
+    selected = resolve_latest_approved_scene_video_for_final_build(first_scene, language)
     speed_coef = (
         parse_speed_coef(selected.get("speed_coef"))
         if isinstance(selected, dict)
@@ -2669,6 +2895,7 @@ def build_titled_post_production_from_subtitled_master(
     lang = str(language or "ru").strip().lower() or "ru"
     source_w, source_h = _video_dimensions(source_path)
     source_duration = _media_duration(source_path) or 0.0
+    subtitle_fingerprint = subtitle_fingerprint_for_language(scenes, lang)
     title_duration = _estimated_title_duration_for_language(scenes, lang, source_duration)
     title_cue = _build_title_overlay_cue(
         overlay_title_by_lang,
@@ -2746,6 +2973,7 @@ def build_titled_post_production_from_subtitled_master(
             "source_audio_preserved": bool(source_audio_preserved),
             "source_variant": "subtitled_music",
             "source_video_path": str(source_path),
+            "subtitle_fingerprint": subtitle_fingerprint,
         }
 
     title_overlay_by_language = {}
@@ -2768,6 +2996,7 @@ def build_titled_post_production_from_subtitled_master(
         "renders_by_language": {lang: {"titled_subtitled_music": payload}},
         "subtitle_entries": [],
         "subtitle_entries_by_language": {},
+        "subtitle_fingerprint_by_language": {lang: subtitle_fingerprint},
         "title_overlay_by_language": title_overlay_by_language,
         "series_overlay_by_language": series_overlay_by_language,
         "title_overlay_style": dict(overlay_title_style or {}),

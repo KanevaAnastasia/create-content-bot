@@ -294,7 +294,7 @@ def maybe_choose_romantic_subplot(
         "Grandma Kitchen keeps stable relationship canon across the series: the orange cat and the white cat are a pair; "
         "the black-and-white cat is the white cat's admirer only in episodes where he is selected."
     )
-    if draw() >= 0.50:
+    if draw() >= 0.90:
         return {
             "enabled": False,
             "characters": [],
@@ -302,7 +302,7 @@ def maybe_choose_romantic_subplot(
             "decision_scope": "episode",
             "series_rule": series_rule,
         }
-    include_markiz = draw() < 0.10
+    include_markiz = draw() < 0.80
     characters = ["zaya", "markiz"] if include_markiz else ["zaya"]
     return {
         "enabled": True,

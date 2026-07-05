@@ -6,7 +6,7 @@ import copy
 import logging
 import uuid
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
 from sqlalchemy import select
@@ -43,6 +43,24 @@ TRANSIENT_SCENE_KEYS = {
     "video_provider_choice_pending",
     "image_model_choice_pending",
 }
+
+CHECKPOINT_MAX_LARGE_STRING_CHARS = 200_000
+CHECKPOINT_RETENTION_DAYS = 3
+CHECKPOINT_RETENTION_LIMIT_PER_CHAT = 40
+
+CHECKPOINT_MEDIA_KEY_FRAGMENTS = (
+    "image_b64",
+    "video_b64",
+    "audio_b64",
+    "base64",
+    "image_bytes",
+    "video_bytes",
+    "audio_bytes",
+    "image_candidates",
+    "video_candidates",
+    "reference_images",
+    "user_reference_images",
+)
 
 
 @dataclass(frozen=True)
@@ -148,6 +166,78 @@ def _clean_transient_pending(snapshot: dict[str, Any]) -> dict[str, Any]:
     return cleaned
 
 
+def _empty_like(value: Any) -> Any:
+    if isinstance(value, list):
+        return []
+    if isinstance(value, dict):
+        return {}
+    return None
+
+
+def _sanitize_checkpoint_value(value: Any, *, key: str | None, stats: dict[str, int]) -> Any:
+    key_l = (key or "").lower()
+    if key_l and any(fragment in key_l for fragment in CHECKPOINT_MEDIA_KEY_FRAGMENTS):
+        stats["omitted_values"] += 1
+        try:
+            stats["omitted_chars"] += len(str(value))
+        except Exception:
+            pass
+        return _empty_like(value)
+    if isinstance(value, str):
+        if len(value) > CHECKPOINT_MAX_LARGE_STRING_CHARS:
+            stats["omitted_values"] += 1
+            stats["omitted_chars"] += len(value)
+            return None
+        return value
+    if isinstance(value, list):
+        return [_sanitize_checkpoint_value(item, key=None, stats=stats) for item in value]
+    if isinstance(value, dict):
+        return {
+            item_key: _sanitize_checkpoint_value(item_value, key=str(item_key), stats=stats)
+            for item_key, item_value in value.items()
+        }
+    return value
+
+
+def _sanitize_checkpoint_snapshot(snapshot: dict[str, Any]) -> tuple[dict[str, Any], dict[str, int]]:
+    stats = {"omitted_values": 0, "omitted_chars": 0}
+    sanitized = _sanitize_checkpoint_value(snapshot, key=None, stats=stats)
+    if not isinstance(sanitized, dict):
+        return {}, stats
+    return sanitized, stats
+
+
+def _prune_checkpoint_history(db, chat_id: int) -> None:
+    cutoff = datetime.now(UTC) - timedelta(days=CHECKPOINT_RETENTION_DAYS)
+    old_rows = (
+        db.execute(
+            select(PipelineStepCheckpoint.id)
+            .where(PipelineStepCheckpoint.chat_id == int(chat_id))
+            .where(PipelineStepCheckpoint.created_at < cutoff)
+        )
+        .scalars()
+        .all()
+    )
+    for row_id in old_rows:
+        row = db.get(PipelineStepCheckpoint, row_id)
+        if row is not None:
+            db.delete(row)
+    recent_ids = (
+        db.execute(
+            select(PipelineStepCheckpoint.id)
+            .where(PipelineStepCheckpoint.chat_id == int(chat_id))
+            .order_by(PipelineStepCheckpoint.created_at.desc(), PipelineStepCheckpoint.id.desc())
+            .offset(CHECKPOINT_RETENTION_LIMIT_PER_CHAT)
+        )
+        .scalars()
+        .all()
+    )
+    for row_id in recent_ids:
+        row = db.get(PipelineStepCheckpoint, row_id)
+        if row is not None:
+            db.delete(row)
+
+
 def record_checkpoint(
     chat_id: int | None,
     session: dict[str, Any] | None,
@@ -170,9 +260,11 @@ def record_checkpoint(
             language=language if language is not None else signature.language,
         )
     try:
-        snapshot = _serialize_value(session)
+        snapshot, sanitize_stats = _sanitize_checkpoint_snapshot(_serialize_value(session))
         row_payload = dict(payload or {})
         row_payload.setdefault("signature", signature.as_payload())
+        if sanitize_stats["omitted_values"]:
+            row_payload["checkpoint_omitted_media"] = sanitize_stats
         with SessionLocal() as db:
             latest = (
                 db.execute(
@@ -189,6 +281,7 @@ def record_checkpoint(
                 latest.session_snapshot_json = snapshot
                 latest.payload_json = row_payload
                 latest.created_at = datetime.now(UTC)
+                _prune_checkpoint_history(db, int(chat_id))
                 db.commit()
                 return
             db.add(
@@ -204,6 +297,7 @@ def record_checkpoint(
                     created_at=datetime.now(UTC),
                 )
             )
+            _prune_checkpoint_history(db, int(chat_id))
             db.commit()
     except Exception:
         logger.exception("checkpoint.record_failed chat_id=%s", chat_id)

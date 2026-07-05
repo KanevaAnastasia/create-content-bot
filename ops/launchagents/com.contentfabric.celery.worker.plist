@@ -1,0 +1,37 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "https://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.contentfabric.celery.worker</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/opt/content_fabric/.venv/bin/python</string>
+    <string>-m</string>
+    <string>celery</string>
+    <string>-A</string>
+    <string>cf_admin</string>
+    <string>worker</string>
+    <string>--loglevel=INFO</string>
+    <string>--concurrency=1</string>
+    <string>--pool=solo</string>
+  </array>
+  <key>WorkingDirectory</key>
+  <string>/opt/content_fabric</string>
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>DJANGO_SETTINGS_MODULE</key>
+    <string>cf_admin.settings</string>
+    <key>PYTHONPATH</key>
+    <string>/opt/content_fabric:/opt/content_fabric/admin_panel</string>
+  </dict>
+  <key>RunAtLoad</key>
+  <true/>
+  <key>KeepAlive</key>
+  <true/>
+  <key>StandardOutPath</key>
+  <string>/opt/content_fabric/logs/celery_worker.launchd.log</string>
+  <key>StandardErrorPath</key>
+  <string>/opt/content_fabric/logs/celery_worker.launchd.err.log</string>
+</dict>
+</plist>

@@ -33,6 +33,29 @@ def test_create_db_engine_uses_provided_url():
     assert str(engine.url) == "postgresql://user:***@localhost:5432/test_db"
 
 
+def test_create_db_engine_blocks_real_database_under_pytest(monkeypatch):
+    monkeypatch.setenv("PYTEST_CURRENT_TEST", "tests/test_db.py::guard (call)")
+
+    with pytest.raises(RuntimeError, match="Refusing to use non-test database under pytest"):
+        db.create_db_engine("postgresql+psycopg2://postgres:postgres@localhost:5432/content_fabric")
+
+
+def test_create_db_engine_allows_sqlite_under_pytest(monkeypatch):
+    monkeypatch.setenv("PYTEST_CURRENT_TEST", "tests/test_db.py::guard (call)")
+
+    engine = db.create_db_engine("sqlite+pysqlite:///:memory:")
+
+    assert engine.url.drivername == "sqlite+pysqlite"
+
+
+def test_create_db_engine_allows_named_test_database_under_pytest(monkeypatch):
+    monkeypatch.setenv("PYTEST_CURRENT_TEST", "tests/test_db.py::guard (call)")
+
+    engine = db.create_db_engine("postgresql://user:pass@localhost:5432/content_fabric_test")
+
+    assert engine.url.database == "content_fabric_test"
+
+
 def test_create_tables_uses_passed_engine(monkeypatch):
     class DummyEngine:
         pass

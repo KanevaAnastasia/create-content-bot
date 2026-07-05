@@ -289,6 +289,8 @@ def build_viral_concept_brief_prompt(
         "домашнее детство, неожиданное сравнение, «нельзя терять», «в конце покажу»; слово «секрет» допустимо, но не обязательно\n"
         "- не начинай с обычного вступления «сегодня готовим», «мы приготовим», «давайте сделаем», «в этом видео»\n"
         "- не обещай то, чего нет в рецепте или финале\n"
+        "- не добавляй в visual payoff ингредиенты, гарниры, топпинги или гарнирные элементы, которых нет "
+        "в full_recipe_text, brand_context или явной просьбе пользователя\n"
         "- тон мягкий и уютный, без агрессивного кликбейта\n\n"
         "first_frame_type выбери одно значение из: ready_dish_closeup, cake_cut, cheese_pull, spoon_shot, "
         "grandma_shows_dish, cat_smells, unexpected_phrase, before_after, secret_tease.\n"
@@ -339,6 +341,11 @@ def scenes_plan_requirements() -> dict[str, Any]:
             "(e.g. small dice, thin strips, rings, slices)"
         ),
         "dish_rule": "if scene presents a dish/final serving, add detailed dish_description with visible ingredients",
+        "ingredient_source_of_truth_rule": (
+            "visible ingredients, toppings, sides, and garnishes must come from full_recipe_text, explicit user feedback, "
+            "brand_context, or an explicit user reference. Do not add extra garnish, side dishes, eggs, herbs, potatoes, "
+            "sauces, cheese, berries, nuts, or other ingredients just because they are common in some variants."
+        ),
         "forbidden_shot_type": "never use low-angle / from-below camera",
         "scene_transition_rule": (
             "each next scene should progress recipe action and vary shot_type or continuity focus, "
@@ -421,6 +428,7 @@ def build_scenes_plan_payload(
     brand_context: str | None = None,
     analytics_feedback: dict[str, Any] | None = None,
     romantic_drama_subplot: dict[str, Any] | None = None,
+    generation_comment: str | None = None,
 ) -> dict[str, Any]:
     _ = allowed_locations
     if romantic_drama_subplot is not None:
@@ -433,6 +441,7 @@ def build_scenes_plan_payload(
         "concept": concept,
         "full_recipe_text": full_recipe_text,
         "feedback": feedback,
+        "generation_comment": (generation_comment or "").strip(),
         "dialogue_feedback_hint": _dialogue_feedback_hint(feedback),
         "previous_scenes": previous_scenes,
         "assets": _character_assets_only(),
@@ -453,6 +462,12 @@ def build_scenes_plan_prompt(payload: dict[str, Any]) -> str:
         "Return ONLY valid JSON array of scenes. No markdown.\n"
         "КРИТИЧЕСКОЕ ПРАВИЛО: ровно 3–6 сцен; по порядку покрой весь рецепт от подготовки/старта до подачи; "
         "не выдумывай другое блюдо и не опускай ключевые этапы из текста рецепта.\n"
+        "GENERATION COMMENT: если payload.generation_comment непустой, это обязательная правка ко всему ролику; "
+        "учти её в сценах, репликах, хуке и production-подготовке, не ограничивай её только viral brief.\n"
+        "INGREDIENT SOURCE OF TRUTH: все видимые ингредиенты, гарниры, топпинги, соусы и гарнирные элементы "
+        "должны быть взяты из full_recipe_text, явного feedback, brand_context или пользовательских референсов. "
+        "Не добавляй продукты «для красоты» или потому что они встречаются в отдельных вариантах блюда, если их нет "
+        "в исходном рецепте/запросе. Это правило особенно важно для scene 1 ready dish и финальной подачи.\n"
         "В КАЖДОЙ сцене: конкретное действие с едой; понятное объяснение шага; реакция бабушки; кот в кадре по смыслу.\n"
         "В КАЖДОЙ сцене обязательно непустое поле text — готовая реплика озвучки на этом этапе.\n"
         "Для каждой сцены верни dialogue_mode и dialogue.\n"
@@ -495,8 +510,9 @@ def build_scenes_plan_prompt(payload: dict[str, Any]) -> str:
         "`markiz` только черно-белого кота. Не создавай дополнительных котов, котят, силуэты котов, безымянных котов или "
         "дубликаты того же кота. В описании одного кота не смешивай признаки другого кота.\n"
         "PLACEMENT RULE FOR NEIGHBOR CATS: белая кошка не закреплена за одной точкой кадра и может находиться внутри кухни, "
-        "у окна, в дверном проеме, на подоконнике, рядом со столом или в другой позиции, если это помогает сцене и остается "
-        "безопасным для кулинарного действия. Не привязывай белую кошку по умолчанию к позиции за окном. Черно-белый кот может "
+        "у окна, в дверном проеме, рядом со столом или в другой позиции, если это помогает сцене и остается "
+        "безопасным для кулинарного действия. Не пиши «на подоконнике» без прямой просьбы пользователя. "
+        "Не привязывай белую кошку по умолчанию к позиции за окном. Черно-белый кот может "
         "быть ТОЛЬКО ЗА ОКНОМ, снаружи кухни. Черно-белый кот никогда не находится внутри кухни, на столе, на полу кухни или "
         "рядом с посудой внутри. Если `markiz` выбран, каждый его beat должен явно говорить, что он за окном/снаружи окна.\n"
         "Не добавляй подробные описания внешности персонажей в scene fields или video_prompt; внешний вид будет "

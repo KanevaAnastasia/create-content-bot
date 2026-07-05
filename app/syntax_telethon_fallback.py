@@ -25,6 +25,7 @@ logger = logging.getLogger(__name__)
 
 SYNTAX_PROMPT_DEFAULT_MAX_CHARS = 2000
 SYNTAX_PROMPT_HARD_MAX_CHARS = 2000
+SYNTAX_MEDIA_DOWNLOAD_TIMEOUT_SEC_ENV = "SYNTAX_MEDIA_DOWNLOAD_TIMEOUT_SEC"
 
 try:
     from telethon import TelegramClient
@@ -424,6 +425,32 @@ def _message_looks_like_video(message: Any) -> bool:
     return False
 
 
+def _syntax_media_download_timeout_sec() -> float:
+    raw = str(os.getenv(SYNTAX_MEDIA_DOWNLOAD_TIMEOUT_SEC_ENV) or "").strip()
+    if not raw:
+        return 300.0
+    try:
+        return max(5.0, float(raw))
+    except ValueError:
+        return 300.0
+
+
+async def _download_telegram_media_bytes(client: Any, message: Any) -> bytes | None:
+    timeout_sec = _syntax_media_download_timeout_sec()
+    try:
+        data = await asyncio.wait_for(client.download_media(message, file=bytes), timeout=timeout_sec)
+    except TimeoutError:
+        logger.warning(
+            "syntax.download_media_timeout message_id=%s timeout_sec=%s",
+            int(getattr(message, "id", 0) or 0),
+            timeout_sec,
+        )
+        return None
+    if isinstance(data, bytes) and data:
+        return data
+    return None
+
+
 async def _try_download_from_urls(urls: list[str]) -> tuple[bytes | None, str | None, str]:
     """Returns (video_bytes, video_uri, provider_message)."""
     for url in urls:
@@ -431,8 +458,14 @@ async def _try_download_from_urls(urls: list[str]) -> tuple[bytes | None, str | 
             return None, url, f"Syntax returned direct mp4 link: {url}"
         if "getvideo.syntxai.net/" in url.lower():
             try:
-                data = await asyncio.to_thread(fetch_mp4_bytes_from_getvideo_page, url)
+                data = await asyncio.wait_for(
+                    asyncio.to_thread(fetch_mp4_bytes_from_getvideo_page, url),
+                    timeout=_syntax_media_download_timeout_sec(),
+                )
                 return data, url, "Downloaded mp4 from Syntax getvideo page."
+            except TimeoutError:
+                logger.warning("syntax.getvideo_download_timeout url=%s", url)
+                continue
             except Exception:
                 # Page may still be preparing; keep polling.
                 continue
@@ -477,10 +510,10 @@ async def _process_bot_message(
     if _message_looks_like_video(message):
         if loose_missing_lang_token:
             return None
-        data = await client.download_media(message, file=bytes)
-        if isinstance(data, bytes) and data:
+        data = await _download_telegram_media_bytes(client, message)
+        if data:
             return data, None, "Video downloaded from Syntax bot.", False, False
-        return None, None, "Syntax sent a video attachment but download failed.", True, False
+        return None, None, "Syntax sent a video attachment but download failed or timed out.", True, False
 
     text = _extract_text(message)
     urls = _collect_urls_from_message(message)

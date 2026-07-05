@@ -92,6 +92,8 @@ def build_application(token: str) -> Application:
     app.add_handler(CommandHandler("reset", cancel))
     app.add_handler(CommandHandler("generate", generate))
     app.add_handler(CommandHandler("quick", quick_generate))
+    app.add_handler(CommandHandler("drafts", on_text))
+    app.add_handler(CommandHandler("save_draft", on_text))
     app.add_handler(CommandHandler("ai_approve", ai_approve_command))
     app.add_handler(CommandHandler("image", generate_image_command))
     app.add_handler(CommandHandler("video", generate_video_command))

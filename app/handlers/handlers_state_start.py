@@ -20,10 +20,12 @@ from .handlers_state_deps import (
     _user_error_message,
     _build_concepts_session,
     _build_direct_recipe_session,
+    asyncio,
     ok_only_markup,
     format_full_recipe_for_approval,
     format_viral_application_summary,
     format_viral_concept_brief,
+    gemini_generate_sync,
     generate_recipe_from_source_text,
     generate_recipe_concepts,
     generate_recipe_full_text,
@@ -37,6 +39,8 @@ from .handlers_state_commands import _reply_text_chunked
 from .handlers_state_commands import NAV_BUTTON_START_OVER
 from .handlers_keyboards import reply_text_without_keyboard, safe_reply_text
 from .handlers_state_media import send_social_descriptions_for_recipe
+from ..llm_utils import extract_json_object
+from ..multilingual import language_name, normalize_language_code, target_languages_from_env
 from ..series_store import (
     SERIES_PENDING_PREFER_VERTEX_SESSION_KEY,
     SERIES_PENDING_RECIPE_SESSION_KEY,
@@ -55,7 +59,9 @@ from ..series_store import (
 _PROJECT_KEY_SESSION = "selected_project_key"
 STATE_WAITING_SERIES_CHOICE = "waiting_series_choice"
 STATE_WAITING_SERIES_CREATE = "waiting_series_create"
+STATE_WAITING_SERIES_TRANSLATION_APPROVAL = "waiting_series_translation_approval"
 _SERIES_CHOICE_IDS_SESSION_KEY = "series_choice_ids"
+_SERIES_TRANSLATION_PENDING_SESSION_KEY = "series_translation_pending"
 SERIES_CHOICE_CONFIRMED_SESSION_KEY = "series_choice_confirmed"
 SERIES_PENDING_NEXT_SESSION_KEY = "series_pending_next"
 SERIES_NEXT_GENERATION = "generation"
@@ -212,6 +218,122 @@ def _parse_series_create_text(text: str) -> tuple[str, str | None, int] | None:
         return None
     total_videos = int(days_match.group(0) if days_match else legacy_match.group(1))
     return ru_title, en_title, total_videos
+
+
+def _clean_series_title(value: str) -> str:
+    text = " ".join(str(value or "").strip().split())
+    if len(text) >= 2 and text[0] == text[-1] and text[0] in {"'", '"', "«", "»"}:
+        text = text[1:-1].strip()
+    for prefix in ("EN:", "English:", "Английский:"):
+        if text.lower().startswith(prefix.lower()):
+            text = text[len(prefix) :].strip()
+            break
+    return text
+
+
+def _series_title_target_languages(session: dict) -> list[str]:
+    raw = session.get("target_languages")
+    candidates = raw if isinstance(raw, list) and raw else target_languages_from_env()
+    out: list[str] = []
+    for item in ("ru", "en", *candidates):
+        code = normalize_language_code(str(item or ""))
+        if code and code not in out:
+            out.append(code)
+    return out or ["ru", "en"]
+
+
+async def _translate_series_titles(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+    *,
+    chat_id: int,
+    ru_title: str,
+    languages: list[str],
+) -> dict[str, str]:
+    target_languages = [lang for lang in languages if lang != "ru"]
+    title_by_lang = {"ru": _clean_series_title(ru_title)}
+    if not target_languages:
+        return title_by_lang
+    lang_lines = "\n".join(f"- {lang}: {language_name(lang)}" for lang in target_languages)
+    prompt = (
+        "Translate this short Russian content-series title for social videos.\n"
+        "Keep every translation concise, natural, catchy, and suitable as an on-video series label.\n"
+        "Return only a strict JSON object where keys are the requested language codes and values are titles.\n"
+        "Do not include Markdown, quotes around the whole object, comments, or extra keys.\n\n"
+        f"Russian title: {title_by_lang['ru']}\n\n"
+        f"Target languages:\n{lang_lines}"
+    )
+    raw = await _call_with_503_retries(
+        update,
+        context,
+        chat_id,
+        "translate_series_titles",
+        lambda: asyncio.to_thread(gemini_generate_sync, prompt),
+    )
+    try:
+        data = extract_json_object(str(raw or ""))
+    except Exception:
+        data = {}
+    for lang in target_languages:
+        translated = _clean_series_title(str(data.get(lang) or ""))
+        if translated:
+            title_by_lang[lang] = translated
+    title_by_lang.setdefault("en", title_by_lang["ru"])
+    return title_by_lang
+
+
+def _format_series_titles_for_approval(title_by_lang: dict[str, str], languages: list[str]) -> str:
+    lines = ["Предлагаю названия серии:"]
+    for lang in languages:
+        title = _clean_series_title(str(title_by_lang.get(lang) or ""))
+        if title:
+            lines.append(f"{lang.upper()}: {title}")
+    extras = [lang for lang in title_by_lang if lang not in languages]
+    for lang in extras:
+        title = _clean_series_title(str(title_by_lang.get(lang) or ""))
+        if title:
+            lines.append(f"{lang.upper()}: {title}")
+    lines.append("")
+    lines.append(
+        "Если подходит — нажмите «ОК». Если нужно исправить, "
+        "пришлите новый EN-текст или строки вида `en: ... | es: ...`."
+    )
+    return "\n".join(lines)
+
+
+def _parse_series_title_corrections(text: str, languages: list[str]) -> dict[str, str]:
+    raw = str(text or "").strip()
+    if not raw:
+        return {}
+    chunks = [part.strip() for line in raw.splitlines() for part in line.split("|")]
+    out: dict[str, str] = {}
+    for chunk in chunks:
+        match = re.fullmatch(r"([a-z]{2}(?:[-_][a-z]{2})?)\s*:\s*(.+)", chunk, flags=re.IGNORECASE)
+        if not match:
+            continue
+        code = normalize_language_code(match.group(1))
+        title = _clean_series_title(match.group(2))
+        if code and title:
+            out[code] = title
+    if out:
+        return out
+    if "en" in languages:
+        corrected = _clean_series_title(raw)
+        if corrected:
+            return {"en": corrected}
+    return {}
+
+
+def _create_series_from_title_map(session: dict, title_by_lang: dict[str, str], total_videos: int):
+    ru_title = _clean_series_title(str(title_by_lang.get("ru") or ""))
+    en_title = _clean_series_title(str(title_by_lang.get("en") or "")) or ru_title
+    return create_series(
+        title_ru=ru_title,
+        title_en=en_title,
+        title_by_lang=title_by_lang,
+        total_videos=total_videos,
+        project_slug=str(session.get(_PROJECT_KEY_SESSION) or "").strip() or None,
+    )
 
 
 def _copy_series_context(source: dict, target: dict) -> None:
@@ -528,17 +650,117 @@ async def _handle_waiting_series_create_state(
         )
         return True
     ru_title, en_title, total_videos = parsed
+    if en_title is None:
+        languages = _series_title_target_languages(session)
+        try:
+            await reply_text_without_keyboard(update.message, "Перевожу название серии, ждите.")
+            title_by_lang = await _translate_series_titles(
+                update,
+                context,
+                chat_id=chat_id,
+                ru_title=ru_title,
+                languages=languages,
+            )
+        except ServiceUnavailableRetriesExhaustedError as e:
+            await update.message.reply_text(str(e))
+            return True
+        except Exception as e:
+            logger.exception("content series title translation failed")
+            await update.message.reply_text(
+                f"Ошибка перевода названия серии: {_user_error_message(e)}"
+            )
+            return True
+        session["state"] = STATE_WAITING_SERIES_TRANSLATION_APPROVAL
+        session[_SERIES_TRANSLATION_PENDING_SESSION_KEY] = {
+            "title_by_lang": title_by_lang,
+            "languages": languages,
+            "total_videos": total_videos,
+        }
+        SESSIONS[chat_id] = session
+        await _reply_text_with_optional_markup(
+            update,
+            _format_series_titles_for_approval(title_by_lang, languages),
+            reply_markup=ok_only_markup(),
+        )
+        return True
     try:
-        payload = create_series(
-            title_ru=ru_title,
-            title_en=en_title,
-            total_videos=total_videos,
-            project_slug=str(session.get(_PROJECT_KEY_SESSION) or "").strip() or None,
+        payload = _create_series_from_title_map(
+            session,
+            {"ru": ru_title, "en": en_title},
+            total_videos,
         )
     except Exception as e:
         logger.exception("content series creation failed")
         await update.message.reply_text(f"Ошибка создания серии: {_user_error_message(e)}")
         return True
+    attach_series_to_session(session, payload)
+    session[SERIES_CHOICE_CONFIRMED_SESSION_KEY] = True
+    await update.message.reply_text(f"Серия создана: {format_series_label(payload)}.")
+    return await _continue_generation_after_series(update, context, chat_id=chat_id, session=session)
+
+
+async def _handle_waiting_series_translation_approval_state(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+    *,
+    chat_id: int,
+    session: dict,
+    text: str,
+) -> bool:
+    pending = session.get(_SERIES_TRANSLATION_PENDING_SESSION_KEY)
+    if not isinstance(pending, dict):
+        session["state"] = STATE_WAITING_SERIES_CREATE
+        SESSIONS[chat_id] = session
+        await _reply_text_with_optional_markup(
+            update,
+            "Не вижу сохранённого перевода. "
+            "Пришлите серию ещё раз в формате: название | дней",
+            reply_markup=ok_only_markup(),
+        )
+        return True
+    title_by_lang = pending.get("title_by_lang")
+    if not isinstance(title_by_lang, dict) or not str(title_by_lang.get("ru") or "").strip():
+        session["state"] = STATE_WAITING_SERIES_CREATE
+        session.pop(_SERIES_TRANSLATION_PENDING_SESSION_KEY, None)
+        SESSIONS[chat_id] = session
+        await _reply_text_with_optional_markup(
+            update,
+            "Не вижу русского названия серии. "
+            "Пришлите серию ещё раз в формате: название | дней",
+            reply_markup=ok_only_markup(),
+        )
+        return True
+    languages = [
+        normalize_language_code(str(item or ""))
+        for item in (pending.get("languages") if isinstance(pending.get("languages"), list) else [])
+    ]
+    languages = [lang for lang in languages if lang] or _series_title_target_languages(session)
+    low = str(text or "").strip().lower()
+    if low in {"исправь", "fix"}:
+        await _reply_text_with_optional_markup(
+            update,
+            "Пришлите новый EN-текст или строки вида `en: Summer drinks | es: Bebidas de verano`.",
+            reply_markup=ok_only_markup(),
+        )
+        return True
+    if low not in {"ок", "ok", "okay", "approve"}:
+        corrections = _parse_series_title_corrections(text, languages)
+        if not corrections:
+            await _reply_text_with_optional_markup(
+                update,
+                "Нажмите «ОК» или пришлите правку: новый EN-текст либо `en: ... | es: ...`.",
+                reply_markup=ok_only_markup(),
+            )
+            return True
+        title_by_lang = {**title_by_lang, **corrections}
+    total_videos = int(pending.get("total_videos") or 10)
+    try:
+        payload = _create_series_from_title_map(session, title_by_lang, total_videos)
+    except Exception as e:
+        logger.exception("content series creation after translation failed")
+        await update.message.reply_text(f"Ошибка создания серии: {_user_error_message(e)}")
+        return True
+    session.pop(_SERIES_TRANSLATION_PENDING_SESSION_KEY, None)
     attach_series_to_session(session, payload)
     session[SERIES_CHOICE_CONFIRMED_SESSION_KEY] = True
     await update.message.reply_text(f"Серия создана: {format_series_label(payload)}.")

@@ -23,6 +23,8 @@ FIRST_STEP_BUTTON_PROJECT_IMAGE = "Изображение проект"
 FIRST_STEP_BUTTON_VIDEO = "Видео"
 FIRST_STEP_BUTTON_SOUND = "Звук"
 FIRST_STEP_BUTTON_PROJECT = "Проект"
+DRAFT_BUTTON_SAVE = "Сохранить черновик"
+DRAFT_BUTTON_LIST = "Черновики"
 
 
 def first_step_menu_markup() -> ReplyKeyboardMarkup:
@@ -33,6 +35,7 @@ def first_step_menu_markup() -> ReplyKeyboardMarkup:
             [FIRST_STEP_BUTTON_IMAGE, FIRST_STEP_BUTTON_PROJECT_IMAGE],
             [FIRST_STEP_BUTTON_VIDEO, FIRST_STEP_BUTTON_SOUND],
             [FIRST_STEP_BUTTON_PROJECT],
+            [DRAFT_BUTTON_SAVE, DRAFT_BUTTON_LIST],
         ],
         resize_keyboard=True,
         one_time_keyboard=False,

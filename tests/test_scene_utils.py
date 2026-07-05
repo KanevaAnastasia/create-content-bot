@@ -1,6 +1,8 @@
 import pytest
 
+from app import scene_utils
 from app.scene_utils import (
+    apply_veo3_lowercase_format,
     apply_veo3_speech_format,
     extract_recipe_steps_text,
     normalize_recipe_steps,
@@ -31,6 +33,10 @@ def test_extract_and_normalize_recipe_steps():
     assert normalize_recipe_steps(["  a  ", " ", "b."]) == ["a", "b"]
 
 
+def test_extract_recipe_steps_text_handles_step_without_colon():
+    assert extract_recipe_steps_text("ШАГ без номера") == ["ШАГ без номера"]
+
+
 def test_normalize_scenes_for_pipeline_adds_contract_fields():
     raw = [{"location": "stove", "action": "Жарит лук", "text": "жарим"}]
     scenes = normalize_scenes_for_pipeline(raw)
@@ -40,6 +46,27 @@ def test_normalize_scenes_for_pipeline_adds_contract_fields():
     assert all(s.get("voice_needed") is True for s in scenes)
     assert all("grandma" in s.get("characters", []) for s in scenes)
     assert all("cat" in s.get("characters", []) for s in scenes)
+
+
+def test_normalize_scenes_for_pipeline_adds_mentions_and_continuity():
+    scenes = normalize_scenes_for_pipeline(
+        [
+            {
+                "action": "Бабушка режет лук на тонкие кольца, Зая смотрит, Маркиз сидит за окном",
+                "visual_description": "миска, сковорода, кастрюля, ложка и венчик рядом",
+                "text": "",
+                "continuity_anchors": "доска; нож",
+                "duration_sec": "bad",
+            }
+        ]
+    )
+
+    first = scenes[0]
+    assert "zaya" in first["characters"]
+    assert "markiz" in first["characters"]
+    assert first["duration_sec"] == 6
+    assert "та же деревянная разделочная доска" in first["continuity_anchors"]
+    assert first["continuity_state"]
 
 
 def test_normalize_scenes_for_pipeline_rejects_non_object_items():
@@ -91,11 +118,40 @@ def test_apply_veo3_speech_format_keeps_garbled_text_unchanged():
     assert out[0]["text"] == garbled
 
 
+def test_apply_veo3_lowercase_format_normalizes_pause_and_empty_text():
+    out = apply_veo3_lowercase_format(
+        [
+            {"model": "veo3_fast", "text": "Привет, ПАУЗА Мир!"},
+            {"model": "veo3", "text": ""},
+            {"model": "kling", "text": "Keep, punctuation!"},
+        ]
+    )
+
+    assert out[0]["text"] == "привет [пауза] мир"
+    assert out[1]["text"] == "сейчас готовим вкусное блюдо"
+    assert out[2]["text"] == "Keep, punctuation!"
+
+
 def test_scene_match_and_follow_steps():
     scene = {"action": "Нарезаем лук мелкими кубиками", "text": "режем лук"}
     assert scene_matches_step(scene, "Нарезаем лук")
     errs = scenes_follow_recipe_steps([scene], ["Варим суп"])
     assert errs == ["scene_1: step_not_reflected"]
+
+
+def test_scene_helpers_private_branches():
+    assert scene_utils._as_text(["a", {"text": "b"}, 3]) == "a b 3"
+    assert scene_utils._location_asset_refs("stove", "top-view").get("location_top_view")
+    assert scene_utils._location_asset_refs("missing", "medium") == {}
+    assert scene_utils._normalized_duration_for_model("kling", "bad") == 2
+    assert scene_utils._normalized_duration_for_model("kling", 1) == 2
+    assert scene_utils._normalized_stove_burner("задняя правая", 1) == "back_right"
+    assert scene_utils._normalized_stove_burner("front_left", 2) == "front_left"
+    assert scene_utils._stove_burner_ru("unknown") == "переднюю левую"
+    assert scene_utils._text_implies_food_context("", ("суп",), ("лук",)) is False
+    assert scene_utils._text_implies_food_context("лук и 200 г муки", ("суп",), ("лук",)) is True
+    assert scene_matches_step({}, "и в на") is True
+    assert scenes_follow_recipe_steps([{}], [{}, {}]) == ["recipe_steps_count_mismatch:2!=1"]
 
 
 def test_scenes_quality_errors_flags_basic_issues():
@@ -111,6 +167,52 @@ def test_scenes_quality_errors_flags_basic_issues():
     assert "scene_1: no_speech" in errs
     assert "scene_1: no_cat" in errs
     assert "scene_1: invalid_duration_for_veo3" in errs
+
+
+def test_scenes_quality_errors_flags_specific_contracts():
+    scenes = [
+        {
+            "scene": 1,
+            "characters": ["grandma"],
+            "text": "сегодня режем лук",
+            "action": "Бабушка нарезает лук",
+            "goal": "хук",
+            "model": "veo3_fast",
+            "duration_sec": 6,
+            "shot_type": "medium",
+        },
+        {
+            "scene": 2,
+            "characters": ["grandma", "cat"],
+            "text": "мешАю крем без нужной паузы сейчас аккуратно",
+            "action": "Бабушка жарит сырники на сковороде",
+            "goal": "процесс",
+            "model": "veo3_fast",
+            "duration_sec": 6,
+            "shot_type": "closeup",
+        },
+        {
+            "scene": 3,
+            "characters": ["grandma", "cat"],
+            "text": "готово.",
+            "action": "Финал на тарелке",
+            "goal": "результат",
+            "model": "kling",
+            "duration_sec": 1,
+            "shot_type": "wide",
+            "dish_description": "коротко",
+        },
+    ]
+
+    errs = scenes_quality_errors(scenes, recipe_steps=["Лук", "Сырники", "Подача"])
+
+    assert "scene_1: no_cat" in errs
+    assert "scene_1: cut_style_missing" in errs
+    assert "scene_2: stove_burner_missing" in errs
+    assert "scene_2: veo3_text_no_pause_token" in errs
+    assert "scene_3: invalid_duration_for_non_veo" in errs
+    assert "scene_3: dish_description_with_ingredients_missing" in errs
+    assert "scene_3: final_payoff_missing" in errs
 
 
 def test_scenes_quality_errors_first_scene_requires_hook_and_dish_name():

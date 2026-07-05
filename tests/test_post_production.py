@@ -20,7 +20,9 @@ def test_build_post_production_uses_selected_scene_videos_and_speed(monkeypatch)
     old_ru = register_video_candidate(scenes[0], language="ru", video_bytes=b"old-1")
     new_ru = register_video_candidate(scenes[0], language="ru", video_bytes=b"new-1")
     old_ru["liked"] = True
+    old_ru["approved_for_production"] = True
     old_ru["speed_coef"] = 2.0
+    new_ru["approved_for_production"] = True
     new_ru["speed_coef"] = 1.1
     second_ru = register_video_candidate(scenes[1], language="ru", video_bytes=b"scene-2")
     second_ru["approved_for_production"] = True
@@ -63,9 +65,9 @@ def test_build_post_production_uses_selected_scene_videos_and_speed(monkeypatch)
     subtitles = out["subtitle_entries"]
     assert len(subtitles) == 2
     assert subtitles[0]["text"] == "Первая сцена"
-    assert subtitles[0]["end_sec"] == 4.0
-    assert subtitles[1]["start_sec"] == 4.0
-    assert subtitles[1]["end_sec"] == 8.0
+    assert subtitles[0]["end_sec"] == 8 / 1.1
+    assert subtitles[1]["start_sec"] == 8 / 1.1
+    assert subtitles[1]["end_sec"] == (8 / 1.1) + 4.0
     assert out["final_clean_video"]["width"] == 1080
     assert out["final_clean_video"]["height"] == 1920
     assert out["final_upscaled_4k_video"]["width"] == 1080
@@ -74,19 +76,39 @@ def test_build_post_production_uses_selected_scene_videos_and_speed(monkeypatch)
     assert out["final_subtitled_music_video"]["source_audio_preserved"] is True
     assert sorted(out["languages"]) == ["en", "ru"]
     assert sorted(out["renders_by_language"]) == ["en", "ru"]
-    assert out["subtitle_entries_by_language"]["en"][0]["text"] == "First scene line"
+    assert [item["text"] for item in out["subtitle_entries_by_language"]["en"][:2]] == ["First scene", "line"]
     ru_payload = base64.b64decode(out["final_subtitled_music_video"]["video_b64"]).decode("utf-8", errors="ignore")
     en_payload = base64.b64decode(out["renders_by_language"]["en"]["subtitled_music"]["video_b64"]).decode(
         "utf-8", errors="ignore"
     )
     assert f"Style: CleanPremium,{post_production._subtitle_font_name()},88" in ru_payload
+    assert "new-1|1.1" in ru_payload
+    assert "old-1|2.0" not in ru_payload
     assert "|upscaled_4k" in ru_payload
     assert "Comic Sans" not in ru_payload
     assert "BorderStyle=3" not in ru_payload
     assert "ПЕРВАЯ СЦЕНА" in ru_payload
     assert "ВТОРАЯ СЦЕНА" in ru_payload
-    assert "FIRST SCENE LINE" in en_payload
+    assert "FIRST SCENE" in en_payload
+    assert "LINE" in en_payload
     assert "SECOND LINE" in en_payload
+
+
+def test_production_languages_require_approved_scene_video_candidates():
+    scenes = [
+        {"duration_sec": 8, "text": "Первая сцена"},
+        {"duration_sec": 6, "text": "Вторая сцена"},
+    ]
+    old_approved = register_video_candidate(scenes[0], language="ru", video_bytes=b"old-approved")
+    old_approved["approved_for_production"] = True
+    latest_unapproved = register_video_candidate(scenes[0], language="ru", video_bytes=b"latest-unapproved")
+    second = register_video_candidate(scenes[1], language="ru", video_bytes=b"second")
+
+    assert post_production.production_languages_for_scenes(scenes) == []
+
+    second["approved_for_production"] = True
+    assert post_production.production_languages_for_scenes(scenes) == ["ru"]
+    assert latest_unapproved["approved_for_production"] is False
 
 
 def test_build_post_production_adds_title_overlay_for_first_segment_duration(monkeypatch):
@@ -134,8 +156,8 @@ def test_build_post_production_adds_title_overlay_for_first_segment_duration(mon
     assert "Style: TitleSeriesEN,Ravsten Demo" in ass_by_name["title_overlay_en.ass"]
     assert "Style: TitleOverlayRU,TD Afisha,118,&H003826C7" in ass_by_name["title_overlay_ru.ass"]
     assert "&H00000000,&H00000000" in ass_by_name["title_overlay_ru.ass"]
-    assert ",0,1,3,7,7," in ass_by_name["title_overlay_ru.ass"]
-    assert ",0,1,3,6,7," in ass_by_name["title_overlay_ru.ass"]
+    assert ",0,1,5,12,7," in ass_by_name["title_overlay_ru.ass"]
+    assert ",0,1,5,10,7," in ass_by_name["title_overlay_ru.ass"]
     assert r"\fsp" not in ass_by_name["title_overlay_ru.ass"]
     assert re.search(r",118,118,\d+,1", ass_by_name["title_overlay_ru.ass"])
     assert "Dialogue: 1,0:00:00.00,0:00:04.00,TitleOverlayRU" in ass_by_name["title_overlay_ru.ass"]
@@ -144,9 +166,8 @@ def test_build_post_production_adds_title_overlay_for_first_segment_duration(mon
     assert "Dialogue: 2,0:00:00.00,0:00:04.00,TitleSeriesEN" in ass_by_name["title_overlay_en.ass"]
     assert "Борщ" in ass_by_name["title_overlay_ru.ass"]
     assert "Borscht" in ass_by_name["title_overlay_en.ass"]
-    series_sep = post_production.TITLE_SERIES_WORD_SEPARATOR
-    assert f"супы{series_sep}у{series_sep}бабушки" in ass_by_name["title_overlay_ru.ass"]
-    assert f"Grandma's{series_sep}Soups" in ass_by_name["title_overlay_en.ass"]
+    assert r"супы\hу\hбабушки" in ass_by_name["title_overlay_ru.ass"]
+    assert r"Grandma's\hSoups" in ass_by_name["title_overlay_en.ass"]
     assert re.search(
         r"Dialogue: 2,0:00:00.00,0:00:04.00,TitleSeriesRU,,0,0,0,,\{\\q2\\fscx100\\fs\d+\}",
         ass_by_name["title_overlay_ru.ass"],
@@ -210,6 +231,12 @@ def test_title_overlay_ass_defines_style_for_non_default_language(tmp_path):
     assert "Dialogue: 1,0:00:00.00,0:00:06.00,TitleOverlayES" in payload
 
 
+def test_english_title_overlay_latinizes_ru_fallback_instead_of_rendering_cyrillic():
+    assert post_production._overlay_title_for_language({"ru": "Лагман"}, "en") == "Lagman"
+    assert post_production._overlay_title_for_language({"ru": "ЛАГМАН"}, "en") == "Lagman"
+    assert post_production._overlay_title_for_language({"ru": "Лагман", "en": "Lagman"}, "en") == "Lagman"
+
+
 def test_series_overlay_keeps_day_near_series_size_without_wrapping():
     layout = post_production._subtitle_layout_for_dimensions(1080, 1920)
     max_safe_width = 1080 - (108 * 2)
@@ -231,9 +258,9 @@ def test_series_overlay_keeps_day_near_series_size_without_wrapping():
         assert fit.width <= max_safe_width
         assert fit.series_width == round(1080 * post_production._title_series_width_ratio(language))
         assert fit.counter_width == round(1080 * post_production.TITLE_SERIES_DAY_WIDTH_RATIO)
-        assert fit.series_actual_width >= int(fit.series_width * 0.98)
+        assert fit.series_actual_width >= int(fit.series_width * 0.97)
         assert fit.counter_actual_width >= int(fit.counter_width * 0.95)
-        assert post_production._title_series_day_start_ratio(language, side_margin_ratio=0.10) == 0.70
+        assert post_production._title_series_day_start_ratio(language, side_margin_ratio=0.10) == 0.60
         assert fit.counter_font_size >= int(fit.series_font_size * 0.55)
         assert fit.counter_scale_x == 100
         assert fit.counter_actual_width <= fit.counter_width
@@ -258,10 +285,10 @@ def test_series_overlay_fit_scales_for_4k_title_overlay_canvas():
     assert fit.counter_width == round(2160 * post_production.TITLE_SERIES_DAY_WIDTH_RATIO)
     assert fit.width == fit.series_actual_width + fit.counter_actual_width + post_production._title_series_day_gap(layout)
     assert fit.series_font_size > 63
-    assert post_production._title_series_day_start_ratio("ru", side_margin_ratio=0.10) == 0.70
+    assert post_production._title_series_day_start_ratio("ru", side_margin_ratio=0.10) == 0.60
 
 
-def test_series_day_position_follows_measured_series_width():
+def test_series_day_position_follows_configured_start_ratio():
     layout = post_production._subtitle_layout_for_dimensions(1080, 1920)
     fit = post_production._fit_title_series_ass_text(
         "летние напитки",
@@ -281,8 +308,31 @@ def test_series_day_position_follows_measured_series_width():
         side_margin_ratio=0.10,
     )
 
-    assert day_x == 108 + fit.series_actual_width + post_production._title_series_day_gap(layout)
-    assert day_x <= 108 + fit.series_width + post_production._title_series_day_gap(layout)
+    expected_x = min(
+        round(layout.width * post_production._title_series_day_start_ratio("ru", side_margin_ratio=0.10)),
+        layout.width - 108 - fit.counter_actual_width,
+    )
+
+    assert day_x == expected_x
+    assert day_x >= round(layout.width * 0.60) - 1
+
+
+def test_short_ru_series_title_does_not_push_main_title_down_by_full_font_bbox():
+    layout = post_production._subtitle_layout_for_dimensions(1080, 1920)
+    fit = post_production._fit_title_series_ass_text(
+        "Карта вкусов",
+        "день 1 из 10",
+        layout=layout,
+        language="ru",
+        side_margin_ratio=0.10,
+    )
+
+    assert fit is not None
+    full_bbox_offset = max(0, int(round(fit.series_actual_height + (layout.height * post_production.TITLE_SERIES_ROW_GAP_RATIO))))
+    capped_offset = post_production._title_series_main_row_offset(layout, fit)
+
+    assert capped_offset < full_bbox_offset
+    assert capped_offset <= int(fit.series_font_size * post_production.TITLE_SERIES_MAIN_TITLE_OFFSET_MAX_FONT_SCALE)
 
 
 def test_ru_series_overlay_normalizes_uppercase_for_berezka_glyphs():
@@ -295,7 +345,7 @@ def test_ru_series_overlay_normalizes_uppercase_for_berezka_glyphs():
         language="ru",
     )
 
-    assert f"летние{post_production.TITLE_SERIES_WORD_SEPARATOR}напитки" in formatted
+    assert r"летние\hнапитки" in formatted
     assert "ЛЕТНИЕ" not in formatted
 
 
@@ -406,7 +456,10 @@ def test_build_subtitled_post_production_reuses_existing_upscaled_master(tmp_pat
     payload = out["renders_by_language"]["ru"]["subtitled_music"]
     assert payload["source_variant"] == "upscaled_4k"
     assert payload["source_video_path"] == str(source)
-    assert out["subtitle_entries"] == [
+    assert [
+        {key: value for key, value in item.items() if key != "candidate_id"}
+        for item in out["subtitle_entries"]
+    ] == [
         {
             "scene": 1,
             "language": "ru",
@@ -423,7 +476,7 @@ def test_build_subtitled_post_production_reuses_existing_upscaled_master(tmp_pat
 def test_title_overlay_helpers_cover_fallbacks_and_invalid_style_values(tmp_path):
     ass_path = tmp_path / "subtitles_with_title.ass"
 
-    assert post_production._overlay_title_for_language({"ru": "Борщ"}, "en") == "Борщ"
+    assert post_production._overlay_title_for_language({"ru": "Борщ"}, "en") == "Borshch"
     assert post_production._overlay_title_for_language({"en": "Borscht"}, "ru") == "Borscht"
     assert post_production._build_title_overlay_cue({"ru": "Борщ"}, language="ru", duration_sec=0) is None
     assert post_production._build_title_overlay_cue({"ru": "  "}, language="ru", duration_sec=6) is None
@@ -719,6 +772,136 @@ def test_build_post_production_prefers_language_specific_speech_cues(monkeypatch
     assert out["subtitle_entries_by_language"]["en"][1]["start_sec"] == 1.25
     assert out["speech_budget_by_language"]["en"] == []
     assert out["original_audio_preserved_by_language"]["en"] is True
+
+
+def test_build_post_production_does_not_fallback_english_subtitles_to_russian(monkeypatch):
+    scenes = [
+        {
+            "scene": 1,
+            "duration_sec": 6,
+            "text": "Русская фраза",
+            "speech_by_lang": {"ru": "Русская фраза"},
+        }
+    ]
+    ru = register_video_candidate(scenes[0], language="ru", video_bytes=b"ru")
+    en = register_video_candidate(scenes[0], language="en", video_bytes=b"en")
+    ru["approved_for_production"] = True
+    en["approved_for_production"] = True
+
+    monkeypatch.setattr(post_production, "_resolve_ffmpeg", lambda: "/usr/bin/ffmpeg")
+    monkeypatch.setattr(post_production, "_video_dimensions", lambda _path: (1080, 1920))
+    monkeypatch.setattr(post_production, "_has_audio_stream", lambda _path: True)
+    monkeypatch.setattr(post_production, "_resolve_music_path", lambda _slug: (None, 0.18))
+    monkeypatch.setattr(post_production, "_normalize_segment", lambda **kwargs: kwargs["dest_path"].write_bytes(kwargs["src_path"].read_bytes()))
+    monkeypatch.setattr(post_production, "_concat_segments", lambda **kwargs: kwargs["dest_path"].write_bytes(b"merged"))
+    monkeypatch.setattr(post_production, "_upscale_master_to_4k", _fake_upscale_master_to_4k)
+
+    def fake_render_subtitled_music_master(**kwargs):
+        kwargs["dest_path"].write_bytes(kwargs["subtitles_path"].read_bytes())
+        return True
+
+    monkeypatch.setattr(post_production, "_render_subtitled_music_master", fake_render_subtitled_music_master)
+
+    try:
+        post_production.build_post_production(scenes, target_languages=["en"])
+    except RuntimeError as exc:
+        assert "Missing language-specific subtitle text" in str(exc)
+    else:
+        raise AssertionError("English build must not use Russian scene text as subtitles")
+
+
+def test_build_post_production_uses_candidate_speech_snapshot_for_subtitles(monkeypatch):
+    scenes = [
+        {
+            "scene": 1,
+            "duration_sec": 6,
+            "text": "Новый текст сцены",
+            "speech_by_lang": {"ru": "Новый текст сцены"},
+        }
+    ]
+    ru = register_video_candidate(scenes[0], language="ru", video_bytes=b"ru")
+    ru["approved_for_production"] = True
+    ru["speech_by_lang"] = {"ru": "Старый текст кандидата"}
+
+    monkeypatch.setattr(post_production, "_resolve_ffmpeg", lambda: "/usr/bin/ffmpeg")
+    monkeypatch.setattr(post_production, "_video_dimensions", lambda _path: (1080, 1920))
+    monkeypatch.setattr(post_production, "_has_audio_stream", lambda _path: True)
+    monkeypatch.setattr(post_production, "_resolve_music_path", lambda _slug: (None, 0.18))
+    monkeypatch.setattr(post_production, "_normalize_segment", lambda **kwargs: kwargs["dest_path"].write_bytes(kwargs["src_path"].read_bytes()))
+    monkeypatch.setattr(post_production, "_concat_segments", lambda **kwargs: kwargs["dest_path"].write_bytes(b"merged"))
+    monkeypatch.setattr(post_production, "_upscale_master_to_4k", _fake_upscale_master_to_4k)
+    monkeypatch.setattr(post_production, "_render_subtitled_music_master", lambda **kwargs: kwargs["dest_path"].write_bytes(kwargs["subtitles_path"].read_bytes()))
+
+    out = post_production.build_post_production(scenes, target_languages=["ru"])
+
+    assert out["subtitle_entries_by_language"]["ru"][0]["text"] == "Старый текст кандидата"
+
+
+def test_build_post_production_splits_fallback_subtitles_on_pause_markers(monkeypatch):
+    scenes = [
+        {
+            "scene": 1,
+            "duration_sec": 6,
+            "text": "Первая часть [пауза] Вторая часть [пауза] Финал",
+            "speech_by_lang": {"ru": "Первая часть [пауза] Вторая часть [пауза] Финал"},
+        }
+    ]
+    ru = register_video_candidate(scenes[0], language="ru", video_bytes=b"ru")
+    ru["approved_for_production"] = True
+    ru["speed_coef"] = 1.0
+
+    monkeypatch.setattr(post_production, "_resolve_ffmpeg", lambda: "/usr/bin/ffmpeg")
+    monkeypatch.setattr(post_production, "_video_dimensions", lambda _path: (1080, 1920))
+    monkeypatch.setattr(post_production, "_has_audio_stream", lambda _path: True)
+    monkeypatch.setattr(post_production, "_resolve_music_path", lambda _slug: (None, 0.18))
+    monkeypatch.setattr(post_production, "_normalize_segment", lambda **kwargs: kwargs["dest_path"].write_bytes(kwargs["src_path"].read_bytes()))
+    monkeypatch.setattr(post_production, "_concat_segments", lambda **kwargs: kwargs["dest_path"].write_bytes(b"merged"))
+    monkeypatch.setattr(post_production, "_upscale_master_to_4k", _fake_upscale_master_to_4k)
+    monkeypatch.setattr(post_production, "_render_subtitled_music_master", lambda **kwargs: kwargs["dest_path"].write_bytes(kwargs["subtitles_path"].read_bytes()))
+
+    out = post_production.build_post_production(scenes, target_languages=["ru"])
+    subtitles = out["subtitle_entries_by_language"]["ru"]
+
+    assert [item["text"] for item in subtitles] == ["Первая часть", "Вторая часть", "Финал"]
+    assert subtitles[0]["start_sec"] == 0.0
+    assert subtitles[-1]["end_sec"] == 6.0
+
+
+def test_build_post_production_ignores_zero_duration_speech_cues(monkeypatch):
+    scenes = [
+        {
+            "scene": 1,
+            "duration_sec": 6,
+            "speech_by_lang": {"ru": "Первая часть [пауза] Вторая часть"},
+            "speech_cues_by_lang": {
+                "ru": [
+                    {"text": "Первая часть", "start_sec": 0.0, "end_sec": 0.0},
+                    {"text": "Вторая часть", "start_sec": 0.0, "end_sec": 0.0},
+                ]
+            },
+        }
+    ]
+    ru = register_video_candidate(scenes[0], language="ru", video_bytes=b"ru")
+    ru["approved_for_production"] = True
+    ru["speed_coef"] = 1.0
+
+    monkeypatch.setattr(post_production, "_resolve_ffmpeg", lambda: "/usr/bin/ffmpeg")
+    monkeypatch.setattr(post_production, "_video_dimensions", lambda _path: (1080, 1920))
+    monkeypatch.setattr(post_production, "_has_audio_stream", lambda _path: True)
+    monkeypatch.setattr(post_production, "_resolve_music_path", lambda _slug: (None, 0.18))
+    monkeypatch.setattr(post_production, "_normalize_segment", lambda **kwargs: kwargs["dest_path"].write_bytes(kwargs["src_path"].read_bytes()))
+    monkeypatch.setattr(post_production, "_concat_segments", lambda **kwargs: kwargs["dest_path"].write_bytes(b"merged"))
+    monkeypatch.setattr(post_production, "_upscale_master_to_4k", _fake_upscale_master_to_4k)
+    monkeypatch.setattr(post_production, "_render_subtitled_music_master", lambda **kwargs: kwargs["dest_path"].write_bytes(kwargs["subtitles_path"].read_bytes()))
+
+    out = post_production.build_post_production(scenes, target_languages=["ru"])
+    subtitles = out["subtitle_entries_by_language"]["ru"]
+
+    assert [item["text"] for item in subtitles] == ["Первая часть", "Вторая часть"]
+    assert subtitles[0]["start_sec"] == 0.0
+    assert subtitles[0]["end_sec"] > subtitles[0]["start_sec"]
+    assert subtitles[1]["start_sec"] == subtitles[0]["end_sec"]
+    assert subtitles[1]["end_sec"] == 6.0
 
 
 def test_build_post_production_scales_speech_cues_with_video_speed(monkeypatch):

@@ -13,6 +13,7 @@ PROJECT_ROOT = BASE_DIR.parent
 sys.path.insert(0, str(PROJECT_ROOT))
 
 from app.env_utils import load_env_file
+from app.db import database_url_is_test_safe, running_under_pytest
 
 load_env_file()
 
@@ -27,6 +28,7 @@ INSTALLED_APPS = [
     "django.contrib.messages",
     "django.contrib.sessions",
     "django.contrib.staticfiles",
+    "django_celery_beat",
     "pipeline_admin",
 ]
 
@@ -63,6 +65,11 @@ TEMPLATES = [
 
 def _database_from_url() -> dict[str, str]:
     raw = os.getenv("DATABASE_URL", "").strip()
+    if raw and running_under_pytest() and not database_url_is_test_safe(raw):
+        return {
+            "ENGINE": "django.db.backends.sqlite3",
+            "NAME": os.getenv("CONTENT_FABRIC_PYTEST_DJANGO_DB", str(PROJECT_ROOT / "runtime" / "pytest_django.sqlite3")),
+        }
     if not raw:
         return {
             "ENGINE": "django.db.backends.sqlite3",
@@ -90,3 +97,30 @@ def _database_from_url() -> dict[str, str]:
 
 
 DATABASES = {"default": _database_from_url()}
+
+CELERY_BROKER_URL = os.getenv("CELERY_BROKER_URL", "redis://127.0.0.1:6379/0")
+CELERY_RESULT_BACKEND = os.getenv("CELERY_RESULT_BACKEND", CELERY_BROKER_URL)
+CELERY_TASK_IGNORE_RESULT = os.getenv("CELERY_TASK_IGNORE_RESULT", "1") == "1"
+CELERY_TIMEZONE = os.getenv("CELERY_TIMEZONE", "Europe/Moscow")
+CELERY_BROKER_CONNECTION_TIMEOUT = float(os.getenv("CELERY_BROKER_CONNECTION_TIMEOUT", "5"))
+CELERY_BROKER_TRANSPORT_OPTIONS = {
+    "socket_connect_timeout": CELERY_BROKER_CONNECTION_TIMEOUT,
+    "socket_timeout": CELERY_BROKER_CONNECTION_TIMEOUT,
+}
+CELERY_BEAT_SCHEDULER = os.getenv(
+    "CELERY_BEAT_SCHEDULER",
+    "django_celery_beat.schedulers:DatabaseScheduler",
+)
+
+try:
+    from celery.schedules import crontab
+except Exception:
+    CELERY_BEAT_SCHEDULE = {}
+else:
+    CELERY_BEAT_SCHEDULE = {
+        "scheduled-generation-nightly-0300": {
+            "task": "pipeline_admin.process_due_scheduled_generations",
+            "schedule": crontab(hour=3, minute=0),
+            "kwargs": {"limit": int(os.getenv("SCHEDULED_GENERATION_NIGHTLY_LIMIT", "0") or 0)},
+        }
+    }

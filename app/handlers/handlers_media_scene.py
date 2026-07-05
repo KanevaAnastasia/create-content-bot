@@ -14,7 +14,7 @@ from telegram import ReplyKeyboardMarkup, Update
 from ..assets import ASSETS
 from ..character_catalog import character_identity_lines, format_character_short_descriptions, sanitize_character_names_and_keys
 from ..constants import STATE_READY_FOR_PRODUCTION
-from .handlers_keyboards import safe_reply_photo, safe_reply_text
+from .handlers_keyboards import DRAFT_BUTTON_SAVE, safe_reply_photo, safe_reply_text
 from .handlers_media_core import (
     _decode_b64,
     _image_end_scene_prompt,
@@ -64,6 +64,7 @@ def _reply_markup_with_rows(*rows: list[str]) -> ReplyKeyboardMarkup:
         SCENE_MEDIA_STOP_BUTTON,
     }
     keyboard = [[item] for row in rows for item in row if item and item not in mode_buttons]
+    keyboard.append([DRAFT_BUTTON_SAVE])
     keyboard.append([NAV_BUTTON_PREVIOUS_STEP])
     keyboard.append([NAV_BUTTON_START_OVER])
     for row in rows:
@@ -88,6 +89,10 @@ def _scene_media_mode_row(session: dict | None) -> list[str]:
     ):
         return [SCENE_MEDIA_STOP_BUTTON]
     return [SCENE_MEDIA_AUTO_APPROVE_BUTTON, SCENE_MEDIA_AI_APPROVE_BUTTON]
+
+
+def _scene_media_stop_visible(session: dict | None) -> bool:
+    return _scene_media_mode_row(session) == [SCENE_MEDIA_STOP_BUTTON]
 
 
 def scene_image_approval_markup(*, session: dict | None = None) -> ReplyKeyboardMarkup:
@@ -190,7 +195,7 @@ def scene_language_approval_markup(languages: list[str], *, session: dict | None
     return _reply_markup_with_rows(*rows)
 
 
-def video_policy_retry_markup(*, include_restart_hint: bool) -> ReplyKeyboardMarkup:
+def video_policy_retry_markup(*, include_restart_hint: bool, session: dict | None = None) -> ReplyKeyboardMarkup:
     """Кнопки для policy-retry video prompt."""
     rows = [
         ["ОК"],
@@ -200,6 +205,8 @@ def video_policy_retry_markup(*, include_restart_hint: bool) -> ReplyKeyboardMar
     ]
     if include_restart_hint:
         rows.append(["старт заново"])
+    if _scene_media_stop_visible(session):
+        rows.append([SCENE_MEDIA_STOP_BUTTON])
     return _reply_markup_with_rows(*rows)
 
 
@@ -797,7 +804,6 @@ _END_IMAGE_PROMPT_REFERENCE_KEYS = ("end_frame_prompt", "end_frame_prompt_ru", "
 _CHARACTER_PROMPT_ALIASES: dict[str, tuple[str, ...]] = {
     "zaya": ("зая", "заю", "заи", "белая кошка", "белая кошечка"),
     "markiz": ("маркиз", "маркиза", "черно-белый кот", "чёрно-белый кот"),
-    "dog": ("пёс", "пес"),
 }
 _CHARACTER_PROMPT_PATTERNS: dict[str, tuple[str, ...]] = {
     "grandma": (r"\bбабушк\w*",),
@@ -806,7 +812,7 @@ _CHARACTER_PROMPT_PATTERNS: dict[str, tuple[str, ...]] = {
     "grandson": (r"\bвнук(?:а|у|ом|е)?\b",),
     "grandfather": (r"\bдедушк\w*",),
     "daughter": (r"\bдочь\b", r"\bдоч(?:ка|ку|ке|кой|ери|ерью)\b"),
-    "dog": (r"\bсобак\w*",),
+    "dog": (r"\bсобак\w*", r"\bп(?:ё|е)с\b"),
 }
 
 
@@ -819,7 +825,7 @@ def _prompt_mentions_character(character_key: str, prompt_blob: str) -> bool:
         return True
     if any(re.search(pattern, text, flags=re.IGNORECASE) for pattern in _CHARACTER_PROMPT_PATTERNS.get(ch_norm, ())):
         return True
-    return any(alias in text for alias in _CHARACTER_PROMPT_ALIASES.get(ch_norm, ()))
+    return any(re.search(rf"(?<!\w){re.escape(alias)}(?!\w)", text) for alias in _CHARACTER_PROMPT_ALIASES.get(ch_norm, ()))
 
 
 def _scene_prompt_blob(scene: dict, prompt_keys: tuple[str, ...] | None = None) -> str:
