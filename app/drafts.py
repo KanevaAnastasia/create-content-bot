@@ -224,6 +224,21 @@ def clear_scene_for_repair(scene: dict[str, Any], *, stage: str, languages: list
         ):
             scene.pop(key, None)
     if normalized_stage in {DRAFT_STAGE_PROMPT, DRAFT_STAGE_IMAGE, DRAFT_STAGE_VIDEO}:
+        for key in (
+            "video_provider_choice_pending",
+            "syntax_fallback_pending",
+            "video_prompt_policy_candidate",
+            "video_prompt_policy_failure_count",
+        ):
+            scene.pop(key, None)
+        policy_candidates = scene.get("video_prompt_policy_candidate_by_lang")
+        if isinstance(policy_candidates, dict):
+            for lang in normalized_languages:
+                policy_candidates.pop(lang, None)
+            if policy_candidates:
+                scene["video_prompt_policy_candidate_by_lang"] = policy_candidates
+            else:
+                scene.pop("video_prompt_policy_candidate_by_lang", None)
         ignored_restored_candidates = scene.get(DRAFT_REPAIR_IGNORE_RESTORED_VIDEO_CANDIDATES_KEY)
         if not isinstance(ignored_restored_candidates, dict):
             ignored_restored_candidates = {}

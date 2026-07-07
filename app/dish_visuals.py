@@ -7,6 +7,17 @@ import re
 
 _KNOWN_DISH_VISUAL_BRIEFS: tuple[tuple[re.Pattern[str], str], ...] = (
     (
+        re.compile(r"\b(чак[\s-]*чак|chak[\s-]*chak|chakchak)\b", re.IGNORECASE),
+        (
+            "Чак-чак / chak-chak: a Tatar/Bashkir honey dessert made from many small, irregular "
+            "solid pieces or short uneven strips of deep-fried dough bound together with glossy honey "
+            "syrup into a mound or compact pile. The pieces are golden yellow to golden brown, shiny, "
+            "slightly porous on the fried surface, and visibly stuck together by honey. Reject substitutes "
+            "where the piece shape, ingredient structure, surface texture, or serving form does not match "
+            "authentic honey-bound fried dough."
+        ),
+    ),
+    (
         re.compile(r"\b(baursak|baursaki|баурсак|баурсаки|баурсаки)\b", re.IGNORECASE),
         (
             "Баурсаки / baursaki: small puffy pieces of deep-fried dough, usually irregular "
@@ -33,6 +44,20 @@ _INGREDIENT_FIDELITY_RULE = (
     "they are common in some variants of the dish."
 )
 
+_CANONICAL_APPEARANCE_RULE = (
+    "Before judging or generating any food frame, identify the dish's canonical real-world appearance "
+    "from the dish name, recipe, cooking method, and culinary knowledge: expected shape, size, color, "
+    "surface texture, interior/crumb/cut view if relevant, sauce/broth state, plating/serving form, "
+    "and how the listed ingredients normally look after this step. Use that canonical appearance as "
+    "the visual target; if the dish is unfamiliar, do not replace it with a generic nearby food."
+)
+
+_FRAMING_FIDELITY_RULE = (
+    "The main food must be framed so its shape, texture, and ingredient state are readable. Do not "
+    "crop off the main dish, key cut/open face, or required food object so severely that the viewer "
+    "or QA model cannot verify the dish."
+)
+
 
 def build_dish_visual_brief(title: str | None, recipe_text: str | None) -> str:
     """Return a compact real-world visual target for image prompts and AI approval."""
@@ -42,7 +67,7 @@ def build_dish_visual_brief(title: str | None, recipe_text: str | None) -> str:
     haystack = f"{title_text}\n{recipe}"
     for pattern, brief in _KNOWN_DISH_VISUAL_BRIEFS:
         if pattern.search(haystack):
-            return f"{brief} {_INGREDIENT_FIDELITY_RULE}"
+            return f"{brief} {_CANONICAL_APPEARANCE_RULE} {_INGREDIENT_FIDELITY_RULE} {_FRAMING_FIDELITY_RULE}"
 
     ingredients_hint = ""
     for marker in ("ингредиент", "ingredients", "состав"):
@@ -62,7 +87,7 @@ def build_dish_visual_brief(title: str | None, recipe_text: str | None) -> str:
         "similar-looking food; describe the likely authentic appearance explicitly. Do not add visible "
         "ingredients or garnishes that are not supported by the recipe text or explicit user request; "
         "reject frames that look like an unrelated dish or include invented ingredients. Recipe visual clues: "
-        f"{ingredients_hint or '-'} {_INGREDIENT_FIDELITY_RULE}"
+        f"{ingredients_hint or '-'} {_CANONICAL_APPEARANCE_RULE} {_INGREDIENT_FIDELITY_RULE} {_FRAMING_FIDELITY_RULE}"
     )
 
 
@@ -81,5 +106,6 @@ def append_dish_visual_brief_to_prompt(prompt: str, dish_visual_brief: str | Non
         "dish requirements exactly. If this frame shows an intermediate recipe step, show the correct current "
         "ingredient/process state and make it visually consistent with this dish; do not replace it with a generic "
         "or unrelated food. Do not add visible ingredients or garnishes that are absent from the recipe text, "
-        "user request, or these dish requirements."
+        "user request, or these dish requirements. Keep the main dish or key food object sufficiently inside "
+        "the frame so its shape, texture, and ingredient state are verifiable; avoid severe crop of the food."
     ).strip()

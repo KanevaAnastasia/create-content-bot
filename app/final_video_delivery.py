@@ -28,6 +28,8 @@ FINAL_VIDEO_ARTIFACT_TYPES = {
     "final_subtitled_music",
     "final_titled_subtitled_music",
 }
+FINAL_BUILD_STATUS_ARTIFACT_TYPE = "final_build_status"
+FINAL_PUBLICATION_READY_VARIANT = "titled_subtitled_music"
 FINAL_SOCIAL_DESCRIPTIONS_TRIGGER_KEY = "final_social_descriptions_triggered_at"
 TELEGRAM_CLOUD_UPLOAD_LIMIT_BYTES = 49 * 1024 * 1024
 TELEGRAM_DELIVERY_ARTIFACT_DIR = Path(__file__).resolve().parents[1] / "artifacts" / "telegram_delivery"
@@ -484,7 +486,7 @@ def deliver_final_artifact_to_telegram(
 def all_final_artifacts_delivered(run_id: str | uuid.UUID) -> bool:
     run_uuid = uuid.UUID(str(run_id))
     with SessionLocal() as db:
-        rows = (
+        artifact_rows = (
             db.execute(
                 select(GenerationArtifact).where(
                     GenerationArtifact.run_id == run_uuid,
@@ -496,10 +498,49 @@ def all_final_artifacts_delivered(run_id: str | uuid.UUID) -> bool:
             .scalars()
             .all()
         )
+        status_rows = (
+            db.execute(
+                select(GenerationArtifact).where(
+                    GenerationArtifact.run_id == run_uuid,
+                    GenerationArtifact.artifact_type == FINAL_BUILD_STATUS_ARTIFACT_TYPE,
+                )
+                .order_by(GenerationArtifact.created_at.desc())
+            )
+            .scalars()
+            .all()
+        )
     latest_rows_by_track: dict[tuple[str, str], GenerationArtifact] = {}
-    for row in rows:
+    artifact_rows_by_id = {str(row.id): row for row in artifact_rows}
+    for row in artifact_rows:
         key = (str(row.language or "").strip().lower(), row.artifact_type)
         latest_rows_by_track.setdefault(key, row)
+    latest_statuses_by_track: dict[tuple[str, str], dict[str, Any]] = {}
+    for row in status_rows:
+        payload = row.payload_json if isinstance(row.payload_json, dict) else {}
+        language = str(payload.get("language") or row.language or "").strip().lower()
+        variant = str(payload.get("variant") or "").strip()
+        if not language or not variant:
+            continue
+        latest_statuses_by_track.setdefault((language, variant), dict(payload))
+    if latest_statuses_by_track:
+        if not any(variant == FINAL_PUBLICATION_READY_VARIANT for _language, variant in latest_statuses_by_track):
+            return False
+        for (language, variant), status in latest_statuses_by_track.items():
+            if str(status.get("status") or "").strip().lower() != "success":
+                return False
+            artifact = None
+            artifact_id = str(status.get("artifact_id") or "").strip()
+            if artifact_id:
+                artifact = artifact_rows_by_id.get(artifact_id)
+            if artifact is None:
+                artifact = latest_rows_by_track.get((language, f"final_{variant}"))
+            if artifact is None:
+                return False
+            payload = artifact.payload_json if isinstance(artifact.payload_json, dict) else {}
+            delivery = payload.get(FINAL_DELIVERY_KEY) if isinstance(payload, dict) else None
+            if not isinstance(delivery, dict) or str(delivery.get("status") or "").strip().lower() != "sent":
+                return False
+        return True
     latest_rows = list(latest_rows_by_track.values())
     if not latest_rows:
         return False

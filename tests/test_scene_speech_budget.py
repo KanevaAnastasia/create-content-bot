@@ -25,8 +25,12 @@ def test_normalize_speech_phrase_for_voice_removes_dashes() -> None:
     assert normalize_speech_phrase_for_voice("по-домашнему – мягко") == "по домашнему мягко"
 
 
+def test_normalize_speech_phrase_for_voice_does_not_rewrite_yo_letters() -> None:
+    assert normalize_speech_phrase_for_voice("все берёт ещё нежный") == "все берёт ещё нежный"
+
+
 def test_max_speech_chars_for_duration() -> None:
-    assert max_speech_chars_for_duration(8) == 112
+    assert max_speech_chars_for_duration(8) == 125
     assert max_speech_chars_for_duration(6) == 84
     assert max_speech_chars_for_duration(6, "en") == 66
 

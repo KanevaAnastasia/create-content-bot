@@ -275,12 +275,144 @@ SEVERE_AI_APPROVAL_REASON_PATTERNS: tuple[str, ...] = (
     "mismatch with the prompt",
     "wrong character",
     "wrong cat",
+    "extra cat",
+    "same cat appears twice",
+    "same cat appears two times",
+    "same cat is duplicated",
+    "same-looking cat",
+    "same looking cat",
+    "identical cats",
+    "duplicate cat",
+    "duplicated cat",
+    "duplicate cats",
+    "duplicated cats",
+    "clone cat",
+    "cloned cat",
+    "cat clone",
+    "cat clones",
+    "two identical cats",
+    "multiple identical cats",
+    "same identity cat",
+    "same-identity cat",
+    "wrong art style",
+    "style mismatch",
+    "different style",
+    "changed illustration style",
+    "does not match reference style",
+    "not match reference style",
+    "storybook style",
+    "children's book style",
+    "childrens book style",
+    "disney-like",
+    "pixar-like",
+    "anime style",
+    "watercolor style",
+    "oil painting style",
+    "generic cute cartoon",
+    "different-looking character",
+    "different-looking grandma",
     "wrong color",
     "wrong coat",
     "wrong food",
+    "two orange cats",
+    "two white cats",
+    "two black-and-white cats",
+    "two black and white cats",
+    "duplicated orange cats",
+    "duplicated white cats",
+    "duplicated black-and-white cats",
+    "duplicate orange cat",
+    "duplicate white cat",
+    "duplicate black-and-white cat",
+    "same cat identity",
+    "same coat identity",
+    "wrong pronunciation",
+    "mispronounced",
+    "mispronunciation",
+    "incorrect pronunciation",
+    "unnatural pronunciation",
+    "pronunciation issue",
+    "wrong stress",
+    "incorrect stress",
+    "misstressed",
+    "wrong word stress",
+    "stress error",
+    "rising intonation",
+    "question-like intonation",
+    "missing spoken words",
+    "extra spoken words",
+    "speech does not match",
+    "speech mismatch",
+    "clipped speech",
+    "cut off speech",
+    "cut-off speech",
+    "swallowed syllables",
+    "swallowed endings",
+    "wrong main dish",
+    "wrong dish",
+    "unrelated dish",
+    "generic substitute",
+    "dish visual mismatch",
+    "canonical dish mismatch",
+    "wrong ingredient geometry",
+    "wrong ingredient structure",
+    "wrong food structure",
+    "wrong food texture",
+    "wrong serving form",
+    "wrong dish structure",
+    "wrong dish texture",
+    "incorrect ingredient form",
+    "incorrect serving form",
+    "cropped food",
+    "food cropped",
+    "dish cropped",
+    "cropped dish",
+    "severely cropped",
+    "cut off dish",
+    "cut-off dish",
+    "cut off food",
+    "cut-off food",
     "missing required",
     "missing grandmother",
     "missing grandma",
+    "missing grandma face",
+    "missing grandmother face",
+    "grandma's face is not visible",
+    "grandmother's face is not visible",
+    "grandma face is not visible",
+    "grandmother face is not visible",
+    "grandma face not visible",
+    "grandmother face not visible",
+    "grandma's face not visible",
+    "grandmother's face not visible",
+    "no visible grandma face",
+    "no visible grandmother face",
+    "grandma has no visible face",
+    "grandmother has no visible face",
+    "only grandma's hand",
+    "only grandma's hands",
+    "only grandmother's hand",
+    "only grandmother's hands",
+    "only grandma's arm",
+    "only grandmother's arm",
+    "only the grandma's hand",
+    "only the grandmother's hand",
+    "only the grandma's hands",
+    "only the grandmother's hands",
+    "grandma's hand is visible but her face is not",
+    "grandmother's hand is visible but her face is not",
+    "cropped grandma face",
+    "grandma face cropped",
+    "cropped grandmother face",
+    "grandmother face cropped",
+    "cropped head",
+    "head cropped",
+    "face cut off",
+    "cut off face",
+    "head cut off",
+    "cut off head",
+    "face is cropped",
+    "head is cropped",
     "missing cat",
     "extra character",
     "not described in the prompt",
@@ -307,7 +439,49 @@ SEVERE_AI_APPROVAL_REASON_PATTERNS: tuple[str, ...] = (
     "лишний персонаж",
     "лишняя кошка",
     "лишний кот",
+    "два рыжих кот",
+    "две рыжие кош",
+    "два белых кот",
+    "две белые кош",
+    "два черно-белых кот",
+    "два чёрно-белых кот",
+    "две черно-белые кош",
+    "две чёрно-белые кош",
+    "дубликат кот",
+    "дубли кот",
+    "повтор того же кот",
+    "одинаковые кот",
+    "одинаковые кош",
+    "тот же кот",
+    "та же кош",
+    "клон кот",
+    "клон кош",
+    "склонированный кот",
+    "неверное произношение",
+    "неправильное произношение",
+    "искаженное произношение",
+    "искажённое произношение",
+    "неверное ударение",
+    "неправильное ударение",
+    "ударение не туда",
+    "лишние слова",
+    "пропущенные слова",
+    "обрыв речи",
+    "речь обрывается",
+    "вопросительная интонация",
+    "восходящая интонация",
     "нет бабушки",
+    "нет лица бабушки",
+    "лицо бабушки не видно",
+    "не видно лица бабушки",
+    "лица бабушки не видно",
+    "бабушкино лицо не видно",
+    "видна только рука бабушки",
+    "видны только руки бабушки",
+    "видна лишь рука бабушки",
+    "видны лишь руки бабушки",
+    "видна только часть бабушки",
+    "видно только тело бабушки",
     "нет кота",
     "не видно бабушку",
     "не видно кота",
@@ -316,9 +490,31 @@ SEVERE_AI_APPROVAL_REASON_PATTERNS: tuple[str, ...] = (
     "крошечная бабушка",
     "неправильный цвет",
     "неправильный окрас",
+    "не тот стиль",
+    "другой стиль",
+    "не совпадает со стилем",
+    "не совпадает с референс",
+    "стиль сказочной",
+    "книжная иллюстрация",
+    "диснеевский",
+    "пиксаровский",
+    "аниме",
+    "акварельный стиль",
+    "другая бабушка",
+    "другое лицо",
     "субтитры",
     "водяной знак",
     "фотореализм",
+    "не то блюдо",
+    "другое блюдо",
+    "похожее блюдо",
+    "общее блюдо",
+    "блюдо обрезано",
+    "еда обрезана",
+    "сильно обрезан",
+    "сильно обрезана",
+    "обрезан кадром",
+    "обрезана кадром",
 )
 
 
@@ -327,6 +523,73 @@ def _looks_like_severe_ai_approval_reason(text: str) -> bool:
     if not low:
         return False
     return any(pattern in low for pattern in SEVERE_AI_APPROVAL_REASON_PATTERNS)
+
+
+GRANDMA_FACE_VISIBILITY_FAIL_PATTERNS: tuple[str, ...] = (
+    "grandma's face is not visible",
+    "grandmother's face is not visible",
+    "grandma face is not visible",
+    "grandmother face is not visible",
+    "grandma face not visible",
+    "grandmother face not visible",
+    "grandma's face not visible",
+    "grandmother's face not visible",
+    "no visible grandma face",
+    "no visible grandmother face",
+    "grandma has no visible face",
+    "grandmother has no visible face",
+    "only grandma's hand",
+    "only grandma's hands",
+    "only grandmother's hand",
+    "only grandmother's hands",
+    "only grandma's arm",
+    "only grandmother's arm",
+    "grandma's hand is visible but her face is not",
+    "grandmother's hand is visible but her face is not",
+    "нет лица бабушки",
+    "лицо бабушки не видно",
+    "не видно лица бабушки",
+    "лица бабушки не видно",
+    "бабушкино лицо не видно",
+    "видна только рука бабушки",
+    "видны только руки бабушки",
+    "видна лишь рука бабушки",
+    "видны лишь руки бабушки",
+    "видна только часть бабушки",
+    "видно только тело бабушки",
+)
+
+
+def _looks_like_grandma_face_visibility_failure(text: str) -> bool:
+    low = " ".join(str(text or "").strip().lower().split())
+    if not low:
+        return False
+    return any(pattern in low for pattern in GRANDMA_FACE_VISIBILITY_FAIL_PATTERNS)
+
+
+def _video_hard_fail_reasons(data: dict[str, Any]) -> list[str]:
+    fields: list[Any] = [data.get("recommended_action")]
+    for key in (
+        "critical_issues",
+        "warnings",
+    ):
+        value = data.get(key)
+        if isinstance(value, list):
+            fields.extend(value)
+        elif value:
+            fields.append(value)
+    reasons = [str(item).strip() for item in fields if str(item).strip()]
+    hard_fails = [reason for reason in reasons if _looks_like_severe_ai_approval_reason(reason)]
+    speech_issue_labels = {
+        "speech_missing_words": "missing spoken words",
+        "speech_extra_words": "extra spoken words",
+        "speech_wrong_stress_words": "wrong word stress",
+    }
+    for key, label in speech_issue_labels.items():
+        values = _string_list(data.get(key))
+        if values:
+            hard_fails.append(f"{label}: {', '.join(values)}")
+    return hard_fails
 
 
 def normalize_ai_approval_result(
@@ -344,6 +607,14 @@ def normalize_ai_approval_result(
     positive_notes = _string_list(data.get("positive_notes"))
     recommended_action = str(data.get("recommended_action") or "").strip()
     severe_reasons = [item for item in [*warnings, recommended_action] if _looks_like_severe_ai_approval_reason(item)]
+    if stage in {"image", "video"}:
+        for reason in [*warnings, *positive_notes, recommended_action]:
+            if _looks_like_grandma_face_visibility_failure(reason) and reason not in severe_reasons:
+                severe_reasons.append(reason)
+    if stage == "video":
+        for reason in _video_hard_fail_reasons(data):
+            if reason not in severe_reasons:
+                severe_reasons.append(reason)
     for reason in severe_reasons:
         if reason not in critical:
             critical.append(reason)
@@ -662,6 +933,10 @@ def check_scene_prompts(
             "You are a strict QA agent for prompts before generating Grandma Kitchen cartoon media.\n\n"
             "Evaluate the START FRAME PROMPT, optional END FRAME PROMPT, and VIDEO PROMPT together.\n\n"
             "Hard prompt requirements:\n"
+            "- Before scoring, perform a culinary visual lookup from your own world knowledge: identify what the "
+            "named dish should look like in real life, then compare the prompts against that canonical appearance, "
+            "the recipe, and DISH VISUAL REQUIREMENTS. Put a short canonical appearance note in positive_notes or "
+            "warnings so the decision shows what you compared against.\n"
             "- If grandma is expected or mentioned, the prompts must clearly preserve her face, kind expression, "
             "normal cartoon proportions, and canonical outfit from CHARACTER DESCRIPTIONS.\n"
             "- If grandma is expected or mentioned, start/end prompts must require her face to be visibly readable "
@@ -670,7 +945,10 @@ def check_scene_prompts(
             "- If a cat is expected or mentioned, the prompts must name/preserve the correct cat identity and coat color. "
             "Do not approve if the orange cat becomes gray/brown/black, the white cat gains dark spots/stripes, or the black-and-white cat loses the "
             "black-and-white pattern described in CHARACTER DESCRIPTIONS.\n"
-            "- If the orange cat is expected or mentioned, prompts must not allow two orange cats or duplicated orange-cat identity.\n"
+            "- Cat identity count: prompts may include several cats only when they are different expected identities. "
+            "Never allow duplicate same-identity cats: no two orange cats, no two white cats, no two black-and-white cats, "
+            "no kittens/silhouettes/mirrored copies that duplicate an expected cat. If multiple cats appear, each must have "
+            "a distinct expected coat/identity.\n"
             "- Every human or animal character must stay visibly cartoon/stylized, never photorealistic or live-action.\n"
             "- Any expected character must keep normal relative scale: no giant cat, no tiny grandma, no character "
             "that becomes toy-sized or oversized unless explicitly intended.\n"
@@ -686,6 +964,8 @@ def check_scene_prompts(
             "ingredient form, and serving style. If it shows an intermediate recipe step, it must accurately "
             "show the current ingredient/process state and remain visually consistent with the dish; do not "
             "require the finished dish to appear in every preparation frame.\n"
+            "- Frame prompts must keep the main food readable enough to verify the dish: do not allow severe crop "
+            "of the finished dish, cut/open face, or key food object when that object is the focus of the frame.\n"
             "- Do NOT flag an intermediate preparation prompt merely because it does not show or anchor the "
             "cooked/final dish. Apply the finished-dish visual requirement only when the prompt asks for the "
             "finished dish, cooked dish, plated/served dish, or payoff frame.\n"
@@ -701,13 +981,15 @@ def check_scene_prompts(
             "- grandma is shown only from behind, cropped away, hidden, tiny, faceless, or substituted by a different woman\n"
             "- missing required cat when a cat is expected\n"
             "- wrong cat color or wrong cat identity versus CHARACTER DESCRIPTIONS\n"
-            "- duplicate orange cat or two orange cats when only the orange cat identity is expected\n"
+            "- duplicate same-identity cat: two orange cats, two white cats, two black-and-white cats, mirrored cat copies, "
+            "or unnamed extra cats with the same coat/identity as an expected cat\n"
             "- realistic, photorealistic, or live-action character style instead of cartoon\n"
             "- cooking pot/pan/cauldron is not on a visible stovetop burner/hob\n"
             "- unsupported visible ingredient, side, topping, sauce, or garnish not present in the recipe/request/brief\n"
             "- scene 1 VIDEO PROMPT speech does not explicitly say the dish name after CHARACTERS SPEAKS\n"
             "- video prompt uses ingredients/tableware/props absent from the start frame prompt\n"
             "- final/payoff start frame prompt does not anchor the finished dish to DISH VISUAL REQUIREMENTS\n"
+            "- start/end frame prompt allows the main dish or required food object to be severely cropped or unreadable\n"
             "- intermediate preparation prompt is incorrectly treated as a final/payoff dish frame\n"
             "- intermediate preparation prompt shows an unrelated food/process instead of the current recipe state\n"
             "- start/end frame prompts do not preserve character identity from references\n"
@@ -789,13 +1071,21 @@ def check_start_frame(
         prompt = (
             "You are a strict QA agent for AI-generated cartoon cooking videos.\n\n"
             f"Your task is to compare the expected scene prompt with the provided {frame_kind} frame image.\n\n"
+            "Attached image order:\n"
+            "- Image 1 is the generated candidate frame to approve or reject.\n"
+            "- All following images, when present, are mandatory character/style reference images. Use them as visual evidence, "
+            "not optional inspiration. Compare faces, proportions, costume details, coat colors, cat markings, lighting, "
+            "palette, softness, and rendering style against these references before deciding.\n"
+            "- If the candidate frame does not clearly preserve the referenced character identities or project style, return "
+            "REGENERATE_IMAGE even if the scene composition is otherwise attractive.\n\n"
             "The video style must be:\n"
             "- colorful cartoon style\n"
             "- soft stylized shading\n"
             "- non realistic rendering\n"
             "- no photorealism\n"
             "- warm cozy lighting\n"
-            "- cozy grandmother cooking atmosphere\n\n"
+            "- cozy grandmother cooking atmosphere\n"
+            "- exact visual continuity with attached character/reference images when references are provided\n\n"
             "Evaluate:\n"
             "1. Scene match\n"
             "2. Character consistency\n"
@@ -805,7 +1095,24 @@ def check_start_frame(
             "6. Absence of subtitles, captions, typography, watermarks, and any visible text\n"
             "7. Whether the frame is a single continuous camera shot, not a collage, split-screen, stitched panel, "
             "or image with a horizontal/vertical seam\n"
-            "8. Whether the frame is suitable as a start frame for a short cooking video\n\n"
+            "8. Whether the frame is suitable as a start frame for a short cooking video\n"
+            "9. Whether the art style, line quality, shading, palette, character face design, costume rendering, "
+            "and cat design match the attached reference images/project style, not merely any cartoon style\n\n"
+            "Canonical dish lookup:\n"
+            "- Before scoring the image, identify from your own culinary/world knowledge what the named dish should "
+            "look like in real life. Use the recipe and DISH VISUAL REQUIREMENTS to resolve the exact variant.\n"
+            "- Compare the attached frame against that canonical target: food shape, size, color, surface texture, "
+            "interior/cut view if relevant, sauce/broth state, ingredient forms, and serving/process state.\n"
+            "- Reject if the visible food uses the wrong ingredient geometry, piece size, surface texture, internal "
+            "structure, sauce/binding state, or serving form for the named dish, even when the colors look appetizing.\n"
+            "- Add a short note about the canonical appearance you used to positive_notes or warnings. If you are "
+            "not confident enough to identify the dish, use HUMAN_REVIEW rather than APPROVE.\n\n"
+            "Reference-image verification:\n"
+            "- Explicitly compare the candidate frame to each attached reference image that is relevant to the scene.\n"
+            "- In positive_notes or warnings, mention that you checked the reference style/identity. If there is a mismatch, "
+            "describe it as a critical issue.\n"
+            "- Do not approve merely because the candidate is polished, cute, or high quality. A polished frame with the "
+            "wrong reference style, wrong face/costume, wrong cat markings, or wrong dish is still REGENERATE_IMAGE.\n\n"
             "Viral retention checks:\n"
             "- the first frame is immediately understandable\n"
             "- the first scene is not boring preparation if a result/payoff frame is expected\n"
@@ -816,11 +1123,18 @@ def check_start_frame(
             "- grandmother looks kind and friendly\n"
             "- if grandma is expected, her face is clearly visible and readable from the front or three-quarter view, "
             "not back-only, cropped out, hidden, tiny, faceless, or replaced by a different woman\n"
+            "- if grandma appears in the frame, her full face and head must stay inside the frame: eyes, nose, mouth, "
+            "chin, and head covering cannot be cut by the top or side edge\n"
             "- cat looks cute, not scary\n"
             "- grandma and every cat/character match their reference identity and CHARACTER DESCRIPTIONS\n"
-            "- there is no duplicated orange cat; only one orange cat identity appears unless the prompt explicitly asks otherwise\n"
+            "- art style matches the attached reference images/project style exactly; do not approve a different "
+            "storybook, Disney-like, Pixar-like, anime, watercolor, oil-painting, 3D-render, or generic cute-cartoon style\n"
+            "- there is no duplicated same-identity cat: no two orange cats, no two white cats, no two black-and-white cats; "
+            "multiple cats are acceptable only when they are distinct expected identities with distinct coats\n"
             "- any pot, saucepan, cauldron, frying pan, or skillet that is cooking is on a visible stovetop burner/hob\n"
             "- no unsupported ingredient, side, topping, sauce, or garnish appears beyond the recipe/request/brief\n"
+            "- the main food is not severely cropped; the dish or key food object is inside the frame enough to "
+            "verify shape, texture, color, and ingredient state\n"
             "- character scale is normal: no giant cat, no tiny grandma, no toy-sized people unless explicitly intended\n"
             "- no text covers faces or food\n\n"
             "- the frame is one coherent uninterrupted image; reject split panels, collage layouts, stitched seams, "
@@ -832,21 +1146,30 @@ def check_start_frame(
             "- any on-screen text\n"
             "- watermark\n"
             "- photorealistic style\n"
+            "- wrong art style or style mismatch versus attached references/project style\n"
+            "- characters are drawn as a different storybook/Disney-like/generic cartoon design instead of the reference style\n"
             "- missing grandmother when required\n"
             "- missing readable grandma face when grandma is required\n"
             "- grandma is back-only, cropped, hidden, tiny, faceless, or replaced by a different woman\n"
+            "- grandma's face or head is cut off by the frame edge\n"
             "- wrong main dish\n"
+            "- dish visual mismatch: the visible food has the wrong ingredient geometry, piece size, surface texture, "
+            "internal structure, sauce/binding state, or serving form for the named dish\n"
             "- strongly distorted face\n"
             "- strongly distorted hands\n"
             "- missing required cat\n"
             "- cooked/final food shape/color/texture/serving does not match DISH VISUAL REQUIREMENTS\n"
             "- intermediate food/process state does not match the recipe step\n"
             "- wrong cat coat color or wrong cat identity versus CHARACTER DESCRIPTIONS\n"
-            "- duplicate orange cat or two orange cats when only one orange cat identity is expected\n"
+            "- duplicate same-identity cat: two orange cats, two white cats, two black-and-white cats, mirrored cat copies, "
+            "or unnamed extra cats with the same coat/identity as an expected cat\n"
             "- realistic, photorealistic, or live-action character style instead of cartoon\n"
             "- cooking pot/pan/cauldron is not on a visible stovetop burner/hob\n"
             "- unsupported visible ingredient, side, topping, sauce, or garnish not present in the recipe/request/brief\n"
+            "- main dish or required food object is severely cropped, cut off by frame edge, or unreadable for dish verification\n"
             "- character style changed heavily\n"
+            "- illustration style, palette, line quality, shading, face design, costume rendering, or cat design does not match references\n"
+            "- candidate frame was not compared to attached reference images, or references were ignored\n"
             "- any prompt-mentioned character does not match its description in CHARACTER DESCRIPTIONS\n"
             "- abnormal character scale such as a giant cat, tiny grandma, or oversized secondary character\n"
             "- split-screen, collage, stitched image, duplicated panel, or visible horizontal/vertical seam\n"
@@ -874,6 +1197,8 @@ def check_start_frame(
             "Check these items:\n"
             "1. The frame matches the expected scene and current recipe step.\n"
             "2. Required characters are present and keep the provided character identities.\n"
+            "   If grandma is expected, her readable face must be visible; a frame with only her hand, arm, body, "
+            "back, or cropped head is not production-ready.\n"
             "3. Food or ingredient state matches the recipe step and dish notes.\n"
             "4. The style is colorful cozy cartoon, not photographic.\n"
             "5. Anatomy, scale, faces, paws/hands, and composition look production-ready.\n"
@@ -881,6 +1206,8 @@ def check_start_frame(
             "7. There is no readable text, caption, logo, or watermark.\n\n"
             "If the frame is production-ready, status must be APPROVE. "
             "If a new frame is needed, status must be REGENERATE_IMAGE. "
+            "Hard fail as REGENERATE_IMAGE for missing readable grandma face when grandma is expected, "
+            "including only-hand/only-arm/only-body grandma crops. "
             "Use HUMAN_REVIEW only when the image cannot be evaluated.\n\n"
             "Return only valid JSON:\n"
             f"{_json_schema_text('image', 'APPROVE | REGENERATE_IMAGE | HUMAN_REVIEW')}\n\n"
@@ -1233,6 +1560,13 @@ def check_video(
             "- the real-world dish appearance in DISH VISUAL REQUIREMENTS\n"
             "- the previous character references if provided\n"
             "- the visual style requirements\n\n"
+            "Canonical dish lookup:\n"
+            "- Before scoring, identify from your own culinary/world knowledge what the named dish should look like "
+            "in real life. Use the recipe and DISH VISUAL REQUIREMENTS to resolve the exact variant.\n"
+            "- Compare sampled frames against that canonical target: food shape, size, color, surface texture, "
+            "interior/cut view if relevant, sauce/broth state, ingredient forms, and serving/process state.\n"
+            "- Add a short note about the canonical appearance you used to positive_notes or warnings. If the dish "
+            "cannot be identified confidently, use HUMAN_REVIEW rather than APPROVE.\n\n"
             "Important rules:\n"
             "- No subtitles\n"
             "- No captions\n"
@@ -1247,8 +1581,13 @@ def check_video(
             "- Do not approve back-only grandma shots, cropped/hidden/tiny/faceless grandma shots, or a different woman's face\n"
             "- Cat must stay consistent if present\n"
             "- Grandma, cat, and any other recurring characters must match the provided reference/start images and canonical identities\n"
+            "- Art style must match the provided reference/start images and project style. Do not approve a clip that "
+            "switches into a different storybook, Disney-like, Pixar-like, anime, watercolor, oil-painting, 3D-render, "
+            "or generic cute-cartoon look, even if it is still non-photorealistic.\n"
             "- Character scale must remain normal: no giant cat, tiny grandma, or accidental oversized/undersized character\n"
-            "- The orange cat identity must not be duplicated; do not approve two orange cats unless explicitly requested\n"
+            "- Cat identity count: multiple cats are acceptable only when they are distinct expected identities. "
+            "Do not approve duplicate same-identity cats: two orange cats, two white cats, two black-and-white cats, "
+            "mirrored copies, kittens, or unnamed extra cats with the same coat/identity as an expected cat\n"
             "- Do not approve duplicated white cats, two white cats, a white cat with long ears, rabbit-like ears, dog-like body, or wrong animal anatomy\n"
             "- Wrong cat color, wrong cat identity, or a cat that stops matching the canonical/start-frame character identity = REGENERATE_VIDEO\n"
             "- Do not approve a cat inside an oven, pot, saucepan, cauldron, frying pan, skillet, hot oil, boiling liquid, or on a stovetop burner/hob; the cat must stay safely outside cookware and heat sources\n"
@@ -1259,7 +1598,10 @@ def check_video(
             "- Do not approve unsupported visible ingredients, sides, toppings, sauces, or garnishes that are absent from the recipe/request/brief\n"
             "- Food must match the recipe step\n"
             "- Cooked/final food must still match DISH VISUAL REQUIREMENTS; intermediate recipe steps must match the current ingredient/process state and not drift into a generic or unrelated dish\n"
+            "- Do not approve if the main dish or required food object is severely cropped, cut off by the frame edge, "
+            "or unreadable for dish verification in the sampled frames where it is the focus\n"
             "- Major hand, face, mouth, or object deformation is a critical issue\n"
+            "- Wrong art style or style mismatch versus reference/start images is a critical issue\n"
             "- Missing, unreadable, hidden, back-only, cropped, or wrong grandma face is a critical issue\n"
             "- Split-screen, collage, stitched-panel, duplicated scene band, or visible seam artifacts are critical issues\n"
             "- If the scene includes lipsync, grandmother's mouth should appear naturally active during speech frames\n"
@@ -1309,11 +1651,12 @@ def check_video(
             "Check whether:\n"
             "1. The action matches the expected scene.\n"
             "2. The recurring characters stay consistent and cartoon-stylized.\n"
-            "3. The food/process state matches the recipe step and dish notes.\n"
-            "4. There is no readable text, logo, watermark, or photographic/live-action drift.\n"
-            "5. The clip has usable movement and no major visual artifacts.\n"
-            "6. If speech evidence is available, it matches EXPECTED SPEECH closely enough for the duration.\n\n"
-            "Hard fail as REGENERATE_VIDEO for visible text/logo/watermark/caption, photorealistic/live-action character drift, duplicated white cats, white cats with long/rabbit-like ears, wrong cat identity/color, unsafe cat placement inside cookware/oven/hot pan/stove, Russian wrong stress, distorted dish name, extra/missing spoken words, or rising question-like intonation in a declarative phrase.\n\n"
+            "3. The art style matches the provided reference/start images, not a different generic cartoon or storybook style.\n"
+            "4. The food/process state matches the recipe step and dish notes.\n"
+            "5. There is no readable text, logo, watermark, or photographic/live-action drift.\n"
+            "6. The clip has usable movement and no major visual artifacts.\n"
+            "7. If speech evidence is available, it matches EXPECTED SPEECH closely enough for the duration.\n\n"
+            "Hard fail as REGENERATE_VIDEO for visible text/logo/watermark/caption, wrong reference/project art style, storybook/Disney-like/generic cartoon style drift, photorealistic/live-action character drift, duplicate same-identity cats such as two orange cats, two white cats, or two black-and-white cats, white cats with long/rabbit-like ears, wrong cat identity/color, unsafe cat placement inside cookware/oven/hot pan/stove, Russian wrong stress, distorted dish name, extra/missing spoken words, or rising question-like intonation in a declarative phrase.\n\n"
             "Use status APPROVE when production-ready, REGENERATE_VIDEO when a new clip is needed, "
             "and HUMAN_REVIEW only when the media cannot be evaluated.\n\n"
             "Return only valid JSON:\n"

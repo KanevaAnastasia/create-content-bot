@@ -118,9 +118,9 @@ except Exception:
     CELERY_BEAT_SCHEDULE = {}
 else:
     CELERY_BEAT_SCHEDULE = {
-        "scheduled-generation-nightly-0300": {
+        "scheduled-generation-nightly-0100": {
             "task": "pipeline_admin.process_due_scheduled_generations",
-            "schedule": crontab(hour=3, minute=0),
+            "schedule": crontab(hour=1, minute=0),
             "kwargs": {"limit": int(os.getenv("SCHEDULED_GENERATION_NIGHTLY_LIMIT", "0") or 0)},
         }
     }

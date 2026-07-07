@@ -112,6 +112,10 @@ _VOICE_RULES_BY_LANGUAGE = {
     "en": "all spoken phrases and voiceover are in English language only",
 }
 _NON_REALISM_RULE = "visual style is strictly non-photorealistic, non-realistic, and cartoon; no realism or photorealism"
+_CARTOON_CHARACTER_RUNTIME_RULE = (
+    "grandmother is a cartoon grandmother; every human or animal character is cartoon; "
+    "the cat is a cartoon cat"
+)
 _NO_SUBTITLES_MUSIC_RULE = (
     "no on-screen text or subtitles; no background music or soundtrack"
 )
@@ -144,20 +148,21 @@ def get_last_video_provider() -> str | None:
 
 
 def _sanitize_video_prompt_language_references(video_prompt: str, target_language: str) -> str:
-    """Remove stale Russian speech instructions from non-Russian prompts."""
+    """Remove stale speech-language instructions after prompt reuse or edits."""
     prompt = str(video_prompt or "").strip()
     lang = normalize_language_code(target_language) or "ru"
-    if lang == "ru":
-        return prompt
     label = language_name(lang)
     token = _VOICE_LOCK_LANGUAGE_TOKEN_BY_LANG.get(lang, f"{label} language")
+    stale_lang = "en" if lang == "ru" else "ru"
+    stale_label = language_name(stale_lang)
+    stale_token = _VOICE_LOCK_LANGUAGE_TOKEN_BY_LANG.get(stale_lang, f"{stale_label} language")
     replacements = {
-        "Russian language": token,
-        "Russian line": f"{label} line",
-        "spoken Russian speech": f"spoken {label} speech",
-        "Russian speech": f"{label} speech",
-        "neutral Russian accent": f"neutral {label} accent",
-        "all spoken phrases and voiceover are in Russian language only": (
+        stale_token: token,
+        f"{stale_label} line": f"{label} line",
+        f"spoken {stale_label} speech": f"spoken {label} speech",
+        f"{stale_label} speech": f"{label} speech",
+        f"neutral {stale_label} accent": f"neutral {label} accent",
+        _VOICE_RULES_BY_LANGUAGE.get(stale_lang, ""): (
             _VOICE_RULES_BY_LANGUAGE.get(lang, f"all spoken phrases and voiceover are in {label} language only")
         ),
     }
@@ -1325,7 +1330,7 @@ def enforce_video_prompt_voice_requirements(
     if not vp:
         vp = (
             f"voice_lock_full: {required_lock}. {lang_rule}. {_NON_REALISM_RULE}. "
-            f"{_NO_SUBTITLES_MUSIC_RULE}."
+            f"{_CARTOON_CHARACTER_RUNTIME_RULE}. {_NO_SUBTITLES_MUSIC_RULE}."
         )
     else:
         source_token = _VOICE_LOCK_LANGUAGE_TOKEN_BY_LANG["en" if lang == "ru" else "ru"]
@@ -1337,7 +1342,9 @@ def enforce_video_prompt_voice_requirements(
             vp = f"{vp}. {lang_rule}".strip()
         if "photoreal" not in vp.lower() and "no realism" not in vp.lower():
             vp = f"{vp}. {_NON_REALISM_RULE}".strip()
-        if "subtitles" not in vp.lower() or "music" not in vp.lower():
+        if "cartoon grandmother" not in vp.lower() or "cartoon cat" not in vp.lower():
+            vp = f"{vp}. {_CARTOON_CHARACTER_RUNTIME_RULE}".strip()
+        if _NO_SUBTITLES_MUSIC_RULE.lower() not in vp.lower():
             vp = f"{vp}. {_NO_SUBTITLES_MUSIC_RULE}".strip()
     vp = enforce_video_prompt_visual_source_rule(vp)
     return _sanitize_video_prompt_language_references(append_veo3_video_framing_constraints(vp, scene), lang)

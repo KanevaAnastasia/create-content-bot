@@ -654,6 +654,63 @@ def test_final_video_delivery_triggers_social_descriptions_once(monkeypatch, tmp
     assert "social_descriptions_pending" in restored
 
 
+def test_final_artifacts_delivered_waits_for_all_queued_final_statuses(monkeypatch, tmp_path):
+    _install_sqlite(monkeypatch)
+    ru_path = tmp_path / "final-ru.mp4"
+    ru_path.write_bytes(b"ru")
+
+    with db.SessionLocal() as check_db:
+        run = GenerationRun(status="final_render_running", language="ru", script="recipe")
+        check_db.add(run)
+        check_db.flush()
+        ru_artifact = GenerationArtifact(
+            run_id=run.id,
+            artifact_type="final_titled_subtitled_music",
+            label="Final RU",
+            uri=f"file://{ru_path}",
+            language="ru",
+            mime_type="video/mp4",
+            payload_json={"telegram_delivery": {"status": "sent", "telegram_message_id": 1}},
+        )
+        check_db.add(ru_artifact)
+        check_db.flush()
+        check_db.add_all(
+            [
+                GenerationArtifact(
+                    run_id=run.id,
+                    artifact_type="final_build_status",
+                    label="Final build status title/subtitled/music (ru)",
+                    uri=f"admin://final-build/{run.id}/ru/titled_subtitled_music",
+                    language="ru",
+                    mime_type="application/json",
+                    payload_json={
+                        "status": "success",
+                        "language": "ru",
+                        "variant": "titled_subtitled_music",
+                        "artifact_id": str(ru_artifact.id),
+                    },
+                ),
+                GenerationArtifact(
+                    run_id=run.id,
+                    artifact_type="final_build_status",
+                    label="Final build status title/subtitled/music (en)",
+                    uri=f"admin://final-build/{run.id}/en/titled_subtitled_music",
+                    language="en",
+                    mime_type="application/json",
+                    payload_json={
+                        "status": "pending",
+                        "language": "en",
+                        "variant": "titled_subtitled_music",
+                    },
+                ),
+            ]
+        )
+        check_db.commit()
+        run_id = str(run.id)
+
+    assert all_final_artifacts_delivered(run_id) is False
+
+
 def test_final_video_delivery_triggers_social_descriptions_from_draft_when_session_moved(monkeypatch, tmp_path):
     _install_sqlite(monkeypatch)
     video_path = tmp_path / "final.mp4"

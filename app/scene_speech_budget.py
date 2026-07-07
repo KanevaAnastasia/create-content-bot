@@ -16,6 +16,9 @@ SPEECH_CHARS_PER_SECOND_BY_LANG = {
     "ru": 14,
     "en": 11,
 }
+SPEECH_MAX_CHARS_BY_LANG_DURATION = {
+    ("ru", 8): 125,
+}
 
 
 def normalize_speech_phrase_for_voice(text: str) -> str:
@@ -54,7 +57,11 @@ def max_speech_chars_for_duration(duration_sec: int, language: str = "ru") -> in
         sec = int(duration_sec)
     except (TypeError, ValueError):
         sec = 6
-    return max(1, sec * speech_chars_per_second(language))
+    code = str(language or "ru").strip().lower() or "ru"
+    override = SPEECH_MAX_CHARS_BY_LANG_DURATION.get((code, sec))
+    if override is not None:
+        return int(override)
+    return max(1, sec * speech_chars_per_second(code))
 
 
 def speech_budget_for_duration(duration_sec: int, language: str = "ru") -> dict[str, int | str]:

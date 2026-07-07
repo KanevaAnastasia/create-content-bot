@@ -12,7 +12,7 @@ from telegram.error import NetworkError, RetryAfter, TimedOut
 
 from ..character_catalog import sanitize_character_names_and_keys
 from ..dish_visuals import append_dish_visual_brief_to_prompt, build_dish_visual_brief
-from ..pipeline_llm_steps import FINAL_SCENE_SUBSCRIBE_CTA, RUSSIAN_YO_RULE
+from ..pipeline_llm_steps import FINAL_SCENE_SUBSCRIBE_CTA
 from .handlers_state_deps import (
     ContextTypes,
     SESSIONS,
@@ -1941,7 +1941,7 @@ async def _regenerate_start_prompt_from_ai_feedback(
             "AI approval rejected the start frame. Rewrite the start frame prompt so the next image fixes "
             "the visual mismatch, preserves required characters, contains no visible text, and matches the real dish."
         )
-    dish_brief = _dish_visual_brief_for_session(session, scene)
+    dish_brief = _dish_visual_brief_for_scene(session, scene, idx)
     if dish_brief:
         feedback = (
             f"{feedback}\n\n"
@@ -2000,7 +2000,7 @@ async def _regenerate_scene_prompts_from_prompt_ai_feedback(
             "AI approval rejected the scene prompts. Rewrite the start frame prompt and video prompts so visible "
             "ingredients, garnishes, characters, kitchen physics, and dish state match the recipe and references."
         )
-    dish_brief = _dish_visual_brief_for_session(session, scene)
+    dish_brief = _dish_visual_brief_for_scene(session, scene, idx)
     if dish_brief:
         feedback = (
             f"{feedback}\n\n"
@@ -2115,6 +2115,30 @@ def _dish_visual_brief_for_session(session: dict, scene: dict | None = None) -> 
     return brief
 
 
+def _scene_count_for_dish_visual_gate(session: dict) -> int:
+    production = session.get("production") if isinstance(session, dict) else None
+    scenes = production.get("json_plan") if isinstance(production, dict) else None
+    if isinstance(scenes, list) and scenes:
+        return len(scenes)
+    scenes = session.get("scenes_plan") if isinstance(session, dict) else None
+    if isinstance(scenes, list) and scenes:
+        return len(scenes)
+    return 0
+
+
+def _should_enforce_dish_visual_for_scene(session: dict, idx: int) -> bool:
+    if idx <= 0:
+        return True
+    scene_count = _scene_count_for_dish_visual_gate(session)
+    return bool(scene_count and idx == scene_count - 1)
+
+
+def _dish_visual_brief_for_scene(session: dict, scene: dict | None, idx: int) -> str:
+    if not _should_enforce_dish_visual_for_scene(session, idx):
+        return ""
+    return _dish_visual_brief_for_session(session, scene)
+
+
 def _scene_description(scene: dict) -> str:
     parts = [
         str(scene.get("action") or "").strip(),
@@ -2195,7 +2219,7 @@ async def _run_ai_start_frame_check(
             scene_prompt=str(scene.get("start_frame_prompt_effective") or scene.get("start_frame_prompt") or "").strip(),
             scene_description=_scene_description(scene),
             recipe_text=_scene_recipe_text(session, scene),
-            dish_visual_brief=_dish_visual_brief_for_session(session, scene),
+            dish_visual_brief=_dish_visual_brief_for_scene(session, scene, idx),
             scene_number=scene.get("scene") or idx + 1,
             previous_reference_images=_load_scene_reference_images(
                 scene,
@@ -2233,7 +2257,7 @@ async def _run_ai_prompt_check(
             video_prompt=_scene_video_prompt_for_language(scene, language),
             scene_description=_scene_description(scene),
             recipe_text=_scene_recipe_text(session, scene),
-            dish_visual_brief=_dish_visual_brief_for_session(session, scene),
+            dish_visual_brief=_dish_visual_brief_for_scene(session, scene, idx),
             scene_number=scene.get("scene") or idx + 1,
             expected_characters=[str(x) for x in (scene.get("characters") or [])],
             config=cfg,
@@ -2264,7 +2288,7 @@ async def _run_ai_end_frame_check(
             scene_prompt=str(scene.get("end_frame_prompt") or scene.get("end_frame_prompt_ru") or "").strip(),
             scene_description=_scene_description(scene),
             recipe_text=_scene_recipe_text(session, scene),
-            dish_visual_brief=_dish_visual_brief_for_session(session, scene),
+            dish_visual_brief=_dish_visual_brief_for_scene(session, scene, idx),
             scene_number=scene.get("scene") or idx + 1,
             previous_reference_images=references,
             expected_characters=[str(x) for x in (scene.get("characters") or [])],
@@ -2300,7 +2324,7 @@ async def _run_ai_video_check(
             expected_speech_text=_scene_speech_for_language(scene, language),
             duration=scene.get("duration_sec"),
             recipe_text=_scene_recipe_text(session, scene),
-            dish_visual_brief=_dish_visual_brief_for_session(session, scene),
+            dish_visual_brief=_dish_visual_brief_for_scene(session, scene, idx),
             scene_number=scene.get("scene") or idx + 1,
             language=language,
             previous_reference_images=_load_scene_reference_images(scene, include_location=False),
@@ -2579,7 +2603,6 @@ def _social_copy_prompt(recipe: str, *, scheduled_comment: str = "") -> str:
         "- обязательно учитывай его как editorial direction для тона, акцентов, подачи и вирусного угла\n"
         "- комментарий не заменяет рецепт\n"
         "- не добавляй ингредиенты, шаги и факты, которых нет в утвержденном рецепте\n\n"
-        f"{RUSSIAN_YO_RULE}\n\n"
         "Верни строго JSON объект без markdown с ключами:\n"
         "youtube_ru_title, youtube_ru_description, rutube_ru_title, rutube_ru_description, instagram_ru, vk_ru, tiktok_ru, instagram_en, youtube_en_title, youtube_en_description.\n\n"
         f"{comment_block}"
@@ -2792,7 +2815,6 @@ async def _refine_social_copy_from_feedback(
         "Учти фидбэк пользователя, но не выдумывай ингредиенты и количества.\n"
         "Русские описания: #убабушкивкуснее #бабушкинырецепты #рецепты + 1-2 хэштега по рецепту.\n"
         "Английские описания: #grandmatastesbetter #grandmasrecipes #recipes + 1-2 английских хэштега по рецепту.\n"
-        f"{RUSSIAN_YO_RULE}\n"
         "Верни строго JSON объект без markdown с ключами:\n"
         "youtube_ru_title, youtube_ru_description, rutube_ru_title, rutube_ru_description, instagram_ru, vk_ru, tiktok_ru, "
         "instagram_en, youtube_en_title, youtube_en_description.\n\n"
@@ -2861,14 +2883,16 @@ async def _send_copyable_message(update: Update, title: str, body: str) -> None:
 
 async def _send_final_social_descriptions(update: Update, session: dict) -> bool:
     recipe = str(session.get("recipe_full_text") or "").strip()
-    if not recipe or session.get(SOCIAL_DESCRIPTIONS_SENT_KEY):
+    if not recipe or session.get(SOCIAL_DESCRIPTIONS_SENT_KEY) or session.get(SOCIAL_DESCRIPTIONS_PENDING_KEY):
+        return False
+    run_id = str(session.get("generation_run_id") or "").strip()
+    if not run_id:
         return False
     resolved_recipe = await _resolve_social_recipe_text(recipe)
     if resolved_recipe and resolved_recipe != recipe:
         recipe = resolved_recipe
         session["recipe_full_text"] = resolved_recipe
-    run_id = str(session.get("generation_run_id") or "").strip()
-    if run_id and not all_final_artifacts_delivered(run_id):
+    if not all_final_artifacts_delivered(run_id):
         await update.message.reply_text(
             "Финальные видео ещё не доставлены в Telegram. Публикацию предложу только после подтвержденной доставки файлов."
         )
@@ -3346,13 +3370,30 @@ def _draft_repair_item_for_scene(session: dict, idx: int) -> dict | None:
     return None
 
 
-def _apply_draft_repair_scene_settings(session: dict, idx: int) -> None:
+_SCENE_MEDIA_REPAIR_SUBSTEPS = frozenset(
+    {
+        SCENE_MEDIA_SUBSTEP_START,
+        SCENE_MEDIA_SUBSTEP_START_IMAGE_APPROVAL,
+        SCENE_MEDIA_SUBSTEP_END,
+        SCENE_MEDIA_SUBSTEP_END_IMAGE_APPROVAL,
+        SCENE_MEDIA_SUBSTEP_VIDEO,
+    }
+)
+
+
+def _apply_draft_repair_scene_settings(session: dict, idx: int, *, force_substep: bool = False) -> None:
     item = _draft_repair_item_for_scene(session, idx)
     if not item:
         return
     stage = str(item.get("stage") or "").strip().lower()
-    session["scene_media_substep"] = _draft_repair_substep_for_stage(stage)
-    session["scene_media_language_index"] = 0
+    current_substep = str(session.get("scene_media_substep") or "").strip()
+    if stage == "video":
+        if force_substep or current_substep != SCENE_MEDIA_SUBSTEP_VIDEO:
+            session["scene_media_substep"] = SCENE_MEDIA_SUBSTEP_VIDEO
+            session["scene_media_language_index"] = 0
+    elif force_substep or current_substep not in _SCENE_MEDIA_REPAIR_SUBSTEPS:
+        session["scene_media_substep"] = _draft_repair_substep_for_stage(stage)
+        session["scene_media_language_index"] = 0
     if stage != "video":
         return
     production = session.get("production") or {}
@@ -3386,11 +3427,7 @@ def _align_draft_repair_scene_cursor(session: dict, scenes: list[dict], idx: int
         return len(scenes)
     next_idx = min(next_indexes)
     session["image_scene_index"] = next_idx
-    for item in plan:
-        if int(item["scene_index"]) == next_idx:
-            session["scene_media_substep"] = _draft_repair_substep_for_stage(str(item.get("stage") or ""))
-            session["scene_media_language_index"] = 0
-            break
+    _apply_draft_repair_scene_settings(session, next_idx, force_substep=True)
     return next_idx
 
 
@@ -4716,7 +4753,7 @@ async def _scene_media_start_ok(
             scene,
             include_location=False,
         )
-    prompt = append_dish_visual_brief_to_prompt(prompt, _dish_visual_brief_for_session(session, scene))
+    prompt = append_dish_visual_brief_to_prompt(prompt, _dish_visual_brief_for_scene(session, scene, idx))
     scene["start_frame_prompt_effective"] = prompt
     scene["start_frame_ref_count"] = len(scene_refs)
     logger.info("scene=%s start_image_generation prompt_len=%s refs=%s", idx + 1, len(prompt), len(scene_refs))
@@ -6485,7 +6522,6 @@ async def _run_scene_media_auto_approve(
 
         if session.get("state") == STATE_READY_FOR_PRODUCTION:
             session.pop(SCENE_MEDIA_AUTO_APPROVE_SESSION_KEY, None)
-            await _send_final_social_descriptions(update, session)
             return True
 
         scenes_after, idx_after = _scene_media_context(session)
@@ -6647,7 +6683,6 @@ async def _run_scene_media_ai_approve(
             session["scene_media_substep"] = SCENE_MEDIA_SUBSTEP_START
 
         if session.get("state") == STATE_READY_FOR_PRODUCTION:
-            await _send_final_social_descriptions(update, session)
             return True
 
         scenes_after, idx_after = _scene_media_context(session)

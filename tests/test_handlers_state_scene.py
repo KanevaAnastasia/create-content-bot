@@ -312,6 +312,11 @@ def test_clear_scene_for_image_repair_unapproves_images_and_videos():
             "ru": [{"candidate_id": "vid-ru", "approved_for_production": True}],
             "en": [{"candidate_id": "vid-en", "approved_for_production": True}],
         },
+        "video_provider_choice_pending": {"source": "scene", "language": "ru"},
+        "syntax_fallback_pending": {"source": "scene"},
+        "video_prompt_policy_candidate": "stale prompt",
+        "video_prompt_policy_candidate_by_lang": {"ru": "stale ru", "en": "keep en"},
+        "video_prompt_policy_failure_count": 2,
     }
 
     clear_scene_for_repair(scene, stage="image", languages=["ru"])
@@ -325,6 +330,11 @@ def test_clear_scene_for_image_repair_unapproves_images_and_videos():
     assert scene["video_approvals_by_lang"]["ru"] is False
     assert scene["video_approvals_by_lang"]["en"] is True
     assert scene["draft_repair_ignore_restored_video_candidates_by_lang"] == {"ru": True}
+    assert "video_provider_choice_pending" not in scene
+    assert "syntax_fallback_pending" not in scene
+    assert "video_prompt_policy_candidate" not in scene
+    assert scene["video_prompt_policy_candidate_by_lang"] == {"en": "keep en"}
+    assert "video_prompt_policy_failure_count" not in scene
 
 
 def test_draft_repair_keyboard_multiple_scenes_configures_each_scene_separately(monkeypatch):

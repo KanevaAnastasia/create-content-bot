@@ -140,6 +140,159 @@ def test_normalize_ai_approval_promotes_severe_approve_warnings_to_critical() ->
     assert any("significant deviation" in issue for issue in result.critical_issues)
 
 
+def test_normalize_ai_approval_promotes_wrong_dish_and_crop_warnings_to_critical() -> None:
+    result = normalize_ai_approval_result(
+        {
+            "status": "APPROVE",
+            "overall_score": 0.99,
+            "stage": "image",
+            "critical_issues": [],
+            "warnings": [
+                "The frame shows a generic substitute and the main dish is severely cropped, "
+                "so the food cannot be verified against the canonical dish appearance."
+            ],
+        },
+        stage="image",
+        config=_cfg(),
+    )
+
+    assert result.status == AI_APPROVAL_STATUS_REGENERATE_IMAGE
+    assert result.overall_score < _cfg().human_review_threshold
+    assert result.critical_issues == result.warnings
+
+
+def test_normalize_ai_approval_promotes_wrong_food_structure_to_critical() -> None:
+    result = normalize_ai_approval_result(
+        {
+            "status": "APPROVE",
+            "overall_score": 0.98,
+            "stage": "image",
+            "critical_issues": [],
+            "warnings": [
+                "The visible food has the wrong ingredient geometry and wrong serving form for the named dish."
+            ],
+        },
+        stage="image",
+        config=_cfg(),
+    )
+
+    assert result.status == AI_APPROVAL_STATUS_REGENERATE_IMAGE
+    assert result.overall_score < _cfg().human_review_threshold
+    assert result.critical_issues == result.warnings
+
+
+def test_normalize_ai_approval_promotes_duplicate_same_identity_cats_to_critical() -> None:
+    result = normalize_ai_approval_result(
+        {
+            "status": "APPROVE",
+            "overall_score": 0.96,
+            "stage": "video",
+            "critical_issues": [],
+            "warnings": ["The frame contains two orange cats, duplicating the same cat identity."],
+        },
+        stage="video",
+        config=_cfg(),
+    )
+
+    assert result.status == AI_APPROVAL_STATUS_REGENERATE_VIDEO
+    assert result.overall_score < _cfg().human_review_threshold
+    assert result.critical_issues == result.warnings
+
+
+def test_normalize_ai_approval_promotes_natural_duplicate_cat_wording_to_critical() -> None:
+    result = normalize_ai_approval_result(
+        {
+            "status": "APPROVE",
+            "overall_score": 0.96,
+            "stage": "video",
+            "critical_issues": [],
+            "warnings": ["The same cat appears twice in the scene, like an identical clone."],
+        },
+        stage="video",
+        config=_cfg(),
+    )
+
+    assert result.status == AI_APPROVAL_STATUS_REGENERATE_VIDEO
+    assert result.overall_score < _cfg().human_review_threshold
+    assert result.critical_issues == result.warnings
+
+
+def test_normalize_ai_approval_promotes_video_pronunciation_warning_to_critical() -> None:
+    result = normalize_ai_approval_result(
+        {
+            "status": "APPROVE",
+            "overall_score": 0.97,
+            "stage": "video",
+            "critical_issues": [],
+            "warnings": ["The Russian word is mispronounced with incorrect stress."],
+            "speech_wrong_stress_words": ["тают"],
+        },
+        stage="video",
+        config=_cfg(),
+    )
+
+    assert result.status == AI_APPROVAL_STATUS_REGENERATE_VIDEO
+    assert result.overall_score < _cfg().human_review_threshold
+    assert result.speech_wrong_stress_words == ["тают"]
+    assert "The Russian word is mispronounced with incorrect stress." in result.critical_issues
+    assert "wrong word stress: тают" in result.critical_issues
+
+
+def test_normalize_ai_approval_promotes_reference_style_mismatch_to_critical() -> None:
+    result = normalize_ai_approval_result(
+        {
+            "status": "APPROVE",
+            "overall_score": 0.97,
+            "stage": "image",
+            "critical_issues": [],
+            "warnings": ["The frame is a children's book style and does not match reference style."],
+        },
+        stage="image",
+        config=_cfg(),
+    )
+
+    assert result.status == AI_APPROVAL_STATUS_REGENERATE_IMAGE
+    assert result.overall_score < _cfg().human_review_threshold
+    assert result.critical_issues == result.warnings
+
+
+def test_normalize_ai_approval_promotes_cropped_grandma_face_to_critical() -> None:
+    result = normalize_ai_approval_result(
+        {
+            "status": "APPROVE",
+            "overall_score": 0.98,
+            "stage": "image",
+            "critical_issues": [],
+            "warnings": ["Grandma face cropped by the top frame edge."],
+        },
+        stage="image",
+        config=_cfg(),
+    )
+
+    assert result.status == AI_APPROVAL_STATUS_REGENERATE_IMAGE
+    assert result.overall_score < _cfg().human_review_threshold
+    assert result.critical_issues == result.warnings
+
+
+def test_normalize_ai_approval_rejects_only_grandma_hand_visible() -> None:
+    result = normalize_ai_approval_result(
+        {
+            "status": "APPROVE",
+            "overall_score": 0.98,
+            "stage": "image",
+            "critical_issues": [],
+            "warnings": [],
+            "positive_notes": ["Only grandma's hand is visible holding food; her face is not visible."],
+        },
+        stage="image",
+        config=_cfg(),
+    )
+
+    assert result.status == AI_APPROVAL_STATUS_REGENERATE_IMAGE
+    assert result.overall_score < _cfg().human_review_threshold
+    assert result.critical_issues == ["Only grandma's hand is visible holding food; her face is not visible."]
+
+
 def test_normalize_ai_approval_does_not_turn_positive_note_into_critical() -> None:
     result = normalize_ai_approval_result(
         {
@@ -786,6 +939,45 @@ def test_check_video_prompt_hard_fails_echpochmak_visual_regressions(monkeypatch
         "rising question-like intonation",
     ):
         assert needle in prompt or needle in fallback
+
+
+def test_check_start_frame_prompt_requires_reference_image_comparison(monkeypatch) -> None:
+    import app.ai_approval_service as svc
+
+    captured: dict[str, object] = {}
+
+    def _fake_model(prompt, *, images, fallback_prompts=None, config):
+        captured["prompt"] = prompt
+        captured["images"] = images
+        return {
+            "status": "APPROVE",
+            "overall_score": 0.95,
+            "stage": "image",
+            "critical_issues": [],
+            "warnings": [],
+        }
+
+    monkeypatch.setattr(svc, "call_ai_approval_model", _fake_model)
+    monkeypatch.setenv("AI_APPROVAL_INCLUDE_REFERENCE_IMAGES", "1")
+
+    result = check_start_frame(
+        image_bytes=b"candidate",
+        scene_prompt="Бабушка показывает чак-чак рядом с котами.",
+        scene_description="Первый кадр с блюдом.",
+        recipe_text="Чак-чак из жареного теста и меда.",
+        dish_visual_brief="canonical dish brief",
+        previous_reference_images=[b"grandma-ref", b"cat-ref"],
+        expected_characters=["grandma", "cat"],
+        config=AIApprovalConfig(model="test-model"),
+    )
+
+    assert result.status == AI_APPROVAL_STATUS_APPROVE
+    assert captured["images"] == [b"candidate", b"grandma-ref", b"cat-ref"]
+    prompt = str(captured["prompt"])
+    assert "Image 1 is the generated candidate frame" in prompt
+    assert "mandatory character/style reference images" in prompt
+    assert "not optional inspiration" in prompt
+    assert "Reference-image verification" in prompt
 
 
 def test_check_scene_prompts_provides_neutral_fallback_prompt(monkeypatch) -> None:

@@ -405,6 +405,55 @@ def test_django_generation_admin_form_saves_ru_and_en_overlay_titles(monkeypatch
     assert form.overlay_title_by_lang() == {"ru": "Бешбармак", "en": "Beshbarmak Feast"}
 
 
+def test_django_generation_admin_title_override_survives_without_chat_session(monkeypatch):
+    admin_dir = Path(__file__).resolve().parents[1] / "admin_panel"
+    sys.path.insert(0, str(admin_dir))
+    os.environ.setdefault("DJANGO_SETTINGS_MODULE", "cf_admin.settings")
+
+    import django
+
+    django.setup()
+
+    import pipeline_admin.admin as admin_module
+
+    run_id = uuid.uuid4()
+    saved_title = {"ru": "Бешбармак", "en": "Beshbarmak Feast"}
+    artifact = SimpleNamespace(payload_json={"status": "active", "overlay_title_by_lang": saved_title})
+
+    class EmptyChatQuerySet:
+        def order_by(self, *_args):
+            return self
+
+        def first(self):
+            return None
+
+    class ChatManagerStub:
+        def filter(self, **kwargs):
+            assert kwargs == {"generation_run_id": run_id}
+            return EmptyChatQuerySet()
+
+    class ArtifactQuerySet(list):
+        def order_by(self, *_args):
+            return self
+
+    class ArtifactManagerStub:
+        def filter(self, **kwargs):
+            assert kwargs == {
+                "run_id": run_id,
+                "artifact_type": admin_module.TITLE_OVERRIDE_ARTIFACT_TYPE,
+                "uri": admin_module._title_override_uri(run_id),
+            }
+            return ArtifactQuerySet([artifact])
+
+    monkeypatch.setattr(admin_module.ChatSession, "objects", ChatManagerStub())
+    monkeypatch.setattr(admin_module.GenerationArtifact, "objects", ArtifactManagerStub())
+
+    run = SimpleNamespace(id=run_id, human_title="Бешбармак")
+
+    assert admin_module._overlay_title_for_admin_edit(run) == saved_title
+    assert admin_module._overlay_title_for_admin_render(run, {}, {}) == saved_title
+
+
 def test_django_generation_admin_inlines_render_hidden_primary_keys():
     admin_dir = Path(__file__).resolve().parents[1] / "admin_panel"
     sys.path.insert(0, str(admin_dir))
@@ -444,6 +493,57 @@ def test_django_content_series_model_string():
     )
 
     assert str(series) == "летние напитки / summer drinks (7 из 10)"
+
+
+def test_django_admin_series_overlay_counter_uses_current_series_day():
+    admin_dir = Path(__file__).resolve().parents[1] / "admin_panel"
+    sys.path.insert(0, str(admin_dir))
+    os.environ.setdefault("DJANGO_SETTINGS_MODULE", "cf_admin.settings")
+
+    import django
+
+    django.setup()
+
+    import pipeline_admin.admin as admin_module
+
+    series = SimpleNamespace(current_video_index=6, total_videos=10)
+    run = SimpleNamespace(series=series, series_video_index=7, series_total_videos=10)
+
+    counter = admin_module._overlay_series_counter_for_admin_render(
+        run,
+        session={"series_counter_by_lang": {"ru": "день 7 из 10", "en": "day 7 of 10"}},
+        production={"series_counter_by_lang": {"ru": "день 7 из 10", "en": "day 7 of 10"}},
+    )
+
+    assert counter == {"ru": "день 6 из 10", "en": "day 6 of 10"}
+
+
+def test_django_admin_series_context_sync_uses_current_series_day():
+    admin_dir = Path(__file__).resolve().parents[1] / "admin_panel"
+    sys.path.insert(0, str(admin_dir))
+    os.environ.setdefault("DJANGO_SETTINGS_MODULE", "cf_admin.settings")
+
+    import django
+
+    django.setup()
+
+    import pipeline_admin.admin as admin_module
+
+    series = SimpleNamespace(
+        id=uuid.UUID("00000000-0000-0000-0000-000000000006"),
+        title_ru="Каюта вкусов",
+        title_en="Taste Cabin",
+        current_video_index=6,
+        total_videos=10,
+    )
+    run = SimpleNamespace(series=series, series_video_index=7, series_total_videos=10)
+    session = {"series_counter_by_lang": {"ru": "день 7 из 10", "en": "day 7 of 10"}}
+
+    admin_module._sync_series_context_from_run(session, run)
+
+    assert session["series_video_index"] == 6
+    assert session["series_counter_by_lang"] == {"ru": "день 6 из 10", "en": "day 6 of 10"}
+    assert session["series"]["counter_by_lang"] == {"ru": "день 6 из 10", "en": "day 6 of 10"}
 
 
 def test_django_admin_allows_series_binding_and_day_editing():

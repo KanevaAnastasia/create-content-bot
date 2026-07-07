@@ -1,7 +1,6 @@
 from ..constants import GEMINI_GENERATE_TIMEOUT_SEC_ENV_NAME
 from ..constants import STATE_WAITING_SCENE_MEDIA
 from ..character_catalog import GRANDMA_KITCHEN_PROJECT_SLUG, GRANDMA_KITCHEN_PROJECT_TITLE
-from ..pipeline_llm_steps import RUSSIAN_YO_RULE
 
 from .handlers_state_deps import (
     Any,
@@ -146,7 +145,6 @@ async def _regenerate_image_prompt_from_feedback(scene: dict, feedback: str) -> 
     prompt = (
         "Ты редактируешь промпт для генерации СТАРТОВОГО кадра.\n"
         "Верни только один готовый промпт на русском, без пояснений.\n"
-        f"{RUSSIAN_YO_RULE}\n"
         "Требования:\n"
         "- промпт максимально конкретный и самодостаточный\n"
         "- если есть еда, перечисляй конкретные ингредиенты\n"

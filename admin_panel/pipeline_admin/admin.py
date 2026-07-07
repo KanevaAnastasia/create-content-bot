@@ -92,6 +92,8 @@ FINAL_BUILD_STATUS_ARTIFACT_TYPE = "final_build_status"
 FINAL_BUILD_ACTIVE_STATUSES = {"pending", "running"}
 TITLE_STYLE_OVERRIDE_ARTIFACT_TYPE = "title_overlay_style_override"
 TITLE_STYLE_OVERRIDE_URI_PREFIX = "admin://title-overlay-style/"
+TITLE_OVERRIDE_ARTIFACT_TYPE = "title_overlay_override"
+TITLE_OVERRIDE_URI_PREFIX = "admin://title-overlay/"
 PUBLICATION_COPY_DRAFT_ARTIFACT_TYPE = "publication_copy_draft"
 PUBLICATION_COPY_DRAFT_URI_PREFIX = "admin://publication-copy-draft/"
 FINAL_BUILD_STALE_AFTER = timedelta(minutes=30)
@@ -408,11 +410,24 @@ def _overlay_series_title_for_admin_render(
     return values
 
 
+def _series_counter_by_lang_from_series(series: Any) -> dict[str, str]:
+    if series is None:
+        return {}
+    index = getattr(series, "current_video_index", None)
+    total = getattr(series, "total_videos", None)
+    if not index or not total:
+        return {}
+    return {"ru": f"день {int(index)} из {int(total)}", "en": f"day {int(index)} of {int(total)}"}
+
+
 def _overlay_series_counter_for_admin_render(
     run: GenerationRun,
     session: dict[str, Any],
     production: dict[str, Any],
 ) -> dict[str, str]:
+    series_counter = _series_counter_by_lang_from_series(getattr(run, "series", None))
+    if series_counter:
+        return series_counter
     for source in (production, session):
         value = source.get("series_counter_by_lang") if isinstance(source, dict) else None
         if isinstance(value, dict) and any(str(item or "").strip() for item in value.values()):
@@ -690,8 +705,9 @@ def _overlay_title_for_admin_render(
         if isinstance(value, dict) and any(str(item or "").strip() for item in value.values()):
             source_title = {str(key): str(item) for key, item in value.items() if str(item or "").strip()}
             if _looks_like_default_overlay_title(source_title, run) and title:
-                return title
+                continue
             title.update(source_title)
+    title.update(_active_title_override_for_run(run))
     return title or _default_overlay_title(run)
 
 
@@ -735,6 +751,60 @@ def _project_slug_for_admin_render(run: GenerationRun, session: dict[str, Any]) 
     if raw:
         return raw
     return None
+
+
+def _title_override_uri(run_id: Any) -> str:
+    return f"{TITLE_OVERRIDE_URI_PREFIX}{run_id}"
+
+
+def _latest_title_override_payloads_for_run(run: GenerationRun) -> list[dict[str, Any]]:
+    payloads: list[dict[str, Any]] = []
+    try:
+        artifacts = GenerationArtifact.objects.filter(
+            run_id=run.id,
+            artifact_type=TITLE_OVERRIDE_ARTIFACT_TYPE,
+            uri=_title_override_uri(run.id),
+        ).order_by("-created_at")
+        for artifact in artifacts:
+            payload = getattr(artifact, "payload_json", None)
+            if isinstance(payload, dict):
+                payloads.append(copy.deepcopy(payload))
+    except Exception:
+        return []
+    return payloads
+
+
+def _active_title_override_for_run(run: GenerationRun | None) -> dict[str, str]:
+    if run is None:
+        return {}
+    for payload in _latest_title_override_payloads_for_run(run):
+        if payload.get("status") == "cleared":
+            return {}
+        value = _clean_overlay_title_by_lang(payload.get("overlay_title_by_lang"))
+        if value:
+            return value
+    return {}
+
+
+def _write_title_override_artifact(
+    run: GenerationRun,
+    *,
+    overlay_title_by_lang: dict[str, Any] | None,
+) -> GenerationArtifact:
+    title_by_lang = _clean_overlay_title_by_lang(overlay_title_by_lang)
+    payload: dict[str, Any] = {"status": "active" if title_by_lang else "cleared"}
+    if title_by_lang:
+        payload["overlay_title_by_lang"] = title_by_lang
+    return GenerationArtifact.objects.create(
+        run=run,
+        artifact_type=TITLE_OVERRIDE_ARTIFACT_TYPE,
+        label="Title overlay override",
+        uri=_title_override_uri(run.id),
+        language=None,
+        mime_type="application/json",
+        payload_json=payload,
+        created_at=timezone.now(),
+    )
 
 
 def _title_style_override_uri(run_id: Any) -> str:
@@ -1119,6 +1189,8 @@ def _build_final_videos_for_run(
         _merge_post_production(production.get("post_production"), post)
     )
     session["production"] = production
+    if getattr(run, "series", None) is not None:
+        _sync_series_context_from_run(session, run)
     session["overlay_title_by_lang"] = overlay_title_by_lang
     if overlay_title_style:
         session["overlay_title_style"] = overlay_title_style
@@ -2784,18 +2856,18 @@ def _sync_series_context_from_run(session: dict[str, Any], run: GenerationRun) -
         ):
             session.pop(key, None)
         return
-    video_index = int(run.series_video_index or series.current_video_index or 1)
-    total_videos = int(run.series_total_videos or series.total_videos or 1)
+    video_index = int(getattr(series, "current_video_index", None) or getattr(run, "series_video_index", None) or 1)
+    total_videos = int(getattr(series, "total_videos", None) or getattr(run, "series_total_videos", None) or 1)
     title_by_lang = {
-        "ru": " ".join(str(series.title_ru or "").split()),
-        "en": " ".join(str(series.title_en or "").split()),
+        "ru": " ".join(str(getattr(series, "title_ru", "") or "").split()),
+        "en": " ".join(str(getattr(series, "title_en", "") or "").split()),
     }
-    counter_by_lang = {
+    counter_by_lang = _series_counter_by_lang_from_series(series) or {
         "ru": f"день {video_index} из {total_videos}",
         "en": f"day {video_index} of {total_videos}",
     }
     session["series"] = {
-        "id": str(series.id),
+        "id": str(getattr(series, "id", "") or ""),
         "title_by_lang": title_by_lang,
         "video_index": video_index,
         "total_videos": total_videos,
@@ -3064,6 +3136,7 @@ def _overlay_title_for_admin_edit(run: GenerationRun) -> dict[str, str]:
     title_by_lang: dict[str, str] = {}
     for source in (production, session):
         title_by_lang.update(_clean_overlay_title_by_lang(source.get("overlay_title_by_lang")))
+    title_by_lang.update(_active_title_override_for_run(run))
     return title_by_lang or _default_overlay_title(run)
 
 
@@ -3184,6 +3257,8 @@ class GenerationRunAdmin(admin.ModelAdmin):
         sync_overlay_title = (not change) or bool({"human_title", "overlay_title_ru", "overlay_title_en"} & changed_fields)
         title_by_lang = form.overlay_title_by_lang() if hasattr(form, "overlay_title_by_lang") else None
         super().save_model(request, obj, form, change)
+        if sync_overlay_title:
+            _write_title_override_artifact(obj, overlay_title_by_lang=title_by_lang)
         for chat_session in ChatSession.objects.filter(generation_run_id=obj.id):
             session = copy.deepcopy(chat_session.session_json or {})
             if sync_overlay_title:

@@ -481,7 +481,6 @@ async def _regenerate_end_frame_prompt_from_feedback(scene: dict, feedback: str)
         "Верни один короткий текст на русском: что изменилось к финалу (кто вошёл, положение рук, еда, готовность). "
         "Не описывай весь кадр с нуля. Сохраняй предметную непрерывность: та же посуда, кастрюля/сковорода, "
         "плита или рабочая поверхность, ингредиенты и состояние еды, если они ещё должны быть в кадре.\n\n"
-        f"{RUSSIAN_YO_RULE}\n\n"
         f"CONTINUITY ANCHORS: {anchors or '-'}\n"
         f"СТАРТОВЫЙ КАДР (контекст):\n{start_snapshot}\n\n"
         f"ТЕКУЩАЯ ДЕЛЬТА END:\n{current}\n\n"
@@ -685,13 +684,15 @@ def _next_image_quality_model(current_model: str | None) -> str | None:
 
 _IMAGE_REFERENCE_STYLE_BLOCK = (
     "Обязательно: визуальный стиль, палитра и внешность персонажей должны совпадать с приложенными "
-    "референсами персонажей. Не брать другой стиль или другие лица.\n"
+    "референсами персонажей. Не брать другой стиль или другие лица; приложенные референсы — единственный "
+    "источник стиля персонажей.\n"
     "Если на референсах есть буквы, слова, логотипы или надписи, не переносить их в итоговый кадр; "
     "оставить только форму, цвета, одежду и декоративные узоры без читаемого текста.\n"
     "CRITICAL: Match art style, lighting, color palette, and character designs exactly to the attached reference "
     "images (character references). Do not copy any letters, words, labels, "
     "logos, or readable text from reference images. Do not change illustration style or invent different-looking "
-    "characters."
+    "characters. Do not switch to a children's storybook, Disney-like, Pixar-like, anime, watercolor, oil-painting, "
+    "3D render, or generic cute cartoon look if that is not the attached reference style."
 )
 
 
@@ -785,7 +786,12 @@ def _append_scene_identity_to_image_prompt(
     drama_beat = "" if fruit_only_closeup else sanitize_character_names_and_keys(scene.get("romantic_drama_beat") or "").strip()
     identity_block = (
         f"Персонажи в кадре: {chars_text}. Состав персонажей не менять.\n"
-        "Описание персонажей обязательно соблюдать; если персонаж есть в prompt, он должен выглядеть согласно описанию."
+        "Описание персонажей обязательно соблюдать; если персонаж есть в prompt, он должен выглядеть согласно описанию.\n"
+        "Если бабушка присутствует в кадре, её лицо и голова должны быть полностью внутри кадра: глаза, нос, рот, "
+        "подбородок и головной убор не должны быть обрезаны верхним или боковым краем.\n"
+        "Правило котов: каждый canonical кот может появиться только один раз. Не рисовать двух рыжих котов, "
+        "двух белых кошек или двух черно-белых котов; если в кадре несколько котов, они должны быть разными "
+        "персонажами из списка выше и с разным окрасом."
     )
     if drama_beat:
         identity_block = f"{identity_block}\nФоновая драма этой сцены должна быть видна в кадре: {drama_beat}"

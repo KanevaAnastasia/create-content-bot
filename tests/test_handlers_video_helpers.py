@@ -1835,6 +1835,26 @@ def test_image_identity_can_skip_location_for_video_images():
     assert "локацию не менять" not in prompt.lower()
 
 
+def test_image_identity_adds_duplicate_cat_identity_rule():
+    scene = {"characters": ["grandma", "cat", "zaya", "markiz"]}
+    prompt = _append_scene_identity_to_image_prompt("Бабушка ставит чак-чак на стол.", scene, include_location=False)
+
+    assert "лицо и голова должны быть полностью внутри кадра" in prompt
+    assert "головной убор не должны быть обрезаны" in prompt
+    assert "Не рисовать двух рыжих котов" in prompt
+    assert "двух белых кошек" in prompt
+    assert "двух черно-белых котов" in prompt
+    assert "разными персонажами" in prompt
+
+
+def test_reference_style_prompt_rejects_storybook_style_drift():
+    prompt = handlers_media_scene._append_reference_style_to_image_prompt("Бабушка месит тесто.", True)
+
+    assert "единственный источник стиля" in prompt
+    assert "Do not switch to a children's storybook" in prompt
+    assert "Disney-like" in prompt
+
+
 def test_image_identity_keeps_fruit_only_closeup_visible_cast():
     scene = {
         "characters": ["grandma", "cat", "zaya", "banana", "strawberry", "grandson"],
@@ -3804,6 +3824,17 @@ def test_start_ok_uses_raw_manual_prompt_without_identity_block(monkeypatch):
     assert "REAL DISH VISUAL REQUIREMENTS" in str(captured["prompt"])
 
 
+def test_dish_visual_brief_applies_only_to_first_and_last_scene():
+    session = {
+        "dish_visual_brief": "canonical dish brief",
+        "production": {"json_plan": [{}, {}, {}]},
+    }
+
+    assert handlers_state_media._dish_visual_brief_for_scene(session, {}, 0) == "canonical dish brief"
+    assert handlers_state_media._dish_visual_brief_for_scene(session, {}, 1) == ""
+    assert handlers_state_media._dish_visual_brief_for_scene(session, {}, 2) == "canonical dish brief"
+
+
 def test_image_approval_text_uses_raw_prompt_verbatim():
     scene = {
         "scene": 1,
@@ -3996,11 +4027,13 @@ def test_final_social_descriptions_resolve_url_recipe_before_generation(monkeypa
     update = SimpleNamespace(message=_Msg(), effective_chat=SimpleNamespace(id=303))
     session = {
         "recipe_full_text": "https://www.russianfood.com/recipes/recipe.php?rid=132701",
+        "generation_run_id": "00000000-0000-0000-0000-000000000303",
         "scheduled_generation_comment": "сделай теплее",
     }
 
     monkeypatch.setattr(handlers_state_media, "fetch_recipe_text_from_url", fake_fetch)
     monkeypatch.setattr(handlers_state_media, "_generate_social_copy_from_recipe", fake_generate)
+    monkeypatch.setattr(handlers_state_media, "all_final_artifacts_delivered", lambda _run_id: True)
 
     out = asyncio.run(handlers_state_media._send_final_social_descriptions(update, session))
 
@@ -4012,6 +4045,34 @@ def test_final_social_descriptions_resolve_url_recipe_before_generation(monkeypa
     assert session["state"] == handlers_state_media.STATE_WAITING_SOCIAL_DESCRIPTIONS_APPROVAL
     assert handlers_state_media.SOCIAL_DESCRIPTIONS_PENDING_KEY in session
     assert any("Проверьте описания." in text for text in messages)
+
+
+def test_final_social_descriptions_skip_when_pending_exists(monkeypatch):
+    calls = 0
+
+    async def fake_generate(recipe, *, scheduled_comment=""):
+        nonlocal calls
+        calls += 1
+        return handlers_state_media._fallback_social_copy(recipe)
+
+    class _Msg:
+        async def reply_text(self, text, **kwargs):
+            pass
+
+    update = SimpleNamespace(message=_Msg(), effective_chat=SimpleNamespace(id=303))
+    session = {
+        "recipe_full_text": "Ингредиенты: картофель.",
+        "generation_run_id": "00000000-0000-0000-0000-000000000303",
+        handlers_state_media.SOCIAL_DESCRIPTIONS_PENDING_KEY: {"copy": {"instagram_ru": "Описание"}},
+    }
+
+    monkeypatch.setattr(handlers_state_media, "_generate_social_copy_from_recipe", fake_generate)
+    monkeypatch.setattr(handlers_state_media, "all_final_artifacts_delivered", lambda _run_id: True)
+
+    out = asyncio.run(handlers_state_media._send_final_social_descriptions(update, session))
+
+    assert out is False
+    assert calls == 0
 
 
 def test_social_descriptions_selection_toggles_targets_and_video_variant():
@@ -5908,6 +5969,25 @@ def test_draft_repair_cursor_skips_unselected_scenes():
     assert "draft_repair_active_plan" not in session
 
 
+def test_draft_repair_image_stage_preserves_current_substep():
+    scenes = [{"scene": idx + 1} for idx in range(2)]
+    session = {
+        "image_scene_index": 0,
+        "scene_media_substep": handlers_state_media.SCENE_MEDIA_SUBSTEP_START_IMAGE_APPROVAL,
+        "scene_media_language_index": 0,
+        "production": {"json_plan": scenes},
+        "draft_repair_active_plan": [
+            {"scene_index": 0, "languages": ["ru"], "stage": "image"},
+        ],
+    }
+
+    out_scenes, idx = handlers_state_media._scene_media_context(session)
+
+    assert out_scenes is scenes
+    assert idx == 0
+    assert session["scene_media_substep"] == handlers_state_media.SCENE_MEDIA_SUBSTEP_START_IMAGE_APPROVAL
+
+
 def test_draft_repair_target_languages_use_current_scene_plan():
     scene = {"video_prompt_by_lang": {"ru": "ru", "en": "en"}}
     session = {
@@ -7195,7 +7275,8 @@ def test_enforce_video_prompt_voice_requirements_adds_lock_and_russian_rule():
     assert "voice_lock_full:" in out
     assert "all spoken phrases and voiceover are in Russian language only" in out
     assert "non-photorealistic" in out.lower()
-    assert "cartoon cat" not in out
+    assert "cartoon grandmother" in out
+    assert "cartoon cat" in out
     assert "no on-screen text or subtitles" in out.lower()
     assert "no background music" in out.lower()
     assert "visual_source_lock:" not in out
@@ -7229,7 +7310,8 @@ def test_enforce_video_prompt_voice_requirements_for_en_uses_english_constraints
     assert "all spoken phrases and voiceover are in English language only" in out
     assert "Russian language" not in out
     assert "non-photorealistic" in out.lower()
-    assert "cartoon cat" not in out
+    assert "cartoon grandmother" in out
+    assert "cartoon cat" in out
     assert "no on-screen text or subtitles" in out.lower()
     assert "no background music" in out.lower()
     assert "Russian line" not in out
@@ -7246,7 +7328,7 @@ def test_enforce_video_prompt_voice_requirements_keeps_existing_constraints():
     out = enforce_video_prompt_voice_requirements(src)
     assert out.count("voice_lock_full:") == 1
     assert out.lower().count("veo3_framing:") == 1
-    assert "cartoon cat" not in out
+    assert "cartoon cat" in out
 
 
 def test_enforce_video_prompt_voice_requirements_switches_voice_lock_language_token():
@@ -7257,6 +7339,16 @@ def test_enforce_video_prompt_voice_requirements_switches_voice_lock_language_to
     assert "Russian language" not in out
     assert "neutral English accent" in out
     assert "neutral Russian accent" not in out
+
+
+def test_enforce_video_prompt_voice_requirements_switches_english_lock_to_russian():
+    src = "voice_lock_full: female voice English language elderly grandmother; neutral English accent; close shot."
+    out = enforce_video_prompt_voice_requirements(src, target_language="ru")
+    assert "voice_lock_full:" in out
+    assert "Russian language" in out
+    assert "English language" not in out
+    assert "neutral Russian accent" in out
+    assert "neutral English accent" not in out
 
 
 def test_enforce_video_prompt_voice_requirements_removes_russian_lipsync_in_en_prompt():

@@ -70,9 +70,23 @@ GRANDMA_VOICE_LOCK_FULL = (
     "tone very warm soft caring; emotional state calm nurturing stable; pitch low to medium stable; "
     "speech rate approximately 1.1; articulation clear but soft; neutral Russian accent."
 )
+_VOICE_RULES_BY_LANGUAGE = {
+    "ru": "all spoken phrases and voiceover are in Russian language only",
+    "en": "all spoken phrases and voiceover are in English language only",
+}
+_VOICE_LOCK_LANGUAGE_TOKEN_BY_LANG = {
+    "ru": "Russian language",
+    "en": "English language",
+}
+_NON_REALISM_RULE = "visual style is strictly non-photorealistic, non-realistic, and cartoon; no realism or photorealism"
+_CARTOON_CHARACTER_RUNTIME_RULE = (
+    "grandmother is a cartoon grandmother; every human or animal character is cartoon; "
+    "the cat is a cartoon cat"
+)
+_NO_SUBTITLES_MUSIC_RULE = "no on-screen text or subtitles; no background music or soundtrack"
 
 VEO3_FAST_VIDEO_FRAMING_RULE = (
-    "veo3_framing: close-up to medium-close shot; grandmother's full figure always fully visible in frame "
+    "veo3_framing: close-up shot only, not medium or medium-close; grandmother's full figure always fully visible in frame "
     "(at least head through torso, never a tight face-only crop); every other character in the scene stays "
     "fully visible in frame; accurate lip sync with the spoken Russian speech; camera angle and framing "
     "evolve during the clip (subtle reframing, angle shifts, or gentle camera movement) — avoid one locked "
@@ -380,7 +394,7 @@ def append_veo3_video_framing_constraints(
     """
     Для моделей ``veo3*`` добавляет в конец промпта правила кадра/ракурса (см. ``VEO3_FAST_VIDEO_FRAMING_RULE``).
 
-    Идемпотентно: если подстрока ``veo3_framing:`` уже есть, повторно не добавляет.
+    Идемпотентно для актуального правила; устаревший ``veo3_framing:`` заменяет на строгий close-up.
     """
     vp = (video_prompt or "").strip()
     model = model_fallback
@@ -390,6 +404,9 @@ def append_veo3_video_framing_constraints(
         return vp
     out = vp
     low = out.lower()
+    if "veo3_framing:" in low and "close-up shot only" not in low:
+        out = re.sub(r"\s*veo3_framing:\s*[^.]*\.?", "", out, count=1, flags=re.IGNORECASE).strip()
+        low = out.lower()
     if "veo3_framing:" not in low:
         out = f"{out} {VEO3_FAST_VIDEO_FRAMING_RULE}".strip()
         low = out.lower()
@@ -439,14 +456,23 @@ def _scene_start_frame_mentions_markiz(scene: dict[str, Any] | None) -> bool:
 def _build_veo3_cat_count_rule(scene: dict[str, Any] | None) -> str:
     """Builds strict anti-duplication rule for cat identities in Grandma Kitchen videos."""
     rules = [
-        "veo3_cat_count_rule: exactly one orange cat in frame; never show two orange cats or duplicate the orange cat identity."
+        "veo3_cat_count_rule: exactly one orange cat identity in frame; never show two orange cats, "
+        "two copies of the same orange cat, mirrored duplicate orange cats, orange kittens, or an unnamed extra orange cat."
     ]
     if _scene_has_character(scene, "zaya") or _scene_start_frame_mentions_white_cat(scene):
-        rules.append("Exactly one white cat in frame; never show two white cats or duplicate the white cat identity.")
+        rules.append(
+            "Exactly one white cat identity in frame; never show two white cats, mirrored duplicate white cats, "
+            "white kittens, or an unnamed extra white cat."
+        )
     if _scene_has_character(scene, "markiz") or _scene_start_frame_mentions_markiz(scene):
         rules.append(
-            "Exactly one black-and-white cat in frame; never show two black-and-white cats or duplicate the black-and-white cat identity."
+            "Exactly one black-and-white cat identity in frame; never show two black-and-white cats, "
+            "mirrored duplicate black-and-white cats, black-and-white kittens, or an unnamed extra black-and-white cat."
         )
+    rules.append(
+        "Different cat identities may appear together only when they are listed or clearly requested; if multiple cats appear, "
+        "each must have a distinct coat/identity and no same-identity duplicate."
+    )
     return " ".join(rules)
 
 
@@ -476,16 +502,42 @@ def _should_apply_voice_lock(scene: dict[str, Any]) -> bool:
     return bool(str(scene.get("text", "")).strip())
 
 
-def _enforce_voice_lock_if_needed(video_prompt: str, scene: dict[str, Any]) -> str:
+def _sanitize_video_prompt_language_references(video_prompt: str, target_language: str) -> str:
+    """Replace stale language references after reusing the base LLM prompt for another locale."""
+    prompt = str(video_prompt or "").strip()
+    lang = str(target_language or "ru").strip().lower()
+    label = language_name(lang)
+    token = _VOICE_LOCK_LANGUAGE_TOKEN_BY_LANG.get(lang, f"{label} language")
+    stale_lang = "en" if lang == "ru" else "ru"
+    stale_label = language_name(stale_lang)
+    stale_token = _VOICE_LOCK_LANGUAGE_TOKEN_BY_LANG.get(stale_lang, f"{stale_label} language")
+    replacements = {
+        stale_token: token,
+        f"{stale_label} line": f"{label} line",
+        f"spoken {stale_label} speech": f"spoken {label} speech",
+        f"{stale_label} speech": f"{label} speech",
+        f"neutral {stale_label} accent": f"neutral {label} accent",
+        _VOICE_RULES_BY_LANGUAGE.get(stale_lang, ""): (
+            _VOICE_RULES_BY_LANGUAGE.get(lang, f"all spoken phrases and voiceover are in {label} language only")
+        ),
+    }
+    out = prompt
+    for source, target in replacements.items():
+        out = out.replace(source, target)
+    return out
+
+
+def _enforce_voice_lock_if_needed(video_prompt: str, scene: dict[str, Any], *, target_language: str = "ru") -> str:
     """
     Добавляет `voice_lock_full` в prompt только когда это требуется политикой сцены.
     """
     vp = (video_prompt or "").strip()
     if not _should_apply_voice_lock(scene):
         return vp
-    if GRANDMA_VOICE_LOCK_FULL.lower() in vp.lower():
+    required_lock = _voice_lock_for_speaker_language("grandma", target_language)
+    if required_lock.lower() in vp.lower():
         return vp
-    return f"{vp} voice_lock_full: {GRANDMA_VOICE_LOCK_FULL}".strip()
+    return f"{vp} voice_lock_full: {required_lock}".strip()
 
 
 _DIALOGUE_SPEAKER_PROMPT_LABELS = {
@@ -559,18 +611,48 @@ def _append_dialogue_video_prompt_metadata(
     return (base + "\n" + "\n".join(metadata)).strip()
 
 
-def _finalize_scene_video_prompt(video_prompt_en: str, scene: dict[str, Any]) -> str:
-    """
-    Добавляет ``voice_lock_full`` при необходимости и runtime-критичные правила кадра Veo 3 fast
-    (липсинк, полная бабушка, все персонажи в кадре, крупный план, смена ракурса).
+def _append_prompt_rule(video_prompt: str, rule: str) -> str:
+    vp = str(video_prompt or "").strip()
+    text = str(rule or "").strip()
+    if not text:
+        return vp
+    if not vp:
+        return text
+    return f"{vp}. {text}".strip()
 
-    Контентные правила вроде cartoon grandma/cartoon cat и kitchen physics должны попадать в
-    композицию prompt на этапе LLM-генерации, а не насильно приклеиваться к каждому готовому
-    ``video_prompt`` на пост-обработке. ``CHARACTERS SPEAKS`` задаёт только модель.
+
+def _ensure_scene_video_prompt_invariants(video_prompt: str, scene: dict[str, Any], *, target_language: str) -> str:
+    """Apply non-negotiable runtime rules that must survive LLM rewrites."""
+    lang = str(target_language or "ru").strip().lower()
+    label = language_name(lang)
+    lang_rule = _VOICE_RULES_BY_LANGUAGE.get(lang, f"all spoken phrases and voiceover are in {label} language only")
+    vp = _sanitize_video_prompt_language_references(str(video_prompt or "").strip(), lang)
+    vp = _enforce_voice_lock_if_needed(vp, scene, target_language=lang)
+    low = vp.lower()
+    if lang_rule.lower() not in low:
+        vp = _append_prompt_rule(vp, lang_rule)
+        low = vp.lower()
+    if "cartoon grandmother" not in low or "cartoon cat" not in low:
+        vp = _append_prompt_rule(vp, _CARTOON_CHARACTER_RUNTIME_RULE)
+        low = vp.lower()
+    if "photoreal" not in low and "no realism" not in low:
+        vp = _append_prompt_rule(vp, _NON_REALISM_RULE)
+        low = vp.lower()
+    if _NO_SUBTITLES_MUSIC_RULE.lower() not in low:
+        vp = _append_prompt_rule(vp, _NO_SUBTITLES_MUSIC_RULE)
+    return vp
+
+
+def _finalize_scene_video_prompt(video_prompt_en: str, scene: dict[str, Any], *, target_language: str = "ru") -> str:
+    """
+    Добавляет runtime-критичные правила видео и языковой voice lock.
+
+    ``CHARACTERS SPEAKS`` задаёт модель, а ниже код только синхронизирует уже готовую секцию
+    с конкретной репликой целевого языка.
     """
     vp = _append_romantic_drama_to_video_prompt(str(video_prompt_en).strip(), scene)
-    vp = _enforce_voice_lock_if_needed(vp, scene)
-    return append_veo3_video_framing_constraints(vp, scene)
+    vp = _ensure_scene_video_prompt_invariants(vp, scene, target_language=target_language)
+    return _sanitize_video_prompt_language_references(append_veo3_video_framing_constraints(vp, scene), target_language)
 
 
 def _replace_characters_speaks(video_prompt: str, speech_text: str) -> str:
@@ -1066,8 +1148,6 @@ async def generate_recipe_steps(
         "- конкретные глаголы: режет, мешает, жарит, формирует\n"
         "- каждый шаг развернутый: минимум 5-7 слов, с деталями действия\n"
         "- никаких 'готовит' и 'делает что-то'\n\n"
-        + _RUSSIAN_YO_RULE
-        + "\n"
         + _LLM_RECIPE_STEPS_QUALITY_RULE
         + "\n"
         + _LLM_RECIPE_STEPS_COUNT_RULE
@@ -1263,8 +1343,6 @@ async def expand_recipe_steps(recipe_steps: list[str]) -> list[str]:
         "- не добавлять новые ингредиенты\n"
         "- не менять блюдо\n"
         "- просто детализировать\n\n"
-        + _RUSSIAN_YO_RULE
-        + "\n"
         + _LLM_RECIPE_STEPS_QUALITY_RULE
         + "\n"
         + _LLM_RECIPE_STEPS_COUNT_RULE
@@ -1291,8 +1369,6 @@ async def merge_recipe_steps(recipe_steps: list[str]) -> list[str]:
         "ПРАВИЛА:\n"
         "- не терять ключевые этапы\n"
         "- сохранить понятность\n\n"
-        + _RUSSIAN_YO_RULE
-        + "\n"
         + _LLM_RECIPE_STEPS_QUALITY_RULE
         + "\n"
         + _LLM_RECIPE_STEPS_COUNT_RULE
@@ -1863,7 +1939,7 @@ def _extract_production_prompts(raw: str) -> Any:
 
 def _fallback_start_frame_prompt_from_scene(scene: dict[str, Any]) -> str:
     """Builds a minimal deterministic start-frame prompt when production JSON is invalid."""
-    shot = str(scene.get("shot_type") or "medium-close").strip()
+    shot = str(scene.get("shot_type") or "close-up").strip()
     action = sanitize_character_names_and_keys(
         str(scene.get("action") or scene.get("recipe_step") or scene.get("text") or "бабушка готовит блюдо").strip()
     )
@@ -1875,7 +1951,7 @@ def _fallback_start_frame_prompt_from_scene(scene: dict[str, Any]) -> str:
     )
     continuity_state = sanitize_character_names_and_keys(str(scene.get("continuity_state") or "").strip())
     parts = [
-        f"Крупный или средне-крупный план, ракурс {shot}.",
+        f"Крупный план, не средний и не средне-крупный, ракурс {shot}.",
         "Бабушка и кот полностью видны в кадре.",
         action.rstrip(".") + ".",
     ]
@@ -1900,7 +1976,7 @@ def _fallback_video_prompt_from_scene(scene: dict[str, Any]) -> str:
     )
     continuity_state = sanitize_character_names_and_keys(str(scene.get("continuity_state") or "").strip())
     prompt = (
-        f"{duration}-second cozy cartoon cooking clip, close-up to medium-close framing, "
+        f"{duration}-second cozy cartoon cooking clip, close-up framing only, not medium or medium-close, "
         f"grandmother and cartoon cat fully visible, gentle camera evolution, accurate lip sync, "
         f"no on-screen text, no subtitles, no background music. Main action: {action}."
     )
@@ -1996,8 +2072,6 @@ async def generate_frame_prompts_for_approval(
         "Return ONLY JSON array. One item per scene, same order.\n"
         "Each item must have keys: start_frame_prompt_ru, end_frame_prompt_ru.\n"
         "START FRAME: detailed static pre-action frame in Russian.\n"
-        + _RUSSIAN_YO_RULE
-        + "\n"
         "START FRAME must explicitly include camera angle/viewpoint in words (required).\n"
         "END FRAME is opt-in only. Return end_frame_prompt_ru only for scene numbers in requested_end_frame_scenes; "
         "for every other scene return the Russian word 'пусто', even if the final beat differs visually. "
@@ -2049,6 +2123,7 @@ async def generate_full_production(
     sponsored_content: bool = False,
     brand_context: str | None = None,
     generation_comment: str | None = None,
+    dish_visual_brief: str | None = None,
 ) -> dict[str, Any]:
     """
     Сборка промптов для медиа по сценам.
@@ -2068,6 +2143,7 @@ async def generate_full_production(
     }
     viral_brief = viral_concept_brief if isinstance(viral_concept_brief, dict) else {}
     comment = (generation_comment or "").strip()
+    dish_brief = str(dish_visual_brief or "").strip()
     target_languages = target_languages_from_env()
     if approved_frame_prompts is not None:
         if len(approved_frame_prompts) != len(scenes):
@@ -2137,6 +2213,16 @@ async def generate_full_production(
                     "video_prompt_en must not introduce new visible ingredients, garnishes, toppings, sides, sauces, "
                     "or dish decorations; all visuals come from start/end frames"
                 ),
+                "cat_identity_count_rule": (
+                    "Each cat identity may appear at most once: one orange cat, one white cat, one black-and-white cat. "
+                    "Different cat identities may appear together only when listed in scene.characters or explicitly requested; "
+                    "never duplicate the same coat/identity."
+                ),
+                "dish_visual_fidelity_rule": (
+                    "Use dish_visual_brief as the real-world visual target for any visible food. Start/end frames "
+                    "must make the dish or current recipe-state appearance explicit: canonical shape, color, "
+                    "texture, ingredient form, serving/process state, and readable non-cropped framing."
+                ),
                 "romantic_drama_rule": (
                     "If scene.romantic_drama_beat is non-empty, video_prompt_en must explicitly include that background "
                     "drama beat as visible action throughout the clip, using concrete staging and behavior rather than "
@@ -2151,6 +2237,7 @@ async def generate_full_production(
                 "viral_concept_brief": viral_brief,
                 "sponsored_content": bool(sponsored_content),
                 "brand_context": brand_context or "",
+                "dish_visual_brief": dish_brief,
                 "end_frame_rule": (
                     "Return end_frame_prompt_ru only for scene numbers listed in requested_end_frame_scenes. "
                     "For every other scene return the Russian word 'пусто'. The end frame is a delta vs start."
@@ -2189,15 +2276,17 @@ async def generate_full_production(
             "Kitchen physics must stay plausible: cookware belongs on a visible burner or hob when cooking; "
             "blenders must have jar, base, and lid; mixers need beaters, bowl, and motor body. "
             "Do not invent extra characters, duplicate animals, extra hands, or unrelated side actions. "
+            "Cat identity count: never show duplicate same-identity cats. One orange cat maximum, one white cat maximum, "
+            "one black-and-white cat maximum; different cat identities may appear together only when listed/requested. "
             "If scene has speech, require accurate lip sync with the Russian line. "
             "Speech must be spoken verbatim with no extra filler words and no omitted words; declarative cooking lines "
             "must end with calm completed intonation, not question-like rising intonation. "
-            "For every Russian word copied into video_prompt_en, especially after CHARACTERS SPEAKS, use `ё` when Russian spelling requires `ё`, not `е`. "
+            "For Russian voiceover words copied into video_prompt_en, especially after CHARACTERS SPEAKS, use correct Russian spelling: `ё` only where the spoken word really requires `ё`, and ordinary `е` where the word requires `е`. "
             "For scene 1, the spoken phrase in CHARACTERS SPEAKS must happen at the start of the clip and explicitly "
             "name the dish from the scenario; the viewer must hear the dish name in the first scene. "
             "Do not include title_safe_top_30 or top-30-percent overlay instructions in video_prompt_en; that rule is only for start_frame_prompt_ru. "
             f"Scene 1 fruit-only first-moment exception: {FRUIT_ONLY_FIRST_MOMENT_RULE} "
-            "Framing: close-up / medium-close; grandmother's full figure and every other character in the scene "
+            "Framing: close-up only, not medium or medium-close; grandmother's full figure and every other character in the scene "
             "must stay fully visible; camera angle or framing should evolve during the clip (no fixed static "
             "tripod for the entire take).\n"
             + _LLM_VIDEO_CHARACTERS_SPEAKS_RULE
@@ -2213,11 +2302,15 @@ async def generate_full_production(
             "Use the cartoon-character and kitchen-physics rules when composing the prompt, but do not append bulky "
             "meta-rule labels like veo3_cartoon_character_rule or kitchen_physics_rule unless they naturally belong in the prompt.\n"
             "Do not mention location names or location references; preserve continuity through recurring props and food state.\n"
+            "Use DISH VISUAL BRIEF as the real-world target whenever food appears: explicitly write the canonical "
+            "dish/current food-state details into the frame prompts, including shape, color, texture, ingredient "
+            "form, serving/process state, and enough framing that the main food is not cropped and remains verifiable.\n"
             "Respect the Viral Concept Brief and scene retention fields. First frame must not be boring preparation; "
             "final scene must deliver the visual payoff. If sponsored_content is true, integrate the brand naturally "
             "inside the cooking story, not as an ad break.\n"
             "If a scene contains romantic_drama_beat, video_prompt_en must show that beat as visible background action for that exact scene.\n"
             + (f"MANDATORY GENERATION COMMENT FROM QUEUE/USER:\n{comment}\n" if comment else "")
+            + (f"DISH VISUAL BRIEF:\n{dish_brief}\n" if dish_brief else "")
             + feedback_block
             + "\n"
             + json.dumps(payload, ensure_ascii=False, indent=2)
@@ -2259,9 +2352,9 @@ async def generate_full_production(
                 speech_by_lang,
                 dialogue_by_lang=dialogue_by_lang or _dialogue_by_lang_for_scene(scene_out, speech_by_lang),
             )
-            base_prompt = _finalize_scene_video_prompt(
-                _append_first_scene_title_safe_video_rule(str(p.get("video_prompt_en", "")), scene_index=scene_index),
-                scene_out,
+            raw_video_prompt = _append_first_scene_title_safe_video_rule(
+                str(p.get("video_prompt_en", "")),
+                scene_index=scene_index,
             )
             scene_out["speech_by_lang"] = speech_by_lang
             scene_out["dialogue_by_lang"] = dialogue_by_lang
@@ -2271,7 +2364,10 @@ async def generate_full_production(
             scene_out["video_prompt_by_lang"] = {
                 lang: _append_dialogue_video_prompt_metadata(
                     append_prompt_timing_hints(
-                        _replace_characters_speaks(base_prompt, speech),
+                        _replace_characters_speaks(
+                            _finalize_scene_video_prompt(raw_video_prompt, scene_out, target_language=lang),
+                            speech,
+                        ),
                         speech_plan_by_lang.get(lang),
                         duration_sec=float(scene_out.get("duration_sec") or 0.0),
                     ),
@@ -2282,7 +2378,10 @@ async def generate_full_production(
             }
             scene_out["video_results_by_lang"] = {}
             scene_out["video_approvals_by_lang"] = {lang: False for lang in speech_by_lang}
-            scene_out["video_prompt"] = scene_out["video_prompt_by_lang"].get("ru") or base_prompt
+            scene_out["video_prompt"] = (
+                scene_out["video_prompt_by_lang"].get("ru")
+                or next(iter(scene_out["video_prompt_by_lang"].values()), raw_video_prompt)
+            )
             scene_out["text"] = speech_by_lang.get("ru") or str(scene_out.get("text", "")).strip()
             scene_out["tts"] = {
                 "provider": "none",
@@ -2344,6 +2443,16 @@ async def generate_full_production(
                     "start_frame_ru must not add unsupported visible ingredients; video_prompt_en must not introduce "
                     "new visible ingredients, garnishes, toppings, sides, sauces, or dish decorations"
                 ),
+            "cat_identity_count_rule": (
+                "Each cat identity may appear at most once: one orange cat, one white cat, one black-and-white cat. "
+                "Different cat identities may appear together only when listed in scene.characters or explicitly requested; "
+                "never duplicate the same coat/identity."
+            ),
+            "dish_visual_fidelity_rule": (
+                "Use dish_visual_brief as the real-world visual target. start_frame_ru/end_frame_prompt_ru must "
+                "explicitly describe the dish or current recipe-state appearance with canonical shape, color, "
+                "texture, ingredient form, serving/process state, and readable non-cropped framing of the main food."
+            ),
             "romantic_drama_rule": (
                 "If scene.romantic_drama_beat is non-empty, both start_frame_ru and video_prompt_en must explicitly "
                 "include that background drama beat as visible action, using concrete staging and behavior rather than "
@@ -2358,16 +2467,18 @@ async def generate_full_production(
             "viral_concept_brief": viral_brief,
             "sponsored_content": bool(sponsored_content),
             "brand_context": brand_context or "",
+            "dish_visual_brief": dish_brief,
             "requested_end_frame_scenes": sorted(requested_end_frames),
         },
     }
     prompt = (
         "Return ONLY JSON object with key \"prompts\" — array of objects, one per scene in order.\n"
         "Each object: start_frame_prompt_ru, end_frame_prompt_ru, video_prompt_en.\n"
-        + _RUSSIAN_YO_RULE
-        + "\n"
         "START FRAME must be static and highly detailed, and explicitly include camera angle/viewpoint. "
         "START FRAME must include cutting/slicing method when relevant, dish/current dish-state description, and detailed ingredient descriptions: shape, color, texture, processing state. "
+        "Use DISH VISUAL BRIEF as the real-world target: before writing each food frame, infer the canonical look "
+        "of the named dish/current recipe state and write it directly into the prompt; the main food must be framed "
+        "readably, not cropped off, with shape, texture, color, and ingredient state visible. "
         f"START FRAME Russian mandatory rule: {START_FRAME_RECIPE_VISUAL_DETAIL_RULE} "
         f"SCENE 1 title-safe mandatory rule: {TITLE_SAFE_FIRST_SCENE_START_FRAME_RULE} "
         f"SCENE 1 fruit-only first-moment exception: {FRUIT_ONLY_FIRST_MOMENT_RULE} "
@@ -2384,15 +2495,17 @@ async def generate_full_production(
         "Kitchen physics must stay plausible: cookware belongs on a visible burner or hob when cooking; "
         "blenders must have jar, base, and lid; mixers need beaters, bowl, and motor body. "
         "Do not invent extra characters, duplicate animals, extra hands, or unrelated side actions. "
+        "Cat identity count: never show duplicate same-identity cats. One orange cat maximum, one white cat maximum, "
+        "one black-and-white cat maximum; different cat identities may appear together only when listed/requested. "
         "If scene has speech, require accurate lip sync with the Russian line. "
         "Speech must be spoken verbatim with no extra filler words and no omitted words; declarative cooking lines "
         "must end with calm completed intonation, not question-like rising intonation. "
-        "For every Russian word copied into video_prompt_en, especially after CHARACTERS SPEAKS, use `ё` when Russian spelling requires `ё`, not `е`. "
+        "For Russian voiceover words copied into video_prompt_en, especially after CHARACTERS SPEAKS, use correct Russian spelling: `ё` only where the spoken word really requires `ё`, and ordinary `е` where the word requires `е`. "
         "For scene 1, the spoken phrase in CHARACTERS SPEAKS must happen at the start of the clip and explicitly "
         "name the dish from the scenario; the viewer must hear the dish name in the first scene. "
         "Do not include title_safe_top_30 or top-30-percent overlay instructions in video_prompt_en; that rule is only for START FRAME. "
         f"Scene 1 fruit-only first-moment exception: {FRUIT_ONLY_FIRST_MOMENT_RULE} "
-        "Framing: close-up / medium-close; grandmother's full figure and every other character in the scene "
+        "Framing: close-up only, not medium or medium-close; grandmother's full figure and every other character in the scene "
         "must stay fully visible; camera angle or framing should evolve during the clip (no fixed static "
         "tripod for the entire take).\n"
         + _LLM_VIDEO_CHARACTERS_SPEAKS_RULE
@@ -2416,6 +2529,7 @@ async def generate_full_production(
         "inside the cooking story, not as an ad break.\n"
         "If a scene contains romantic_drama_beat, both start_frame_prompt_ru and video_prompt_en must show that beat as visible background action for that exact scene.\n"
         + (f"MANDATORY GENERATION COMMENT FROM QUEUE/USER:\n{comment}\n" if comment else "")
+        + (f"DISH VISUAL BRIEF:\n{dish_brief}\n" if dish_brief else "")
         + json.dumps(payload, ensure_ascii=False, indent=2)
     )
     raw = await asyncio.to_thread(gemini_generate_sync, prompt)
@@ -2462,9 +2576,9 @@ async def generate_full_production(
             speech_by_lang,
             dialogue_by_lang=dialogue_by_lang or _dialogue_by_lang_for_scene(scene_out, speech_by_lang),
         )
-        base_prompt = _finalize_scene_video_prompt(
-            _append_first_scene_title_safe_video_rule(str(p.get("video_prompt_en", "")), scene_index=scene_index),
-            scene_out,
+        raw_video_prompt = _append_first_scene_title_safe_video_rule(
+            str(p.get("video_prompt_en", "")),
+            scene_index=scene_index,
         )
         scene_out["speech_by_lang"] = speech_by_lang
         scene_out["dialogue_by_lang"] = dialogue_by_lang
@@ -2474,7 +2588,10 @@ async def generate_full_production(
         scene_out["video_prompt_by_lang"] = {
             lang: _append_dialogue_video_prompt_metadata(
                 append_prompt_timing_hints(
-                    _replace_characters_speaks(base_prompt, speech),
+                    _replace_characters_speaks(
+                        _finalize_scene_video_prompt(raw_video_prompt, scene_out, target_language=lang),
+                        speech,
+                    ),
                     speech_plan_by_lang.get(lang),
                     duration_sec=float(scene_out.get("duration_sec") or 0.0),
                 ),
@@ -2485,7 +2602,10 @@ async def generate_full_production(
         }
         scene_out["video_results_by_lang"] = {}
         scene_out["video_approvals_by_lang"] = {lang: False for lang in speech_by_lang}
-        scene_out["video_prompt"] = scene_out["video_prompt_by_lang"].get("ru") or base_prompt
+        scene_out["video_prompt"] = (
+            scene_out["video_prompt_by_lang"].get("ru")
+            or next(iter(scene_out["video_prompt_by_lang"].values()), raw_video_prompt)
+        )
         scene_out["text"] = speech_by_lang.get("ru") or str(scene_out.get("text", "")).strip()
         scene_out["tts"] = {
             "provider": "none",

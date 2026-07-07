@@ -61,7 +61,7 @@ def test_scheduled_generation_template_imports_to_db(monkeypatch, tmp_path):
         assert row.source_file_path == result.saved_path
 
 
-def test_due_scheduled_generation_waits_until_local_3am(monkeypatch):
+def test_due_scheduled_generation_waits_until_local_1am(monkeypatch):
     _install_sqlite(monkeypatch)
     monkeypatch.setenv("SCHEDULED_GENERATION_TIMEZONE", "Europe/Moscow")
     with db.SessionLocal() as session:
@@ -89,11 +89,11 @@ def test_due_scheduled_generation_waits_until_local_3am(monkeypatch):
         )
         session.commit()
 
-    rows = due_scheduled_generation_items(now=datetime(2026, 6, 29, 23, 0, tzinfo=timezone.utc))
+    rows = due_scheduled_generation_items(now=datetime(2026, 6, 29, 21, 59, tzinfo=timezone.utc))
 
     assert [row.title for row in rows] == ["Old"]
 
-    rows = due_scheduled_generation_items(now=datetime(2026, 6, 30, 0, 0, tzinfo=timezone.utc))
+    rows = due_scheduled_generation_items(now=datetime(2026, 6, 29, 22, 0, tzinfo=timezone.utc))
 
     assert [row.title for row in rows] == ["Old", "Today late"]
 
@@ -411,8 +411,8 @@ def test_scheduled_generation_comment_is_used_for_viral_plan(monkeypatch):
         calls["scenes"] = (concept, full_recipe_text, viral_concept_brief, generation_comment)
         return {"json_plan": [{"scene": 1, "text": "Сцена"}]}
 
-    async def fake_production(scenes_plan, *, viral_concept_brief=None, generation_comment=None, **_kwargs):
-        calls["production"] = (scenes_plan, viral_concept_brief, generation_comment)
+    async def fake_production(scenes_plan, *, viral_concept_brief=None, generation_comment=None, dish_visual_brief=None, **_kwargs):
+        calls["production"] = (scenes_plan, viral_concept_brief, generation_comment, dish_visual_brief)
         return {"json_plan": [{"scene": 1, "start_frame_prompt": "Prompt"}]}
 
     async def fake_notify(*_args, **_kwargs):
@@ -445,6 +445,8 @@ def test_scheduled_generation_comment_is_used_for_viral_plan(monkeypatch):
     )
     assert calls["production"][1] == {"hook": "family intrigue"}
     assert calls["production"][2] == "После рецепта: больше семейной интриги в первом кадре."
+    assert "Летний пирог" in calls["production"][3]
+    assert "canonical real-world appearance" in calls["production"][3]
 
 
 def test_scheduled_generation_url_recipe_is_resolved_before_pipeline(monkeypatch):

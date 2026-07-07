@@ -45,6 +45,7 @@ SCHEDULED_STATUS_RUNNING = "running"
 SCHEDULED_STATUS_DRAFT_READY = "draft_ready"
 SCHEDULED_STATUS_FAILED_NEEDS_REVIEW = "failed_needs_review"
 SCHEDULED_STATUS_FAILED = "failed"
+SCHEDULED_STATUS_WAITING_FOR_CHAK_CHAK = "waiting_for_chak_chak"
 
 SCHEDULED_EXCEL_COLUMNS = ("title", "recipe", "comment", "title_color", "run_at", "is_draft", "series_id", "source_row_key")
 DEFAULT_TITLE_COLOR = "#c72638"
@@ -59,7 +60,7 @@ SCHEDULED_MEDIA_PROGRESS_RETRY_DELAY_MINUTES = 1
 SCHEDULED_MEDIA_PROGRESS_ITERATION_COUNT_ENV = "SCHEDULED_MEDIA_PROGRESS_ITERATION_COUNT"
 SCHEDULED_MEDIA_PROGRESS_CONTINUE_DELAY_SEC_ENV = "SCHEDULED_MEDIA_PROGRESS_CONTINUE_DELAY_SEC"
 DEFAULT_SCHEDULED_GENERATION_TIMEZONE = "Europe/Moscow"
-DEFAULT_SCHEDULED_GENERATION_DUE_HOUR = 3
+DEFAULT_SCHEDULED_GENERATION_DUE_HOUR = 1
 SCHEDULED_STEP_STATE_KEY = "step_state"
 SCHEDULED_STEP_VIRAL_PLAN = "viral_plan"
 SCHEDULED_STEP_SCENES_PLAN = "scenes_plan"
@@ -833,6 +834,43 @@ def claim_scheduled_generation_item(item_id: uuid.UUID) -> bool:
         return True
 
 
+def _release_items_waiting_for_completed_item(db, completed_item_id: uuid.UUID, *, now: datetime) -> None:
+    held_rows = (
+        db.execute(
+            select(ScheduledGenerationItem).where(
+                ScheduledGenerationItem.status == SCHEDULED_STATUS_WAITING_FOR_CHAK_CHAK
+            )
+        )
+        .scalars()
+        .all()
+    )
+    for held in held_rows:
+        payload = dict(held.payload_json or {})
+        if str(payload.get("hold_until_item_id") or "") != str(completed_item_id):
+            continue
+        payload["released_after_item_id"] = str(completed_item_id)
+        payload["released_at"] = now.isoformat()
+        payload.pop(SCHEDULED_RETRY_NOT_BEFORE_KEY, None)
+        held.status = SCHEDULED_STATUS_PENDING
+        held.run_at = now
+        held.error_text = None
+        held.claimed_at = None
+        held.started_at = None
+        held.finished_at = None
+        held.payload_json = payload
+        db.add(
+            ScheduledGenerationEvent(
+                scheduled_item_id=held.id,
+                generation_run_id=None,
+                event_type="released",
+                stage="dependency",
+                status=SCHEDULED_STATUS_PENDING,
+                message="Задача автоматически выпущена после завершения зависимой задачи.",
+                payload_json={"released_after_item_id": str(completed_item_id)},
+            )
+        )
+
+
 def _set_item_status(
     item_id: uuid.UUID,
     status: str,
@@ -862,6 +900,8 @@ def _set_item_status(
             merged = dict(row.payload_json or {})
             merged.update(payload)
             row.payload_json = merged
+        if status == SCHEDULED_STATUS_DRAFT_READY:
+            _release_items_waiting_for_completed_item(db, row.id, now=now)
         db.commit()
 
 
@@ -1572,6 +1612,7 @@ async def process_scheduled_generation_item(item_id: uuid.UUID) -> str:
                 scenes_plan,
                 viral_concept_brief=viral_brief,
                 generation_comment=comment,
+                dish_visual_brief=build_dish_visual_brief(title, recipe_text),
             )
             plan = production.get("json_plan") if isinstance(production, dict) else None
             if not isinstance(plan, list) or not plan:
