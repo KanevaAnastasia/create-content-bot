@@ -12,7 +12,9 @@ from telegram.error import NetworkError, RetryAfter, TimedOut
 
 from ..character_catalog import sanitize_character_names_and_keys
 from ..dish_visuals import append_dish_visual_brief_to_prompt, build_dish_visual_brief
+from ..generation_modes import is_silence_generation, syntax_provider_for_generation_mode
 from ..pipeline_llm_steps import FINAL_SCENE_SUBSCRIBE_CTA
+from ..scheduled_comments import scheduled_generation_every_start_prompt_comment
 from .handlers_state_deps import (
     ContextTypes,
     SESSIONS,
@@ -1363,7 +1365,37 @@ def _parse_speed_command(text: str) -> float | None:
     return parse_speed_coef(parts[1])
 
 
+def _parse_video_duration_feedback(text: str) -> int | None:
+    low = str(text or "").strip().lower().replace(",", ".")
+    if not low:
+        return None
+    for pattern in (
+        r"(?:длительн\w*|хронометраж|тайминг|видео)\D{0,24}([3-8])\s*(?:сек\w*|sec|s)\b",
+        r"\b(?:на|до)\s*([3-8])\s*(?:сек\w*|sec|s)\b",
+        r"\b([3-8])\s*(?:сек\w*|sec|s)\b",
+    ):
+        match = re.search(pattern, low, flags=re.IGNORECASE)
+        if match:
+            try:
+                return int(match.group(1))
+            except (TypeError, ValueError):
+                return None
+    return None
+
+
+def _apply_video_duration_feedback(scene: dict, feedback: str, *, speechless: bool) -> int | None:
+    duration = _parse_video_duration_feedback(feedback)
+    if duration is None:
+        return None
+    if speechless:
+        duration = max(3, min(4, duration))
+    scene["duration_sec"] = duration
+    return duration
+
+
 def _scene_speed_coef(scene: dict, language: str) -> float:
+    if _is_speechless_video_scene(scene):
+        return 1.0
     selected = resolve_scene_video_for_production(scene, language)
     if selected is None:
         return DEFAULT_SCENE_VIDEO_SPEED_COEF
@@ -1734,6 +1766,7 @@ async def _attempt_scheduled_syntax_batch(
     model: str,
     duration_sec: int,
     session: dict,
+    syntax_provider: str | None = None,
 ) -> dict[str, bytes]:
     timeout_sec = _scheduled_syntax_timeout_sec(session)
     lock_timeout_sec = _scheduled_syntax_lock_timeout_sec(session)
@@ -1744,6 +1777,7 @@ async def _attempt_scheduled_syntax_batch(
             duration_sec=duration_sec,
             timeout_sec=timeout_sec,
             acquire_timeout_sec=lock_timeout_sec,
+            syntax_provider=syntax_provider,
         )
     except TypeError as exc:
         if "unexpected keyword" not in str(exc):
@@ -1926,6 +1960,27 @@ def _latest_ai_approval_feedback(scene: dict, *, stage: str) -> str:
     return ""
 
 
+def _scheduled_every_start_prompt_comment(session: dict) -> str:
+    explicit = str(session.get("scheduled_generation_every_start_prompt_comment") or "").strip()
+    if explicit:
+        return explicit
+    return scheduled_generation_every_start_prompt_comment(
+        str(session.get("scheduled_generation_comment") or "")
+    )
+
+
+def _append_scheduled_every_start_prompt_comment(session: dict, feedback: str) -> str:
+    comment = _scheduled_every_start_prompt_comment(session)
+    if not comment:
+        return str(feedback or "").strip()
+    feedback_text = str(feedback or "").strip()
+    comment_block = (
+        "MANDATORY SCHEDULED COMMENT FOR EVERY START PROMPT GENERATION/REGENERATION:\n"
+        f"{comment}"
+    )
+    return f"{feedback_text}\n\n{comment_block}".strip()
+
+
 async def _regenerate_start_prompt_from_ai_feedback(
     update: Update,
     context: ContextTypes.DEFAULT_TYPE | None,
@@ -1948,6 +2003,7 @@ async def _regenerate_start_prompt_from_ai_feedback(
             "Keep the real dish appearance exactly:\n"
             f"{dish_brief}"
         )
+    feedback = _append_scheduled_every_start_prompt_comment(session, feedback)
     await _safe_reply_text(
         update.message,
         "🤖 ИИ апрув дал фидбэк по стартовому кадру. "
@@ -2007,6 +2063,7 @@ async def _regenerate_scene_prompts_from_prompt_ai_feedback(
             "Keep dish and ingredient fidelity exactly:\n"
             f"{dish_brief}"
         )
+    feedback = _append_scheduled_every_start_prompt_comment(session, feedback)
     await _safe_reply_text(
         update.message,
         "🤖 ИИ апрув отклонил связку prompt/image/video до генерации. "
@@ -3551,6 +3608,7 @@ def _scene_speech_for_language(scene: dict, language: str) -> str:
 _DIALOGUE_SPEAKER_ALIASES = {
     "grandma": "grandma",
     "бабушка": "grandma",
+    "babushka": "grandma",
     "grandfather": "grandfather",
     "grandpa": "grandfather",
     "дедушка": "grandfather",
@@ -3629,6 +3687,53 @@ def _dialogue_voice_lock_full(speaker: str, language: str) -> str:
     )
 
 
+def _scene_voice_speakers_for_language(scene: dict, language: str) -> set[str]:
+    speakers = {
+        _normalize_dialogue_speaker(item.get("speaker"))
+        for item in _scene_dialogue_for_language(scene, language)
+    }
+    plan_map = scene.get("speech_plan_by_lang")
+    plan = plan_map.get(language) if isinstance(plan_map, dict) else None
+    if isinstance(plan, list):
+        for item in plan:
+            if isinstance(item, dict):
+                speaker = _normalize_dialogue_speaker(item.get("speaker"))
+                if speaker:
+                    speakers.add(speaker)
+    return {speaker for speaker in speakers if speaker}
+
+
+def _scene_requires_grandma_named_voice_lock(scene: dict, language: str) -> bool:
+    speakers = _scene_voice_speakers_for_language(scene, language)
+    if speakers:
+        return "grandma" in speakers
+    characters = scene.get("characters")
+    if isinstance(characters, list):
+        normalized = {
+            _normalize_dialogue_speaker(value)
+            for value in characters
+            if str(value or "").strip()
+        }
+        if "grandma" in normalized:
+            return True
+        if normalized:
+            return False
+    for key in ("text", "action", "recipe_step", "start_frame_prompt", "video_prompt"):
+        low = str(scene.get(key) or "").lower()
+        if "grandma" in low or "babushka" in low or "бабуш" in low:
+            return True
+    return True
+
+
+def _ensure_named_grandma_voice_lock(prompt: str, scene: dict, language: str) -> str:
+    out = str(prompt or "").strip()
+    if not _scene_requires_grandma_named_voice_lock(scene, language):
+        return out
+    if re.search(r"\bvoice_lock_full_grandma\s*:", out, flags=re.IGNORECASE):
+        return out
+    return f"{out}\nvoice_lock_full_grandma: {_dialogue_voice_lock_full('grandma', language)}".strip()
+
+
 def _strip_dialogue_prompt_metadata(prompt: str) -> str:
     out = str(prompt or "").strip()
     patterns = (
@@ -3665,6 +3770,55 @@ def _append_dialogue_prompt_metadata(prompt: str, scene: dict, language: str) ->
     return f"{base}\n" + "\n".join(metadata)
 
 
+def _is_speechless_video_scene(scene: dict, session: dict | None = None) -> bool:
+    if session is not None and is_silence_generation(session):
+        return True
+    mode = str(scene.get("generation_mode") or scene.get("mode") or "").strip().lower()
+    model = str(scene.get("model") or "").strip().lower()
+    return mode == "silence" or model.startswith("kling")
+
+
+def _strip_speechless_video_prompt_metadata(prompt: str) -> str:
+    out = str(prompt or "").strip()
+    out = re.sub(r"\blang\s*[:=]\s*[a-z]{2}\b", "", out, flags=re.IGNORECASE)
+    out = re.sub(r"\bCHARACTERS?\s+SPEAKS?\s*:[^\n.]*(?:\.|\n|$)", "", out, flags=re.IGNORECASE)
+    out = re.sub(r"\bspeaker_dialogue_order\s*:[^\n]*", "", out, flags=re.IGNORECASE)
+    out = re.sub(r"\bcharacter_dialogue_script\s*:(?:\n[^\n:]+:\s*[^\n]*)+", "", out, flags=re.IGNORECASE)
+    out = re.sub(
+        r"\bvoice_lock_full(?:_[a-z_]+)?\s*:.*?(?=\bvisual style\b|\bno on-screen text\b|\bAudio enabled\b|\bNo dialogue\b|\bPixar\b|\bExtreme close\b|\bNostalgic\b|\bOnly grandmother\b|\n|$)",
+        "",
+        out,
+        flags=re.IGNORECASE | re.DOTALL,
+    )
+    out = re.sub(r"\ball spoken phrases? and voiceover are in [^.]+\.?", "", out, flags=re.IGNORECASE)
+    out = re.sub(r"\b(?:accurate\s+)?lip[-\s]?sync\b[^.]*\.?", "", out, flags=re.IGNORECASE)
+    out = re.sub(r"\bvoiceover\s+in\s+[A-Za-zА-Яа-я -]+\.?", "", out, flags=re.IGNORECASE)
+    out = re.sub(r"\s+", " ", out).strip(" \n\t.;")
+    return out
+
+
+def _compose_speechless_video_prompt(scene: dict, language: str, prompt: str) -> str:
+    base = _strip_speechless_video_prompt_metadata(sanitize_character_names_and_keys(prompt))
+    try:
+        duration = int(scene.get("duration_sec") or 4)
+    except Exception:
+        duration = 4
+    duration = max(3, min(4, duration))
+    scene["duration_sec"] = duration
+    required = (
+        f"{duration}-second Kling 3.0 image-to-video shot. "
+        "No dialogue, no voiceover, no subtitles, no on-screen text. "
+        "Audio enabled; natural cooking sounds only: sauce pouring, bubbling cream sauce, sizzling food, "
+        "spoon against ceramic, soft cloth movement, cat purrs or tiny paw taps when visible. "
+        "No background music. Pixar-like non-realistic cartoon style. "
+        "Extreme close-up, food-first framing; the dish and the orange cartoon cat face are very large in frame. "
+        "Nostalgic rustic grandma kitchen atmosphere. "
+        "Only grandmother and exactly one orange cartoon cat are present; no other cats, animals, or people."
+    )
+    text = " ".join(part for part in (base, required) if part).strip()
+    return _prefix_video_prompt_with_language(text, language)
+
+
 def _scene_video_provider_choice_entry(
     *,
     prompt: str,
@@ -3676,6 +3830,7 @@ def _scene_video_provider_choice_entry(
     aspect_ratio: str,
     audio_enabled: bool,
     syntax_error_message: str,
+    syntax_provider: str | None = None,
 ) -> dict:
     return {
         "schema": 1,
@@ -3686,6 +3841,7 @@ def _scene_video_provider_choice_entry(
         "quality": quality,
         "aspect_ratio": aspect_ratio,
         "audio_enabled": audio_enabled,
+        "syntax_provider": syntax_provider,
         "start_image_b64": _encode_b64(start_image),
         "end_image_b64": _encode_b64(end_image) if end_image else "",
         "syntax_error_message": (syntax_error_message or "")[:8000],
@@ -3786,11 +3942,15 @@ def _compose_locked_video_prompt(scene: dict, language: str, prompt: str) -> str
 
     Prompt edits (`ПРОМПТ`/`ФИДБЕК`) must not alter spoken phrase.
     """
-    out = enforce_video_prompt_voice_requirements(sanitize_character_names_and_keys(prompt), scene, target_language=language)
+    if _is_speechless_video_scene(scene):
+        return _compose_speechless_video_prompt(scene, language, prompt)
+    base_prompt = append_prompt_timing_hints(sanitize_character_names_and_keys(prompt), None, duration_sec=0.0)
+    out = enforce_video_prompt_voice_requirements(base_prompt, scene, target_language=language)
     speech = _scene_speech_for_language(scene, language)
     if speech:
         out = _sync_scene_text_into_video_prompt(out, speech)
     out = _append_dialogue_prompt_metadata(out, scene, language)
+    out = _ensure_named_grandma_voice_lock(out, scene, language)
     plan_map = scene.get("speech_plan_by_lang")
     plan = plan_map.get(language) if isinstance(plan_map, dict) else build_default_speech_plan(speech, language)
     out = append_prompt_timing_hints(out, plan, duration_sec=float(scene.get("duration_sec") or 0.0))
@@ -4538,6 +4698,8 @@ async def _apply_scene_video_feedback(
     lang = normalize_language_code(str(language or "")) or _scene_current_language(session, scene)
     if lang not in languages:
         lang = languages[0] if languages else "ru"
+    speechless = _is_speechless_video_scene(scene, session)
+    updated_duration = _apply_video_duration_feedback(scene, feedback_text, speechless=speechless)
     current = _scene_video_prompt_for_language(scene, lang)
     try:
         rewritten = await _call_with_503_retries(
@@ -4554,11 +4716,14 @@ async def _apply_scene_video_feedback(
         logger.exception("video prompt feedback rewrite failed")
         await update.message.reply_text(f"Ошибка переформатирования video prompt: {_user_error_message(e)}")
         return True
+    if speechless:
+        rewritten = _strip_speechless_video_prompt_metadata(rewritten)
     applied_languages = _set_scene_video_prompt_for_all_languages(session, scene, rewritten)
     session["scene_media_language_index"] = applied_languages.index(lang) if lang in applied_languages else 0
     has_generated_videos = _all_scene_languages_have_video(scene, languages)
     preview_lang = lang if lang in applied_languages else (applied_languages[0] if applied_languages else lang)
     preview_prompt = _scene_video_prompt_for_language(scene, preview_lang)
+    duration_note = f"\nДлительность обновлена: {updated_duration} сек." if updated_duration is not None else ""
     await update.message.reply_text(
         "Подготовила обновлённый video prompt по фидбэку для языков: "
         f"{', '.join(applied_languages)}. "
@@ -4567,6 +4732,7 @@ async def _apply_scene_video_feedback(
             if has_generated_videos
             else "Нажмите «ОК», чтобы сгенерировать видео."
         )
+        + duration_note
         + f"\n\nТекущий prompt ({preview_lang}):\n{_prompt_preview(preview_prompt)}"
     )
     if not has_generated_videos:
@@ -4696,6 +4862,7 @@ async def _scene_media_start_not_ok(
         await _safe_reply_text(update.message, 'После "ФИДБЕК:" пришлите комментарий, что изменить.')
         return True
     _apply_shot_type_hint_from_text(scene, feedback)
+    feedback = _append_scheduled_every_start_prompt_comment(session, feedback)
     await _safe_reply_text(update.message, "Перегенерирую стартовый промпт (нейросеть).")
     try:
         new_prompt = await _call_with_503_retries(
@@ -4745,6 +4912,7 @@ async def _scene_media_start_ok(
     user_reference_images = _scene_user_reference_images(scene, "start")
     scene_refs = _dedupe_image_reference_bytes([*scene_reference_images, *user_reference_images])
     raw_mode = bool(scene.get(START_PROMPT_RAW_MODE_KEY))
+    silence_mode = str(session.get("generation_mode") or "").strip().lower() == "silence"
     if raw_mode:
         prompt = str(base_prompt or "").strip()
     else:
@@ -4752,6 +4920,7 @@ async def _scene_media_start_ok(
             _append_reference_style_to_image_prompt(base_prompt, bool(scene_refs)),
             scene,
             include_location=False,
+            allow_grandma_face_crop_rule=not silence_mode,
         )
     prompt = append_dish_visual_brief_to_prompt(prompt, _dish_visual_brief_for_scene(session, scene, idx))
     scene["start_frame_prompt_effective"] = prompt
@@ -5156,10 +5325,12 @@ async def _scene_media_end_ok(update: Update, *, session: dict, scene: dict, idx
     )
     user_end_refs = _scene_user_reference_images(scene, "end")
     end_references = _dedupe_image_reference_bytes([start_bytes, *first_scene_refs, *current_scene_refs, *user_end_refs])
+    silence_mode = str(session.get("generation_mode") or "").strip().lower() == "silence"
     end_full = str(end_prompt or "").strip() if raw_end_mode else _append_scene_identity_to_image_prompt(
         _append_reference_style_to_image_prompt(end_prompt, True),
         scene,
         include_location=False,
+        allow_grandma_face_crop_rule=not silence_mode,
     )
     if not auto_approve:
         await reply_text_without_keyboard(update.message, "Генерируем конечный кадр (референс — стартовый), ждите.")
@@ -5353,6 +5524,7 @@ async def _scene_media_start_image_approval_step(
     if not feedback:
         await update.message.reply_text("Пришлите комментарий, что изменить в изображении.")
         return True
+    feedback = _append_scheduled_every_start_prompt_comment(session, feedback)
     await update.message.reply_text("Перегенерирую стартовый промпт и кадр по фидбеку.")
     try:
         new_prompt = await _call_with_503_retries(
@@ -6035,11 +6207,17 @@ async def _scene_media_video_ok(
     end_bytes = selected_image_bytes_for_video(scene, kind="end")
 
     model = str(scene.get("model", "veo3_fast")).strip() or "veo3_fast"
+    syntax_provider = syntax_provider_for_generation_mode(session)
+    video_quality = "720" if str(session.get("generation_mode") or "").strip().lower() == "silence" else "1080"
     try:
         duration_sec = int(scene.get("duration_sec", 6))
     except Exception:
         duration_sec = 6
-    if "ru" in languages and not any(_scene_video_prompt_raw(scene, lang) for lang in languages) and await _maybe_shorten_scene_speech_for_video_budget(
+    speechless_video = _is_speechless_video_scene(scene, session)
+    if speechless_video:
+        duration_sec = max(3, min(4, duration_sec))
+        scene["duration_sec"] = duration_sec
+    if not speechless_video and "ru" in languages and not any(_scene_video_prompt_raw(scene, lang) for lang in languages) and await _maybe_shorten_scene_speech_for_video_budget(
         update,
         context=context,
         session=session,
@@ -6053,7 +6231,10 @@ async def _scene_media_video_ok(
         duration_sec = int(scene.get("duration_sec", duration_sec))
     except Exception:
         pass
-    if "en" in languages and not any(_scene_video_prompt_raw(scene, lang) for lang in languages):
+    if speechless_video:
+        duration_sec = max(3, min(4, duration_sec))
+        scene["duration_sec"] = duration_sec
+    if not speechless_video and "en" in languages and not any(_scene_video_prompt_raw(scene, lang) for lang in languages):
         should_stop = await _maybe_adjust_english_speech_for_video_budget(
             update,
             context=context,
@@ -6115,6 +6296,7 @@ async def _scene_media_video_ok(
             return language, None, RuntimeError("empty video prompt")
         await update.message.reply_text(
             f"Промпт перед генерацией видео — сцена {idx + 1}/{total}, язык {language}:\n"
+            f"Длительность запуска: {duration_sec} сек.\n"
             f"{_prompt_preview(prompt_local)}"
         )
         if syntax_video is not None:
@@ -6127,13 +6309,14 @@ async def _scene_media_video_ok(
                 duration_sec=duration_sec,
                 start_image=start_bytes,
                 end_image=end_bytes,
-                quality="1080",
+                quality=video_quality,
                 aspect_ratio="9:16",
                 audio_enabled=True,
                 skip_initial_syntax=skip_initial_syntax,
                 disable_syntax_fallback=disable_syntax_fallback,
                 syntax_timeout_sec=_scheduled_syntax_timeout_sec(session),
                 syntax_acquire_timeout_sec=_scheduled_syntax_lock_timeout_sec(session),
+                syntax_provider=syntax_provider,
             )
             return language, video, None
         except VideoProviderChoiceRequired as e:
@@ -6145,6 +6328,9 @@ async def _scene_media_video_ok(
         "Генерируем видео параллельно для языков: " + ", ".join(pending_languages)
         if len(pending_languages) > 1
         else "Генерирую видео для языка: " + pending_languages[0]
+    )
+    generation_message += (
+        f"\nДлительность: {duration_sec} сек. Модель: {model}. Качество: {video_quality}."
     )
     await reply_text_without_keyboard(update.message, generation_message)
     syntax_batch_results: dict[str, bytes] = {}
@@ -6162,7 +6348,9 @@ async def _scene_media_video_ok(
         if batch_requests:
             await reply_text_without_keyboard(
                 update.message,
-                "Сначала отправляю все языки в Syntax одним обработчиком: " + ", ".join(req.key for req in batch_requests),
+                "Сначала отправляю все языки в Syntax одним обработчиком: "
+                + ", ".join(req.key for req in batch_requests)
+                + f"\nДлительность каждого видео: {duration_sec} сек.",
             )
             scheduled_syntax_mode = _is_scheduled_unattended_ai_mode(session)
             max_syntax_attempts = _scheduled_syntax_video_retry_count(session) if scheduled_syntax_mode else 1
@@ -6177,6 +6365,7 @@ async def _scene_media_video_ok(
                         model=model,
                         duration_sec=duration_sec,
                         session=session,
+                        syntax_provider=syntax_provider,
                     )
                 except Exception as e:
                     if not scheduled_syntax_mode:
@@ -6226,9 +6415,10 @@ async def _scene_media_video_ok(
                             duration_sec=duration_sec,
                             start_image=start_bytes,
                             end_image=end_bytes,
-                            quality="1080",
+                            quality=video_quality,
                             aspect_ratio="9:16",
                             audio_enabled=True,
+                            syntax_provider=syntax_provider,
                             syntax_error_message=(
                                 "Syntax вернул не весь набор языков. "
                                 f"Не пришли: {', '.join(missing_syntax_keys)}."
@@ -7247,6 +7437,7 @@ async def _handle_scene_video_provider_choice_pending(
                     requests=requests,
                     model=str(next(iter(entries_by_lang.values())).get("model") or scene.get("model") or "veo3_fast"),
                     duration_sec=int(next(iter(entries_by_lang.values())).get("duration_sec") or scene.get("duration_sec") or 6),
+                    syntax_provider=str(next(iter(entries_by_lang.values())).get("syntax_provider") or syntax_provider_for_generation_mode(session)),
                 )
             except Exception as fb_err:
                 logger.exception("scene Syntax batch retry execution failed")
@@ -8276,6 +8467,11 @@ async def _handle_waiting_scene_media_state(
                     if prompt_cmd:
                         lang, payload = prompt_cmd
                         if lang in languages and payload:
+                            _apply_video_duration_feedback(
+                                scene,
+                                payload,
+                                speechless=_is_speechless_video_scene(scene, session),
+                            )
                             _set_scene_video_prompt_for_language(
                                 scene,
                                 lang,
@@ -8320,6 +8516,11 @@ async def _handle_waiting_scene_media_state(
                             await update.message.reply_text('Используйте общий формат без языка: "ФИДБЕК: комментарий".')
                             return True
                         if lang in languages and payload:
+                            updated_duration = _apply_video_duration_feedback(
+                                scene,
+                                payload,
+                                speechless=_is_speechless_video_scene(scene, session),
+                            )
                             current = _scene_video_prompt_for_language(scene, lang)
                             try:
                                 rewritten = await _call_with_503_retries(
@@ -8338,8 +8539,9 @@ async def _handle_waiting_scene_media_state(
                                 _compose_locked_video_prompt(scene, lang, rewritten),
                             )
                             session["scene_media_language_index"] = languages.index(lang)
+                            duration_note = f" Длительность: {updated_duration} сек." if updated_duration is not None else ""
                             await update.message.reply_text(
-                                f"Подготовила обновлённый prompt для {lang}. Нажмите «ПЕРЕГЕНЕРИРОВАТЬ {lang}»."
+                                f"Подготовила обновлённый prompt для {lang}.{duration_note} Нажмите «ПЕРЕГЕНЕРИРОВАТЬ {lang}»."
                             )
                             return True
                         if lang in languages and not payload:

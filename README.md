@@ -163,6 +163,35 @@ CONTENT_FABRIC_PROJECT_SCOPE="grandma_kitchen"
 DATABASE_URL="postgresql+psycopg2://user:password@localhost:5432/content_fabric"
 ```
 
+Для доступа к Django-админке из интернета включите публичный профиль и укажите HTTPS-домен:
+
+```env
+DJANGO_PUBLIC_ADMIN=1
+DJANGO_DEBUG=0
+DJANGO_SECRET_KEY="long-random-secret"
+DJANGO_ALLOWED_HOSTS="admin.example.com"
+DJANGO_CSRF_TRUSTED_ORIGINS="https://admin.example.com"
+CONTENT_FABRIC_PUBLIC_BASE_URL="https://admin.example.com"
+DJANGO_ADMIN_PATH="private-admin-path"
+DJANGO_STATIC_ROOT="/opt/content_fabric/runtime/django_static"
+DJANGO_SECURE_SSL_REDIRECT=1
+```
+
+`DJANGO_ADMIN_PATH` меняет URL админки с `/admin/` на `/<private-admin-path>/`.
+HSTS subdomains/preload включайте только если весь домен и все поддомены всегда работают по HTTPS.
+Для публичного доступа используйте HTTPS reverse proxy или tunnel, который прокидывает запросы
+на локальный Django-процесс. Минимальный локальный запуск для прокси:
+
+```bash
+.venv/bin/python admin_panel/manage.py check --deploy
+.venv/bin/python admin_panel/manage.py collectstatic --noinput
+.venv/bin/python admin_panel/manage.py createsuperuser
+.venv/bin/python admin_panel/manage.py runserver 127.0.0.1:8000
+```
+
+В прокси направьте `https://admin.example.com` на `http://127.0.0.1:8000` и отдавайте
+`/static/` из `DJANGO_STATIC_ROOT`. Не открывайте порт `8000` напрямую в интернет.
+
 Для будущего автопостинга через `n8n` и соцсети список секретов, рекомендуемое место хранения и способ получения описаны в [docs/autoposting_secrets.md](/opt/content_fabric/docs/autoposting_secrets.md). Пошаговый локальный запуск `n8n` и wiring publish queue описаны в [docs/n8n_autoposting_setup.md](/opt/content_fabric/docs/n8n_autoposting_setup.md).
 
 Для video generation используется прямой вызов Python-функции `tools.gen_video.generate_video_via_vertex`
@@ -200,6 +229,11 @@ TELETHON_STRING_SESSIONS="string_session_one,string_session_two"
 периодически читает входящие (интервал `SYNTAX_FALLBACK_POLL_SEC`, по умолчанию 10 с) и ожидает
 mp4-документ/видео, прямую ссылку на `.mp4` или страницу `getvideo.syntxai.net` в пределах таймаута.
 Если Syntax не вернул видео или сообщает, что Veo находится на обновлении, бот сразу переходит к Vertex.
+Для режима 📼 Kling через Syntax webapp нужен browser runtime Playwright поверх Python-пакета:
+
+```bash
+.venv/bin/python -m playwright install chromium
+```
 
 Проверка цепочки Vertex still → Syntax без Telegram-бота:
 

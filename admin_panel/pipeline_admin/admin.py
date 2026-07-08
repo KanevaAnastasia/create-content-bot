@@ -26,6 +26,12 @@ from django.utils.safestring import mark_safe
 from app.artifact_store import persist_post_production_artifacts
 from app.db import SessionLocal
 from app.final_video_delivery import all_final_artifacts_delivered, deliver_final_artifact_to_telegram
+from app.generation_modes import (
+    GENERATION_MODE_NORMAL,
+    GENERATION_MODE_SESSION_KEY,
+    GENERATION_MODE_SILENCE,
+    normalize_generation_mode,
+)
 from app.media_file_store import local_path_from_media_uri, read_media_uri_bytes
 from app.post_production import (
     build_post_production,
@@ -193,14 +199,31 @@ def _artifact_media_url(obj: GenerationArtifact) -> str:
         return f"/admin/pipeline_admin/generationartifact/{pk}/media/"
 
 
+def _artifact_yandex_disk_link(obj: GenerationArtifact) -> str:
+    payload = getattr(obj, "payload_json", None)
+    if not isinstance(payload, dict):
+        return ""
+    yandex_disk = payload.get("yandex_disk")
+    if not isinstance(yandex_disk, dict):
+        return ""
+    url = str(yandex_disk.get("public_url") or yandex_disk.get("web_url") or "").strip()
+    if not url:
+        return ""
+    status = str(yandex_disk.get("status") or "").strip()
+    label = "Yandex Disk" if status != "failed" else "Yandex Disk upload failed"
+    return format_html('<a href="{}" target="_blank" rel="noopener">{}</a>', url, label)
+
+
 def _generation_artifact_link(obj: GenerationArtifact, label: str | None = None) -> str:
     raw = str(obj.uri or "")
     text = label or raw
+    cloud_link = _artifact_yandex_disk_link(obj)
+    suffix = format_html(" {}", cloud_link) if cloud_link else ""
     if raw.startswith(("file://", "db://scene_image_candidates/", "db://scene_video_candidates/")):
         media_url = _artifact_media_url(obj)
         if media_url:
-            return format_html('<a href="{}" target="_blank" rel="noopener">{}</a>', media_url, text)
-    return _artifact_link(raw, text)
+            return format_html('<a href="{}" target="_blank" rel="noopener">{}</a>{}', media_url, text, suffix)
+    return format_html("{}{}", _artifact_link(raw, text), suffix)
 
 
 def _artifact_local_path(obj: GenerationArtifact) -> Path | None:
@@ -694,6 +717,63 @@ def _run_session_for_admin_render(run: GenerationRun) -> tuple[ChatSession | Non
     return chat_session, session, production
 
 
+ADMIN_CANDIDATE_SUBTITLE_SNAPSHOT_KEYS = (
+    "speech_by_lang",
+    "speech_cues_by_lang",
+    "speech_plan_by_lang",
+    "video_prompt_by_lang",
+)
+ADMIN_SCENE_DERIVED_SUBTITLE_KEYS = (
+    "speech_cues_by_lang",
+    "speech_plan_by_lang",
+)
+
+
+def _admin_final_build_scenes_from_page(run: GenerationRun, scenes: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    out = copy.deepcopy(scenes)
+    try:
+        rows = list(Scene.objects.filter(run_id=run.id).order_by("scene_order", "id"))
+    except Exception:
+        rows = []
+    rows_by_order = {int(row.scene_order or idx): row for idx, row in enumerate(rows, start=1)}
+    for idx, scene in enumerate(out, start=1):
+        if not isinstance(scene, dict):
+            continue
+        try:
+            order = int(scene.get("scene") or idx)
+        except (TypeError, ValueError):
+            order = idx
+        row = rows_by_order.get(order)
+        if row is not None:
+            scene["scene"] = int(row.scene_order or order)
+            scene["text"] = row.text
+            scene["duration_sec"] = float(row.duration_sec)
+            scene["video_prompt_by_lang"] = row.video_prompt_by_lang or {}
+            scene["speech_by_lang"] = row.speech_by_lang or {}
+            scene["syntax_prompt_by_lang"] = row.syntax_prompt_by_lang or {}
+            scene["prompt_meta_json"] = row.prompt_meta_json or {}
+            for key in ("start_frame_prompt", "start_frame_prompt_effective", "end_frame_prompt"):
+                value = getattr(row, key, None)
+                if value:
+                    scene[key] = value
+                else:
+                    scene.pop(key, None)
+        for key in ADMIN_SCENE_DERIVED_SUBTITLE_KEYS:
+            scene.pop(key, None)
+        candidates_by_lang = scene.get("video_candidates_by_lang")
+        if not isinstance(candidates_by_lang, dict):
+            continue
+        for candidates in candidates_by_lang.values():
+            if not isinstance(candidates, list):
+                continue
+            for candidate in candidates:
+                if not isinstance(candidate, dict):
+                    continue
+                for key in ADMIN_CANDIDATE_SUBTITLE_SNAPSHOT_KEYS:
+                    candidate.pop(key, None)
+    return out
+
+
 def _overlay_title_for_admin_render(
     run: GenerationRun,
     session: dict[str, Any],
@@ -1096,6 +1176,7 @@ def _build_final_videos_for_run(
     scenes = production.get("json_plan") if isinstance(production, dict) else None
     if not isinstance(scenes, list) or not scenes:
         raise RuntimeError("No production scenes are available for this run.")
+    scenes = _admin_final_build_scenes_from_page(run, scenes)
 
     overlay_title_by_lang = _overlay_title_for_admin_render(run, session, production)
     if not overlay_title_by_lang:
@@ -1145,6 +1226,7 @@ def _build_final_videos_for_run(
             language=target_language,
             project_slug=project_slug,
             progress_callback=progress_callback,
+            use_candidate_subtitle_snapshot=False,
         )
     elif (
         source_subtitled_video_path
@@ -1161,6 +1243,7 @@ def _build_final_videos_for_run(
             overlay_series_title_by_lang=overlay_series_title_by_lang,
             overlay_series_counter_by_lang=overlay_series_counter_by_lang,
             progress_callback=progress_callback,
+            use_candidate_subtitle_snapshot=False,
         )
     else:
         post = build_post_production(
@@ -1173,6 +1256,7 @@ def _build_final_videos_for_run(
             target_languages=[target_language] if target_language else None,
             target_variants=requested_variants,
             progress_callback=progress_callback,
+            use_candidate_subtitle_snapshot=False,
         )
     production["overlay_title_by_lang"] = overlay_title_by_lang
     ru_title = _russian_overlay_title(overlay_title_by_lang)
@@ -1513,7 +1597,11 @@ def _subtitled_artifact_matches_current_subtitles(
     stored = str(payload.get("subtitle_fingerprint") or "").strip()
     if not stored:
         return False
-    return stored == subtitle_fingerprint_for_language(scenes, language)
+    return stored == subtitle_fingerprint_for_language(
+        scenes,
+        language,
+        use_candidate_subtitle_snapshot=False,
+    )
 
 
 def _heartbeat_final_build_job(run: GenerationRun, language: str, variant: str, worker_id: str, stop_event: threading.Event) -> None:
@@ -2929,6 +3017,7 @@ def _record_scene_text_revision(
         source=source,
         actor=_admin_actor(request) or None,
         meta_json=meta_json or {},
+        created_at=timezone.now(),
     )
 
 
@@ -3656,6 +3745,14 @@ class ScheduledGenerationImportForm(django_forms.Form):
 
 
 class ScheduledGenerationItemAdminForm(django_forms.ModelForm):
+    generation_mode = django_forms.ChoiceField(
+        label="Generation mode",
+        required=False,
+        choices=(
+            (GENERATION_MODE_NORMAL, "Normal"),
+            (GENERATION_MODE_SILENCE, "Silence / Kling RU-only"),
+        ),
+    )
     title_color = django_forms.CharField(
         label="Title color",
         required=False,
@@ -3671,12 +3768,40 @@ class ScheduledGenerationItemAdminForm(django_forms.ModelForm):
         model = ScheduledGenerationItem
         fields = "__all__"
 
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        if self.is_bound:
+            return
+        payload = (
+            self.instance.payload_json
+            if self.instance is not None and isinstance(self.instance.payload_json, dict)
+            else {}
+        )
+        self.fields["generation_mode"].initial = normalize_generation_mode(payload.get(GENERATION_MODE_SESSION_KEY))
+
+    def clean_generation_mode(self) -> str:
+        return normalize_generation_mode(self.cleaned_data.get("generation_mode"))
+
     def clean_title_color(self) -> str:
         normalized = _normalize_title_color(self.cleaned_data.get("title_color"))
         return normalized or SCHEDULED_DEFAULT_TITLE_COLOR
 
     def clean_source_row_key(self) -> str | None:
         return str(self.cleaned_data.get("source_row_key") or "").strip() or None
+
+    def save(self, commit=True):
+        obj = super().save(commit=False)
+        payload = dict(obj.payload_json or {})
+        mode = normalize_generation_mode(self.cleaned_data.get("generation_mode"))
+        if mode == GENERATION_MODE_SILENCE:
+            payload[GENERATION_MODE_SESSION_KEY] = GENERATION_MODE_SILENCE
+        else:
+            payload.pop(GENERATION_MODE_SESSION_KEY, None)
+        obj.payload_json = payload
+        if commit:
+            obj.save()
+            self.save_m2m()
+        return obj
 
 
 class ScheduledGenerationEventInline(admin.TabularInline):
@@ -3724,6 +3849,7 @@ class ScheduledGenerationItemAdmin(admin.ModelAdmin):
         "status",
         "is_draft",
         "title_color",
+        "generation_mode_short",
         "comment_short",
         "series",
         "source_row_key",
@@ -3750,6 +3876,7 @@ class ScheduledGenerationItemAdmin(admin.ModelAdmin):
         "title",
         "recipe",
         "comment",
+        "generation_mode",
         "title_color",
         "run_at",
         "is_draft",
@@ -3812,6 +3939,12 @@ class ScheduledGenerationItemAdmin(admin.ModelAdmin):
     @admin.display(description="Comment")
     def comment_short(self, obj: ScheduledGenerationItem) -> str:
         return _short(obj.comment, 60)
+
+    @admin.display(description="Mode")
+    def generation_mode_short(self, obj: ScheduledGenerationItem) -> str:
+        payload = obj.payload_json if isinstance(obj.payload_json, dict) else {}
+        mode = normalize_generation_mode(payload.get(GENERATION_MODE_SESSION_KEY))
+        return "Silence" if mode == GENERATION_MODE_SILENCE else "Normal"
 
     @admin.display(description="Run")
     def linked_run(self, obj: ScheduledGenerationItem) -> str:

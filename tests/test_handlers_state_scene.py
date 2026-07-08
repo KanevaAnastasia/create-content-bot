@@ -31,10 +31,12 @@ from app.handlers.handlers_state_start import (
     SERIES_CHOICE_CONFIRMED_SESSION_KEY,
     SERIES_NEXT_OVERLAY_TITLE,
     SERIES_PENDING_NEXT_SESSION_KEY,
+    STATE_WAITING_GENERATION_MODE,
     STATE_WAITING_SERIES_CHOICE,
     STATE_WAITING_SERIES_CREATE,
     STATE_WAITING_SERIES_TRANSLATION_APPROVAL,
     generate,
+    _handle_waiting_generation_mode_state,
     _parse_series_create_text,
 )
 from app.handlers.handlers_state_commands import NAV_BUTTON_PREVIOUS_STEP, NAV_BUTTON_START_OVER
@@ -497,7 +499,7 @@ def test_generate_command_launches_pipeline(monkeypatch):
     assert captured_calls == [("Сырники с клубникой", False)]
 
 
-def test_start_generation_with_recipe_asks_for_series(monkeypatch):
+def test_start_generation_with_recipe_asks_for_generation_mode_then_series(monkeypatch):
     from app.handlers.handlers_state_start import _start_generation_with_recipe
 
     monkeypatch.setattr("app.handlers.handlers_state_start.list_active_series", lambda _project_slug: [])
@@ -518,8 +520,21 @@ def test_start_generation_with_recipe_asks_for_series(monkeypatch):
         )
     )
 
-    assert SESSIONS[1060]["state"] == STATE_WAITING_SERIES_CHOICE
+    assert SESSIONS[1060]["state"] == STATE_WAITING_GENERATION_MODE
     assert SESSIONS[1060][SERIES_PENDING_RECIPE_SESSION_KEY].startswith("Клубника")
+    assert any("Выберите режим генерации" in text for text, _markup in captured)
+
+    asyncio.run(
+        _handle_waiting_generation_mode_state(
+            update,
+            context=None,
+            chat_id=1060,
+            session=SESSIONS[1060],
+            text="Обычный",
+        )
+    )
+
+    assert SESSIONS[1060]["state"] == STATE_WAITING_SERIES_CHOICE
     assert any("Можно привязать" in text for text, _markup in captured)
     assert any(markup is not None for _text, markup in captured)
 

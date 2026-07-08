@@ -26,6 +26,13 @@ from .dish_visuals import build_dish_visual_brief
 from .drafts import save_generation_draft
 from .formatting import build_human_readable_plan, format_production_bundle_for_approval, format_viral_concept_brief
 from .generation_store import ensure_generation_run_for_session, update_generation_run_cursor_from_session
+from .generation_modes import (
+    GENERATION_MODE_NORMAL,
+    GENERATION_MODE_SESSION_KEY,
+    GENERATION_MODE_SILENCE,
+    normalize_generation_mode,
+    target_languages_for_generation_mode,
+)
 from .models import GenerationRun, ScheduledGenerationEvent, ScheduledGenerationItem
 from .handlers.handlers_generation_utils import fetch_recipe_text_from_url
 from .pipeline import (
@@ -36,6 +43,7 @@ from .pipeline import (
 )
 from .scene_media_candidates import resolve_scene_image_for_video, resolve_scene_video_for_production
 from .scene_media_store import rebuild_production_session, rebuild_scene_db_ids_for_session
+from .scheduled_comments import normalize_scheduled_generation_comment, scheduled_generation_every_start_prompt_comment
 from .session_store import save_session_if_possible
 from .series_store import attach_series_to_session, select_series_payload
 
@@ -47,7 +55,17 @@ SCHEDULED_STATUS_FAILED_NEEDS_REVIEW = "failed_needs_review"
 SCHEDULED_STATUS_FAILED = "failed"
 SCHEDULED_STATUS_WAITING_FOR_CHAK_CHAK = "waiting_for_chak_chak"
 
-SCHEDULED_EXCEL_COLUMNS = ("title", "recipe", "comment", "title_color", "run_at", "is_draft", "series_id", "source_row_key")
+SCHEDULED_EXCEL_COLUMNS = (
+    "title",
+    "recipe",
+    "comment",
+    "title_color",
+    "run_at",
+    "is_draft",
+    "series_id",
+    "source_row_key",
+    "generation_mode",
+)
 DEFAULT_TITLE_COLOR = "#c72638"
 IMPORT_DIR = Path("/opt/content_fabric/artifacts/scheduled_generation_imports")
 SCHEDULED_WORKER_LOG = Path("/opt/content_fabric/logs/scheduled_generation_worker.log")
@@ -227,7 +245,7 @@ def _normalize_title_color(value: Any) -> str:
 
 def _recipe_text_for_viral_plan(recipe: str, comment: str | None) -> str:
     text = (recipe or "").strip()
-    extra = (comment or "").strip()
+    extra = normalize_scheduled_generation_comment(comment)
     if not extra:
         return text
     return (
@@ -370,6 +388,7 @@ def build_scheduled_generation_template_bytes() -> bytes:
                 True,
                 "",
                 "banana-icecream-001",
+                GENERATION_MODE_NORMAL,
             ],
         ]
     )
@@ -388,6 +407,11 @@ def export_scheduled_generation_items_to_xlsx(queryset) -> bytes:
                 bool(item.is_draft),
                 str(item.series_id or ""),
                 item.source_row_key or "",
+                normalize_generation_mode(
+                    (item.payload_json if isinstance(item.payload_json, dict) else {}).get(
+                        GENERATION_MODE_SESSION_KEY
+                    )
+                ),
                 item.status,
                 item.error_text or "",
             ]
@@ -448,6 +472,11 @@ def import_scheduled_generation_xlsx(file_obj, *, original_name: str = "schedule
             item.status = SCHEDULED_STATUS_PENDING
             item.error_text = None
             payload = dict(item.payload_json or {})
+            generation_mode = normalize_generation_mode(values.get("generation_mode"))
+            if generation_mode == GENERATION_MODE_SILENCE:
+                payload[GENERATION_MODE_SESSION_KEY] = GENERATION_MODE_SILENCE
+            else:
+                payload.pop(GENERATION_MODE_SESSION_KEY, None)
             payload["last_imported_at"] = datetime.now(timezone.utc).isoformat()
             payload["source_file_name"] = original_name
             payload["source_row_number"] = row_number
@@ -1032,6 +1061,11 @@ def _scheduled_session_for_item(
     viral_concept_brief: dict[str, Any],
 ) -> dict[str, Any]:
     dish_visual_brief = build_dish_visual_brief(item.title, recipe_text)
+    payload = item.payload_json if isinstance(item.payload_json, dict) else {}
+    generation_mode = normalize_generation_mode(payload.get(GENERATION_MODE_SESSION_KEY))
+    target_languages = target_languages_for_generation_mode(generation_mode, ["ru", "en"])
+    generation_comment = normalize_scheduled_generation_comment(item.comment)
+    every_start_prompt_comment = scheduled_generation_every_start_prompt_comment(item.comment)
     return {
         "state": "waiting_scene_media",
         "scheduled_generation_mode": True,
@@ -1039,9 +1073,11 @@ def _scheduled_session_for_item(
         "is_draft": bool(item.is_draft),
         "scheduled_item_id": str(item.id),
         "selected_project_key": "grandma_kitchen",
-        "target_languages": ["ru", "en"],
+        GENERATION_MODE_SESSION_KEY: generation_mode,
+        "target_languages": target_languages,
         "user_input": item.recipe,
-        "scheduled_generation_comment": item.comment or "",
+        "scheduled_generation_comment": generation_comment,
+        "scheduled_generation_every_start_prompt_comment": every_start_prompt_comment,
         "selected_concept": item.title,
         "recipe_full_text": recipe_text,
         "recipe_title": item.title,
@@ -1449,7 +1485,7 @@ async def process_scheduled_generation_item(item_id: uuid.UUID) -> str:
             return "missing"
         title = item.title
         recipe = item.recipe
-        comment = item.comment
+        comment = normalize_scheduled_generation_comment(item.comment)
         series_id = item.series_id
         item_payload = dict(item.payload_json or {})
     await record_scheduled_generation_event_async(
@@ -1471,9 +1507,21 @@ async def process_scheduled_generation_item(item_id: uuid.UUID) -> str:
                 message="Рецепт из ссылки извлечен и будет использован вместо URL.",
                 payload={"source_url": _extract_first_http_url(recipe), "recipe_chars": len(recipe_text)},
             )
+        generation_mode = normalize_generation_mode(item_payload.get(GENERATION_MODE_SESSION_KEY))
         viral_recipe_text = _recipe_text_for_viral_plan(recipe_text, comment)
         viral_done = _scheduled_step_done(item_payload, SCHEDULED_STEP_VIRAL_PLAN)
-        if viral_done and isinstance(viral_done.get("viral_concept_brief"), dict):
+        if generation_mode == "silence":
+            viral_brief = {}
+            await record_scheduled_generation_event_async(
+                item_id,
+                event_type="skipped",
+                stage="viral_plan",
+                status="skipped",
+                message="Silence mode: viral plan пропущен, сразу идём к сценам и production prompts.",
+                payload={"generation_mode": generation_mode},
+                notify=False,
+            )
+        elif viral_done and isinstance(viral_done.get("viral_concept_brief"), dict):
             viral_brief = dict(viral_done["viral_concept_brief"])
             await record_scheduled_generation_event_async(
                 item_id,
@@ -1547,6 +1595,7 @@ async def process_scheduled_generation_item(item_id: uuid.UUID) -> str:
                 viral_concept_brief=viral_brief,
                 generation_comment=comment,
                 on_attempt_failure=_on_scenes_attempt_failure,
+                generation_mode=normalize_generation_mode(item_payload.get(GENERATION_MODE_SESSION_KEY)),
             )
             scenes_plan = scenes.get("json_plan") if isinstance(scenes, dict) else None
             if not isinstance(scenes_plan, list) or not scenes_plan:
@@ -1613,6 +1662,11 @@ async def process_scheduled_generation_item(item_id: uuid.UUID) -> str:
                 viral_concept_brief=viral_brief,
                 generation_comment=comment,
                 dish_visual_brief=build_dish_visual_brief(title, recipe_text),
+                generation_mode=normalize_generation_mode(item_payload.get(GENERATION_MODE_SESSION_KEY)),
+                target_languages=target_languages_for_generation_mode(
+                    item_payload.get(GENERATION_MODE_SESSION_KEY),
+                    ["ru", "en"],
+                ),
             )
             plan = production.get("json_plan") if isinstance(production, dict) else None
             if not isinstance(plan, list) or not plan:

@@ -592,6 +592,203 @@ def _video_hard_fail_reasons(data: dict[str, Any]) -> list[str]:
     return hard_fails
 
 
+GRANDMA_WARDROBE_ISSUE_TOKENS: tuple[str, ...] = (
+    "outfit",
+    "clothing",
+    "costume",
+    "wardrobe",
+    "dress",
+    "robe",
+    "kimono",
+    "headwear",
+    "headband",
+    "hat",
+    "apron",
+    "одеж",
+    "одеяни",
+    "плать",
+    "кимоно",
+    "повяз",
+    "платок",
+    "фартук",
+    "голов",
+)
+
+GRANDMA_IDENTITY_BLOCKING_TOKENS: tuple[str, ...] = (
+    "face",
+    "facial",
+    "age",
+    "body proportion",
+    "proportions",
+    "expression",
+    "different woman",
+    "replaced",
+    "substituted",
+    "faceless",
+    "missing",
+    "hidden",
+    "tiny",
+    "scale",
+    "photorealistic",
+    "live-action",
+    "style changed",
+    "wrong art style",
+    "лицо",
+    "лица",
+    "возраст",
+    "пропорц",
+    "выражени",
+    "другая женщин",
+    "замен",
+    "без лица",
+    "не видно",
+    "крошеч",
+    "масштаб",
+    "фотореал",
+)
+
+GRANDMA_IDENTITY_FAILURE_PHRASES: tuple[str, ...] = (
+    "different woman",
+    "different-looking woman",
+    "different grandmother",
+    "different-looking grandma",
+    "replaced by another woman",
+    "substituted by a different woman",
+    "wrong face",
+    "different face",
+    "face does not match",
+    "face doesn't match",
+    "face no longer match",
+    "does not match the reference face",
+    "doesn't match the reference face",
+    "changed her face",
+    "changes her face",
+    "wrong age",
+    "age changed",
+    "changed age",
+    "wrong body proportions",
+    "body proportions changed",
+    "proportions changed",
+    "wrong expression",
+    "expression changed",
+    "style changed",
+    "wrong art style",
+    "photorealistic",
+    "live-action",
+    "другая женщина",
+    "другая бабушка",
+    "заменена",
+    "заменили",
+    "не совпадает лицо",
+    "лицо не совпадает",
+    "другое лицо",
+    "изменено лицо",
+    "изменили лицо",
+    "изменился возраст",
+    "другой возраст",
+    "изменились пропорции",
+    "другие пропорции",
+    "изменилось выражение",
+    "другое выражение",
+    "сменился стиль",
+    "другой стиль",
+    "фотореал",
+)
+
+
+def _has_grandma_identity_failure(text: str) -> bool:
+    low = " ".join(str(text or "").strip().lower().split())
+    return any(phrase in low for phrase in GRANDMA_IDENTITY_FAILURE_PHRASES)
+
+
+def _looks_like_allowed_grandma_wardrobe_issue(text: str) -> bool:
+    low = " ".join(str(text or "").strip().lower().split())
+    if not low:
+        return False
+    compact = low.replace(" ", "_")
+    if any(code in compact for code in ("grandma_outfit_mismatch", "grandma_headwear_mismatch", "grandma_wardrobe_mismatch")):
+        return not _has_grandma_identity_failure(low)
+    if not any(token in low for token in ("grandma", "grandmother", "бабуш")):
+        return False
+    if not any(token in low for token in GRANDMA_WARDROBE_ISSUE_TOKENS):
+        return False
+    if not any(token in low for token in ("contradict", "canonical", "character description", "character descriptions", "противореч")):
+        return False
+    return not _has_grandma_identity_failure(low)
+
+
+def _looks_like_allowed_orange_cat_wording_issue(text: str) -> bool:
+    low = " ".join(str(text or "").strip().lower().split())
+    if not low:
+        return False
+    if not any(token in low for token in ("cat", "кот")):
+        return False
+    if not any(token in low for token in ("orange", "рыж")):
+        return False
+    if not any(
+        token in low
+        for token in (
+            "missing required cat",
+            "does not explicitly mention",
+            "not explicitly mention",
+            "not as precise",
+            "specific identity",
+            "character identity",
+        )
+    ):
+        return False
+    if any(
+        token in low
+        for token in (
+            "not visible",
+            "absent",
+            "no cat",
+            "without cat",
+            "wrong color",
+            "wrong coat",
+            "gray cat",
+            "grey cat",
+            "brown cat",
+            "black cat",
+            "duplicated",
+            "duplicate",
+            "не видно",
+            "нет кот",
+            "без кот",
+            "серый кот",
+            "коричневый кот",
+            "черный кот",
+            "чёрный кот",
+            "дубликат",
+        )
+    ):
+        return False
+    return True
+
+
+def _downgrade_allowed_grandma_wardrobe_issues(
+    critical: list[str],
+    warnings: list[str],
+    *,
+    stage: AIApprovalStage,
+) -> list[str]:
+    if stage not in {"prompt", "image", "video"} or not critical:
+        return critical
+    kept: list[str] = []
+    for issue in critical:
+        if _looks_like_allowed_grandma_wardrobe_issue(issue):
+            note = f"Ignored prompted grandma wardrobe/accessory change as non-critical: {issue}"
+            if note not in warnings:
+                warnings.append(note)
+        elif _looks_like_allowed_orange_cat_wording_issue(issue):
+            note = f"Ignored orange cat wording-only identity issue as non-critical: {issue}"
+            if note not in warnings:
+                warnings.append(note)
+        else:
+            kept.append(issue)
+    return kept
+
+
 def normalize_ai_approval_result(
     data: dict[str, Any],
     *,
@@ -618,8 +815,15 @@ def normalize_ai_approval_result(
     for reason in severe_reasons:
         if reason not in critical:
             critical.append(reason)
+    critical = _downgrade_allowed_grandma_wardrobe_issues(critical, warnings, stage=stage)
     if severe_reasons:
         score = min(score, max(0.0, cfg.human_review_threshold - 0.01))
+    if not critical and any(
+        _looks_like_allowed_grandma_wardrobe_issue(warning)
+        or _looks_like_allowed_orange_cat_wording_issue(warning)
+        for warning in warnings
+    ):
+        score = max(score, threshold_for_stage(stage, cfg))
     status = str(data.get("status") or "").strip().upper()
     if status not in ALLOWED_STATUSES:
         status = AI_APPROVAL_STATUS_HUMAN_REVIEW
@@ -938,7 +1142,12 @@ def check_scene_prompts(
             "the recipe, and DISH VISUAL REQUIREMENTS. Put a short canonical appearance note in positive_notes or "
             "warnings so the decision shows what you compared against.\n"
             "- If grandma is expected or mentioned, the prompts must clearly preserve her face, kind expression, "
-            "normal cartoon proportions, and canonical outfit from CHARACTER DESCRIPTIONS.\n"
+            "normal cartoon proportions, and recognizable identity from CHARACTER DESCRIPTIONS.\n"
+            "- Grandma's canonical outfit from CHARACTER DESCRIPTIONS is the default identity anchor, but an "
+            "explicitly described alternate costume, robe, apron, headband, hat, or cultural/themed outfit in the "
+            "scene prompts is allowed. Do not treat that wardrobe change as a critical identity mismatch by itself; "
+            "fail only if the prompt changes her face, age, body proportions, expression, cartoon style, or replaces "
+            "her with a different woman.\n"
             "- If grandma is expected or mentioned, start/end prompts must require her face to be visibly readable "
             "from the front or three-quarter view. Do not allow a back-only, cropped, hidden, tiny, faceless, "
             "or substituted grandma.\n"
@@ -992,7 +1201,8 @@ def check_scene_prompts(
             "- start/end frame prompt allows the main dish or required food object to be severely cropped or unreadable\n"
             "- intermediate preparation prompt is incorrectly treated as a final/payoff dish frame\n"
             "- intermediate preparation prompt shows an unrelated food/process instead of the current recipe state\n"
-            "- start/end frame prompts do not preserve character identity from references\n"
+            "- start/end frame prompts do not preserve character identity from references, excluding explicitly "
+            "prompted wardrobe/accessory changes that keep the same character identity\n"
             "- abnormal character scale such as a giant cat or tiny grandma\n"
             "- prompts allow text, captions, watermarks, or photorealism\n\n"
             "Scoring rule: if you mention any significant deviation, mismatch, missing required character, wrong cat "
@@ -1016,6 +1226,8 @@ def check_scene_prompts(
             "visually consistent, free of readable text/logo/watermark requirements, and faithful to the recipe. "
             "If prompts would likely create wrong characters, wrong food, readable text, realistic/live-action drift, "
             "unsafe animal placement near heat/cookware, or missing required speech content, return FIX_PROMPT. "
+            "Allow explicitly prompted character costume or accessory changes when the same character identity, face, "
+            "proportions, and cartoon style are preserved. "
             "Use HUMAN_REVIEW only if the prompt text cannot be evaluated.\n\n"
             "Return only valid JSON:\n"
             f"{_json_schema_text('prompt', 'APPROVE | FIX_PROMPT | HUMAN_REVIEW')}\n\n"
@@ -1074,8 +1286,9 @@ def check_start_frame(
             "Attached image order:\n"
             "- Image 1 is the generated candidate frame to approve or reject.\n"
             "- All following images, when present, are mandatory character/style reference images. Use them as visual evidence, "
-            "not optional inspiration. Compare faces, proportions, costume details, coat colors, cat markings, lighting, "
-            "palette, softness, and rendering style against these references before deciding.\n"
+            "not optional inspiration. Compare faces, proportions, coat colors, cat markings, lighting, palette, softness, "
+            "and rendering style against these references before deciding. Compare costume details too, unless the scene "
+            "prompt explicitly requests alternate wardrobe/accessories.\n"
             "- If the candidate frame does not clearly preserve the referenced character identities or project style, return "
             "REGENERATE_IMAGE even if the scene composition is otherwise attractive.\n\n"
             "The video style must be:\n"
@@ -1111,6 +1324,14 @@ def check_start_frame(
             "- Explicitly compare the candidate frame to each attached reference image that is relevant to the scene.\n"
             "- In positive_notes or warnings, mention that you checked the reference style/identity. If there is a mismatch, "
             "describe it as a critical issue.\n"
+            "- If the scene prompt explicitly asks for grandma in a different outfit, robe, apron, headband, hat, or "
+            "cultural/themed costume, allow that wardrobe/accessory change. Continue rejecting changes to her face, "
+            "age, body proportions, expression, cartoon style, or replacement by another woman.\n"
+            "- Treat prompted grandma wardrobe/headwear as a clothing-only exception: her face must still match the "
+            "attached reference and CHARACTER DESCRIPTIONS, including the kind brown eyes behind thin round copper "
+            "glasses, round reddish nose, rosy cheeks, small chin, soft gray brows/hair at the forehead, warm smile, "
+            "short rounded proportions, and the same 2D cartoon project style. Reject if the image turns her into a "
+            "new generic elderly woman, anime/Pixar/3D character, or otherwise different face/design.\n"
             "- Do not approve merely because the candidate is polished, cute, or high quality. A polished frame with the "
             "wrong reference style, wrong face/costume, wrong cat markings, or wrong dish is still REGENERATE_IMAGE.\n\n"
             "Viral retention checks:\n"
@@ -1126,7 +1347,10 @@ def check_start_frame(
             "- if grandma appears in the frame, her full face and head must stay inside the frame: eyes, nose, mouth, "
             "chin, and head covering cannot be cut by the top or side edge\n"
             "- cat looks cute, not scary\n"
-            "- grandma and every cat/character match their reference identity and CHARACTER DESCRIPTIONS\n"
+            "- grandma and every cat/character match their reference identity and CHARACTER DESCRIPTIONS, while "
+            "allowing explicitly prompted wardrobe/accessory changes for grandma\n"
+            "- prompted alternate grandma clothing/headwear changes only clothing/accessories; grandma keeps the same "
+            "reference face, glasses, age, proportions, expression, and 2D cartoon design\n"
             "- art style matches the attached reference images/project style exactly; do not approve a different "
             "storybook, Disney-like, Pixar-like, anime, watercolor, oil-painting, 3D-render, or generic cute-cartoon style\n"
             "- there is no duplicated same-identity cat: no two orange cats, no two white cats, no two black-and-white cats; "
@@ -1151,6 +1375,8 @@ def check_start_frame(
             "- missing grandmother when required\n"
             "- missing readable grandma face when grandma is required\n"
             "- grandma is back-only, cropped, hidden, tiny, faceless, or replaced by a different woman\n"
+            "- prompted alternate grandma clothing/headwear is present, but grandma's face, glasses, proportions, "
+            "expression, age, or 2D cartoon design no longer match the reference character\n"
             "- grandma's face or head is cut off by the frame edge\n"
             "- wrong main dish\n"
             "- dish visual mismatch: the visible food has the wrong ingredient geometry, piece size, surface texture, "
@@ -1168,7 +1394,8 @@ def check_start_frame(
             "- unsupported visible ingredient, side, topping, sauce, or garnish not present in the recipe/request/brief\n"
             "- main dish or required food object is severely cropped, cut off by frame edge, or unreadable for dish verification\n"
             "- character style changed heavily\n"
-            "- illustration style, palette, line quality, shading, face design, costume rendering, or cat design does not match references\n"
+            "- illustration style, palette, line quality, shading, face design, costume rendering, or cat design does not "
+            "match references, except for explicitly prompted wardrobe/accessory changes that preserve identity\n"
             "- candidate frame was not compared to attached reference images, or references were ignored\n"
             "- any prompt-mentioned character does not match its description in CHARACTER DESCRIPTIONS\n"
             "- abnormal character scale such as a giant cat, tiny grandma, or oversized secondary character\n"
@@ -1199,6 +1426,11 @@ def check_start_frame(
             "2. Required characters are present and keep the provided character identities.\n"
             "   If grandma is expected, her readable face must be visible; a frame with only her hand, arm, body, "
             "back, or cropped head is not production-ready.\n"
+            "   If the expected brief explicitly changes grandma's outfit or accessories, allow that wardrobe change "
+            "as long as her face, age, proportions, expression, and cartoon identity remain the same.\n"
+            "   Alternate grandma wardrobe/headwear is only a clothing exception: keep her reference face, round "
+            "glasses, rosy cheeks, round reddish nose, warm smile, short rounded proportions, and 2D cartoon design. "
+            "Reject a new generic elderly woman, anime/Pixar/3D character, or different face/design.\n"
             "3. Food or ingredient state matches the recipe step and dish notes.\n"
             "4. The style is colorful cozy cartoon, not photographic.\n"
             "5. Anatomy, scale, faces, paws/hands, and composition look production-ready.\n"

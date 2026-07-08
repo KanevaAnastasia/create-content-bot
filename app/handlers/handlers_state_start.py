@@ -5,6 +5,7 @@ from .handlers_state_deps import (
     STATE_REFINING_CONCEPT,
     STATE_REFINING_RECIPE,
     STATE_WAITING_CONCEPT,
+    STATE_WAITING_PRODUCTION_BUNDLE_APPROVAL,
     STATE_WAITING_RECIPE_APPROVAL,
     STATE_WAITING_SCENE_APPROVAL,
     Update,
@@ -23,12 +24,14 @@ from .handlers_state_deps import (
     asyncio,
     ok_only_markup,
     format_full_recipe_for_approval,
+    format_production_bundle_for_approval,
     format_viral_application_summary,
     format_viral_concept_brief,
     gemini_generate_sync,
     generate_recipe_from_source_text,
     generate_recipe_concepts,
     generate_recipe_full_text,
+    generate_full_production,
     generate_scenes_plan,
     generate_viral_concept_brief,
     logger,
@@ -39,7 +42,15 @@ from .handlers_state_commands import _reply_text_chunked
 from .handlers_state_commands import NAV_BUTTON_START_OVER
 from .handlers_keyboards import reply_text_without_keyboard, safe_reply_text
 from .handlers_state_media import send_social_descriptions_for_recipe
+from ..dish_visuals import build_dish_visual_brief
 from ..llm_utils import extract_json_object
+from ..generation_modes import (
+    GENERATION_MODE_NORMAL,
+    GENERATION_MODE_SESSION_KEY,
+    GENERATION_MODE_SILENCE,
+    normalize_generation_mode,
+    target_languages_for_generation_mode,
+)
 from ..multilingual import language_name, normalize_language_code, target_languages_from_env
 from ..series_store import (
     SERIES_PENDING_PREFER_VERTEX_SESSION_KEY,
@@ -57,6 +68,7 @@ from ..series_store import (
 )
 
 _PROJECT_KEY_SESSION = "selected_project_key"
+STATE_WAITING_GENERATION_MODE = "waiting_generation_mode"
 STATE_WAITING_SERIES_CHOICE = "waiting_series_choice"
 STATE_WAITING_SERIES_CREATE = "waiting_series_create"
 STATE_WAITING_SERIES_TRANSLATION_APPROVAL = "waiting_series_translation_approval"
@@ -66,6 +78,8 @@ SERIES_CHOICE_CONFIRMED_SESSION_KEY = "series_choice_confirmed"
 SERIES_PENDING_NEXT_SESSION_KEY = "series_pending_next"
 SERIES_NEXT_GENERATION = "generation"
 SERIES_NEXT_OVERLAY_TITLE = "overlay_title"
+_GENERATION_MODE_BUTTON_NORMAL = "Обычный"
+_GENERATION_MODE_BUTTON_SILENCE = "Silence"
 _SERIES_BUTTON_NEW = "Создать серию"
 _SERIES_BUTTON_SKIP = "Без серии"
 _SERIES_BUTTON_BACK = "Назад"
@@ -161,6 +175,27 @@ def _parse_concept_choice(text: str) -> int | None:
     return int(match.group(1))
 
 
+def _generation_mode_markup() -> object | None:
+    try:
+        from telegram import ReplyKeyboardMarkup
+    except Exception:
+        return None
+    return ReplyKeyboardMarkup(
+        [[_GENERATION_MODE_BUTTON_NORMAL], [_GENERATION_MODE_BUTTON_SILENCE]],
+        resize_keyboard=True,
+        one_time_keyboard=False,
+    )
+
+
+async def _ask_generation_mode(update: Update, session: dict) -> None:
+    session["state"] = STATE_WAITING_GENERATION_MODE
+    await _reply_text_with_optional_markup(
+        update,
+        "Выберите режим генерации.",
+        reply_markup=_generation_mode_markup(),
+    )
+
+
 def _series_choice_markup(session: dict) -> object | None:
     try:
         from telegram import ReplyKeyboardMarkup
@@ -232,6 +267,8 @@ def _clean_series_title(value: str) -> str:
 
 
 def _series_title_target_languages(session: dict) -> list[str]:
+    if normalize_generation_mode(session.get(GENERATION_MODE_SESSION_KEY)) == GENERATION_MODE_SILENCE:
+        return ["ru"]
     raw = session.get("target_languages")
     candidates = raw if isinstance(raw, list) and raw else target_languages_from_env()
     out: list[str] = []
@@ -342,6 +379,15 @@ def _copy_series_context(source: dict, target: dict) -> None:
             target[key] = source[key]
 
 
+def _copy_generation_mode_context(source: dict, target: dict) -> None:
+    mode = normalize_generation_mode(source.get(GENERATION_MODE_SESSION_KEY))
+    target[GENERATION_MODE_SESSION_KEY] = mode
+    target["target_languages"] = target_languages_for_generation_mode(
+        mode,
+        target.get("target_languages") if isinstance(target.get("target_languages"), list) else target_languages_from_env(),
+    )
+
+
 async def generate(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Команда ``/generate <текст>``: обычный старт пайплайна (без fastpath)."""
     await _start_generation(update, context, prefer_vertex_api=False)
@@ -415,7 +461,7 @@ async def _start_generation_with_recipe(
     await _announce_generation_mode(update, chat_id=chat_id, prefer_vertex_api=prefer_vertex_api)
     session = {
         **existing_session,
-        "state": STATE_WAITING_SERIES_CHOICE,
+        "state": STATE_WAITING_GENERATION_MODE,
         SERIES_PENDING_NEXT_SESSION_KEY: SERIES_NEXT_GENERATION,
         SERIES_PENDING_RECIPE_SESSION_KEY: recipe,
         SERIES_PENDING_PREFER_VERTEX_SESSION_KEY: prefer_vertex_api,
@@ -423,7 +469,7 @@ async def _start_generation_with_recipe(
     if selected_project_key:
         session[_PROJECT_KEY_SESSION] = selected_project_key
     SESSIONS[chat_id] = session
-    await _ask_series_choice(update, session)
+    await _ask_generation_mode(update, session)
     return
 
 
@@ -482,6 +528,7 @@ async def _continue_generation_with_recipe(
         if selected_project_key:
             new_session[_PROJECT_KEY_SESSION] = selected_project_key
         _copy_series_context(existing_session, new_session)
+        _copy_generation_mode_context(existing_session, new_session)
         SESSIONS[chat_id] = new_session
         logger.info(
             "chat=%s state=%s (recipe provided directly%s)",
@@ -533,6 +580,7 @@ async def _continue_generation_with_recipe(
     if selected_project_key:
         new_session[_PROJECT_KEY_SESSION] = selected_project_key
     _copy_series_context(existing_session, new_session)
+    _copy_generation_mode_context(existing_session, new_session)
     SESSIONS[chat_id] = new_session
     logger.info("chat=%s state=%s", chat_id, STATE_WAITING_CONCEPT)
     await _reply_text_chunked(update, result["text_plan"])
@@ -577,6 +625,41 @@ async def _continue_generation_after_series(
         recipe=recipe,
         prefer_vertex_api=prefer_vertex_api,
     )
+    return True
+
+
+async def _handle_waiting_generation_mode_state(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+    *,
+    chat_id: int,
+    session: dict,
+    text: str,
+) -> bool:
+    low = str(text or "").strip().lower()
+    if low in {_GENERATION_MODE_BUTTON_NORMAL.lower(), "normal", "обычная", "обычный режим"}:
+        mode = GENERATION_MODE_NORMAL
+    elif low in {_GENERATION_MODE_BUTTON_SILENCE.lower(), GENERATION_MODE_SILENCE, "silent", "тихий"}:
+        mode = GENERATION_MODE_SILENCE
+    else:
+        await _reply_text_with_optional_markup(
+            update,
+            "Выберите «Обычный» или «Silence».",
+            reply_markup=_generation_mode_markup(),
+        )
+        return True
+    session[GENERATION_MODE_SESSION_KEY] = normalize_generation_mode(mode)
+    session["target_languages"] = target_languages_for_generation_mode(
+        mode,
+        target_languages_from_env(),
+    )
+    await update.message.reply_text(
+        "Ок, запускаю silence-режим: один RU-формат, Kling, короткие динамичные кадры."
+        if mode == GENERATION_MODE_SILENCE
+        else "Ок, запускаю обычный режим."
+    )
+    await _ask_series_choice(update, session)
+    SESSIONS[chat_id] = session
     return True
 
 
@@ -862,6 +945,84 @@ async def _handle_waiting_concept_state(
     return True
 
 
+async def _continue_silence_after_recipe_approval(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+    *,
+    chat_id: int,
+    session: dict,
+    full_recipe: str,
+    on_scene_plan_fail,
+) -> bool:
+    try:
+        await reply_text_without_keyboard(
+            update.message,
+            "Silence: сразу готовлю 5–8 Kling-сцен и production-промпты без речи.",
+        )
+        scenes = await _call_with_503_retries(
+            update,
+            context,
+            chat_id,
+            "generate_silence_scenes_plan",
+            lambda: generate_scenes_plan(
+                session["selected_concept"],
+                full_recipe_text=full_recipe,
+                on_attempt_failure=on_scene_plan_fail,
+                generation_mode=GENERATION_MODE_SILENCE,
+            ),
+        )
+        production = await _call_with_503_retries(
+            update,
+            context,
+            chat_id,
+            "generate_silence_full_production",
+            lambda: generate_full_production(
+                scenes["json_plan"],
+                approved_frame_prompts=None,
+                generation_mode=GENERATION_MODE_SILENCE,
+                target_languages=["ru"],
+                dish_visual_brief=build_dish_visual_brief(
+                    str(session.get("selected_concept_name") or session.get("selected_concept") or ""),
+                    full_recipe,
+                ),
+            ),
+        )
+    except ServiceUnavailableRetriesExhaustedError as e:
+        await update.message.reply_text(str(e))
+        return True
+    except Exception as e:
+        logger.exception("silence production generation failed")
+        await update.message.reply_text(f"Ошибка silence production: {_user_error_message(e)}")
+        return True
+
+    session["target_languages"] = ["ru"]
+    session["recipe_steps"] = [
+        str(s.get("recipe_step") or s.get("action") or "").strip()
+        for s in (scenes.get("json_plan") or [])
+        if isinstance(s, dict)
+    ]
+    session["state"] = STATE_WAITING_PRODUCTION_BUNDLE_APPROVAL
+    session["viral_concept_brief"] = {}
+    session["romantic_drama_subplot"] = {}
+    session["retention_review"] = {}
+    session["scenes_plan"] = scenes["json_plan"]
+    session["scenes_text"] = scenes["text_plan"]
+    session["frame_prompts"] = None
+    session["frame_prompts_text"] = None
+    session["production"] = production
+    session["image_scene_index"] = 0
+    session["scene_media_language_index"] = 0
+    session["scene_media_substep"] = "start_prompt"
+    await _reply_text_chunked(update, format_production_bundle_for_approval(production["json_plan"]))
+    await _reply_text_with_optional_markup(
+        update,
+        "Silence production готов: 5–8 сцен, Kling 3.0, RU-only, без речи и voice lock. "
+        "Если подходит — нажми «ОК», чтобы перейти к генерации кадров и видео.",
+        reply_markup=ok_only_markup(),
+    )
+    return True
+
+
 async def _handle_waiting_recipe_approval_state(
     update: Update,
     context: ContextTypes.DEFAULT_TYPE,
@@ -880,6 +1041,15 @@ async def _handle_waiting_recipe_approval_state(
         if not full_recipe:
             await update.message.reply_text("Нет текста рецепта. Сначала согласуйте рецепт.")
             return True
+        if normalize_generation_mode(session.get(GENERATION_MODE_SESSION_KEY)) == GENERATION_MODE_SILENCE:
+            return await _continue_silence_after_recipe_approval(
+                update,
+                context,
+                chat_id=chat_id,
+                session=session,
+                full_recipe=full_recipe,
+                on_scene_plan_fail=_on_scene_plan_fail,
+            )
 
         try:
             await reply_text_without_keyboard(update.message, "Готовлю viral brief и план сцен, ждите.")
@@ -909,6 +1079,7 @@ async def _handle_waiting_recipe_approval_state(
                     sponsored_content=bool(session.get("sponsored_content")),
                     brand_context=session.get("brand_context"),
                     analytics_feedback=session.get("analytics_feedback"),
+                    generation_mode=session.get(GENERATION_MODE_SESSION_KEY, GENERATION_MODE_NORMAL),
                 ),
             )
         except ServiceUnavailableRetriesExhaustedError as e:

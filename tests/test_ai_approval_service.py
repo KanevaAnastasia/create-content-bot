@@ -110,6 +110,95 @@ def test_normalize_ai_approval_critical_issue_overrides_score() -> None:
     assert result.critical_issues == ["visible subtitles"]
 
 
+@pytest.mark.parametrize(
+    ("stage", "expected_status"),
+    [
+        ("prompt", AI_APPROVAL_STATUS_APPROVE),
+        ("image", AI_APPROVAL_STATUS_APPROVE),
+        ("video", AI_APPROVAL_STATUS_APPROVE),
+    ],
+)
+def test_normalize_ai_approval_allows_prompted_grandma_wardrobe_only_issue(stage, expected_status) -> None:
+    result = normalize_ai_approval_result(
+        {
+            "status": "FIX_PROMPT",
+            "overall_score": 0.69,
+            "stage": stage,
+            "critical_issues": [
+                {
+                    "field": "START FRAME PROMPT",
+                    "issue": (
+                        'The START FRAME PROMPT describes the grandmother wearing "белом японском одеянии '
+                        'с повязкой с красной точкой на голове" which contradicts her canonical outfit description. '
+                        "The headwear in the prompt also contradicts the CHARACTER DESCRIPTION's headwear."
+                    ),
+                },
+                {
+                    "issue_type": "missing required cat",
+                    "description": (
+                        "The START FRAME PROMPT mentions 'рыжий мультяшный кот' but does not explicitly mention "
+                        "the 'рыжий кот' character identity that is expected from CHARACTER DESCRIPTIONS. "
+                        "The specific identity and coat color (orange) are mentioned, but the phrasing is not as precise."
+                    ),
+                },
+            ],
+            "warnings": [],
+        },
+        stage=stage,
+        config=_cfg(),
+    )
+
+    assert result.status == expected_status
+    assert result.critical_issues == []
+    assert any("Ignored prompted grandma wardrobe/accessory change" in warning for warning in result.warnings)
+    assert any("Ignored orange cat wording-only identity issue" in warning for warning in result.warnings)
+
+
+def test_normalize_ai_approval_allows_grandma_outfit_mismatch_code() -> None:
+    result = normalize_ai_approval_result(
+        {
+            "status": "FIX_PROMPT",
+            "overall_score": 0.0,
+            "stage": "prompt",
+            "critical_issues": ["GRANDMA_OUTFIT_MISMATCH"],
+            "warnings": [],
+        },
+        stage="prompt",
+        config=_cfg(),
+    )
+
+    assert result.status == AI_APPROVAL_STATUS_APPROVE
+    assert result.critical_issues == []
+    assert any("Ignored prompted grandma wardrobe/accessory change" in warning for warning in result.warnings)
+
+
+def test_normalize_ai_approval_allows_wardrobe_note_that_mentions_preserving_face() -> None:
+    result = normalize_ai_approval_result(
+        {
+            "status": "FIX_PROMPT",
+            "overall_score": 0.69,
+            "stage": "prompt",
+            "critical_issues": [
+                (
+                    "The START FRAME PROMPT specifies that the grandmother is wearing white Japanese attire with "
+                    "a headband with a red dot. However, the CHARACTER DESCRIPTIONS clearly state she wears a "
+                    "dark blue home dress and floral apron. This is a significant deviation from the canonical outfit. "
+                    "The prompt also overrides the default canonical outfit with an explicitly described alternate "
+                    "costume. This is allowed, but it is important that the character's face, expression, and overall "
+                    "identity remain consistent with the references."
+                )
+            ],
+            "warnings": [],
+        },
+        stage="prompt",
+        config=_cfg(),
+    )
+
+    assert result.status == AI_APPROVAL_STATUS_APPROVE
+    assert result.critical_issues == []
+    assert any("Ignored prompted grandma wardrobe/accessory change" in warning for warning in result.warnings)
+
+
 def test_normalize_ai_approval_promotes_severe_approve_warnings_to_critical() -> None:
     result = normalize_ai_approval_result(
         {
@@ -435,6 +524,8 @@ def test_check_scene_prompts_requires_character_and_prop_consistency(monkeypatch
         assert "missing grandma face" in prompt
         assert "back-only, cropped, hidden, tiny, faceless" in prompt
         assert "substituted by a different woman" in prompt
+        assert "explicitly described alternate costume, robe, apron, headband" in prompt
+        assert "Do not treat that wardrobe change as a critical identity mismatch" in prompt
         assert "wrong cat color" in prompt
         assert "giant cat" in prompt
         assert "tiny grandma" in prompt
@@ -460,8 +551,11 @@ def test_check_scene_prompts_requires_character_and_prop_consistency(monkeypatch
     monkeypatch.setattr(svc, "call_ai_approval_model", _fake_model)
 
     result = check_scene_prompts(
-        start_frame_prompt="Grandma and the orange cat near a bowl with flour.",
-        end_frame_prompt="The same grandma and orange cat near finished dough.",
+        start_frame_prompt=(
+            "Grandma in a white Japanese kimono-style robe and a red dot headband, "
+            "with the orange cat near a bowl with flour."
+        ),
+        end_frame_prompt="The same grandma in the kimono-style robe and orange cat near finished dough.",
         video_prompt="Grandma mixes flour in a ceramic bowl with a wooden spoon.",
         scene_description="Mix dough.",
         recipe_text="Mix flour.",
@@ -511,6 +605,11 @@ def test_check_start_frame_requires_reference_identity_and_normal_scale(monkeypa
         assert "tiny grandma" in prompt
         assert "front or three-quarter view" in prompt
         assert "replaced by a different woman" in prompt
+        assert "explicitly asks for grandma in a different outfit" in prompt
+        assert "allow that wardrobe/accessory change" in prompt
+        assert "clothing-only exception" in prompt
+        assert "kind brown eyes behind thin round copper glasses" in prompt
+        assert "new generic elderly woman, anime/Pixar/3D character" in prompt
         assert "split-screen, collage, stitched image" in prompt
         assert "horizontal/vertical seam" in prompt
         assert "CHARACTER DESCRIPTIONS" in prompt
@@ -527,7 +626,10 @@ def test_check_start_frame_requires_reference_identity_and_normal_scale(monkeypa
 
     result = check_start_frame(
         image_bytes=b"image",
-        scene_prompt="End frame with grandma and the orange cat at normal scale.",
+        scene_prompt=(
+            "End frame with grandma in a white Japanese kimono-style robe and a red dot headband, "
+            "plus the orange cat at normal scale."
+        ),
         scene_description="Serve dough.",
         recipe_text="Serve.",
         scene_number=1,

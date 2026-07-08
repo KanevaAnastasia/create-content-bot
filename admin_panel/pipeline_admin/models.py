@@ -376,7 +376,7 @@ class SceneTextRevision(models.Model):
     source = models.CharField(max_length=64, default="admin")
     actor = models.CharField(max_length=256, blank=True, null=True)
     meta_json = LenientJSONField(default=dict, blank=True)
-    created_at = models.DateTimeField()
+    created_at = models.DateTimeField(auto_now_add=True)
 
     class Meta:
         managed = False

@@ -395,6 +395,7 @@ def test_compose_locked_video_prompt_keeps_existing_scene_phrase():
     )
     assert "CHARACTERS SPEAKS: Оригинальная фраза" in out
     assert "Подмена фразы" not in out
+    assert "voice_lock_full_grandma:" in out
     assert "speech_timing_plan:" in out
 
 
@@ -1841,10 +1842,42 @@ def test_image_identity_adds_duplicate_cat_identity_rule():
 
     assert "лицо и голова должны быть полностью внутри кадра" in prompt
     assert "головной убор не должны быть обрезаны" in prompt
+    assert "Замок идентичности бабушки" in prompt
+    assert "менять можно только одежду и аксессуары" in prompt
+    assert "generic Japanese/anime/Pixar/3D character" in prompt
     assert "Не рисовать двух рыжих котов" in prompt
     assert "двух белых кошек" in prompt
     assert "двух черно-белых котов" in prompt
     assert "разными персонажами" in prompt
+
+
+def test_image_identity_can_skip_grandma_face_crop_rule_for_silence_mode():
+    scene = {"characters": ["grandma", "cat"]}
+    prompt = _append_scene_identity_to_image_prompt(
+        "Экстремально крупный план: руки бабушки поливают курицу сливочным соусом, рядом мордочка рыжего кота.",
+        scene,
+        include_location=False,
+        allow_grandma_face_crop_rule=False,
+    )
+
+    assert "лицо и голова должны быть полностью внутри кадра" not in prompt
+    assert "головной убор не должны быть обрезаны" not in prompt
+    assert "Замок идентичности бабушки" in prompt
+    assert "Не рисовать двух рыжих котов" in prompt
+
+
+def test_image_identity_strips_cached_grandma_face_crop_rule_for_kling_scene():
+    scene = {"characters": ["grandma", "cat"], "model": "kling_3_0"}
+    cached_prompt = (
+        "Экстремально крупный план курицы под сливочным соусом.\n"
+        "Если бабушка присутствует в кадре, её лицо и голова должны быть полностью внутри кадра: глаза, нос, рот, "
+        "подбородок и головной убор не должны быть обрезаны верхним или боковым краем."
+    )
+    prompt = _append_scene_identity_to_image_prompt(cached_prompt, scene, include_location=False)
+
+    assert "лицо и голова должны быть полностью внутри кадра" not in prompt
+    assert "головной убор не должны быть обрезаны" not in prompt
+    assert "Персонажи в кадре: бабушка, рыжий кот" in prompt
 
 
 def test_reference_style_prompt_rejects_storybook_style_drift():
@@ -2967,6 +3000,7 @@ def test_scheduled_image_rejection_regenerates_prompt_with_ai_feedback(monkeypat
     }
     session = {
         "scheduled_generation_mode": True,
+        "scheduled_generation_every_start_prompt_comment": "Всегда держи бабушку в красном фартуке.",
         "recipe_title": "Баурсаки",
         "recipe_full_text": "Баурсаки",
     }
@@ -2988,6 +3022,8 @@ def test_scheduled_image_rejection_regenerates_prompt_with_ai_feedback(monkeypat
     assert captured_feedback
     assert "pancakes" in captured_feedback[0]
     assert "Баурсаки / baursaki" in captured_feedback[0]
+    assert "MANDATORY SCHEDULED COMMENT FOR EVERY START PROMPT" in captured_feedback[0]
+    assert "красном фартуке" in captured_feedback[0]
     assert any("фидбэк" in message.lower() for message in messages)
 
 
@@ -3106,6 +3142,8 @@ def test_start_frame_generation_includes_user_reference_images(monkeypatch):
 
     assert out is True
     assert calls[0]["reference_images"] == [b"char-ref", b"user-ref"]
+    assert "Замок идентичности бабушки" in calls[0]["prompt"]
+    assert "менять можно только одежду и аксессуары" in calls[0]["prompt"]
 
 
 def test_scene_media_reference_photo_adds_image_to_current_scene():
@@ -4763,6 +4801,69 @@ def test_video_feedback_button_after_generated_video_applies_next_text(monkeypat
     assert any("Текущий prompt (ru):" in message for message in messages)
 
 
+def test_speechless_video_feedback_changes_duration_and_strips_voice_lock(monkeypatch):
+    messages: list[str] = []
+
+    class _Msg:
+        async def reply_text(self, text, **_kwargs):
+            messages.append(text)
+
+    async def _call_direct(_update, _context, _chat_id, _action_name, op):
+        result = op()
+        if hasattr(result, "__await__"):
+            return await result
+        return result
+
+    async def _rewrite(_current_prompt: str, feedback: str) -> str:
+        return (
+            "Grandma pours sauce. "
+            "voice_lock_full: female voice Russian language elderly grandmother. "
+            "voice_lock_full_grandma: female voice Russian language elderly grandmother. "
+            "CHARACTERS SPEAKS: привет. "
+            + feedback
+        )
+
+    monkeypatch.setattr(handlers_state_media, "_call_with_503_retries", _call_direct)
+    monkeypatch.setattr(handlers_state_media, "_rewrite_video_prompt_by_format_instruction", _rewrite)
+
+    scene = {
+        "model": "kling_3_0",
+        "duration_sec": 6,
+        "video_results_by_lang": {"ru": {"video_b64": _encode_b64(b"ru-video")}},
+        "video_approvals_by_lang": {"ru": False},
+        "video_prompt_by_lang": {"ru": "lang:ru old prompt"},
+    }
+    session = {
+        "generation_mode": "silence",
+        "target_languages": ["ru"],
+        "production": {"json_plan": [scene]},
+        "image_scene_index": 0,
+        "scene_media_substep": "video_prompt",
+    }
+
+    out = asyncio.run(
+        handlers_state_media._apply_scene_video_feedback(
+            SimpleNamespace(message=_Msg()),
+            context=None,
+            chat_id=1,
+            session=session,
+            scene=scene,
+            idx=0,
+            feedback="сделай 3 секунды",
+            language="ru",
+        )
+    )
+
+    prompt = scene["video_prompt_by_lang"]["ru"]
+    assert out is True
+    assert scene["duration_sec"] == 3
+    assert "voice_lock_full" not in prompt
+    assert "CHARACTERS SPEAKS" not in prompt
+    assert "No dialogue" in prompt
+    assert "Audio enabled" in prompt
+    assert any("Длительность обновлена: 3 сек" in message for message in messages)
+
+
 def test_waiting_scene_media_retry_button_restarts_auto_shorten(monkeypatch):
     called = {"video_ok": False}
 
@@ -5120,6 +5221,7 @@ def test_scheduled_speech_auto_shorten_failure_uses_fallback_and_continues(monke
 
 def test_scene_media_video_ok_sends_only_start_and_optional_end_frames(monkeypatch):
     calls: list[dict] = []
+    messages: list[str] = []
 
     async def _gen_ok(*args, **kwargs):
         calls.append(kwargs)
@@ -5129,6 +5231,7 @@ def test_scene_media_video_ok_sends_only_start_and_optional_end_frames(monkeypat
 
     class _Msg:
         async def reply_text(self, _text):
+            messages.append(str(_text))
             return None
 
         async def reply_video(self, *args, **kwargs):
@@ -5165,6 +5268,8 @@ def test_scene_media_video_ok_sends_only_start_and_optional_end_frames(monkeypat
     assert calls[0]["end_image"] == b"end-frame"
     assert "reference_images" not in calls[0]
     assert "references" not in calls[0]
+    assert any("Длительность: 6 сек" in message for message in messages)
+    assert any("Длительность запуска: 6 сек" in message for message in messages)
 
 
 def test_scene_media_video_ok_sends_no_end_frame_when_missing(monkeypatch):
@@ -5343,8 +5448,8 @@ def test_ok_regenerates_all_changed_languages_in_parallel(monkeypatch):
     batch_requests_seen: list[str] = []
     messages: list[str] = []
 
-    async def _batch(*, requests, model, duration_sec):
-        _ = (model, duration_sec)
+    async def _batch(*, requests, model, duration_sec, syntax_provider=None):
+        _ = (model, duration_sec, syntax_provider)
         batch_requests_seen.extend(req.key for req in requests)
         return {"ru": b"new-ru-video", "en": b"new-en-video"}
 
@@ -5428,7 +5533,8 @@ def test_scene_media_video_ok_preserves_partial_syntax_batch_and_retries_missing
     messages: list[str] = []
     captions: list[str] = []
 
-    async def _batch(*, requests, model, duration_sec):
+    async def _batch(*, requests, model, duration_sec, syntax_provider=None):
+        _ = syntax_provider
         batch_requests_seen.extend(req.key for req in requests)
         assert model == "veo3_fast"
         assert duration_sec == 6
@@ -5490,8 +5596,8 @@ def test_scheduled_scene_media_video_retries_partial_syntax_batch(monkeypatch):
     captions: list[str] = []
     sleeps: list[float] = []
 
-    async def _batch(*, requests, model, duration_sec):
-        _ = (model, duration_sec)
+    async def _batch(*, requests, model, duration_sec, syntax_provider=None):
+        _ = (model, duration_sec, syntax_provider)
         keys = [req.key for req in requests]
         batch_requests_seen.append(keys)
         if len(batch_requests_seen) == 1:
@@ -5557,8 +5663,8 @@ def test_scheduled_scene_media_video_records_syntax_retries_after_exhaustion(mon
     batch_requests_seen: list[list[str]] = []
     messages: list[str] = []
 
-    async def _batch(*, requests, model, duration_sec):
-        _ = (model, duration_sec)
+    async def _batch(*, requests, model, duration_sec, syntax_provider=None):
+        _ = (model, duration_sec, syntax_provider)
         keys = [req.key for req in requests]
         batch_requests_seen.append(keys)
         return {}
@@ -5656,10 +5762,11 @@ def test_handle_scene_video_provider_choice_pending_batch_syntax_retries_all_lan
     captions: list[str] = []
     replies: list[tuple[str, object | None]] = []
 
-    async def _batch(*, requests, model, duration_sec):
+    async def _batch(*, requests, model, duration_sec, syntax_provider=None):
         batch_requests_seen.extend(req.key for req in requests)
         assert model == "veo3_fast"
         assert duration_sec == 6
+        assert syntax_provider == "veo"
         return {"ru": b"video-ru", "en": b"video-en"}
 
     async def _fake_reply_video(_message, *, video, caption):

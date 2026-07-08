@@ -239,6 +239,7 @@ def test_finalize_scene_video_prompt_adds_voice_lock_and_veo_framing():
     scene = {"model": "veo3_fast", "text": "реплика сцены"}
     out = pipeline._finalize_scene_video_prompt("close-up kitchen", scene)
     assert "voice_lock_full:" in out
+    assert "voice_lock_full_grandma:" in out
     assert "veo3_framing:" in out.lower()
     assert "close-up shot only" in out.lower()
     assert "medium-close shot" not in out.lower()
@@ -1096,6 +1097,8 @@ def test_generate_full_production_with_approved_frames(monkeypatch):
     assert set(scene["video_prompt_by_lang"].keys()) == {"ru", "en"}
     assert "speech_timing_plan:" in scene["video_prompt_by_lang"]["ru"]
     assert "speech_timing_plan:" in scene["video_prompt_by_lang"]["en"]
+    assert "voice_lock_full_grandma:" in scene["video_prompt_by_lang"]["ru"]
+    assert "voice_lock_full_grandma:" in scene["video_prompt_by_lang"]["en"]
     assert scene["video_approvals_by_lang"]["ru"] is False
     assert scene["video_approvals_by_lang"]["en"] is False
     assert "no background music" in captured_prompt["text"].lower()

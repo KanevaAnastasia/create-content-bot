@@ -695,6 +695,15 @@ _IMAGE_REFERENCE_STYLE_BLOCK = (
     "3D render, or generic cute cartoon look if that is not the attached reference style."
 )
 
+_GRANDMA_FACE_IDENTITY_LOCK = (
+    "Замок идентичности бабушки: если scene prompt просит другой наряд, robe, apron, headband, hat или "
+    "культурный/тематический костюм, менять можно только одежду и аксессуары. Лицо, возраст, мягкие округлые "
+    "пропорции, добрая улыбка, круглое лицо, пухлые румяные щеки, маленький подбородок, круглый красноватый нос, "
+    "добрые карие глаза за тонкими круглыми очками в медной оправе, светло-седые брови/волосы у лба и общий "
+    "2D cartoon project style должны оставаться как у приложенного референса и описания персонажа. Не превращать "
+    "ее в другую пожилую женщину, generic Japanese/anime/Pixar/3D character или новый дизайн лица."
+)
+
 
 def _fruit_only_closeup_prompt(prompt: str) -> bool:
     """
@@ -751,11 +760,24 @@ def _append_scene_identity_to_image_prompt(
     scene: dict,
     *,
     include_location: bool = False,
+    allow_grandma_face_crop_rule: bool = True,
 ) -> str:
     """
     Фиксирует персонажей в промпте image generation.
     """
     text = sanitize_character_names_and_keys(base_prompt).strip()
+    scene_generation_mode = str(scene.get("generation_mode") or "").strip().lower()
+    scene_model = str(scene.get("model") or "").strip().lower()
+    silence_scene = scene_generation_mode == "silence" or scene_model.startswith("kling")
+    if silence_scene:
+        allow_grandma_face_crop_rule = False
+        text = re.sub(
+            r"Если бабушка присутствует в кадре, её лицо и голова должны быть полностью внутри кадра:.*?"
+            r"подбородок и головной убор не должны быть обрезаны верхним или боковым краем\.\s*",
+            "",
+            text,
+            flags=re.IGNORECASE | re.DOTALL,
+        ).strip()
     chars = scene.get("characters")
     if isinstance(chars, list):
         char_list = [str(c).strip() for c in chars if str(c).strip()]
@@ -784,15 +806,23 @@ def _append_scene_identity_to_image_prompt(
     character_lines = character_identity_lines(normalized_keys)
     descriptions = "\n".join(character_lines)
     drama_beat = "" if fruit_only_closeup else sanitize_character_names_and_keys(scene.get("romantic_drama_beat") or "").strip()
-    identity_block = (
-        f"Персонажи в кадре: {chars_text}. Состав персонажей не менять.\n"
-        "Описание персонажей обязательно соблюдать; если персонаж есть в prompt, он должен выглядеть согласно описанию.\n"
-        "Если бабушка присутствует в кадре, её лицо и голова должны быть полностью внутри кадра: глаза, нос, рот, "
-        "подбородок и головной убор не должны быть обрезаны верхним или боковым краем.\n"
+    identity_lines = [
+        f"Персонажи в кадре: {chars_text}. Состав персонажей не менять.",
+        "Описание персонажей обязательно соблюдать; если персонаж есть в prompt, он должен выглядеть согласно описанию.",
+    ]
+    if "grandma" in normalized_keys and not fruit_only_closeup:
+        identity_lines.append(_GRANDMA_FACE_IDENTITY_LOCK)
+    if allow_grandma_face_crop_rule:
+        identity_lines.append(
+            "Если бабушка присутствует в кадре, её лицо и голова должны быть полностью внутри кадра: глаза, нос, рот, "
+            "подбородок и головной убор не должны быть обрезаны верхним или боковым краем."
+        )
+    identity_lines.append(
         "Правило котов: каждый canonical кот может появиться только один раз. Не рисовать двух рыжих котов, "
         "двух белых кошек или двух черно-белых котов; если в кадре несколько котов, они должны быть разными "
         "персонажами из списка выше и с разным окрасом."
     )
+    identity_block = "\n".join(identity_lines)
     if drama_beat:
         identity_block = f"{identity_block}\nФоновая драма этой сцены должна быть видна в кадре: {drama_beat}"
     if descriptions:

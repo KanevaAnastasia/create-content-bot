@@ -705,6 +705,110 @@ def test_django_generation_run_scene_inline_speech_preserves_en(monkeypatch):
     ]
 
 
+def test_django_generation_run_scene_inline_revision_sets_created_at(monkeypatch):
+    admin_dir = Path(__file__).resolve().parents[1] / "admin_panel"
+    sys.path.insert(0, str(admin_dir))
+    os.environ.setdefault("DJANGO_SETTINGS_MODULE", "cf_admin.settings")
+
+    import django
+
+    django.setup()
+
+    import pipeline_admin.admin as admin_module
+
+    captured = {}
+
+    monkeypatch.setattr(
+        admin_module.SceneTextRevision.objects,
+        "create",
+        lambda **kwargs: captured.update(kwargs) or SimpleNamespace(**kwargs),
+    )
+
+    scene = SimpleNamespace(
+        id=uuid.uuid4(),
+        run_id=uuid.uuid4(),
+        scene_order=1,
+    )
+
+    revision = admin_module._record_scene_text_revision(
+        scene,
+        field_name="speech",
+        language="ru",
+        old_text="Старая речь",
+        new_text="Новая речь",
+        source="generation_run_admin_inline",
+    )
+
+    assert revision is not None
+    assert captured["created_at"].tzinfo is not None
+    assert captured["field_name"] == "speech"
+    assert captured["language"] == "ru"
+
+
+def test_django_admin_final_build_scenes_prefer_page_speech_over_candidate_snapshot(monkeypatch):
+    admin_dir = Path(__file__).resolve().parents[1] / "admin_panel"
+    sys.path.insert(0, str(admin_dir))
+    os.environ.setdefault("DJANGO_SETTINGS_MODULE", "cf_admin.settings")
+
+    import django
+
+    django.setup()
+
+    import pipeline_admin.admin as admin_module
+
+    scene_row = SimpleNamespace(
+        scene_order=1,
+        text="Текст на странице",
+        duration_sec=6.0,
+        start_frame_prompt=None,
+        start_frame_prompt_effective=None,
+        end_frame_prompt=None,
+        video_prompt_by_lang={},
+        speech_by_lang={"ru": "Новая речь со страницы"},
+        syntax_prompt_by_lang={},
+        prompt_meta_json={},
+    )
+
+    class _Rows:
+        def order_by(self, *_args):
+            return [scene_row]
+
+    monkeypatch.setattr(admin_module.Scene.objects, "filter", lambda **_kwargs: _Rows())
+
+    scenes = [
+        {
+            "scene": 1,
+            "text": "Старый текст плана",
+            "duration_sec": 5.0,
+            "speech_by_lang": {"ru": "Старая речь плана"},
+            "speech_cues_by_lang": {"ru": [{"text": "ОК", "start_sec": 0.0, "end_sec": 6.0}]},
+            "video_candidates_by_lang": {
+                "ru": [
+                    {
+                        "candidate_id": "old",
+                        "approved_for_production": True,
+                        "speech_by_lang": {"ru": "ОК"},
+                        "speech_cues_by_lang": {
+                            "ru": [{"text": "ОК", "start_sec": 0.0, "end_sec": 6.0}]
+                        },
+                        "video_prompt_by_lang": {"ru": "CHARACTERS SPEAKS: ОК"},
+                    }
+                ]
+            },
+        }
+    ]
+
+    out = admin_module._admin_final_build_scenes_from_page(SimpleNamespace(id=uuid.uuid4()), scenes)
+
+    assert out[0]["text"] == "Текст на странице"
+    assert out[0]["speech_by_lang"] == {"ru": "Новая речь со страницы"}
+    assert "speech_cues_by_lang" not in out[0]
+    candidate = out[0]["video_candidates_by_lang"]["ru"][0]
+    assert "speech_by_lang" not in candidate
+    assert "speech_cues_by_lang" not in candidate
+    assert "video_prompt_by_lang" not in candidate
+
+
 def test_django_generation_run_scene_inline_shows_ru_text_fallback_and_saves_en(monkeypatch):
     admin_dir = Path(__file__).resolve().parents[1] / "admin_panel"
     sys.path.insert(0, str(admin_dir))
@@ -1197,6 +1301,7 @@ def test_django_admin_titled_only_build_uses_subtitled_source_fast_path(monkeypa
     assert out["renders_by_language"]["ru"]["titled_subtitled_music"]["video_path"] == "/tmp/titled.mp4"
     assert calls[0]["subtitled_video_path"] == Path("/tmp/source_subtitled.mp4")
     assert calls[0]["language"] == "ru"
+    assert calls[0]["use_candidate_subtitle_snapshot"] is False
     assert calls[0]["overlay_title_style"]["title_color"] == "#1a2b3c"
     assert session["overlay_title_style"]["title_color"] == "#1a2b3c"
     assert production["overlay_title_style"]["title_color"] == "#1a2b3c"
@@ -1265,6 +1370,7 @@ def test_django_admin_titled_build_prefers_current_series_titles_over_snapshot(m
     )
 
     assert calls[0]["overlay_series_title_by_lang"] == {"ru": "Карта вкусов", "en": "Flavor map"}
+    assert calls[0]["use_candidate_subtitle_snapshot"] is False
     assert production["series_title_by_lang"] == {"ru": "Карта вкусов", "en": "Flavor map"}
 
 
@@ -1312,6 +1418,7 @@ def test_django_admin_non_title_build_keeps_pending_title_color(monkeypatch):
     )
 
     assert calls[0]["overlay_title_style"]["title_color"] == "#c72638"
+    assert calls[0]["use_candidate_subtitle_snapshot"] is False
     assert session["pending_overlay_title_style"] == {"title_color": "#1a2b3c"}
     assert production["pending_overlay_title_style"] == {"title_color": "#1a2b3c"}
 

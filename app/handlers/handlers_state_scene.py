@@ -113,16 +113,19 @@ from .handlers_state_start import (
     SERIES_CHOICE_CONFIRMED_SESSION_KEY,
     SERIES_NEXT_OVERLAY_TITLE,
     SERIES_PENDING_NEXT_SESSION_KEY,
+    STATE_WAITING_GENERATION_MODE,
     STATE_WAITING_SERIES_CHOICE,
     STATE_WAITING_SERIES_CREATE,
     STATE_WAITING_SERIES_TRANSLATION_APPROVAL,
     _ask_series_choice,
     _concept_choice_markup,
+    _handle_waiting_generation_mode_state,
     _handle_waiting_series_choice_state,
     _handle_waiting_series_create_state,
     _handle_waiting_series_translation_approval_state,
     _handle_waiting_concept_state,
     _handle_waiting_recipe_approval_state,
+    _generation_mode_markup,
     _series_choice_markup,
     _start_description_with_recipe,
     _start_generation_with_recipe,
@@ -138,14 +141,18 @@ from .handlers_generation_utils import (
 )
 from ..state import get_loaded_session, save_loaded_session_if_possible
 from .handlers_state_media import (
+    SOCIAL_DESCRIPTIONS_PENDING_KEY,
     STATE_REFINING_SOCIAL_DESCRIPTIONS,
     STATE_WAITING_SOCIAL_DESCRIPTIONS_APPROVAL,
     handle_scene_media_reference_photo,
+    _social_descriptions_approval_markup,
     _handle_waiting_scene_media_state,
     _handle_waiting_social_descriptions_approval_state,
+    scene_media_keyboard_snapshot,
     scene_media_reference_images_pending,
 )
 from ..character_catalog import format_character_short_descriptions
+from ..generation_modes import GENERATION_MODE_NORMAL, GENERATION_MODE_SESSION_KEY
 from ..pipeline_history import record_checkpoint, restore_previous_checkpoint, session_step_signature
 from ..scene_media_store import mark_candidate_liked_by_message as persist_mark_candidate_liked_by_message
 from ..session_store import load_session_if_possible, save_session_if_possible
@@ -774,6 +781,8 @@ async def _generate_production_after_overlay_title(
                 viral_concept_brief=session.get("viral_concept_brief"),
                 sponsored_content=bool(session.get("sponsored_content")),
                 brand_context=session.get("brand_context"),
+                generation_mode=session.get(GENERATION_MODE_SESSION_KEY, GENERATION_MODE_NORMAL),
+                target_languages=session.get("target_languages"),
             ),
         )
     except ServiceUnavailableRetriesExhaustedError as e:
@@ -810,10 +819,38 @@ async def _generate_production_after_overlay_title(
 def keyboard_for_session_state(session: dict):
     """Return the reply keyboard expected for the current visible state."""
     state = str((session or {}).get("state") or "")
+    if state in {
+        STATE_REFINING_CONCEPT,
+        STATE_REFINING_RECIPE,
+        STATE_REFINING_SCENES,
+        STATE_REFINING_FRAME_PROMPTS,
+        STATE_REFINING_PRODUCTION_BUNDLE,
+        STATE_REFINING_SOCIAL_DESCRIPTIONS,
+    }:
+        return remove_keyboard_markup()
     if state == _STATE_WAITING_FIRST_STEP_PROJECT_SELECTION:
         return project_choice_markup()
-    if state == "":
+    if state in {
+        "",
+        _STATE_WAITING_FIRST_STEP_GENERATE_TEXT,
+        _STATE_WAITING_FIRST_STEP_DESCRIPTION_TEXT,
+        _STATE_WAITING_FIRST_STEP_SOUND_TEXT,
+        _STATE_WAITING_FIRST_STEP_VIDEO_TEXT,
+        _STATE_WAITING_FIRST_STEP_VIDEO_IMAGE,
+        _STATE_WAITING_FIRST_STEP_PROJECT_IMAGE_PROMPT,
+    }:
         return first_step_menu_markup()
+    if state == _STATE_WAITING_FIRST_STEP_IMAGE_TEXT:
+        return image_text_markup()
+    if state in {
+        _STATE_WAITING_FIRST_STEP_IMAGE_REFERENCES,
+        _STATE_WAITING_FIRST_STEP_PROJECT_IMAGE_REFERENCES,
+    }:
+        return _custom_reference_markup()
+    if state == _STATE_WAITING_FIRST_STEP_PROJECT_IMAGE_CHARACTERS:
+        return project_image_character_markup(_project_image_selected_characters(session or {}))
+    if state == STATE_WAITING_GENERATION_MODE:
+        return _generation_mode_markup()
     if state == STATE_WAITING_OVERLAY_TITLE_RU:
         return remove_keyboard_markup()
     if state == STATE_WAITING_OVERLAY_TITLE_EN_APPROVAL:
@@ -822,7 +859,10 @@ def keyboard_for_session_state(session: dict):
         return ok_only_markup()
     if state == STATE_WAITING_SERIES_CHOICE:
         return _series_choice_markup(session)
-    if state == STATE_WAITING_SERIES_CREATE:
+    if state in {
+        STATE_WAITING_SERIES_CREATE,
+        STATE_WAITING_SERIES_TRANSLATION_APPROVAL,
+    }:
         return ok_only_markup()
     if state == STATE_WAITING_CONCEPT:
         concepts = session.get("concepts")
@@ -838,8 +878,32 @@ def keyboard_for_session_state(session: dict):
         return _frame_prompt_reference_markup()
     if state == STATE_WAITING_PRODUCTION_BUNDLE_APPROVAL:
         return _production_bundle_approval_markup()
+    if state == STATE_WAITING_SOCIAL_DESCRIPTIONS_APPROVAL:
+        pending = (session or {}).get(SOCIAL_DESCRIPTIONS_PENDING_KEY)
+        return _social_descriptions_approval_markup(pending if isinstance(pending, dict) else None)
+    if state == STATE_WAITING_SCENE_MEDIA:
+        return scene_media_keyboard_snapshot(session or {}).markup
     if state == STATE_READY_FOR_PRODUCTION:
         return first_step_menu_markup()
+    if state == _STATE_WAITING_DRAFT_SCENES:
+        production = (session or {}).get("production") or {}
+        scenes = production.get("json_plan") if isinstance(production, dict) else None
+        repair = dict((session or {}).get("draft_repair") or {})
+        plan = repair.get("plan") if isinstance(repair.get("plan"), list) else []
+        selected = (
+            repair.get("selected_scene_indexes")
+            if isinstance(repair.get("selected_scene_indexes"), list)
+            else []
+        )
+        return _draft_scene_markup(
+            len(scenes) if isinstance(scenes, list) else 0,
+            has_plan=bool(plan),
+            selected=selected,
+        )
+    if state == _STATE_WAITING_DRAFT_LANGUAGE:
+        return _draft_language_markup()
+    if state == _STATE_WAITING_DRAFT_STAGE:
+        return _draft_stage_markup()
     return None
 
 
@@ -2216,6 +2280,8 @@ async def _handle_waiting_frame_prompts_approval_state(
                     viral_concept_brief=session.get("viral_concept_brief"),
                     sponsored_content=bool(session.get("sponsored_content")),
                     brand_context=session.get("brand_context"),
+                    generation_mode=session.get(GENERATION_MODE_SESSION_KEY, GENERATION_MODE_NORMAL),
+                    target_languages=session.get("target_languages"),
                 ),
             )
         except ServiceUnavailableRetriesExhaustedError as e:
@@ -2313,6 +2379,8 @@ async def _handle_waiting_production_bundle_approval_state(
                 viral_concept_brief=session.get("viral_concept_brief"),
                 sponsored_content=bool(session.get("sponsored_content")),
                 brand_context=session.get("brand_context"),
+                generation_mode=session.get(GENERATION_MODE_SESSION_KEY, GENERATION_MODE_NORMAL),
+                target_languages=session.get("target_languages"),
             ),
         )
     except ServiceUnavailableRetriesExhaustedError as e:
@@ -2554,10 +2622,11 @@ async def _handle_scene_approval_refine(update: Update, context: ContextTypes.DE
                 viral_concept_brief=session.get("viral_concept_brief"),
                 sponsored_content=bool(session.get("sponsored_content")),
                 brand_context=session.get("brand_context"),
-                analytics_feedback=session.get("analytics_feedback"),
-                romantic_drama_subplot=session.get("romantic_drama_subplot"),
-            ),
-        )
+                    analytics_feedback=session.get("analytics_feedback"),
+                    romantic_drama_subplot=session.get("romantic_drama_subplot"),
+                    generation_mode=session.get(GENERATION_MODE_SESSION_KEY, GENERATION_MODE_NORMAL),
+                ),
+            )
     except ServiceUnavailableRetriesExhaustedError as e:
         await update.message.reply_text(str(e)); session["state"] = STATE_WAITING_SCENE_APPROVAL; return True
     except Exception as e:
@@ -3149,6 +3218,15 @@ async def _on_text_impl(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
             context,
             recipe=text.strip(),
             prefer_vertex_api=False,
+        )
+        return
+    if session.get("state") == STATE_WAITING_GENERATION_MODE:
+        await _handle_waiting_generation_mode_state(
+            update,
+            context,
+            chat_id=chat_id,
+            session=session,
+            text=text,
         )
         return
     if session.get("state") == STATE_WAITING_SERIES_CHOICE:

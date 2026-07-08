@@ -184,6 +184,7 @@ def test_try_generate_via_syntax_telethon_happy_path(monkeypatch):
         id = 999
 
     call_order: list[str] = []
+    file_count = {"value": 0}
 
     class _FakeClient:
         def __init__(self, *_args, **_kwargs):
@@ -202,8 +203,11 @@ def test_try_generate_via_syntax_telethon_happy_path(monkeypatch):
             return _Entity()
 
         async def send_message(self, _target, _text, reply_to=None):
-            call_order.append("send_message")
+            call_order.append(f"send_message:{_text}")
             assert len(_text) <= 2000
+            if _text in {"/video", "⭕ Veo"}:
+                assert reply_to is None
+                return _SentMessage(90 + len(call_order))
             assert reply_to is not None
             return _SentMessage(103)
 
@@ -212,7 +216,8 @@ def test_try_generate_via_syntax_telethon_happy_path(monkeypatch):
             assert getattr(file, "name", "") in ("start_frame.png", "end_frame.png")
             assert caption is None
             assert force_document is False
-            if len(call_order) == 1:
+            file_count["value"] += 1
+            if file_count["value"] == 1:
                 return _SentMessage(101)
             return _SentMessage(102)
 
@@ -255,7 +260,129 @@ def test_try_generate_via_syntax_telethon_happy_path(monkeypatch):
     assert result.video_bytes == b"mp4-content"
     assert result.video_uri is None
     assert result.attempt_id == "fixed-attempt"
-    assert call_order[:3] == ["send_file", "send_file", "send_message"]
+    assert call_order[:5] == [
+        "send_message:/video",
+        "send_message:⭕ Veo",
+        "send_file",
+        "send_file",
+        "send_message:video prompt",
+    ]
+
+
+def test_try_generate_via_syntax_kling_uses_configure_ui_flow(monkeypatch):
+    import app.syntax_telethon_fallback as telethon_fallback
+
+    class _SentMessage:
+        def __init__(self, msg_id: int):
+            self.id = msg_id
+
+    class _Entity:
+        id = 999
+
+    events: list[tuple[str, str | None, int | None]] = []
+    captured: dict[str, object] = {}
+
+    class _FakeClient:
+        def __init__(self, *_args, **_kwargs):
+            pass
+
+        async def connect(self):
+            return None
+
+        async def disconnect(self):
+            return None
+
+        async def is_user_authorized(self):
+            return True
+
+        async def get_entity(self, _username):
+            return _Entity()
+
+        async def send_message(self, _target, text, reply_to=None):
+            events.append(("send_message", str(text), reply_to))
+            assert reply_to is None
+            return _SentMessage(100 + len(events))
+
+        async def send_file(self, _target, file, caption=None, force_document=False):
+            del caption, force_document
+            events.append(("send_file", getattr(file, "name", ""), None))
+            return _SentMessage(103)
+
+    async def _noop_sleep(_sec: float) -> None:
+        return None
+
+    async def _fake_kling_flow(_client, _target, **kwargs):
+        captured.update(kwargs)
+        return telethon_fallback._result(
+            success=True,
+            video_bytes=b"kling-mp4",
+            video_uri=None,
+            provider_message="kling ok",
+            attempt_id=str(kwargs["attempt_id"]),
+        )
+
+    monkeypatch.setattr(telethon_fallback, "TelegramClient", _FakeClient)
+    monkeypatch.setattr(telethon_fallback, "StringSession", lambda value: value)
+    monkeypatch.setattr(telethon_fallback, "uuid4", lambda: type("_UUID", (), {"hex": "kling-attempt"})())
+    monkeypatch.setattr(telethon_fallback.asyncio, "sleep", _noop_sleep)
+    monkeypatch.setattr(telethon_fallback, "_run_syntax_kling_configure_flow", _fake_kling_flow)
+    monkeypatch.setenv("TELEGRAM_API_ID", "123")
+    monkeypatch.setenv("TELEGRAM_API_HASH", "hash")
+    monkeypatch.setenv("TELETHON_STRING_SESSION", "session")
+
+    result = try_generate_via_syntax(
+        prompt="video prompt",
+        model="kling_3_0",
+        duration_sec=3,
+        start_image=_syntax_test_frame_bytes(),
+        timeout_sec=5,
+        syntax_provider="kling",
+    )
+
+    assert result.success is True
+    assert result.video_bytes == b"kling-mp4"
+    assert events == [
+        ("send_message", "/video", None),
+        ("send_message", "📼 Kling", None),
+        ("send_file", "start_frame.png", None),
+    ]
+    assert captured["prompt"] == "video prompt"
+    assert captured["duration_sec"] == 3
+    assert captured["reply_anchor"] == 103
+
+
+def test_try_generate_via_syntax_batch_kling_runs_sequential_single_flows(monkeypatch):
+    import app.syntax_telethon_fallback as telethon_fallback
+
+    calls: list[tuple[str, int, str]] = []
+
+    async def _fake_single(**kwargs):
+        calls.append((kwargs["prompt"], kwargs["duration_sec"], kwargs["syntax_provider"]))
+        return telethon_fallback._result(
+            success=True,
+            video_bytes=f"mp4-{kwargs['prompt']}".encode(),
+            video_uri=None,
+            provider_message="ok",
+            attempt_id=kwargs["attempt_id"],
+        )
+
+    monkeypatch.setattr(telethon_fallback, "_run_fallback_async", _fake_single)
+
+    results = try_generate_via_syntax_batch(
+        requests=[
+            BatchFallbackRequest(key="ru", prompt="one", start_image=_syntax_test_frame_bytes()),
+            BatchFallbackRequest(key="en", prompt="two", start_image=_syntax_test_frame_bytes()),
+        ],
+        model="kling_3_0",
+        duration_sec=3,
+        timeout_sec=5,
+        acquire_timeout_sec=5,
+        syntax_provider="kling",
+    )
+
+    assert calls == [("one", 3, "kling"), ("two", 3, "kling")]
+    assert results["ru"].video_bytes == b"mp4-one"
+    assert results["en"].video_bytes == b"mp4-two"
 
 
 def test_try_generate_via_syntax_stops_when_veo_is_updating(monkeypatch):
@@ -303,6 +430,9 @@ def test_try_generate_via_syntax_stops_when_veo_is_updating(monkeypatch):
             return _SentMessage(101)
 
         async def send_message(self, _target, _text, reply_to=None):
+            if _text in {"/video", "⭕ Veo"}:
+                assert reply_to is None
+                return _SentMessage(90)
             assert reply_to == 101
             return _SentMessage(102)
 
@@ -314,13 +444,13 @@ def test_try_generate_via_syntax_stops_when_veo_is_updating(monkeypatch):
             del limit
             yield _IncomingMessage()
 
-    async def _sleep_must_not_happen(_sec: float) -> None:
-        raise AssertionError("Veo update message should stop polling immediately")
+    async def _noop_sleep(_sec: float) -> None:
+        return None
 
     monkeypatch.setattr(telethon_fallback, "TelegramClient", _FakeClient)
     monkeypatch.setattr(telethon_fallback, "StringSession", lambda value: value)
     monkeypatch.setattr(telethon_fallback, "uuid4", lambda: type("_UUID", (), {"hex": "veo-update"})())
-    monkeypatch.setattr(telethon_fallback.asyncio, "sleep", _sleep_must_not_happen)
+    monkeypatch.setattr(telethon_fallback.asyncio, "sleep", _noop_sleep)
     monkeypatch.setenv("TELEGRAM_API_ID", "123")
     monkeypatch.setenv("TELEGRAM_API_HASH", "hash")
     monkeypatch.setenv("TELETHON_STRING_SESSION", "session")
@@ -390,6 +520,9 @@ def test_try_generate_via_syntax_caps_long_prompt_to_2000(monkeypatch):
             return _Entity()
 
         async def send_message(self, _target, text, reply_to=None):
+            if text in {"/video", "⭕ Veo"}:
+                assert reply_to is None
+                return _SentMessage(90)
             assert text == "short Gemini prompt"
             assert len(text) <= 2000
             assert reply_to is not None
@@ -601,6 +734,9 @@ def test_try_generate_via_syntax_parallel_uses_distinct_sessions(monkeypatch):
             return _Entity()
 
         async def send_message(self, _target, _text, reply_to=None):
+            if _text in {"/video", "⭕ Veo"}:
+                assert reply_to is None
+                return _SentMessage(90)
             assert reply_to is not None
             return _SentMessage(103)
 
@@ -702,6 +838,9 @@ def test_try_generate_via_syntax_batch_sends_all_requests_before_waiting(monkeyp
 
         async def send_message(self, _target, text, reply_to=None):
             events.append(f"send_message:{text}")
+            if text in {"/video", "⭕ Veo"}:
+                assert reply_to is None
+                return _SentMessage(90 + len(events))
             return _SentMessage(102 if "lang:ru" in text else 104)
 
         async def get_messages(self, _target, limit=None, ids=None):
@@ -737,7 +876,9 @@ def test_try_generate_via_syntax_batch_sends_all_requests_before_waiting(monkeyp
 
     assert results["ru"].success is True
     assert results["en"].success is True
-    assert events[:4] == [
+    assert events[:6] == [
+        "send_message:/video",
+        "send_message:⭕ Veo",
         "send_file:start_frame.png",
         "send_message:lang:ru prompt",
         "send_file:start_frame.png",
@@ -902,8 +1043,11 @@ def test_batch_routes_edited_hard_reject_to_the_right_language(monkeypatch):
             return _SentMessage(101 if self._sent_count == 1 else 103)
 
         async def send_message(self, _target, text, reply_to=None):
-            del reply_to
+            if text in {"/video", "⭕ Veo"}:
+                assert reply_to is None
+                return _SentMessage(90)
             self._sent_count += 1
+            del reply_to
             return _SentMessage(102 if "lang:ru" in text else 104)
 
         async def get_messages(self, _target, limit=None, ids=None):
@@ -1005,8 +1149,11 @@ def test_try_generate_via_syntax_batch_times_out_each_pending_request(monkeypatc
             return _SentMessage(101 if self._sent_count == 1 else 103)
 
         async def send_message(self, _target, text, reply_to=None):
-            del reply_to
+            if text in {"/video", "⭕ Veo"}:
+                assert reply_to is None
+                return _SentMessage(90)
             self._sent_count += 1
+            del reply_to
             return _SentMessage(102 if "lang:ru" in text else 104)
 
         async def get_messages(self, _target, limit=None, ids=None):

@@ -94,6 +94,43 @@ def test_build_post_production_uses_selected_scene_videos_and_speed(monkeypatch)
     assert "SECOND LINE" in en_payload
 
 
+def test_build_post_production_ignores_speed_for_speechless_kling(monkeypatch):
+    scenes = [
+        {"duration_sec": 4, "text": "", "model": "kling_3_0", "generation_mode": "silence"},
+    ]
+    ru = register_video_candidate(scenes[0], language="ru", video_bytes=b"kling-video")
+    ru["approved_for_production"] = True
+    ru["speed_coef"] = 2.0
+    seen_speeds: list[float] = []
+
+    monkeypatch.setattr(post_production, "_resolve_ffmpeg", lambda: "/usr/bin/ffmpeg")
+    monkeypatch.setattr(post_production, "_video_dimensions", lambda _path: (1080, 1920))
+    monkeypatch.setattr(post_production, "_has_audio_stream", lambda _path: True)
+    monkeypatch.setattr(post_production, "_resolve_music_path", lambda _slug: ("", 0.0))
+
+    def fake_normalize_segment(*, ffmpeg, src_path, dest_path, speed_coef):
+        _ = (ffmpeg, src_path)
+        seen_speeds.append(speed_coef)
+        dest_path.write_bytes(b"normalized")
+
+    def fake_concat_segments(*, ffmpeg, list_path, dest_path):
+        _ = (ffmpeg, list_path)
+        dest_path.write_bytes(b"clean")
+
+    monkeypatch.setattr(post_production, "_normalize_segment", fake_normalize_segment)
+    monkeypatch.setattr(post_production, "_concat_segments", fake_concat_segments)
+    monkeypatch.setattr(post_production, "_upscale_master_to_4k", _fake_upscale_master_to_4k)
+
+    out = post_production.build_post_production(
+        scenes,
+        project_slug="grandma_kitchen",
+        target_variants={"clean"},
+    )
+
+    assert seen_speeds == [1.0]
+    assert out["renders_by_language"]["ru"]["clean"]["width"] == 1080
+
+
 def test_production_languages_require_approved_scene_video_candidates():
     scenes = [
         {"duration_sec": 8, "text": "Первая сцена"},
@@ -835,6 +872,40 @@ def test_build_post_production_uses_candidate_speech_snapshot_for_subtitles(monk
     out = post_production.build_post_production(scenes, target_languages=["ru"])
 
     assert out["subtitle_entries_by_language"]["ru"][0]["text"] == "Старый текст кандидата"
+
+
+def test_build_post_production_can_prefer_scene_speech_over_candidate_snapshot(monkeypatch):
+    scenes = [
+        {
+            "scene": 1,
+            "duration_sec": 6,
+            "text": "Новый текст сцены",
+            "speech_by_lang": {"ru": "Новый текст сцены"},
+        }
+    ]
+    ru = register_video_candidate(scenes[0], language="ru", video_bytes=b"ru")
+    ru["approved_for_production"] = True
+    ru["speech_by_lang"] = {"ru": "Старый текст кандидата"}
+    ru["speech_cues_by_lang"] = {
+        "ru": [{"text": "Старый cue кандидата", "start_sec": 0.0, "end_sec": 6.0}]
+    }
+
+    monkeypatch.setattr(post_production, "_resolve_ffmpeg", lambda: "/usr/bin/ffmpeg")
+    monkeypatch.setattr(post_production, "_video_dimensions", lambda _path: (1080, 1920))
+    monkeypatch.setattr(post_production, "_has_audio_stream", lambda _path: True)
+    monkeypatch.setattr(post_production, "_resolve_music_path", lambda _slug: (None, 0.18))
+    monkeypatch.setattr(post_production, "_normalize_segment", lambda **kwargs: kwargs["dest_path"].write_bytes(kwargs["src_path"].read_bytes()))
+    monkeypatch.setattr(post_production, "_concat_segments", lambda **kwargs: kwargs["dest_path"].write_bytes(b"merged"))
+    monkeypatch.setattr(post_production, "_upscale_master_to_4k", _fake_upscale_master_to_4k)
+    monkeypatch.setattr(post_production, "_render_subtitled_music_master", lambda **kwargs: kwargs["dest_path"].write_bytes(kwargs["subtitles_path"].read_bytes()))
+
+    out = post_production.build_post_production(
+        scenes,
+        target_languages=["ru"],
+        use_candidate_subtitle_snapshot=False,
+    )
+
+    assert out["subtitle_entries_by_language"]["ru"][0]["text"] == "Новый текст сцены"
 
 
 def test_build_post_production_splits_fallback_subtitles_on_pause_markers(monkeypatch):

@@ -15,6 +15,20 @@ def test_maybe_choose_romantic_subplot_disabled():
     assert "series" in out["series_rule"].lower()
 
 
+def test_maybe_choose_romantic_subplot_uses_forty_percent_thresholds():
+    zaya_disabled = maybe_choose_romantic_subplot(random_fn=lambda: 0.40)
+    assert zaya_disabled["enabled"] is False
+
+    draws = iter([0.39, 0.40])
+    zaya_only = maybe_choose_romantic_subplot(random_fn=lambda: next(draws))
+    assert zaya_only["enabled"] is True
+    assert zaya_only["characters"] == ["zaya"]
+
+    draws = iter([0.39, 0.39])
+    with_markiz = maybe_choose_romantic_subplot(random_fn=lambda: next(draws))
+    assert with_markiz["characters"] == ["zaya", "markiz"]
+
+
 def test_neighbor_cat_roles_are_encoded():
     assert "соседская" in CHARACTER_CATALOG["zaya"]["role"]
     assert "соседский" in CHARACTER_CATALOG["markiz"]["role"]

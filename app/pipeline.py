@@ -40,6 +40,7 @@ from .formatting import (
     format_romantic_drama_status,
 )
 from .llm_utils import extract_json_array, extract_json_object, gemini_generate_sync
+from .generation_modes import GENERATION_MODE_NORMAL, GENERATION_MODE_SILENCE, normalize_generation_mode
 from .multilingual import language_name, target_languages_from_env
 from . import pipeline_llm_steps as llm_steps
 from .scene_speech_budget import (
@@ -563,6 +564,62 @@ def _voice_lock_for_speaker_language(speaker: str, language: str) -> str:
     return lock
 
 
+def _scene_voice_speakers(scene: dict[str, Any]) -> set[str]:
+    speakers: set[str] = set()
+    dialogue = scene.get("dialogue") if isinstance(scene, dict) else None
+    dialogue_by_lang = scene.get("dialogue_by_lang") if isinstance(scene, dict) else None
+    speech_plan_by_lang = scene.get("speech_plan_by_lang") if isinstance(scene, dict) else None
+    sources: list[Any] = []
+    if isinstance(dialogue, list):
+        sources.append(dialogue)
+    if isinstance(dialogue_by_lang, dict):
+        sources.extend(value for value in dialogue_by_lang.values() if isinstance(value, list))
+    if isinstance(speech_plan_by_lang, dict):
+        sources.extend(value for value in speech_plan_by_lang.values() if isinstance(value, list))
+    for items in sources:
+        for item in items:
+            if not isinstance(item, dict):
+                continue
+            speaker = _normalize_dialogue_speaker(item.get("speaker"))
+            if speaker:
+                speakers.add(speaker)
+    return speakers
+
+
+def _scene_requires_grandma_named_voice_lock(scene: dict[str, Any]) -> bool:
+    if not isinstance(scene, dict):
+        return True
+    speakers = _scene_voice_speakers(scene)
+    if speakers:
+        return "grandma" in speakers
+    characters = scene.get("characters")
+    if isinstance(characters, list):
+        normalized = {
+            _normalize_dialogue_speaker(value)
+            for value in characters
+            if str(value or "").strip()
+        }
+        if "grandma" in normalized:
+            return True
+        if normalized:
+            return False
+    for key in ("text", "action", "recipe_step", "start_frame_prompt", "video_prompt"):
+        low = str(scene.get(key) or "").lower()
+        if "grandma" in low or "babushka" in low or "бабуш" in low:
+            return True
+    return True
+
+
+def _ensure_named_grandma_voice_lock(video_prompt: str, scene: dict[str, Any], language: str) -> str:
+    vp = str(video_prompt or "").strip()
+    if not _should_apply_voice_lock(scene) or not _scene_requires_grandma_named_voice_lock(scene):
+        return vp
+    if re.search(r"\bvoice_lock_full_grandma\s*:", vp, flags=re.IGNORECASE):
+        return vp
+    lock = _voice_lock_for_speaker_language("grandma", language)
+    return f"{vp}\nvoice_lock_full_grandma: {lock}".strip()
+
+
 def _strip_dialogue_video_prompt_metadata(prompt: str) -> str:
     out = str(prompt or "").strip()
     patterns = (
@@ -579,9 +636,12 @@ def _append_dialogue_video_prompt_metadata(
     prompt: str,
     dialogue: list[dict[str, str]] | None,
     language: str,
+    *,
+    scene: dict[str, Any] | None = None,
 ) -> str:
     if not isinstance(dialogue, list) or len(dialogue) < 2:
-        return _strip_dialogue_video_prompt_metadata(prompt)
+        base = _strip_dialogue_video_prompt_metadata(prompt)
+        return _ensure_named_grandma_voice_lock(base, scene or {}, language) if scene is not None else base
     order: list[str] = []
     script: list[str] = []
     locks: list[str] = []
@@ -600,7 +660,8 @@ def _append_dialogue_video_prompt_metadata(
             locks.append(f"voice_lock_full_{speaker}: {_voice_lock_for_speaker_language(speaker, language)}")
             seen_locks.add(speaker)
     if len(script) < 2:
-        return _strip_dialogue_video_prompt_metadata(prompt)
+        base = _strip_dialogue_video_prompt_metadata(prompt)
+        return _ensure_named_grandma_voice_lock(base, scene or {}, language) if scene is not None else base
     base = _strip_dialogue_video_prompt_metadata(prompt)
     metadata = [
         f"speaker_dialogue_order: {', '.join(order)}",
@@ -608,7 +669,8 @@ def _append_dialogue_video_prompt_metadata(
         *script,
         *locks,
     ]
-    return (base + "\n" + "\n".join(metadata)).strip()
+    out = (base + "\n" + "\n".join(metadata)).strip()
+    return _ensure_named_grandma_voice_lock(out, scene or {}, language) if scene is not None else out
 
 
 def _append_prompt_rule(video_prompt: str, rule: str) -> str:
@@ -640,7 +702,7 @@ def _ensure_scene_video_prompt_invariants(video_prompt: str, scene: dict[str, An
         low = vp.lower()
     if _NO_SUBTITLES_MUSIC_RULE.lower() not in low:
         vp = _append_prompt_rule(vp, _NO_SUBTITLES_MUSIC_RULE)
-    return vp
+    return _ensure_named_grandma_voice_lock(vp, scene, lang)
 
 
 def _finalize_scene_video_prompt(video_prompt_en: str, scene: dict[str, Any], *, target_language: str = "ru") -> str:
@@ -651,6 +713,7 @@ def _finalize_scene_video_prompt(video_prompt_en: str, scene: dict[str, Any], *,
     с конкретной репликой целевого языка.
     """
     vp = _append_romantic_drama_to_video_prompt(str(video_prompt_en).strip(), scene)
+    vp = append_prompt_timing_hints(vp, None, duration_sec=0.0)
     vp = _ensure_scene_video_prompt_invariants(vp, scene, target_language=target_language)
     return _sanitize_video_prompt_language_references(append_veo3_video_framing_constraints(vp, scene), target_language)
 
@@ -680,6 +743,7 @@ def _replace_characters_speaks(video_prompt: str, speech_text: str) -> str:
 _DIALOGUE_SPEAKER_ALIASES = {
     "grandma": "grandma",
     "бабушка": "grandma",
+    "babushka": "grandma",
     "grandfather": "grandfather",
     "grandpa": "grandfather",
     "дедушка": "grandfather",
@@ -1656,6 +1720,95 @@ def _humanize_scene_errors(errors: list[str]) -> list[str]:
     return uniq
 
 
+def _apply_silence_scene_constraints(scenes: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Force Kling/silence mode scene metadata after generic scene normalization."""
+    out: list[dict[str, Any]] = []
+    for idx, scene in enumerate(scenes, start=1):
+        item = dict(scene)
+        try:
+            duration = int(item.get("duration_sec") or 4)
+        except Exception:
+            duration = 4
+        item["duration_sec"] = max(3, min(4, duration))
+        item["model"] = "kling_3_0"
+        item["voice_provider"] = "none"
+        item["voice_needed"] = False
+        item["has_lipsync"] = False
+        item["dialogue_mode"] = "none"
+        item["generation_mode"] = GENERATION_MODE_SILENCE
+        item["scene"] = idx
+        item["goal"] = item.get("goal") or ("результат" if idx == len(scenes) else "шаг")
+        item["text"] = ""
+        item["speech_by_lang"] = {"ru": ""}
+        item["dialogue_by_lang"] = {}
+        item["speech_plan_by_lang"] = {"ru": []}
+        item["speech_cues_by_lang"] = {"ru": []}
+        item["characters"] = ["grandma", "cat"]
+        refs: dict[str, str] = {}
+        for key in ("grandma", "cat"):
+            data = (ASSETS.get("characters") or {}).get(key)
+            if isinstance(data, dict) and isinstance(data.get("base"), str):
+                refs[key] = data["base"]
+        item["references"] = refs
+        action = str(item.get("action") or item.get("recipe_step") or "").strip()
+        silence_suffix = (
+            " Ностальгическая деревенская кухня у бабушки, экстремально крупный план еды, "
+            "только один рыжий cartoon cat рядом с блюдом; иногда этот рыжий кот играет с игрушкой или лучом света; "
+            "в кадре нет других котов, животных или людей кроме бабушки; действие динамичное и понятное без речи."
+        )
+        if "ностальг" not in action.lower() or "круп" not in action.lower():
+            item["action"] = (action + silence_suffix).strip()
+        item["recipe_step"] = item.get("recipe_step") or item["action"]
+        out.append(item)
+    return out
+
+
+def _build_silence_scenes_plan_prompt(
+    *,
+    concept: str,
+    full_recipe_text: str,
+    user_feedback: str,
+    generation_comment: str,
+) -> str:
+    payload = {
+        "concept": concept,
+        "full_recipe_text": full_recipe_text,
+        "user_feedback": user_feedback,
+        "generation_comment": generation_comment,
+        "contract": {
+            "scene_count": "5-8 scenes exactly",
+            "duration_sec": "integer 3-4 for every scene",
+            "model": "kling_3_0",
+            "characters": ["grandma", "cat"],
+            "forbidden": [
+                "dialogue",
+                "voiceover",
+                "voice lock",
+                "subtitles",
+                "on-screen text",
+                "any character except grandmother",
+                "any cat except one orange cat",
+                "white cat",
+                "black-and-white cat",
+                "extra animals",
+            ],
+        },
+    }
+    return (
+        "Return ONLY a JSON array of 5-8 objects. No markdown.\n"
+        "Build a silent Kling image-to-video scene plan for a cozy grandma recipe.\n"
+        "This is NOT a viral dialogue plan. Do not write speech, voiceover, lip sync, captions, hooks, or voice locks.\n"
+        "Each scene is a juicy visual cooking beat lasting 3-4 seconds. Several compatible actions may happen in one scene.\n"
+        "Each object must contain: scene, duration_sec, shot_type, characters, action, recipe_step, visual_description, sound_design.\n"
+        "characters must be exactly ['grandma','cat']; the cat is exactly one orange cat. No other cats, no other animals, no other people.\n"
+        "Use nostalgic rustic grandma kitchen atmosphere, Pixar-like non-realistic cartoon style, extreme close-up food-first framing.\n"
+        "Grandma's hands may dominate the frame; the orange cat face should often be very close to the food.\n"
+        "Include dynamic visible actions and rich natural cooking sounds in sound_design: pouring sauce, bubbling, sizzling, spoon on ceramic, cloth movement, cat purrs or tiny paw taps when visible.\n"
+        "Never include background music.\n\n"
+        + json.dumps(payload, ensure_ascii=False, indent=2)
+    )
+
+
 async def generate_scenes_plan(
     concept: str,
     *,
@@ -1669,6 +1822,7 @@ async def generate_scenes_plan(
     analytics_feedback: dict[str, Any] | None = None,
     romantic_drama_subplot: dict[str, Any] | None = None,
     generation_comment: str | None = None,
+    generation_mode: str = GENERATION_MODE_NORMAL,
 ) -> dict[str, Any]:
     """
     Один запрос к Gemini: сценарий из 3–6 сцен по **полному тексту рецепта**, с репликами Veo3 в ``text``.
@@ -1682,8 +1836,19 @@ async def generate_scenes_plan(
     concept = concept.strip()
     fb = (user_feedback or "").strip()
     comment = (generation_comment or "").strip()
+    mode = normalize_generation_mode(generation_mode)
+    if mode == GENERATION_MODE_SILENCE:
+        comment = (
+            (comment + "\n\n") if comment else ""
+        ) + (
+            "SILENCE MODE: no dialogue, no voiceover, no subtitles. Split the recipe into 5-8 dynamic 3-4 second Kling shots. "
+            "Several compatible cooking actions may happen in one shot. Every shot must work as a silent visual beat: "
+            "nostalgic rustic grandma kitchen, extreme close-up food-first framing, orange cartoon cat near the dish; "
+            "sometimes the cat plays with a toy or a beam of sunlight. Keep the grandma atmosphere and very close food/cat shots. "
+            "No other cats, animals, or people except grandmother and exactly one orange cat."
+        )
     has_previous_scenes = bool(previous_scenes)
-    cached = None if has_previous_scenes or comment else get_scenes_plan(concept, body, fb or None)
+    cached = None if has_previous_scenes or comment or mode != GENERATION_MODE_NORMAL else get_scenes_plan(concept, body, fb or None)
     if cached is not None:
         if isinstance(cached, dict):
             cached_plan = cached.get("json_plan")
@@ -1693,6 +1858,8 @@ async def generate_scenes_plan(
                     concept,
                     viral_concept_brief=viral_concept_brief,
                 )
+                if mode == GENERATION_MODE_SILENCE:
+                    fixed = _apply_silence_scene_constraints(fixed)
                 fixed, retention_review = enrich_scenes_with_retention(
                     fixed,
                     viral_concept_brief=viral_concept_brief,
@@ -1714,19 +1881,28 @@ async def generate_scenes_plan(
                 }
         return cached
 
-    payload = llm_steps.build_scenes_plan_payload(
-        concept,
-        body,
-        fb,
-        _strip_location_context_for_llm(list(previous_scenes or [])),
-        viral_concept_brief=viral_concept_brief,
-        sponsored_content=sponsored_content,
-        brand_context=brand_context,
-        analytics_feedback=analytics_feedback,
-        romantic_drama_subplot=romantic_drama_subplot,
-        generation_comment=comment,
-    )
-    prompt = llm_steps.build_scenes_plan_prompt(payload)
+    if mode == GENERATION_MODE_SILENCE:
+        payload = {"romantic_drama_subplot": {}}
+        prompt = _build_silence_scenes_plan_prompt(
+            concept=concept,
+            full_recipe_text=body,
+            user_feedback=fb,
+            generation_comment=comment,
+        )
+    else:
+        payload = llm_steps.build_scenes_plan_payload(
+            concept,
+            body,
+            fb,
+            _strip_location_context_for_llm(list(previous_scenes or [])),
+            viral_concept_brief=viral_concept_brief,
+            sponsored_content=sponsored_content,
+            brand_context=brand_context,
+            analytics_feedback=analytics_feedback,
+            romantic_drama_subplot=romantic_drama_subplot,
+            generation_comment=comment,
+        )
+        prompt = llm_steps.build_scenes_plan_prompt(payload)
 
     async def _emit_failure(payload_cb: dict[str, Any]) -> None:
         if on_attempt_failure is None:
@@ -1754,15 +1930,19 @@ async def generate_scenes_plan(
         )
         raise
 
-    arr = normalize_scenes_for_pipeline(
-        _coerce_llm_scene_items_to_objects(extract_json_array(raw_once), concept=concept)
-    )
-    arr = _ensure_scene_block_len(arr)
+    coerced = _coerce_llm_scene_items_to_objects(extract_json_array(raw_once), concept=concept)
+    if mode == GENERATION_MODE_SILENCE:
+        arr = _ensure_scene_block_len(coerced, min_n=5, max_n=8)
+    else:
+        arr = normalize_scenes_for_pipeline(coerced)
+        arr = _ensure_scene_block_len(arr)
     raw_scenes = _postprocess_scenes_output(
         arr,
         concept,
         viral_concept_brief=viral_concept_brief,
     )
+    if mode == GENERATION_MODE_SILENCE:
+        raw_scenes = _apply_silence_scene_constraints(raw_scenes)
     raw_scenes, retention_review = enrich_scenes_with_retention(
         raw_scenes,
         viral_concept_brief=viral_concept_brief,
@@ -1780,7 +1960,7 @@ async def generate_scenes_plan(
         "retention_review": retention_review,
         "regeneration_events": [],
     }
-    if not has_previous_scenes and not comment:
+    if not has_previous_scenes and not comment and mode == GENERATION_MODE_NORMAL:
         set_scenes_plan(concept, body, fb or None, out_raw)
     return out_raw
 
@@ -2005,6 +2185,149 @@ def _fallback_production_prompts(
     return out
 
 
+def _ensure_silence_video_prompt_requirements(video_prompt: str, scene: dict[str, Any]) -> str:
+    base = re.sub(r"\s+", " ", str(video_prompt or "").strip())
+    base = re.sub(r"\bCHARACTERS?\s+SPEAKS?\s*:[^.]+\.?", "", base, flags=re.IGNORECASE).strip()
+    base = re.sub(r"\bvoice_lock(?:_full)?(?:_[a-z]+)?\s*:[^.]+\.?", "", base, flags=re.IGNORECASE).strip()
+    base = re.sub(r"\b(?:accurate\s+)?lip[-\s]?sync\b", "", base, flags=re.IGNORECASE).strip()
+    try:
+        duration = int(scene.get("duration_sec") or 4)
+    except Exception:
+        duration = 4
+    duration = max(3, min(4, duration))
+    scene["duration_sec"] = duration
+    required = (
+        f"{duration}-second Kling 3.0 image-to-video shot. No dialogue, no voiceover, no subtitles, no on-screen text. "
+        "Pixar-like non-realistic cartoon style. Extreme close-up, food-first framing; the dish and the orange cartoon cat face are very large in frame. "
+        "Nostalgic rustic grandma kitchen atmosphere; grandma's hands perform the cooking action close to camera. "
+        "Only grandmother and exactly one orange cartoon cat are present; no other cats, animals, or people. "
+        "Audio enabled; natural cooking sounds only: sauce pouring, bubbling cream sauce, sizzling food, spoon against ceramic, soft cloth movement, "
+        "cat purrs or tiny paw taps when visible. No background music."
+    )
+    if not base:
+        return required
+    low = base.lower()
+    additions = []
+    if "no dialogue" not in low and "без речи" not in low:
+        additions.append("No dialogue, no voiceover.")
+    if "audio enabled" not in low and "cooking sounds" not in low and "зву" not in low:
+        additions.append(
+            "Audio enabled; natural cooking sounds only: sauce pouring, bubbling cream sauce, sizzling food, spoon against ceramic, cat purrs or paw taps."
+        )
+    if "extreme close" not in low and "экстрем" not in low:
+        additions.append("Extreme close-up, food-first framing; orange cartoon cat face close to the dish.")
+    if "nostalgic" not in low and "ностальг" not in low:
+        additions.append("Nostalgic rustic grandma kitchen atmosphere.")
+    if "pixar" not in low.lower():
+        additions.append("Pixar-like non-realistic cartoon style.")
+    return " ".join([base, required, *additions]).strip()
+
+
+async def _generate_silence_full_production(
+    scenes: list[dict[str, Any]],
+    *,
+    approved_frame_prompts: list[dict[str, Any]] | None,
+    user_feedback: str | None,
+    previous_enriched_scenes: list[dict[str, Any]] | None,
+    generation_comment: str,
+    dish_visual_brief: str,
+) -> dict[str, Any]:
+    payload = {
+        "scenes_in_order": _strip_location_context_for_llm(scenes),
+        "approved_frame_prompts": approved_frame_prompts or [],
+        "previous_video_prompts": [
+            str(scene.get("video_prompt") or "")
+            for scene in (previous_enriched_scenes or [])
+            if isinstance(scene, dict)
+        ],
+        "feedback": (user_feedback or "").strip(),
+        "generation_comment": generation_comment,
+        "dish_visual_brief": dish_visual_brief,
+        "contract": {
+            "mode": "silence",
+            "model": "Kling 3.0 image-to-video",
+            "quality": "720",
+            "aspect_ratio": "9:16",
+            "scene_count": "5-8 scenes from scene plan",
+            "duration_sec": "3-4 seconds per scene",
+            "characters": "only grandmother and exactly one orange cat",
+            "forbidden": [
+                "speech",
+                "voiceover",
+                "voice_lock",
+                "lip sync",
+                "subtitles",
+                "on-screen text",
+                "background music",
+                "white cat",
+                "black-and-white cat",
+                "extra cats",
+                "extra animals",
+                "extra people",
+            ],
+        },
+    }
+    prompt = (
+        "Return ONLY JSON object with key \"prompts\" — array of objects, one per scene in order.\n"
+        "Each object must contain: start_frame_prompt_ru, end_frame_prompt_ru, video_prompt_en.\n"
+        "This is a SILENT Kling 3.0 production prompt set, not a viral spoken-video prompt set.\n"
+        "Never include CHARACTERS SPEAKS, voice_lock, voice_lock_full, lip sync, dialogue, voiceover, subtitles, or text overlays.\n"
+        "Only characters allowed in any prompt: grandmother and exactly one orange cartoon cat. "
+        "No white cat, no black-and-white cat, no extra cats, no other animals, no other people.\n"
+        "START FRAME: Russian, static pre-action frame, nostalgic rustic grandma kitchen, Pixar-like non-realistic cartoon style, "
+        "extreme close-up food-first composition, dish very large, orange cat face often very close to the dish, grandma hands close to camera.\n"
+        "VIDEO PROMPT: English, 3-4 second dynamic action description for Kling image-to-video. "
+        "Describe juicy visible cooking actions and natural sound design: sauce pouring, bubbling cream, sizzling food, spoon on ceramic, "
+        "cloth movement, cat purrs or tiny paw taps when visible. Use 'Audio enabled; natural cooking sounds only'. "
+        "No background music. Several compatible actions may happen in one shot.\n"
+        "END FRAME: return 'пусто' unless the scene explicitly requires a separate ending image; prefer 'пусто'.\n"
+        "Use dish_visual_brief to keep the food accurate and appetizing.\n\n"
+        + json.dumps(payload, ensure_ascii=False, indent=2)
+    )
+    raw = await asyncio.to_thread(gemini_generate_sync, prompt)
+    try:
+        prompts = _normalize_production_prompts(
+            _extract_production_prompts(raw),
+            scenes_count=len(scenes),
+            require_frames=True,
+        )
+    except Exception:
+        logger.exception("silence production prompts parse failed; using deterministic fallback")
+        prompts = _fallback_production_prompts(scenes, require_frames=True)
+
+    enriched: list[dict[str, Any]] = []
+    for scene_index, (scene, p) in enumerate(zip(scenes, prompts), start=1):
+        scene_out = _apply_silence_scene_constraints([scene])[0]
+        scene_out["scene"] = scene_index
+        start_prompt = str(p.get("start_frame_prompt_ru") or "").strip() or _fallback_start_frame_prompt_from_scene(scene_out)
+        if "рыж" not in start_prompt.lower() and "orange" not in start_prompt.lower():
+            start_prompt += " В кадре ровно один рыжий cartoon cat, других котов и животных нет."
+        if "бабуш" not in start_prompt.lower():
+            start_prompt += " В кадре только бабушка и один рыжий кот."
+        scene_out["start_frame_prompt"] = _ensure_image_prompt_framing_requirements(
+            append_visual_prop_descriptions(sanitize_character_names_and_keys(start_prompt)),
+            model=str(scene_out.get("model", "")),
+            title_safe_top=False,
+        )
+        scene_out["end_frame_prompt"] = "пусто"
+        scene_out["end_frame_requested"] = False
+        prompt_ru = append_prompt_timing_hints(
+            _ensure_silence_video_prompt_requirements(str(p.get("video_prompt_en") or ""), scene_out),
+            None,
+            duration_sec=float(scene_out.get("duration_sec") or 0.0),
+        )
+        scene_out["video_prompt_by_lang"] = {"ru": prompt_ru}
+        scene_out["video_results_by_lang"] = {}
+        scene_out["video_approvals_by_lang"] = {"ru": False}
+        scene_out["video_prompt"] = prompt_ru
+        scene_out["tts"] = {
+            "provider": "none",
+            "note": "silence mode: Kling prompt audio/cooking sounds only",
+        }
+        enriched.append(scene_out)
+    return {"json_plan": enriched}
+
+
 async def generate_frame_prompts_for_approval(
     scenes_plan: list[dict[str, Any]],
     user_feedback: str | None = None,
@@ -2124,6 +2447,8 @@ async def generate_full_production(
     brand_context: str | None = None,
     generation_comment: str | None = None,
     dish_visual_brief: str | None = None,
+    generation_mode: str = GENERATION_MODE_NORMAL,
+    target_languages: list[str] | None = None,
 ) -> dict[str, Any]:
     """
     Сборка промптов для медиа по сценам.
@@ -2144,7 +2469,28 @@ async def generate_full_production(
     viral_brief = viral_concept_brief if isinstance(viral_concept_brief, dict) else {}
     comment = (generation_comment or "").strip()
     dish_brief = str(dish_visual_brief or "").strip()
-    target_languages = target_languages_from_env()
+    mode = normalize_generation_mode(generation_mode)
+    target_languages = ["ru"] if mode == GENERATION_MODE_SILENCE else list(target_languages or target_languages_from_env())
+    silence_prompt_rule = ""
+    if mode == GENERATION_MODE_SILENCE:
+        silence_prompt_rule = (
+            "SILENCE MODE FOR KLING 3.0: no dialogue, no voiceover, no subtitles, no text overlays. "
+            "Every scene is a 3-4 second image-to-video shot. Use extreme close-up food-first framing, "
+            "nostalgic rustic grandma kitchen atmosphere, Pixar-like non-realistic cartoon style, orange cartoon cat close to the dish; "
+            "sometimes the cat plays with a tiny toy or a beam of sunlight. Video prompt must explicitly include: "
+            "Audio enabled; natural cooking sounds only: sauce pouring, bubbling cream sauce, sizzling chicken, spoon against ceramic, "
+            "soft kitchen cloth movement, cat purrs or tiny paw taps when visible. No background music. "
+            "No other cats, animals, or people except grandmother and exactly one orange cat."
+        )
+        comment = (comment + "\n\n" if comment else "") + silence_prompt_rule
+        return await _generate_silence_full_production(
+            scenes,
+            approved_frame_prompts=approved_frame_prompts,
+            user_feedback=user_feedback,
+            previous_enriched_scenes=previous_enriched_scenes,
+            generation_comment=comment,
+            dish_visual_brief=dish_brief,
+        )
     if approved_frame_prompts is not None:
         if len(approved_frame_prompts) != len(scenes):
             raise RuntimeError("Approved frame prompts count mismatch.")
@@ -2328,7 +2674,7 @@ async def generate_full_production(
         enriched: list[dict[str, Any]] = []
         for scene_index, (scene, p) in enumerate(zip(scenes, prompts), start=1):
             scene_out = dict(scene)
-            scene_out["model"] = "veo3_fast"
+            scene_out["model"] = "kling_3_0" if mode == GENERATION_MODE_SILENCE else "veo3_fast"
             scene_out["voice_provider"] = "none"
             if scene_index in requested_end_frames:
                 candidate_end = _normalize_end_frame_prompt_for_stable_generation(p.get("end_frame_prompt_ru"))
@@ -2356,6 +2702,28 @@ async def generate_full_production(
                 str(p.get("video_prompt_en", "")),
                 scene_index=scene_index,
             )
+            if mode == GENERATION_MODE_SILENCE:
+                prompt_ru = append_prompt_timing_hints(
+                    _ensure_silence_video_prompt_requirements(raw_video_prompt, scene_out),
+                    None,
+                    duration_sec=float(scene_out.get("duration_sec") or 0.0),
+                )
+                scene_out["speech_by_lang"] = {"ru": ""}
+                scene_out["dialogue_by_lang"] = {}
+                scene_out["speech_plan_by_lang"] = {"ru": []}
+                scene_out["speech_cues_by_lang"] = {"ru": []}
+                scene_out["speech_budget_by_lang"] = {}
+                scene_out["video_prompt_by_lang"] = {"ru": prompt_ru}
+                scene_out["video_results_by_lang"] = {}
+                scene_out["video_approvals_by_lang"] = {"ru": False}
+                scene_out["video_prompt"] = prompt_ru
+                scene_out["text"] = ""
+                scene_out["tts"] = {
+                    "provider": "none",
+                    "note": "silence mode: Kling prompt audio/cooking sounds only",
+                }
+                enriched.append(scene_out)
+                continue
             scene_out["speech_by_lang"] = speech_by_lang
             scene_out["dialogue_by_lang"] = dialogue_by_lang
             scene_out["speech_plan_by_lang"] = speech_plan_by_lang
@@ -2373,6 +2741,7 @@ async def generate_full_production(
                     ),
                     dialogue_by_lang.get(lang) if isinstance(dialogue_by_lang, dict) else None,
                     lang,
+                    scene=scene_out,
                 )
                 for lang, speech in speech_by_lang.items()
             }
@@ -2545,7 +2914,7 @@ async def generate_full_production(
     enriched: list[dict[str, Any]] = []
     for scene_index, (scene, p) in enumerate(zip(scenes, prompts), start=1):
         scene_out = dict(scene)
-        scene_out["model"] = "veo3_fast"
+        scene_out["model"] = "kling_3_0" if mode == GENERATION_MODE_SILENCE else "veo3_fast"
         scene_out["voice_provider"] = "none"
         end_frame_prompt = (
             _normalize_end_frame_prompt_for_stable_generation(p.get("end_frame_prompt_ru"))
@@ -2580,6 +2949,28 @@ async def generate_full_production(
             str(p.get("video_prompt_en", "")),
             scene_index=scene_index,
         )
+        if mode == GENERATION_MODE_SILENCE:
+            prompt_ru = append_prompt_timing_hints(
+                _ensure_silence_video_prompt_requirements(raw_video_prompt, scene_out),
+                None,
+                duration_sec=float(scene_out.get("duration_sec") or 0.0),
+            )
+            scene_out["speech_by_lang"] = {"ru": ""}
+            scene_out["dialogue_by_lang"] = {}
+            scene_out["speech_plan_by_lang"] = {"ru": []}
+            scene_out["speech_cues_by_lang"] = {"ru": []}
+            scene_out["speech_budget_by_lang"] = {}
+            scene_out["video_prompt_by_lang"] = {"ru": prompt_ru}
+            scene_out["video_results_by_lang"] = {}
+            scene_out["video_approvals_by_lang"] = {"ru": False}
+            scene_out["video_prompt"] = prompt_ru
+            scene_out["text"] = ""
+            scene_out["tts"] = {
+                "provider": "none",
+                "note": "silence mode: Kling prompt audio/cooking sounds only",
+            }
+            enriched.append(scene_out)
+            continue
         scene_out["speech_by_lang"] = speech_by_lang
         scene_out["dialogue_by_lang"] = dialogue_by_lang
         scene_out["speech_plan_by_lang"] = speech_plan_by_lang
@@ -2597,6 +2988,7 @@ async def generate_full_production(
                 ),
                 dialogue_by_lang.get(lang) if isinstance(dialogue_by_lang, dict) else None,
                 lang,
+                scene=scene_out,
             )
             for lang, speech in speech_by_lang.items()
         }

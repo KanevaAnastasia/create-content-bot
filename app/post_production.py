@@ -1881,8 +1881,10 @@ def _scene_with_candidate_subtitle_snapshot(
     scene: dict[str, Any],
     selected: dict[str, Any] | None,
     language: str,
+    *,
+    use_candidate_subtitle_snapshot: bool = True,
 ) -> dict[str, Any]:
-    if not isinstance(selected, dict):
+    if not use_candidate_subtitle_snapshot or not isinstance(selected, dict):
         return scene
     lang = str(language or "").strip().lower()
     out = dict(scene)
@@ -1935,6 +1937,19 @@ def _selected_video_source_duration(selected: dict[str, Any] | None) -> float | 
         path = Path(tmp) / "scene_video.mp4"
         path.write_bytes(video_bytes)
         return _media_duration(path)
+
+
+def _is_speechless_final_scene(scene: dict[str, Any]) -> bool:
+    mode = str(scene.get("generation_mode") or scene.get("mode") or "").strip().lower()
+    model = str(scene.get("model") or "").strip().lower()
+    return mode == "silence" or model.startswith("kling")
+
+
+def _final_scene_speed_coef(scene: dict[str, Any], selected: dict[str, Any] | None) -> float:
+    if _is_speechless_final_scene(scene):
+        return 1.0
+    value = parse_speed_coef(selected.get("speed_coef")) if isinstance(selected, dict) else None
+    return value or DEFAULT_SCENE_VIDEO_SPEED_COEF
 
 
 def _run_ffmpeg(cmd: list[str], *, timeout: int = FFMPEG_SHORT_TIMEOUT_SEC, stage: str = "unknown") -> None:
@@ -2254,6 +2269,7 @@ def build_post_production(
     target_languages: list[str] | tuple[str, ...] | set[str] | None = None,
     target_variants: list[str] | tuple[str, ...] | set[str] | None = None,
     progress_callback: Any | None = None,
+    use_candidate_subtitle_snapshot: bool = True,
 ) -> dict[str, Any]:
     ffmpeg = _resolve_ffmpeg()
     if not ffmpeg:
@@ -2311,7 +2327,7 @@ def build_post_production(
                 video_bytes = base64.b64decode(video_b64)
             except Exception:
                 continue
-            speed_coef = parse_speed_coef(selected.get("speed_coef")) or DEFAULT_SCENE_VIDEO_SPEED_COEF
+            speed_coef = _final_scene_speed_coef(scene, selected)
             source_duration = float(scene.get("duration_sec") or 0) or 0.0
             planned_final_duration = source_duration / speed_coef if source_duration > 0 else 0.0
             selected_segments.append(
@@ -2392,7 +2408,12 @@ def build_post_production(
                     planned_duration = float(item.get("planned_final_duration") or 0.0)
                     timing_scale = (actual_duration / planned_duration) if planned_duration > 0 else 1.0
                     scene_entries = _scene_subtitle_entries(
-                        _scene_with_candidate_subtitle_snapshot(item["scene"], item.get("selected"), language),
+                        _scene_with_candidate_subtitle_snapshot(
+                            item["scene"],
+                            item.get("selected"),
+                            language,
+                            use_candidate_subtitle_snapshot=use_candidate_subtitle_snapshot,
+                        ),
                         language,
                         start_offset=current_start,
                         fallback_duration=actual_duration,
@@ -2699,16 +2720,17 @@ def build_upscaled_post_production_from_clean_master(
     }
 
 
-def _subtitle_entries_for_language_from_plan(scenes: list[dict[str, Any]], language: str) -> list[dict[str, Any]]:
+def _subtitle_entries_for_language_from_plan(
+    scenes: list[dict[str, Any]],
+    language: str,
+    *,
+    use_candidate_subtitle_snapshot: bool = True,
+) -> list[dict[str, Any]]:
     current_start = 0.0
     subtitle_entries: list[dict[str, Any]] = []
     for scene_index, scene in enumerate(scenes):
         selected = resolve_latest_approved_scene_video_for_final_build(scene, language)
-        speed_coef = (
-            parse_speed_coef(selected.get("speed_coef"))
-            if isinstance(selected, dict)
-            else None
-        ) or DEFAULT_SCENE_VIDEO_SPEED_COEF
+        speed_coef = _final_scene_speed_coef(scene, selected)
         source_duration = _selected_video_source_duration(selected)
         if source_duration is None:
             try:
@@ -2717,7 +2739,12 @@ def _subtitle_entries_for_language_from_plan(scenes: list[dict[str, Any]], langu
                 source_duration = 0.0
         planned_duration = source_duration / float(speed_coef or DEFAULT_SCENE_VIDEO_SPEED_COEF) if source_duration > 0 else 0.0
         scene_entries = _scene_subtitle_entries(
-            _scene_with_candidate_subtitle_snapshot(scene, selected, language),
+            _scene_with_candidate_subtitle_snapshot(
+                scene,
+                selected,
+                language,
+                use_candidate_subtitle_snapshot=use_candidate_subtitle_snapshot,
+            ),
             language,
             start_offset=current_start,
             fallback_duration=planned_duration,
@@ -2752,8 +2779,19 @@ def subtitle_entries_fingerprint(entries: list[dict[str, Any]]) -> str:
     return hashlib.sha256(raw.encode("utf-8")).hexdigest()
 
 
-def subtitle_fingerprint_for_language(scenes: list[dict[str, Any]], language: str) -> str:
-    return subtitle_entries_fingerprint(_subtitle_entries_for_language_from_plan(scenes, language))
+def subtitle_fingerprint_for_language(
+    scenes: list[dict[str, Any]],
+    language: str,
+    *,
+    use_candidate_subtitle_snapshot: bool = True,
+) -> str:
+    return subtitle_entries_fingerprint(
+        _subtitle_entries_for_language_from_plan(
+            scenes,
+            language,
+            use_candidate_subtitle_snapshot=use_candidate_subtitle_snapshot,
+        )
+    )
 
 
 def build_subtitled_post_production_from_upscaled_master(
@@ -2763,6 +2801,7 @@ def build_subtitled_post_production_from_upscaled_master(
     language: str,
     project_slug: str | None = None,
     progress_callback: Any | None = None,
+    use_candidate_subtitle_snapshot: bool = True,
 ) -> dict[str, Any]:
     ffmpeg = _resolve_ffmpeg()
     if not ffmpeg:
@@ -2790,7 +2829,11 @@ def build_subtitled_post_production_from_upscaled_master(
 
     source_w, source_h = _video_dimensions(source_path)
     music_path, music_volume = _resolve_music_path(project_slug)
-    subtitle_entries = _subtitle_entries_for_language_from_plan(scenes, lang)
+    subtitle_entries = _subtitle_entries_for_language_from_plan(
+        scenes,
+        lang,
+        use_candidate_subtitle_snapshot=use_candidate_subtitle_snapshot,
+    )
     subtitle_fingerprint = subtitle_entries_fingerprint(subtitle_entries)
     subtitle_cues: list[dict[str, Any]] = []
     for item in subtitle_entries:
@@ -2858,11 +2901,7 @@ def _estimated_title_duration_for_language(scenes: list[dict[str, Any]], languag
         return max(0.0, min(float(fallback_duration or 0.0), 6.0))
     first_scene = scenes[0]
     selected = resolve_latest_approved_scene_video_for_final_build(first_scene, language)
-    speed_coef = (
-        parse_speed_coef(selected.get("speed_coef"))
-        if isinstance(selected, dict)
-        else None
-    ) or DEFAULT_SCENE_VIDEO_SPEED_COEF
+    speed_coef = _final_scene_speed_coef(first_scene, selected)
     try:
         source_duration = float(first_scene.get("duration_sec") or 0.0)
     except (TypeError, ValueError):
@@ -2884,6 +2923,7 @@ def build_titled_post_production_from_subtitled_master(
     overlay_series_title_by_lang: dict[str, Any] | None = None,
     overlay_series_counter_by_lang: dict[str, Any] | None = None,
     progress_callback: Any | None = None,
+    use_candidate_subtitle_snapshot: bool = True,
 ) -> dict[str, Any]:
     ffmpeg = _resolve_ffmpeg()
     if not ffmpeg:
@@ -2895,7 +2935,11 @@ def build_titled_post_production_from_subtitled_master(
     lang = str(language or "ru").strip().lower() or "ru"
     source_w, source_h = _video_dimensions(source_path)
     source_duration = _media_duration(source_path) or 0.0
-    subtitle_fingerprint = subtitle_fingerprint_for_language(scenes, lang)
+    subtitle_fingerprint = subtitle_fingerprint_for_language(
+        scenes,
+        lang,
+        use_candidate_subtitle_snapshot=use_candidate_subtitle_snapshot,
+    )
     title_duration = _estimated_title_duration_for_language(scenes, lang, source_duration)
     title_cue = _build_title_overlay_cue(
         overlay_title_by_lang,

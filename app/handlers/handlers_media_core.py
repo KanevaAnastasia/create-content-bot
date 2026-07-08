@@ -15,6 +15,7 @@ from telegram.ext import ContextTypes
 
 from ..assets import ASSETS
 from ..constants import ELEVENLABS_VOICE_ID_ENV_NAME, STATE_READY_FOR_PRODUCTION
+from ..generation_modes import SYNTAX_PROVIDER_VEO
 from ..llm_utils import (
     GEMINI_QUOTA_EXHAUSTED_USER_MESSAGE,
     GeminiQuotaError,
@@ -673,6 +674,7 @@ class SyntaxFallbackPendingConfirmation(Exception):
         aspect_ratio: str,
         audio_enabled: bool,
         vertex_error_message: str,
+        syntax_provider: str | None = None,
     ) -> None:
         super().__init__(vertex_error_message)
         self.prompt = prompt
@@ -684,6 +686,7 @@ class SyntaxFallbackPendingConfirmation(Exception):
         self.aspect_ratio = aspect_ratio
         self.audio_enabled = audio_enabled
         self.vertex_error_message = vertex_error_message
+        self.syntax_provider = syntax_provider or SYNTAX_PROVIDER_VEO
 
 
 class VideoProviderChoiceRequired(Exception):
@@ -705,6 +708,7 @@ class VideoProviderChoiceRequired(Exception):
         aspect_ratio: str,
         audio_enabled: bool,
         syntax_error_message: str,
+        syntax_provider: str | None = None,
     ) -> None:
         super().__init__(syntax_error_message)
         self.prompt = prompt
@@ -716,6 +720,7 @@ class VideoProviderChoiceRequired(Exception):
         self.aspect_ratio = aspect_ratio
         self.audio_enabled = audio_enabled
         self.syntax_error_message = syntax_error_message
+        self.syntax_provider = syntax_provider or SYNTAX_PROVIDER_VEO
 
 
 class SyntaxFallbackDispatchError(RuntimeError):
@@ -733,6 +738,7 @@ def encode_syntax_fallback_pending_for_session(exc: SyntaxFallbackPendingConfirm
         "quality": exc.quality,
         "aspect_ratio": exc.aspect_ratio,
         "audio_enabled": exc.audio_enabled,
+        "syntax_provider": exc.syntax_provider,
         "start_image_b64": base64.b64encode(exc.start_image).decode("ascii"),
         "end_image_b64": base64.b64encode(end).decode("ascii") if end else "",
         "vertex_error_message": (exc.vertex_error_message or "")[:8000],
@@ -762,6 +768,7 @@ def encode_video_provider_choice_for_session(exc: VideoProviderChoiceRequired) -
         "quality": exc.quality,
         "aspect_ratio": exc.aspect_ratio,
         "audio_enabled": exc.audio_enabled,
+        "syntax_provider": exc.syntax_provider,
         "start_image_b64": base64.b64encode(exc.start_image).decode("ascii"),
         "end_image_b64": base64.b64encode(end).decode("ascii") if end else "",
         "syntax_error_message": (exc.syntax_error_message or "")[:8000],
@@ -814,6 +821,7 @@ async def run_syntax_fallback_from_session_payload(payload: dict[str, Any]) -> b
         start_image=start_im,
         end_image=end_im,
         raise_on_dispatch_failure=True,
+        syntax_provider=str(payload.get("syntax_provider") or SYNTAX_PROVIDER_VEO),
     )
 
 
@@ -854,6 +862,7 @@ async def _attempt_syntax_video_fallback_bytes(
     raise_on_dispatch_failure: bool = False,
     timeout_sec: int | None = None,
     acquire_timeout_sec: int | None = None,
+    syntax_provider: str | None = None,
 ) -> bytes | None:
     """Runs Syntax adapter in a worker thread; returns bytes or None."""
     if not _syntax_fallback_env_enabled():
@@ -871,6 +880,7 @@ async def _attempt_syntax_video_fallback_bytes(
                 end_image=end_image,
                 timeout_sec=timeout_sec,
                 acquire_timeout_sec=lock_timeout_sec,
+                syntax_provider=syntax_provider,
             ),
             timeout=lock_timeout_sec + timeout_sec + SYNTAX_FALLBACK_TIMEOUT_GRACE_SEC,
         )
@@ -964,6 +974,7 @@ async def _attempt_syntax_video_fallback_batch(
     duration_sec: int,
     timeout_sec: int | None = None,
     acquire_timeout_sec: int | None = None,
+    syntax_provider: str | None = None,
 ) -> dict[str, bytes]:
     """Runs one batched Syntax session and returns only successful mp4 payloads by request key."""
     if not _syntax_fallback_env_enabled() or not requests:
@@ -979,6 +990,7 @@ async def _attempt_syntax_video_fallback_batch(
                 duration_sec=duration_sec,
                 timeout_sec=timeout_sec,
                 acquire_timeout_sec=lock_timeout_sec,
+                syntax_provider=syntax_provider,
             ),
             timeout=lock_timeout_sec + timeout_sec + SYNTAX_FALLBACK_TIMEOUT_GRACE_SEC,
         )
@@ -1066,6 +1078,7 @@ async def _generate_video_bytes_with_high_load_retry(
     force_vertex_fallback: bool = False,
     syntax_timeout_sec: int | None = None,
     syntax_acquire_timeout_sec: int | None = None,
+    syntax_provider: str | None = None,
 ) -> bytes:
     """Generate video through the current policy: auto Syntax, manual Vertex fallback."""
 
@@ -1085,6 +1098,7 @@ async def _generate_video_bytes_with_high_load_retry(
             end_image=end_image,
             timeout_sec=syntax_timeout_sec,
             acquire_timeout_sec=syntax_acquire_timeout_sec,
+            syntax_provider=syntax_provider or SYNTAX_PROVIDER_VEO,
         )
         if syntax_bytes is not None:
             _LAST_VIDEO_PROVIDER.set("telegram")
@@ -1101,6 +1115,7 @@ async def _generate_video_bytes_with_high_load_retry(
             aspect_ratio=aspect_ratio,
             audio_enabled=audio_enabled,
             syntax_error_message="Syntax не вернул видео.",
+            syntax_provider=syntax_provider or SYNTAX_PROVIDER_VEO,
         )
     if not force_vertex_fallback and syntax_enabled and skip_initial_syntax:
         raise VideoProviderChoiceRequired(
@@ -1113,6 +1128,7 @@ async def _generate_video_bytes_with_high_load_retry(
             aspect_ratio=aspect_ratio,
             audio_enabled=audio_enabled,
             syntax_error_message="Syntax уже был запущен для этой сцены, но видео не вернул.",
+            syntax_provider=syntax_provider or SYNTAX_PROVIDER_VEO,
         )
     if not force_vertex_fallback and not syntax_enabled and not disable_syntax_fallback:
         raise VideoProviderChoiceRequired(
@@ -1125,6 +1141,7 @@ async def _generate_video_bytes_with_high_load_retry(
             aspect_ratio=aspect_ratio,
             audio_enabled=audio_enabled,
             syntax_error_message="Syntax сейчас недоступен, поэтому нужен явный выбор: повторить Syntax позже или запустить Vertex вручную.",
+            syntax_provider=syntax_provider or SYNTAX_PROVIDER_VEO,
         )
     if force_vertex_fallback and model.strip().lower().startswith("veo") and update.message is not None:
         await safe_reply_text(

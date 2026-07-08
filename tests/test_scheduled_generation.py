@@ -59,6 +59,35 @@ def test_scheduled_generation_template_imports_to_db(monkeypatch, tmp_path):
         assert row.series_id is None
         assert row.source_row_key == "banana-icecream-001"
         assert row.source_file_path == result.saved_path
+        assert "generation_mode" not in (row.payload_json or {})
+
+
+def test_scheduled_generation_import_sets_silence_mode(monkeypatch, tmp_path):
+    _install_sqlite(monkeypatch)
+    monkeypatch.setattr(scheduled_generation, "IMPORT_DIR", tmp_path)
+
+    data = scheduled_generation._build_xlsx(
+        [
+            list(scheduled_generation.SCHEDULED_EXCEL_COLUMNS),
+            [
+                "Тихий пирог",
+                "Рецепт: яблоки и тесто.",
+                "",
+                "#c72638",
+                "2026-06-30",
+                True,
+                "",
+                "silent-pie-001",
+                "silence",
+            ],
+        ]
+    )
+    result = import_scheduled_generation_xlsx(io.BytesIO(data), original_name="queue.xlsx")
+
+    assert result.created == 1
+    with db.SessionLocal() as session:
+        row = session.execute(select(ScheduledGenerationItem)).scalar_one()
+        assert row.payload_json["generation_mode"] == "silence"
 
 
 def test_due_scheduled_generation_waits_until_local_1am(monkeypatch):
@@ -364,6 +393,7 @@ def test_scheduled_generation_admin_form_normalizes_empty_source_key(monkeypatch
                 "title": "Баурсаки",
                 "recipe": "https://example.com/recipe",
                 "comment": "Пусть бабушка будет в казахском настроении.",
+                "generation_mode": "silence",
                 "title_color": "#ead257",
                 "run_at": "2026-06-30 13:02:05",
                 "is_draft": "on",
@@ -377,6 +407,7 @@ def test_scheduled_generation_admin_form_normalizes_empty_source_key(monkeypatch
         assert form.is_valid(), form.errors
         obj = form.save(commit=False)
         assert obj.source_row_key is None
+        assert obj.payload_json["generation_mode"] == "silence"
     finally:
         if created_table:
             with connection.schema_editor() as schema:
@@ -447,6 +478,69 @@ def test_scheduled_generation_comment_is_used_for_viral_plan(monkeypatch):
     assert calls["production"][2] == "После рецепта: больше семейной интриги в первом кадре."
     assert "Летний пирог" in calls["production"][3]
     assert "canonical real-world appearance" in calls["production"][3]
+
+
+def test_scheduled_generation_every_comment_is_persistent_start_prompt_instruction(monkeypatch):
+    _install_sqlite(monkeypatch)
+    item_id = uuid.uuid4()
+    with db.SessionLocal() as session:
+        session.add(
+            ScheduledGenerationItem(
+                id=item_id,
+                title="Зимний пирог",
+                recipe="Рецепт: яблоки и тесто.",
+                comment="every Сделай стартовый кадр в зимнем настроении.",
+                title_color="#c72638",
+                run_at=datetime.now(timezone.utc),
+                is_draft=True,
+                status="pending",
+            )
+        )
+        session.commit()
+
+    calls: dict[str, object] = {}
+
+    async def fake_viral(concept, *, full_recipe_text, **_kwargs):
+        calls["viral"] = (concept, full_recipe_text)
+        return {"hook": "winter"}
+
+    async def fake_scenes(concept, *, full_recipe_text, viral_concept_brief=None, generation_comment=None, **_kwargs):
+        calls["scenes_comment"] = generation_comment
+        return {"json_plan": [{"scene": 1, "text": "Сцена"}]}
+
+    async def fake_production(scenes_plan, *, generation_comment=None, **_kwargs):
+        calls["production_comment"] = generation_comment
+        return {"json_plan": [{"scene": 1, "start_frame_prompt": "Prompt"}]}
+
+    async def fake_notify(*_args, **_kwargs):
+        return None
+
+    async def fake_media(item_id_arg, session):
+        calls["session"] = dict(session)
+        session["state"] = "ready_for_production"
+        return {"scene_count": 1, "video_count": 1, "generation_run_id": session.get("generation_run_id")}
+
+    monkeypatch.setattr(scheduled_generation, "generate_viral_concept_brief", fake_viral)
+    monkeypatch.setattr(scheduled_generation, "generate_scenes_plan", fake_scenes)
+    monkeypatch.setattr(scheduled_generation, "generate_full_production", fake_production)
+    monkeypatch.setattr(scheduled_generation, "_run_scheduled_media_pipeline", fake_media)
+    monkeypatch.setattr(scheduled_generation, "ensure_generation_run_for_session", lambda session: (str(uuid.uuid4()), {}))
+    monkeypatch.setattr(scheduled_generation, "save_generation_draft", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(scheduled_generation, "_notify_admin_chat", fake_notify)
+
+    status = asyncio.run(process_scheduled_generation_item(item_id))
+
+    assert status == "draft_ready"
+    assert "Сделай стартовый кадр в зимнем настроении." in calls["viral"][1]
+    assert "every Сделай" not in calls["viral"][1]
+    assert calls["scenes_comment"] == "Сделай стартовый кадр в зимнем настроении."
+    assert calls["production_comment"] == "Сделай стартовый кадр в зимнем настроении."
+    captured_session = calls["session"]
+    assert captured_session["scheduled_generation_comment"] == "Сделай стартовый кадр в зимнем настроении."
+    assert (
+        captured_session["scheduled_generation_every_start_prompt_comment"]
+        == "Сделай стартовый кадр в зимнем настроении."
+    )
 
 
 def test_scheduled_generation_url_recipe_is_resolved_before_pipeline(monkeypatch):

@@ -12,6 +12,7 @@ from sqlalchemy import select
 from .db import SessionLocal
 from .generation_store import ensure_generation_run_for_session
 from .models import ChatSession, GenerationArtifact, Scene, SceneImageCandidate, SceneVideoCandidate
+from .yandex_disk import upload_file_to_yandex_disk, yandex_disk_upload_required
 
 logger = logging.getLogger("bot.artifacts")
 
@@ -125,6 +126,28 @@ def persist_post_production_artifacts(session: dict[str, Any], post: dict[str, A
                 "subtitle_fingerprint": payload.get("subtitle_fingerprint"),
             }
             artifact_payload = {key: value for key, value in artifact_payload.items() if value is not None}
+            try:
+                upload_result = upload_file_to_yandex_disk(
+                    video_path,
+                    bundle_key=str(post.get("artifact_bundle_key") or ""),
+                    filename=Path(video_path).name,
+                )
+            except Exception as exc:
+                if yandex_disk_upload_required():
+                    raise
+                logger.warning(
+                    "artifact.yandex_disk_upload_failed type=%s path=%s err=%s",
+                    variant_key,
+                    video_path,
+                    exc,
+                )
+                artifact_payload["yandex_disk"] = {
+                    "status": "failed",
+                    "error": str(exc)[:1000],
+                }
+            else:
+                if upload_result is not None:
+                    artifact_payload["yandex_disk"] = upload_result.as_payload()
             persist_generation_artifact(
                 session,
                 artifact_type=f"final_{variant_key}",
