@@ -1290,6 +1290,51 @@ def _syntax_veo_queue_is_full_sync(page: Any) -> bool:
     return False
 
 
+def _wait_for_syntax_veo_uploaded_count_sync(
+    page: Any,
+    expected: int,
+    *,
+    timeout_ms: int,
+) -> None:
+    deadline = time.monotonic() + max(1.0, timeout_ms / 1000.0)
+    while time.monotonic() < deadline:
+        if _syntax_veo_uploaded_reference_count_sync(page) == expected:
+            return
+        page.wait_for_timeout(500)
+    raise RuntimeError(
+        f"Syntax Veo uploaded reference count did not become {expected}."
+    )
+
+
+def _clear_syntax_veo_uploaded_references_sync(page: Any, *, timeout_ms: int = 10_000) -> None:
+    """Remove stale Telegram picker items so retries never accumulate frames."""
+
+    for _attempt in range(4):
+        count_before = _syntax_veo_uploaded_reference_count_sync(page)
+        if count_before == 0:
+            return
+        buttons = page.locator("button[aria-label='Remove file']")
+        visible_button: Any | None = None
+        for index in range(buttons.count()):
+            candidate = buttons.nth(index)
+            with contextlib.suppress(Exception):
+                if candidate.is_visible():
+                    visible_button = candidate
+                    break
+        if visible_button is None:
+            raise RuntimeError("Syntax Veo uploaded references cannot be cleared safely.")
+        visible_button.click(timeout=timeout_ms)
+        # Removing one Telegram picker item triggers several Livewire updates
+        # and can take around ten seconds even after the click is accepted.
+        _wait_for_syntax_veo_uploaded_count_sync(
+            page,
+            count_before - 1,
+            timeout_ms=max(timeout_ms, 15_000),
+        )
+    if _syntax_veo_uploaded_reference_count_sync(page) != 0:
+        raise RuntimeError("Syntax Veo still contains stale uploaded references.")
+
+
 def _wait_for_syntax_veo_queue_slot_sync(page: Any, *, timeout_ms: int) -> None:
     """Wait for an account queue slot before the paid Veo submit click."""
 
@@ -1338,8 +1383,12 @@ def _fill_syntax_veo_webapp_sync(
             with contextlib.suppress(Exception):
                 page.wait_for_load_state("networkidle", timeout=min(timeout_ms, 30_000))
 
-            if _syntax_veo_uploaded_reference_count_sync(page) < 1:
-                _upload_syntax_kling_start_frame_sync(page, start_image)
+            # Syntax persists Telegram picker items between attempts.  Always
+            # replace them with exactly the requested frame; otherwise two
+            # retries become an unintended start/end-frame pair.
+            _clear_syntax_veo_uploaded_references_sync(page)
+            _upload_syntax_kling_start_frame_sync(page, start_image)
+            _wait_for_syntax_veo_uploaded_count_sync(page, 1, timeout_ms=30_000)
             _fill_and_commit_syntax_kling_prompt_sync(page, prompt)
 
             if not _try_click_syntax_option_sync(

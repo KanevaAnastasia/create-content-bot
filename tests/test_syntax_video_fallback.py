@@ -709,6 +709,55 @@ def test_syntax_veo_webview_helpers_read_uploaded_count_and_queue_limit():
     assert telethon_fallback._syntax_veo_queue_is_full_sync(page) is True
 
 
+def test_syntax_veo_clears_all_stale_uploaded_references():
+    import app.syntax_telethon_fallback as telethon_fallback
+
+    class _Body:
+        def __init__(self, page):
+            self.page = page
+
+        def inner_text(self):
+            return f"Загружено ({self.page.uploaded}/2)"
+
+    class _Button:
+        def __init__(self, page, index):
+            self.page = page
+            self.index = index
+
+        def is_visible(self):
+            return self.index < self.page.uploaded
+
+        def click(self, timeout=None):
+            del timeout
+            self.page.uploaded -= 1
+
+    class _Buttons:
+        def __init__(self, page):
+            self.page = page
+
+        def count(self):
+            return self.page.uploaded
+
+        def nth(self, index):
+            return _Button(self.page, index)
+
+    class _Page:
+        uploaded = 2
+
+        def locator(self, selector):
+            if selector == "body":
+                return _Body(self)
+            assert selector == "button[aria-label='Remove file']"
+            return _Buttons(self)
+
+        def wait_for_timeout(self, _ms):
+            return None
+
+    page = _Page()
+    telethon_fallback._clear_syntax_veo_uploaded_references_sync(page)
+    assert page.uploaded == 0
+
+
 def test_try_generate_via_syntax_kling_passes_horizontal_aspect_ratio(monkeypatch):
     import app.syntax_telethon_fallback as telethon_fallback
 
