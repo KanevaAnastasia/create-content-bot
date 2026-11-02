@@ -22,8 +22,8 @@ BUTTON_CLOSE_QUIET_MODE = "Закрыть тихий режим"
 
 _MENU_BUTTON: ContextVar[str | None] = ContextVar("admin_quiet_mode_menu_button", default=None)
 QUIET_MODE_TIMEZONE = ZoneInfo("Europe/Moscow")
-QUIET_MODE_GENERATION_MIN = 8
-QUIET_MODE_GENERATION_MAX = 11
+QUIET_MODE_GENERATION_MIN = 18
+QUIET_MODE_GENERATION_MAX = 22
 
 logger = logging.getLogger("bot.quiet_mode")
 
@@ -59,7 +59,10 @@ def _owner_row(db, *, lock: bool = False) -> BotUser | None:
 def _reset_cycle_row(row: BotUser, *, cycle_date: date, target: int | None = None) -> int:
     generation_target = int(target or random.randint(QUIET_MODE_GENERATION_MIN, QUIET_MODE_GENERATION_MAX))
     if not QUIET_MODE_GENERATION_MIN <= generation_target <= QUIET_MODE_GENERATION_MAX:
-        raise ValueError("Quiet-mode generation target must be between 8 and 11.")
+        raise ValueError(
+            f"Quiet-mode generation target must be between "
+            f"{QUIET_MODE_GENERATION_MIN} and {QUIET_MODE_GENERATION_MAX}."
+        )
     row.quiet_mode_enabled = False
     row.quiet_mode_auto_cycle_date = cycle_date
     row.quiet_mode_auto_generation_count = 0
@@ -93,7 +96,7 @@ def reset_automatic_quiet_mode_cycle(
     target: int | None = None,
     session_factory=None,
 ) -> dict[str, object]:
-    """Open quiet mode and start a fresh random 8-11 generation cycle."""
+    """Open quiet mode and start a fresh random daily generation cycle."""
     factory = session_factory or SessionLocal
     cycle_date = _moscow_date(now)
     with factory() as db:

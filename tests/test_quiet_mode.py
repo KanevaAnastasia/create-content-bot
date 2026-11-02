@@ -52,14 +52,14 @@ def test_automation_starts_at_next_moscow_midnight_without_changing_current_stat
 
     result = quiet_mode.reset_automatic_quiet_mode_cycle(
         now=datetime(2026, 10, 31, 21, 0, tzinfo=timezone.utc),
-        target=8,
+        target=18,
         session_factory=factory,
     )
     reset = _owner(factory)
     assert result["changed"] is True
     assert reset.quiet_mode_enabled is False
     assert reset.quiet_mode_auto_cycle_date.isoformat() == "2026-11-01"
-    assert reset.quiet_mode_auto_generation_target == 8
+    assert reset.quiet_mode_auto_generation_target == 18
     assert reset.quiet_mode_auto_generation_count == 0
 
 
@@ -67,19 +67,19 @@ def test_successful_generations_close_quiet_mode_at_target_and_stop_counting():
     factory = _factory()
     midnight = datetime(2026, 10, 31, 21, 0, tzinfo=timezone.utc)
     quiet_mode.enable_automatic_quiet_mode_from_next_midnight(now=midnight, session_factory=factory)
-    quiet_mode.reset_automatic_quiet_mode_cycle(now=midnight, target=8, session_factory=factory)
+    quiet_mode.reset_automatic_quiet_mode_cycle(now=midnight, target=18, session_factory=factory)
 
-    for expected in range(1, 8):
+    for expected in range(1, 18):
         result = quiet_mode.record_automatic_quiet_mode_generation(now=midnight, session_factory=factory)
-        assert result == {"counted": True, "count": expected, "target": 8, "closed": False}
+        assert result == {"counted": True, "count": expected, "target": 18, "closed": False}
 
     result = quiet_mode.record_automatic_quiet_mode_generation(now=midnight, session_factory=factory)
-    assert result == {"counted": True, "count": 8, "target": 8, "closed": True}
+    assert result == {"counted": True, "count": 18, "target": 18, "closed": True}
     assert _owner(factory).quiet_mode_enabled is True
 
     ignored = quiet_mode.record_automatic_quiet_mode_generation(now=midnight, session_factory=factory)
     assert ignored == {"counted": False, "reason": "not_accepting_generations"}
-    assert _owner(factory).quiet_mode_auto_generation_count == 8
+    assert _owner(factory).quiet_mode_auto_generation_count == 18
 
 
 def test_midnight_delay_uses_moscow_time():
