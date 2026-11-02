@@ -547,6 +547,59 @@ def test_django_generation_admin_title_subtitle_override_survives_without_chat_s
     assert admin_module._overlay_subtitle_for_admin_render(run, {}, {}) == saved_subtitle
 
 
+def test_django_generation_admin_recovers_story_alignment_from_narration_artifact(monkeypatch, tmp_path):
+    admin_dir = Path(__file__).resolve().parents[1] / "admin_panel"
+    sys.path.insert(0, str(admin_dir))
+    os.environ.setdefault("DJANGO_SETTINGS_MODULE", "cf_admin.settings")
+
+    import django
+
+    django.setup()
+
+    import pipeline_admin.admin as admin_module
+
+    audio_path = tmp_path / "narration.mp3"
+    audio_path.write_bytes(b"audio")
+    alignment = {
+        "characters": list("Тест"),
+        "character_start_times_seconds": [0.0, 0.1, 0.2, 0.3],
+        "character_end_times_seconds": [0.1, 0.2, 0.3, 0.4],
+    }
+    artifact = SimpleNamespace(
+        language="ru",
+        uri=audio_path.as_uri(),
+        payload_json={
+            "voiceover_text": "Тест",
+            "duration_sec": 0.4,
+            "alignment": alignment,
+        },
+    )
+
+    class ArtifactQuerySet(list):
+        def order_by(self, *_args):
+            return self
+
+    class ArtifactManagerStub:
+        def filter(self, **kwargs):
+            assert kwargs == {
+                "run_id": run_id,
+                "artifact_type": "story_narration_audio",
+            }
+            return ArtifactQuerySet([artifact])
+
+    run_id = uuid.uuid4()
+    monkeypatch.setattr(admin_module.GenerationArtifact, "objects", ArtifactManagerStub())
+
+    paths, voiceovers, durations, alignments = admin_module._story_narration_for_admin_render(
+        SimpleNamespace(id=run_id)
+    )
+
+    assert paths == {"ru": str(audio_path)}
+    assert voiceovers == {"ru": "Тест"}
+    assert durations == {"ru": 0.4}
+    assert alignments == {"ru": alignment}
+
+
 def test_django_generation_admin_title_override_survives_without_chat_session(monkeypatch):
     admin_dir = Path(__file__).resolve().parents[1] / "admin_panel"
     sys.path.insert(0, str(admin_dir))

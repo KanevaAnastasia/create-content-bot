@@ -2975,6 +2975,7 @@ async def _approve_story_audio_and_build_scenes(
     english_audio_path = str(session.get(STORY_AUDIO_PATH_EN_SESSION_KEY) or "").strip()
     english_duration = float(session.get(STORY_AUDIO_DURATION_EN_SESSION_KEY) or 0.0)
     english_voiceover = str(session.get(STORY_VOICEOVER_EN_SESSION_KEY) or "").strip()
+    english_alignment = session.get(STORY_AUDIO_ALIGNMENT_EN_SESSION_KEY)
     if english_requested and (
         not english_audio_path
         or not Path(english_audio_path).is_file()
@@ -3089,6 +3090,7 @@ async def _approve_story_audio_and_build_scenes(
                 "duration_sec": duration,
                 "voiceover_text": voiceover,
                 "title": title,
+                "alignment": alignment if isinstance(alignment, dict) else {},
             },
         )
         if english_requested:
@@ -3103,6 +3105,7 @@ async def _approve_story_audio_and_build_scenes(
                     "duration_sec": english_duration,
                     "voiceover_text": english_voiceover,
                     "title": title_by_lang.get("en"),
+                    "alignment": english_alignment if isinstance(english_alignment, dict) else {},
                 },
             )
     await _reply_text_chunked(update, scenes["text_plan"])

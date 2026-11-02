@@ -1014,11 +1014,12 @@ def _project_slug_for_admin_render(run: GenerationRun, session: dict[str, Any]) 
 
 def _story_narration_for_admin_render(
     run: GenerationRun,
-) -> tuple[dict[str, str], dict[str, str], dict[str, float]]:
+) -> tuple[dict[str, str], dict[str, str], dict[str, float], dict[str, dict[str, Any]]]:
     """Recover Story narration even when its original chat session is gone."""
     paths: dict[str, str] = {}
     voiceover: dict[str, str] = {}
     durations: dict[str, float] = {}
+    alignments: dict[str, dict[str, Any]] = {}
     try:
         rows = GenerationArtifact.objects.filter(
             run_id=run.id,
@@ -1036,14 +1037,17 @@ def _story_narration_for_admin_render(
                 duration = 0.0
             if duration > 0 and language not in durations:
                 durations[language] = duration
+            alignment = payload.get("alignment")
+            if isinstance(alignment, dict) and alignment and language not in alignments:
+                alignments[language] = copy.deepcopy(alignment)
             if language in paths:
                 continue
             local_path = local_path_from_media_uri(str(row.uri or ""))
             if local_path is not None and local_path.is_file():
                 paths[language] = str(local_path)
     except Exception:
-        return {}, {}, {}
-    return paths, voiceover, durations
+        return {}, {}, {}, {}
+    return paths, voiceover, durations, alignments
 
 
 def _title_override_uri(run_id: Any) -> str:
@@ -1446,7 +1450,12 @@ def _build_final_videos_for_run(
     scenes = _admin_final_build_scenes_from_page(run, scenes)
 
     project_slug = _project_slug_for_admin_render(run, session)
-    narration_audio_path_by_lang, stored_voiceover_by_lang, stored_duration_by_lang = _story_narration_for_admin_render(run)
+    (
+        narration_audio_path_by_lang,
+        stored_voiceover_by_lang,
+        stored_duration_by_lang,
+        stored_alignment_by_lang,
+    ) = _story_narration_for_admin_render(run)
     voiceover_by_lang = {
         "ru": str(session.get("story_voiceover_text") or stored_voiceover_by_lang.get("ru") or ""),
         "en": str(session.get("story_voiceover_text_en") or stored_voiceover_by_lang.get("en") or ""),
@@ -1460,8 +1469,18 @@ def _build_final_videos_for_run(
         project_slug=project_slug,
         voiceover_by_lang=voiceover_by_lang,
         alignment_by_lang={
-            "ru": session.get("story_audio_alignment") if isinstance(session.get("story_audio_alignment"), dict) else {},
-            "en": session.get("story_audio_alignment_en") if isinstance(session.get("story_audio_alignment_en"), dict) else {},
+            "ru": (
+                session.get("story_audio_alignment")
+                if isinstance(session.get("story_audio_alignment"), dict)
+                and session.get("story_audio_alignment")
+                else stored_alignment_by_lang.get("ru", {})
+            ),
+            "en": (
+                session.get("story_audio_alignment_en")
+                if isinstance(session.get("story_audio_alignment_en"), dict)
+                and session.get("story_audio_alignment_en")
+                else stored_alignment_by_lang.get("en", {})
+            ),
         },
         duration_by_lang=duration_by_lang,
     )
