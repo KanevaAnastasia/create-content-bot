@@ -1624,7 +1624,7 @@ def test_video_high_load_retry_succeeds(monkeypatch):
     assert calls["n"] == 0
 
 
-def test_video_generation_disable_syntax_fallback_runs_vertex(monkeypatch):
+def test_video_generation_disable_syntax_fallback_requires_explicit_vertex(monkeypatch):
     monkeypatch.setenv("SYNTAX_FALLBACK_ENABLED", "1")
     calls: list[dict] = []
 
@@ -1640,27 +1640,27 @@ def test_video_generation_disable_syntax_fallback_runs_vertex(monkeypatch):
     update = SimpleNamespace(message=_Message())
     monkeypatch.setattr("app.handlers.handlers_media_core.asyncio.to_thread", fake_to_thread)
 
-    out = asyncio.run(
-        _generate_video_bytes_with_high_load_retry(
-            update,
-            prompt="p",
-            model="veo3_fast",
-            duration_sec=6,
-            start_image=b"start",
-            end_image=None,
-            quality="1080",
-            aspect_ratio="9:16",
-            audio_enabled=True,
-            skip_initial_syntax=True,
-            disable_syntax_fallback=True,
+    try:
+        asyncio.run(
+            _generate_video_bytes_with_high_load_retry(
+                update,
+                prompt="p",
+                model="veo3_fast",
+                duration_sec=6,
+                start_image=b"start",
+                end_image=None,
+                quality="1080",
+                aspect_ratio="9:16",
+                audio_enabled=True,
+                skip_initial_syntax=True,
+                disable_syntax_fallback=True,
+            )
         )
-    )
+        assert False, "expected VideoProviderChoiceRequired"
+    except VideoProviderChoiceRequired as exc:
+        assert "явного выбора" in str(exc)
 
-    assert out == b"vertex-video"
-    assert len(calls) == 1
-    assert calls[0]["prompt"] == "p"
-    assert "visual_source_lock:" not in calls[0]["prompt"]
-    assert "do not introduce new food" not in calls[0]["prompt"]
+    assert calls == []
 
 
 def test_video_region_candidates_primary_and_fallbacks(monkeypatch):

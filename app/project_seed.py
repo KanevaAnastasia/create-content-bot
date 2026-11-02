@@ -75,7 +75,7 @@ def _get_or_create_project(session: Session) -> Project:
             is_active=True,
             hashtags_fixed_ru=["#убабушкивкуснее", "#бабушкинырецепты", "#рецепты"],
             hashtags_fixed_en=["#grandmatastesbetter", "#grandmasrecipes", "#recipes"],
-            default_video_provider="vertex",
+            default_video_provider="syntax",
             background_music_volume=0.18,
         )
         session.add(project)
@@ -87,8 +87,8 @@ def _get_or_create_project(session: Session) -> Project:
     project.hashtags_fixed_ru = ["#убабушкивкуснее", "#бабушкинырецепты", "#рецепты"]
     project.hashtags_fixed_en = ["#grandmatastesbetter", "#grandmasrecipes", "#recipes"]
     project.description = "Cozy cartoon cooking Shorts project with grandmother, orange cat, white cat, black-and-white cat, and family characters."
-    if project.default_video_provider is None:
-        project.default_video_provider = "vertex"
+    if project.default_video_provider in (None, "vertex"):
+        project.default_video_provider = "syntax"
     if project.background_music_volume is None:
         project.background_music_volume = 0.18
     return project

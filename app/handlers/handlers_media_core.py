@@ -1351,6 +1351,25 @@ async def _generate_video_bytes_with_high_load_retry(
             syntax_error_message="Syntax сейчас недоступен, поэтому нужен явный выбор: повторить Syntax позже или запустить Vertex вручную.",
             syntax_provider=syntax_provider or SYNTAX_PROVIDER_VEO,
         )
+    if not force_vertex_fallback:
+        # ``disable_syntax_fallback`` is an internal transport switch, not
+        # permission to spend Vertex quota.  Vertex video generation is only
+        # allowed after an explicit user choice has been translated into
+        # ``force_vertex_fallback=True`` by the provider-choice handler.
+        raise VideoProviderChoiceRequired(
+            prompt=prompt,
+            model=model,
+            duration_sec=duration_sec,
+            start_image=start_image,
+            end_image=end_image,
+            quality=quality,
+            aspect_ratio=aspect_ratio,
+            audio_enabled=audio_enabled,
+            syntax_error_message=(
+                "Syntax отключён для этого запуска. Vertex не будет запущен без явного выбора пользователя."
+            ),
+            syntax_provider=syntax_provider or SYNTAX_PROVIDER_VEO,
+        )
     if force_vertex_fallback and model.strip().lower().startswith("veo") and update.message is not None:
         await safe_reply_text(
             update.message,

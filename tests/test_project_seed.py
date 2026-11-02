@@ -36,7 +36,7 @@ def test_seed_default_project_creates_project_assets_and_text_steps():
         assert project is not None
         assert project.title == "Grandma Kitchen"
         assert project.is_default is True
-        assert project.default_video_provider == "vertex"
+        assert project.default_video_provider == "syntax"
         assert project.background_music_asset_uri is None
         assert project.background_music_volume == 0.18
         assert project.hashtags_fixed_ru == ["#убабушкивкуснее", "#бабушкинырецепты", "#рецепты"]
@@ -87,4 +87,20 @@ def test_seed_default_project_is_idempotent():
         assert session.query(ProjectLocation).count() == 1
         assert session.query(VisualProp).count() >= 10
         assert session.query(TextStep).count() == 3
+    engine.dispose()
+
+
+def test_seed_default_project_migrates_legacy_vertex_video_default():
+    engine, Session = _session_factory()
+
+    with Session() as session:
+        seed_default_project(session, assets={})
+        project = session.scalar(select(Project).where(Project.slug == DEFAULT_PROJECT_SLUG))
+        assert project is not None
+        project.default_video_provider = "vertex"
+        session.flush()
+
+        seed_default_project(session, assets={})
+
+        assert project.default_video_provider == "syntax"
     engine.dispose()
