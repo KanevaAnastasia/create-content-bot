@@ -1074,6 +1074,7 @@ def test_syntax_gets_start_frame_and_only_selected_voice_profiles(guest_db, monk
         return SimpleNamespace(success=False, video_bytes=None, provider_message="failed")
 
     monkeypatch.setattr(guest_handlers, "try_generate_via_syntax", fake_syntax)
+    monkeypatch.delenv("GUEST_SYNTAX_TIMEOUT_SEC", raising=False)
     message = _Message()
     update = SimpleNamespace(message=message)
 
@@ -1083,6 +1084,8 @@ def test_syntax_gets_start_frame_and_only_selected_voice_profiles(guest_db, monk
     assert captured["duration_sec"] == 8
     assert captured["aspect_ratio"] == "9:16"
     assert captured["syntax_provider"] == "veo"
+    assert captured["timeout_sec"] == 7200
+    assert captured["acquire_timeout_sec"] == 7200
     assert captured["prompt"].startswith("Персонаж машет рукой и говорит привет\n\n")
     assert "Вертикальное видео 9:16" not in captured["prompt"]
     assert "девочка с двумя косичками: говорит мягким спокойным голосом" in captured["prompt"]
@@ -1090,6 +1093,79 @@ def test_syntax_gets_start_frame_and_only_selected_voice_profiles(guest_db, monk
     assert "Борис" not in captured["prompt"]
     assert b"character-reference-must-not-be-sent" != captured["start_image"]
     assert session["state"] == guest_handlers.STATE_SYNTAX_ERROR
+
+
+def test_real_guest_video_runs_in_deduplicated_background_task(monkeypatch):
+    session = {
+        "state": guest_handlers.STATE_VIDEO_DESCRIPTION,
+        "generation_run_id": "run-1",
+        "guest_data": {"scene_id": "scene-1"},
+    }
+    message = _Message()
+    update = SimpleNamespace(message=message, effective_chat=SimpleNamespace(id=12345))
+    calls = []
+
+    async def scenario():
+        started = asyncio.Event()
+        release = asyncio.Event()
+
+        async def fake_generate_now(_update, _session, **kwargs):
+            calls.append(kwargs)
+            started.set()
+            await release.wait()
+            _session["state"] = guest_handlers.STATE_VIDEO_APPROVAL
+
+        async def quiet_allowed(_update, _session):
+            return False
+
+        monkeypatch.setattr(guest_handlers, "_generate_video_now", fake_generate_now)
+        monkeypatch.setattr(guest_handlers, "_reject_generation_in_quiet_mode", quiet_allowed)
+        monkeypatch.setattr(guest_handlers, "save_loaded_session_if_possible", lambda _chat_id: None)
+        guest_handlers._GUEST_SYNTAX_TASKS.clear()
+
+        await guest_handlers._generate_video(update, session, target="video")
+        assert session["state"] == guest_handlers.STATE_SYNTAX_PENDING
+        await started.wait()
+        await guest_handlers._generate_video(update, session, target="video")
+        assert len(calls) == 1
+        assert len(guest_handlers._GUEST_SYNTAX_TASKS) == 1
+
+        task = next(iter(guest_handlers._GUEST_SYNTAX_TASKS.values()))
+        release.set()
+        await task
+
+        assert session["state"] == guest_handlers.STATE_VIDEO_APPROVAL
+        assert guest_handlers._GUEST_SYNTAX_TASKS == {}
+
+    asyncio.run(scenario())
+    assert [item[1] for item in message.sent] == [
+        "Создаю видео через Syntax → Veo. Очередь дождусь автоматически; повторно нажимать ничего не нужно.",
+        "Генерация через Syntax → Veo уже запущена. Жду очередь и пришлю видео автоматически.",
+    ]
+
+
+def test_new_syntax_candidate_does_not_unapprove_accepted_video(guest_db, monkeypatch, tmp_path):
+    session, _project_id = _guest_session_with_project(guest_db)
+    monkeypatch.setenv("SCENE_MEDIA_ARTIFACTS_DIR", str(tmp_path / "artifacts"))
+    guest_handlers._new_run(session, "video", title="Видео")
+    guest_handlers._persist_image_candidate(session, b"start", kind="start")
+    guest_handlers._approve_image_candidate(session)
+    accepted_id, _ = guest_handlers._persist_video_candidate(session, b"accepted", prompt="Первый")
+    guest_handlers._approve_video_candidate(session)
+
+    new_id, _ = guest_handlers._persist_video_candidate(session, b"new", prompt="Новый Syntax")
+
+    with guest_db() as db:
+        accepted = db.execute(
+            select(SceneVideoCandidate).where(SceneVideoCandidate.candidate_id == accepted_id)
+        ).scalar_one()
+        new = db.execute(
+            select(SceneVideoCandidate).where(SceneVideoCandidate.candidate_id == new_id)
+        ).scalar_one()
+        assert accepted.liked is True
+        assert accepted.approved_for_production is True
+        assert new.liked is False
+        assert new.approved_for_production is False
 
 
 def test_horizontal_cartoon_uses_selected_ratio_for_frames_video_and_storage(guest_db, monkeypatch, tmp_path):

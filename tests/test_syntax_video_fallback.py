@@ -1687,8 +1687,12 @@ def test_try_generate_via_syntax_parallel_uses_distinct_sessions(monkeypatch):
     threads = [threading.Thread(target=_run, args=(idx,)) for idx in range(2)]
     for thread in threads:
         thread.start()
+    # The current Syntax navigation deliberately pauses after /start, /video,
+    # Veo and Generate so the bot can install each reply keyboard before the
+    # next selection. Give both parallel flows enough wall time to complete
+    # that real preflight while still bounding the test.
     for thread in threads:
-        thread.join(timeout=8)
+        thread.join(timeout=12)
 
     assert all(result is not None and result.success for result in results)
     assert set(seen_sessions) == {"session-a", "session-b"}

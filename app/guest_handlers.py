@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import io
 import logging
+import os
 import random
 import re
 import uuid
@@ -53,7 +54,9 @@ from .vertex_images import generate_image_vertex
 
 logger = logging.getLogger("bot.guest")
 _QUIET_FAILURE_TASKS: set[asyncio.Task[Any]] = set()
+_GUEST_SYNTAX_TASKS: dict[str, asyncio.Task[Any]] = {}
 GUEST_VIDEO_SEND_TIMEOUT_SEC = 600.0
+GUEST_SYNTAX_TIMEOUT_SEC_DEFAULT = 2 * 60 * 60
 
 GUEST_IMAGE_DAILY_LIMIT = 7
 GUEST_IMAGE_QUOTA_TIMEZONE = ZoneInfo("Europe/Moscow")
@@ -144,6 +147,7 @@ STATE_CARTOON_EDIT_STAGE_SELECT = "guest_cartoon_edit_stage_select"
 STATE_CARTOON_EDIT_SCENE_DONE = "guest_cartoon_edit_scene_done"
 STATE_CARTOON_INSERT_POSITION = "guest_cartoon_insert_position"
 STATE_IMAGE_ERROR = "guest_image_error"
+STATE_SYNTAX_PENDING = "guest_syntax_pending"
 STATE_SYNTAX_ERROR = "guest_syntax_error"
 STATE_VIDEO_DELIVERY_ERROR = "guest_video_delivery_error"
 STATE_GENERATION_HISTORY = "guest_generation_history"
@@ -1036,6 +1040,8 @@ def guest_keyboard_for_session(session: dict[str, Any]) -> object:
         return _markup([[BUTTON_FIX_ANOTHER_SCENE], [BUTTON_ADD_SCENE], [BUTTON_DONE]])
     if state == STATE_CARTOON_INSERT_POSITION:
         return _cartoon_insert_position_markup(session)
+    if state == STATE_SYNTAX_PENDING:
+        return _markup([])
     if state == STATE_SYNTAX_ERROR and str(_guest_data(session).get("syntax_retry_target") or "") == "cartoon":
         return _markup([[BUTTON_RETRY], [BUTTON_CHANGE_CHARACTERS], [BUTTON_BACK_TO_IMAGE]])
     if state == STATE_VIDEO_DELIVERY_ERROR:
@@ -1684,8 +1690,40 @@ async def _generate_image(update: Update, session: dict[str, Any], *, target: st
     await _send_photo(update, image, caption, markup=guest_keyboard_for_session(session))
 
 
-async def _generate_video(update: Update, session: dict[str, Any], *, target: str) -> None:
-    if await _reject_generation_in_quiet_mode(update, session):
+def _positive_int_env(name: str, default: int) -> int:
+    raw = str(os.getenv(name) or "").strip()
+    if raw.isdigit() and int(raw) > 0:
+        return int(raw)
+    return int(default)
+
+
+def _guest_syntax_timeout_sec() -> int:
+    """Keep unattended guest Veo work alive while Syntax's account queue is full."""
+
+    return max(60, _positive_int_env("GUEST_SYNTAX_TIMEOUT_SEC", GUEST_SYNTAX_TIMEOUT_SEC_DEFAULT))
+
+
+def _guest_syntax_task_key(chat_id: int, session: dict[str, Any], target: str) -> str:
+    data = _guest_data(session)
+    return ":".join(
+        (
+            str(int(chat_id)),
+            str(session.get("generation_run_id") or ""),
+            str(data.get("scene_id") or ""),
+            str(target or "video"),
+        )
+    )
+
+
+async def _generate_video_now(
+    update: Update,
+    session: dict[str, Any],
+    *,
+    target: str,
+    quiet_checked: bool = False,
+    announce: bool = True,
+) -> None:
+    if not quiet_checked and await _reject_generation_in_quiet_mode(update, session):
         return
     data = _guest_data(session)
     aspect_ratio = _guest_aspect_ratio(session)
@@ -1699,7 +1737,12 @@ async def _generate_video(update: Update, session: dict[str, Any], *, target: st
     if not start_image:
         await _reply(update, "Стартовое изображение не найдено. Вернитесь в меню и начните заново.", markup=_markup([]))
         return
-    await _reply(update, "Создаю видео через Syntax → Veo. Это может занять несколько минут.", markup=ReplyKeyboardRemove())
+    if announce:
+        await _reply(
+            update,
+            "Создаю видео через Syntax → Veo. Это может занять несколько минут.",
+            markup=ReplyKeyboardRemove(),
+        )
     try:
         result = await asyncio.to_thread(
             try_generate_via_syntax,
@@ -1710,6 +1753,8 @@ async def _generate_video(update: Update, session: dict[str, Any], *, target: st
             end_image=None,
             syntax_provider="veo",
             aspect_ratio=aspect_ratio,
+            timeout_sec=_guest_syntax_timeout_sec(),
+            acquire_timeout_sec=_guest_syntax_timeout_sec(),
         )
     except Exception:
         logger.exception("guest.syntax_generation_failed target=%s", target)
@@ -1737,6 +1782,79 @@ async def _generate_video(update: Update, session: dict[str, Any], *, target: st
     data["video_delivery_target"] = target
     data["effective_video_prompt"] = prompt
     await _deliver_current_video(update, session, video_bytes=video_bytes)
+
+
+async def _generate_video(update: Update, session: dict[str, Any], *, target: str) -> None:
+    """Start guest video work without blocking all Telegram updates.
+
+    Real Telegram updates carry a chat id, so Syntax/Veo generation runs in a
+    deduplicated background task.  The task owns the full current WebView flow
+    (including queue waiting and the final Generate click), persists its final
+    state, and never falls back to Vertex.  Lightweight/unit callers without a
+    chat id keep the synchronous contract used by tests and internal tools.
+    """
+
+    chat = getattr(update, "effective_chat", None)
+    chat_id = getattr(chat, "id", None)
+    if chat_id is None:
+        await _generate_video_now(update, session, target=target)
+        return
+    if await _reject_generation_in_quiet_mode(update, session):
+        return
+
+    key = _guest_syntax_task_key(int(chat_id), session, target)
+    running = _GUEST_SYNTAX_TASKS.get(key)
+    if running is not None and not running.done():
+        await _reply(
+            update,
+            "Генерация через Syntax → Veo уже запущена. Жду очередь и пришлю видео автоматически.",
+            markup=guest_keyboard_for_session(session),
+        )
+        return
+
+    data = _guest_data(session)
+    data["syntax_retry_target"] = target
+    session["state"] = STATE_SYNTAX_PENDING
+    save_loaded_session_if_possible(int(chat_id))
+    await _reply(
+        update,
+        "Создаю видео через Syntax → Veo. Очередь дождусь автоматически; повторно нажимать ничего не нужно.",
+        markup=ReplyKeyboardRemove(),
+    )
+
+    async def run() -> None:
+        cancelled = False
+        try:
+            await _generate_video_now(
+                update,
+                session,
+                target=target,
+                quiet_checked=True,
+                announce=False,
+            )
+        except asyncio.CancelledError:
+            cancelled = True
+            raise
+        except Exception:
+            logger.exception("guest.syntax_background_generation_failed target=%s", target)
+            data["syntax_retry_target"] = target
+            session["state"] = STATE_SYNTAX_ERROR
+            await _reply(
+                update,
+                "Syntax не смог создать видео. Текущий шаг сохранён; можно повторить запрос.",
+                markup=guest_keyboard_for_session(session),
+            )
+        finally:
+            if not cancelled and session.get("state") == STATE_SYNTAX_PENDING:
+                data["syntax_retry_target"] = target
+                session["state"] = STATE_SYNTAX_ERROR
+            save_loaded_session_if_possible(int(chat_id))
+            _GUEST_SYNTAX_TASKS.pop(key, None)
+
+    _GUEST_SYNTAX_TASKS[key] = asyncio.create_task(
+        run(),
+        name=f"guest-syntax-{int(chat_id)}-{target}",
+    )
 
 
 def _create_character_from_draft(session: dict[str, Any]) -> uuid.UUID:
@@ -1895,13 +2013,27 @@ async def guest_cancel(update: Update, context: ContextTypes.DEFAULT_TYPE, ident
     _ = context
     if update.effective_chat is None:
         return
+    chat_id = int(update.effective_chat.id)
+    active_syntax = [
+        task
+        for key, task in _GUEST_SYNTAX_TASKS.items()
+        if key.startswith(f"{chat_id}:") and not task.done()
+    ]
+    if active_syntax:
+        session = SESSIONS.get(chat_id) or _base_session(identity)
+        await _reply(
+            update,
+            "Запрос уже передан в Syntax → Veo. Его нельзя безопасно прервать локально; дождусь ответа и пришлю результат.",
+            markup=guest_keyboard_for_session(session),
+        )
+        return
     existing = SESSIONS.get(int(update.effective_chat.id))
     session = (
         _workspace_session(identity, existing if isinstance(existing, dict) else None)
         if isinstance(existing, dict) and existing.get("project_workspace_mode") is True
         else _base_session(identity)
     )
-    SESSIONS[int(update.effective_chat.id)] = session
+    SESSIONS[chat_id] = session
     await _reply(update, "Текущий шаг отменён. Выберите действие.", markup=guest_main_menu_markup(session))
 
 
@@ -2462,6 +2594,14 @@ async def guest_on_text(update: Update, context: ContextTypes.DEFAULT_TYPE, iden
     state = str(session.get("state") or STATE_MENU)
     data = _guest_data(session)
     try:
+        if state == STATE_SYNTAX_PENDING:
+            await _reply(
+                update,
+                "Генерация через Syntax → Veo уже выполняется. Очередь дождусь и пришлю видео автоматически.",
+                markup=guest_keyboard_for_session(session),
+            )
+            return
+
         if text == BUTTON_MENU:
             await _show_menu(update, session)
             return
