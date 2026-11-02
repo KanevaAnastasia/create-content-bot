@@ -8,6 +8,7 @@ import getpass
 import os
 import re
 import secrets
+import sys
 import tempfile
 from pathlib import Path
 
@@ -63,17 +64,24 @@ def main() -> int:
     parser.add_argument("key")
     parser.add_argument("--value", help="Avoid this for real secrets; omit it to use the hidden prompt.")
     parser.add_argument("--generate", action="store_true", help="Generate a new random value without printing it.")
+    parser.add_argument("--stdin", action="store_true", help="Read the value from stdin without printing it.")
     args = parser.parse_args()
-    if args.value is not None and args.generate:
-        parser.error("--value and --generate cannot be used together")
+    selected_modes = int(args.value is not None) + int(args.generate) + int(args.stdin)
+    if selected_modes > 1:
+        parser.error("--value, --generate, and --stdin are mutually exclusive")
     name = (
         re.sub(r"[^A-Z0-9]+", "_", args.key.upper()).strip("_")
         if args.project == "shared"
         else env_name(args.project, args.key)
     )
-    value = secrets.token_urlsafe(48) if args.generate else (
-        args.value if args.value is not None else getpass.getpass(f"{name}: ")
-    )
+    if args.generate:
+        value = secrets.token_urlsafe(48)
+    elif args.stdin:
+        value = sys.stdin.read()
+    elif args.value is not None:
+        value = args.value
+    else:
+        value = getpass.getpass(f"{name}: ")
     set_env_value(ENV_PATH, name, value.strip())
     print(f"Saved {name} in {ENV_PATH} (value hidden).")
     return 0

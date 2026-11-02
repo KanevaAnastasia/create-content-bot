@@ -22,6 +22,8 @@
 ## Instagram
 
 - `INSTAGRAM_ACCESS_TOKEN`
+- `INSTAGRAM_APP_ID`
+- `INSTAGRAM_APP_SECRET`
 - `INSTAGRAM_BUSINESS_ACCOUNT_ID_RU` и при необходимости `..._EN`
 
 Нужен professional-аккаунт и токен Meta с правами публикации. Для загрузки Reels Meta должна получить
@@ -42,9 +44,14 @@ MP4 по публичному HTTPS URL, поэтому также обязат�
 ## VK
 
 - `VK_ACCESS_TOKEN`
+- `VK_USER_SCREEN_NAME`
 - `VK_GROUP_ID_RU`
 
-Токен должен иметь право загружать видео в указанное сообщество.
+`video.save` принимает пользовательский токен администратора, а `VK_GROUP_ID_RU` задаёт сообщество,
+куда сохраняется и публикуется видео. Перед каждой загрузкой приложение сверяет короткое имя владельца
+токена и проверяет, что он администрирует именно указанное сообщество. Токену нужны права `video`,
+`groups`, `wall` и серверный доступ. Для новых приложений VK ID выдаёт access token на один час вместе
+с refresh token; перед включением фоновой публикации оба должны быть настроены и проверены.
 
 ## Безопасное сохранение
 
@@ -56,5 +63,17 @@ MP4 по публичному HTTPS URL, поэтому также обязат�
 .venv/bin/python scripts/set_publish_secret.py shared PUBLICATION_MEDIA_SIGNING_KEY --generate
 ```
 
+Если токен уже скопирован в буфер обмена macOS, его можно сохранить без отображения в истории:
+
+```bash
+pbpaste | .venv/bin/python scripts/set_publish_secret.py grandma_kitchen INSTAGRAM_ACCESS_TOKEN --stdin
+```
+
 Скрипт атомарно обновляет `.env`, выставляет режим `0600` и не печатает значение. Публичные channel,
 account и group IDs всё равно хранятся раздельно по проектам.
+
+Короткоживущий токен Meta можно обменять и сразу заменить в `.env`, не печатая ни один секрет:
+
+```bash
+.venv/bin/python scripts/refresh_meta_token.py grandma_kitchen
+```

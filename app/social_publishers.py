@@ -64,7 +64,7 @@ def _required_keys(platform: str, language: str) -> tuple[str, ...]:
             f"INSTAGRAM_BUSINESS_ACCOUNT_ID_{lang}",
         ),
         "tiktok": ("TIKTOK_ACCESS_TOKEN", "TIKTOK_OPEN_ID"),
-        "vk": ("VK_ACCESS_TOKEN", f"VK_GROUP_ID_{lang}"),
+        "vk": ("VK_ACCESS_TOKEN", "VK_USER_SCREEN_NAME", f"VK_GROUP_ID_{lang}"),
     }.get(str(platform or "").strip().lower(), ())
 
 
@@ -313,13 +313,62 @@ def _publish_tiktok(job: PublicationJob, project_slug: str) -> str:
     return publish_id
 
 
+def _vk_error_message(payload: dict[str, Any], context: str) -> None:
+    error = payload.get("error")
+    if not isinstance(error, dict):
+        return
+    code = error.get("error_code")
+    message = str(error.get("error_msg") or "VK API error")
+    suffix = f" (code {code})" if code is not None else ""
+    raise PublicationDeliveryError(f"{context}: {message}{suffix}")
+
+
+def _verify_vk_identity(project_slug: str, *, token: str, group_id: str, api_version: str) -> None:
+    expected_screen_name = project_env(project_slug, "VK_USER_SCREEN_NAME").lstrip("@").lower()
+    user_response = requests.post(
+        "https://api.vk.ru/method/users.get",
+        data={"access_token": token, "v": api_version, "fields": "screen_name"},
+        timeout=DEFAULT_REQUEST_TIMEOUT,
+    )
+    user_payload = _response_json(user_response, "VK users.get")
+    _vk_error_message(user_payload, "VK users.get")
+    users = user_payload.get("response") if isinstance(user_payload.get("response"), list) else []
+    actual_screen_name = str(users[0].get("screen_name") or "").lstrip("@").lower() if users else ""
+    if not actual_screen_name or actual_screen_name != expected_screen_name:
+        raise PublicationDeliveryError(
+            f"VK token belongs to @{actual_screen_name or 'unknown'}, expected @{expected_screen_name}."
+        )
+
+    groups_response = requests.post(
+        "https://api.vk.ru/method/groups.get",
+        data={
+            "access_token": token,
+            "v": api_version,
+            "filter": "admin",
+            "extended": 1,
+            "count": 1000,
+        },
+        timeout=DEFAULT_REQUEST_TIMEOUT,
+    )
+    groups_payload = _response_json(groups_response, "VK groups.get")
+    _vk_error_message(groups_payload, "VK groups.get")
+    response = groups_payload.get("response") if isinstance(groups_payload.get("response"), dict) else {}
+    items = response.get("items") if isinstance(response.get("items"), list) else []
+    managed_group_ids = {str(item.get("id")) for item in items if isinstance(item, dict)}
+    if str(group_id) not in managed_group_ids:
+        raise PublicationDeliveryError(
+            f"VK user @{expected_screen_name} is not an administrator of configured group {group_id}."
+        )
+
+
 def _publish_vk(job: PublicationJob, project_slug: str) -> str:
     token = project_env(project_slug, "VK_ACCESS_TOKEN")
     language = str(job.language or "ru").upper()
     group_id = project_env(project_slug, f"VK_GROUP_ID_{language}")
     api_version = shared_env("VK_API_VERSION", "5.199")
+    _verify_vk_identity(project_slug, token=token, group_id=group_id, api_version=api_version)
     save_response = requests.post(
-        "https://api.vk.com/method/video.save",
+        "https://api.vk.ru/method/video.save",
         data={
             "access_token": token,
             "v": api_version,
@@ -331,8 +380,7 @@ def _publish_vk(job: PublicationJob, project_slug: str) -> str:
         timeout=DEFAULT_REQUEST_TIMEOUT,
     )
     save_payload = _response_json(save_response, "VK video.save")
-    if save_payload.get("error"):
-        raise PublicationDeliveryError(f"VK video.save: {save_payload['error']}")
+    _vk_error_message(save_payload, "VK video.save")
     data = save_payload.get("response") if isinstance(save_payload.get("response"), dict) else {}
     upload_url = str(data.get("upload_url") or "")
     if not upload_url:
