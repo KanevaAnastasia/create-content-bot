@@ -834,15 +834,58 @@ _KLING_SUBMISSION_BLOCKED_RE = re.compile(
     r"ошиб|error|failed|fail|лимит|limit|недостат|insufficient|заполн|invalid|try again|попроб",
     re.IGNORECASE,
 )
+_KLING_SUBMISSION_ALREADY_SENT_RE = re.compile(
+    r"(?:эта\s+)?генерац(?:ия|ии)\s+уже\s+отправлен|generation\s+(?:was\s+)?already\s+(?:sent|submitted)|already\s+submitted",
+    re.IGNORECASE,
+)
+
+
+class SyntaxVeoQueueFullError(RuntimeError):
+    """The final Veo click was rejected because both account queue slots are busy."""
+
+
+def _regex_match_count(pattern: re.Pattern[str], text: str) -> int:
+    return sum(1 for _match in pattern.finditer(re.sub(r"\s+", " ", str(text or ""))))
 
 
 def _syntax_kling_submission_state_from_text(text: str) -> str:
     normalized = re.sub(r"\s+", " ", str(text or "")).strip()
     if not normalized:
         return ""
+    # Syntax uses this toast when the same WebView launch was accepted by an
+    # earlier click.  It is an idempotency acknowledgement, not a rejection.
+    if _KLING_SUBMISSION_ALREADY_SENT_RE.search(normalized):
+        return "started"
     if _KLING_SUBMISSION_BLOCKED_RE.search(normalized):
         return "blocked"
     if _KLING_SUBMISSION_STARTED_RE.search(normalized):
+        return "started"
+    return ""
+
+
+def _syntax_kling_submission_state_after_change(before_text: str, after_text: str) -> str:
+    """Classify only status text introduced by the submit click.
+
+    Veo can render a permanent queue-limit warning before the button is
+    clicked.  Reclassifying the whole page after any Livewire update made that
+    old warning look like a fresh rejection even when the click was accepted.
+    """
+
+    before = re.sub(r"\s+", " ", str(before_text or "")).strip()
+    after = re.sub(r"\s+", " ", str(after_text or "")).strip()
+    if not after or after == before:
+        return ""
+    if _KLING_SUBMISSION_ALREADY_SENT_RE.search(after):
+        return "started"
+    if _regex_match_count(_KLING_SUBMISSION_BLOCKED_RE, after) > _regex_match_count(
+        _KLING_SUBMISSION_BLOCKED_RE,
+        before,
+    ):
+        return "blocked"
+    if _regex_match_count(_KLING_SUBMISSION_STARTED_RE, after) > _regex_match_count(
+        _KLING_SUBMISSION_STARTED_RE,
+        before,
+    ):
         return "started"
     return ""
 
@@ -913,7 +956,7 @@ def _wait_for_syntax_kling_form_ready_sync(page: Any, *, timeout_ms: int | None 
     )
 
 
-def _click_syntax_kling_generate_sync(page: Any, *, timeout_ms: int = 10_000) -> None:
+def _click_syntax_kling_generate_sync(page: Any, *, timeout_ms: int = 10_000) -> str:
     generate_re = re.compile("Сгенерировать|Generate", re.IGNORECASE)
     before = _syntax_kling_submit_snapshot_sync(page)
     before_text = str(before.get("text") or "")
@@ -969,12 +1012,21 @@ def _click_syntax_kling_generate_sync(page: Any, *, timeout_ms: int = 10_000) ->
             for text in progressed_button_texts
         )
         text_changed = bool(last_text and last_text != before_text)
-        state = _syntax_kling_submission_state_from_text(last_text) if text_changed else ""
+        state = (
+            _syntax_kling_submission_state_after_change(before_text, last_text)
+            if text_changed
+            else ""
+        )
         if state == "blocked":
             excerpt = last_text[:500].strip()
+            if _regex_match_count(_SYNTAX_VEO_QUEUE_LIMIT_RE, last_text) > _regex_match_count(
+                _SYNTAX_VEO_QUEUE_LIMIT_RE,
+                before_text,
+            ):
+                raise SyntaxVeoQueueFullError(excerpt)
             raise RuntimeError(f"Syntax Kling UI rejected generation after Generate click: {excerpt}")
         if state == "started" and not button_progress_now:
-            return
+            return "started"
         if text_changed:
             logger.info("syntax.kling.submit_changed_without_known_status text=%s", last_text[:300])
 
@@ -1004,17 +1056,25 @@ def _click_syntax_kling_generate_sync(page: Any, *, timeout_ms: int = 10_000) ->
             page.wait_for_timeout(1200)
             final_snapshot = _syntax_kling_submit_snapshot_sync(page)
             final_text = str(final_snapshot.get("text") or "")
-            if final_text != before_text and _syntax_kling_submission_state_from_text(final_text) == "blocked":
+            final_state = _syntax_kling_submission_state_after_change(before_text, final_text)
+            if final_state == "blocked":
+                if _regex_match_count(_SYNTAX_VEO_QUEUE_LIMIT_RE, final_text) > _regex_match_count(
+                    _SYNTAX_VEO_QUEUE_LIMIT_RE,
+                    before_text,
+                ):
+                    raise SyntaxVeoQueueFullError(final_text[:500].strip())
                 raise RuntimeError(
                     f"Syntax Kling UI rejected generation after Generate click: {final_text[:500].strip()}"
                 )
+            if final_state == "started":
+                return "started"
             logger.info(
                 "syntax.kling.submit_request_confirmed responses=%s status=%s endpoint=%s",
                 len(submit_responses),
                 status,
                 response_url,
             )
-            return
+            return "response_confirmed"
 
     logger.warning(
         "syntax.kling.submit_not_confirmed responses=%s progress_seen=%s buttons=%s text=%s",
@@ -1029,7 +1089,7 @@ def _click_syntax_kling_generate_sync(page: Any, *, timeout_ms: int = 10_000) ->
         # parent Livewire acknowledgement was late or invisible to Playwright.
         # The caller will now keep polling the Syntax chat for its video/error.
         logger.warning("syntax.kling.submit_assumed_started_after_processing_state=true")
-        return
+        return "processing"
     raise RuntimeError("Syntax Kling UI did not confirm generation start after Generate click.")
 
 
@@ -1348,6 +1408,23 @@ def _wait_for_syntax_veo_queue_slot_sync(page: Any, *, timeout_ms: int) -> None:
             page.wait_for_load_state("networkidle", timeout=min(timeout_ms, 30_000))
 
 
+def _submit_syntax_veo_generate_sync(page: Any, *, timeout_ms: int) -> str:
+    """Click first, then wait/retry only after a real queue rejection.
+
+    A permanent "maximum active generations" banner can include the current
+    form's already-submitted job.  Waiting for that banner to disappear before
+    the first click deadlocks the bot.  The WebView launch is idempotent: a
+    repeated accepted click returns "Эта генерация уже отправлена".
+    """
+
+    try:
+        return _click_syntax_kling_generate_sync(page, timeout_ms=15_000)
+    except SyntaxVeoQueueFullError:
+        logger.info("syntax.veo.submit_queue_rejected waiting_for_slot=true")
+        _wait_for_syntax_veo_queue_slot_sync(page, timeout_ms=timeout_ms)
+        return _click_syntax_kling_generate_sync(page, timeout_ms=15_000)
+
+
 def _fill_syntax_veo_webapp_sync(
     *,
     url: str,
@@ -1360,8 +1437,9 @@ def _fill_syntax_veo_webapp_sync(
     """Configure and launch the current Syntax Veo WebView.
 
     Telegram supplies the prompt and uploaded frame to this page.  We verify
-    and re-commit those values, apply the requested duration/aspect ratio, wait
-    for a free Veo queue slot, and only then click the visible Generate button.
+    and re-commit those values, apply the requested duration/aspect ratio, and
+    click the visible Generate button.  A genuine queue rejection is retried
+    after a slot becomes available; an already-submitted form is accepted.
     """
 
     try:
@@ -1405,12 +1483,11 @@ def _fill_syntax_veo_webapp_sync(
                     f"Syntax Veo page does not show selected aspect ratio {_normalize_syntax_aspect_ratio(aspect_ratio)}."
                 )
 
-            # Leave the authenticated page open while the two-account-wide
-            # Syntax queue is full.  Reloading preserves the server-side form
-            # and avoids a paid duplicate submit.
+            # Click once even if the page already shows the account-wide queue
+            # banner: the current form may itself be one of those active jobs.
+            # Syntax deduplicates this WebView launch server-side.
             queue_wait_ms = max(30_000, timeout_ms - 60_000)
-            _wait_for_syntax_veo_queue_slot_sync(page, timeout_ms=queue_wait_ms)
-            _click_syntax_kling_generate_sync(page, timeout_ms=15_000)
+            _submit_syntax_veo_generate_sync(page, timeout_ms=queue_wait_ms)
         finally:
             browser.close()
 

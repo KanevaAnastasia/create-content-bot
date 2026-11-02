@@ -111,6 +111,33 @@ def test_syntax_kling_submission_state_detects_started_text():
 
     assert telethon_fallback._syntax_kling_submission_state_from_text("Видео добавлено в очередь") == "started"
     assert telethon_fallback._syntax_kling_submission_state_from_text("Generating video, please wait") == "started"
+    assert (
+        telethon_fallback._syntax_kling_submission_state_from_text(
+            "Достигнут лимит очереди Veo. Эта генерация уже отправлена"
+        )
+        == "started"
+    )
+
+
+def test_syntax_submission_change_ignores_static_queue_warning():
+    import app.syntax_telethon_fallback as telethon_fallback
+
+    before = "Настройки Veo Достигнут лимит очереди Veo. Максимум активных генераций: 2."
+    assert telethon_fallback._syntax_kling_submission_state_after_change(before, before + " Обновлено") == ""
+    assert (
+        telethon_fallback._syntax_kling_submission_state_after_change(
+            before,
+            before + " Эта генерация уже отправлена",
+        )
+        == "started"
+    )
+    assert (
+        telethon_fallback._syntax_kling_submission_state_after_change(
+            before,
+            before + " Достигнут лимит очереди Veo.",
+        )
+        == "blocked"
+    )
 
 
 def test_syntax_kling_submission_state_detects_blocked_text_first():
@@ -707,6 +734,49 @@ def test_syntax_veo_webview_helpers_read_uploaded_count_and_queue_limit():
     page = _Page()
     assert telethon_fallback._syntax_veo_uploaded_reference_count_sync(page) == 1
     assert telethon_fallback._syntax_veo_queue_is_full_sync(page) is True
+
+
+def test_syntax_veo_submit_clicks_before_waiting_and_retries_real_queue_rejection(monkeypatch):
+    import app.syntax_telethon_fallback as telethon_fallback
+
+    calls: list[str] = []
+
+    def click(_page, *, timeout_ms):
+        calls.append(f"click:{timeout_ms}")
+        if calls.count("click:15000") == 1:
+            raise telethon_fallback.SyntaxVeoQueueFullError("queue full")
+        return "started"
+
+    monkeypatch.setattr(telethon_fallback, "_click_syntax_kling_generate_sync", click)
+    monkeypatch.setattr(
+        telethon_fallback,
+        "_wait_for_syntax_veo_queue_slot_sync",
+        lambda _page, *, timeout_ms: calls.append(f"wait:{timeout_ms}"),
+    )
+
+    result = telethon_fallback._submit_syntax_veo_generate_sync(object(), timeout_ms=120_000)
+
+    assert result == "started"
+    assert calls == ["click:15000", "wait:120000", "click:15000"]
+
+
+def test_syntax_veo_submit_does_not_wait_when_form_was_already_sent(monkeypatch):
+    import app.syntax_telethon_fallback as telethon_fallback
+
+    waits: list[int] = []
+    monkeypatch.setattr(
+        telethon_fallback,
+        "_click_syntax_kling_generate_sync",
+        lambda _page, *, timeout_ms: "started",
+    )
+    monkeypatch.setattr(
+        telethon_fallback,
+        "_wait_for_syntax_veo_queue_slot_sync",
+        lambda _page, *, timeout_ms: waits.append(timeout_ms),
+    )
+
+    assert telethon_fallback._submit_syntax_veo_generate_sync(object(), timeout_ms=120_000) == "started"
+    assert waits == []
 
 
 def test_syntax_veo_clears_all_stale_uploaded_references():
