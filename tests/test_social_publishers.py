@@ -83,12 +83,13 @@ def test_instagram_readiness_uses_shared_https_and_project_credentials(monkeypat
 def test_vk_readiness_requires_expected_user_identity(monkeypatch) -> None:
     monkeypatch.setenv("PUBLISH_GRANDMA_KITCHEN_VK_ACCESS_TOKEN", "token")
     monkeypatch.setenv("PUBLISH_GRANDMA_KITCHEN_VK_GROUP_ID_RU", "238619215")
+    monkeypatch.setenv("PUBLISH_GRANDMA_KITCHEN_VK_USER_ID", "")
     monkeypatch.setenv("PUBLISH_GRANDMA_KITCHEN_VK_USER_SCREEN_NAME", "")
 
     readiness = platform_readiness("grandma_kitchen", "vk", "ru")
 
     assert readiness.ready is False
-    assert readiness.missing == ("PUBLISH_GRANDMA_KITCHEN_VK_USER_SCREEN_NAME",)
+    assert readiness.missing == ("PUBLISH_GRANDMA_KITCHEN_VK_USER_ID",)
 
 
 def test_vk_readiness_accepts_refresh_credentials_without_static_token(monkeypatch) -> None:
@@ -97,8 +98,8 @@ def test_vk_readiness_accepts_refresh_credentials_without_static_token(monkeypat
         "VK_CLIENT_ID": "54871992",
         "VK_REFRESH_TOKEN": "refresh",
         "VK_DEVICE_ID": "device",
-        "VK_REDIRECT_URI": "http://127.0.0.1/callback",
-        "VK_USER_SCREEN_NAME": "gggkanevaag",
+        "VK_REDIRECT_URI": "http://localhost/callback",
+        "VK_USER_ID": "1114556285",
         "VK_GROUP_ID_RU": "238619215",
     }.items():
         monkeypatch.setenv(f"PUBLISH_GRANDMA_KITCHEN_{key}", value)
@@ -214,9 +215,11 @@ def test_vk_oauth_redirect_validation() -> None:
 
 
 def test_vk_identity_must_match_user_and_managed_group(monkeypatch) -> None:
-    monkeypatch.setenv("PUBLISH_GRANDMA_KITCHEN_VK_USER_SCREEN_NAME", "gggkanevaag")
+    monkeypatch.setenv("PUBLISH_GRANDMA_KITCHEN_VK_USER_ID", "1114556285")
     user_response = Mock(ok=True, status_code=200)
-    user_response.json.return_value = {"response": [{"id": 1, "screen_name": "gggkanevaag"}]}
+    user_response.json.return_value = {
+        "response": [{"id": 1114556285, "screen_name": "id1114556285"}]
+    }
     groups_response = Mock(ok=True, status_code=200)
     groups_response.json.return_value = {
         "response": {"count": 1, "items": [{"id": 238619215, "name": "У бабушки дома"}]}
@@ -249,13 +252,13 @@ def test_vk_identity_must_match_user_and_managed_group(monkeypatch) -> None:
 
 
 def test_vk_identity_rejects_wrong_user_without_querying_groups(monkeypatch) -> None:
-    monkeypatch.setenv("PUBLISH_GRANDMA_KITCHEN_VK_USER_SCREEN_NAME", "gggkanevaag")
+    monkeypatch.setenv("PUBLISH_GRANDMA_KITCHEN_VK_USER_ID", "1114556285")
     user_response = Mock(ok=True, status_code=200)
     user_response.json.return_value = {"response": [{"id": 2, "screen_name": "discipline"}]}
     post = Mock(return_value=user_response)
     monkeypatch.setattr("app.social_publishers.requests.post", post)
 
-    with pytest.raises(PublicationDeliveryError, match="expected @gggkanevaag"):
+    with pytest.raises(PublicationDeliveryError, match="expected 1114556285"):
         _verify_vk_identity(
             "grandma_kitchen", token="secret-token", group_id="238619215", api_version="5.199"
         )

@@ -66,7 +66,7 @@ def _required_keys(platform: str, language: str) -> tuple[str, ...]:
             f"INSTAGRAM_BUSINESS_ACCOUNT_ID_{lang}",
         ),
         "tiktok": ("TIKTOK_ACCESS_TOKEN", "TIKTOK_OPEN_ID"),
-        "vk": ("VK_USER_SCREEN_NAME", f"VK_GROUP_ID_{lang}"),
+        "vk": (f"VK_GROUP_ID_{lang}",),
     }.get(str(platform or "").strip().lower(), ())
 
 
@@ -75,13 +75,19 @@ def platform_readiness(project_slug: str, platform: str, language: str) -> Platf
     normalized_language = str(language or "").strip().lower()
     required = _required_keys(normalized_platform, normalized_language)
     missing = [project_env_name(project_slug, key) for key in required if not project_env(project_slug, key)]
-    if normalized_platform == "vk" and not project_env(project_slug, "VK_ACCESS_TOKEN"):
-        oauth_keys = ("VK_CLIENT_ID", "VK_REFRESH_TOKEN", "VK_DEVICE_ID", "VK_REDIRECT_URI")
-        missing.extend(
-            project_env_name(project_slug, key)
-            for key in oauth_keys
-            if not project_env(project_slug, key)
-        )
+    if normalized_platform == "vk":
+        if not (
+            project_env(project_slug, "VK_USER_ID")
+            or project_env(project_slug, "VK_USER_SCREEN_NAME")
+        ):
+            missing.append(project_env_name(project_slug, "VK_USER_ID"))
+        if not project_env(project_slug, "VK_ACCESS_TOKEN"):
+            oauth_keys = ("VK_CLIENT_ID", "VK_REFRESH_TOKEN", "VK_DEVICE_ID", "VK_REDIRECT_URI")
+            missing.extend(
+                project_env_name(project_slug, key)
+                for key in oauth_keys
+                if not project_env(project_slug, key)
+            )
     if normalized_platform == "instagram":
         for shared_key in ("CONTENT_FABRIC_PUBLIC_BASE_URL", "PUBLICATION_MEDIA_SIGNING_KEY"):
             if not shared_env(shared_key):
@@ -376,6 +382,7 @@ def _vk_access_token(project_slug: str) -> str:
 
 
 def _verify_vk_identity(project_slug: str, *, token: str, group_id: str, api_version: str) -> None:
+    expected_user_id = project_env(project_slug, "VK_USER_ID").strip()
     expected_screen_name = project_env(project_slug, "VK_USER_SCREEN_NAME").lstrip("@").lower()
     user_response = requests.post(
         "https://api.vk.ru/method/users.get",
@@ -385,10 +392,18 @@ def _verify_vk_identity(project_slug: str, *, token: str, group_id: str, api_ver
     user_payload = _response_json(user_response, "VK users.get")
     _vk_error_message(user_payload, "VK users.get")
     users = user_payload.get("response") if isinstance(user_payload.get("response"), list) else []
-    actual_screen_name = str(users[0].get("screen_name") or "").lstrip("@").lower() if users else ""
-    if not actual_screen_name or actual_screen_name != expected_screen_name:
+    user = users[0] if users and isinstance(users[0], dict) else {}
+    actual_user_id = str(user.get("id") or "").strip()
+    actual_screen_name = str(user.get("screen_name") or "").lstrip("@").lower()
+    if expected_user_id and actual_user_id != expected_user_id:
         raise PublicationDeliveryError(
-            f"VK token belongs to @{actual_screen_name or 'unknown'}, expected @{expected_screen_name}."
+            f"VK token belongs to user {actual_user_id or 'unknown'}, expected {expected_user_id}."
+        )
+    if not expected_user_id and (
+        not expected_screen_name or actual_screen_name != expected_screen_name
+    ):
+        raise PublicationDeliveryError(
+            f"VK token belongs to @{actual_screen_name or 'unknown'}, expected @{expected_screen_name or 'unconfigured'}."
         )
 
     groups_response = requests.post(
@@ -408,8 +423,13 @@ def _verify_vk_identity(project_slug: str, *, token: str, group_id: str, api_ver
     items = response.get("items") if isinstance(response.get("items"), list) else []
     managed_group_ids = {str(item.get("id")) for item in items if isinstance(item, dict)}
     if str(group_id) not in managed_group_ids:
+        identity = (
+            f"user {actual_user_id}"
+            if actual_user_id
+            else f"@{actual_screen_name or 'unknown'}"
+        )
         raise PublicationDeliveryError(
-            f"VK user @{expected_screen_name} is not an administrator of configured group {group_id}."
+            f"VK {identity} is not an administrator of configured group {group_id}."
         )
 
 
