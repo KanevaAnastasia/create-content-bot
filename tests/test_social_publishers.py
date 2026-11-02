@@ -214,7 +214,7 @@ def test_vk_oauth_redirect_validation() -> None:
             validate_redirect_uri(invalid)
 
 
-def test_vk_identity_must_match_user_and_managed_group(monkeypatch) -> None:
+def test_vk_identity_must_match_user_and_configured_group(monkeypatch) -> None:
     monkeypatch.setenv("PUBLISH_GRANDMA_KITCHEN_VK_USER_ID", "1114556285")
     user_response = Mock(ok=True, status_code=200)
     user_response.json.return_value = {
@@ -254,44 +254,39 @@ def test_vk_identity_must_match_user_and_managed_group(monkeypatch) -> None:
                 "access_token": "secret-token",
                 "v": "5.199",
                 "group_id": "238619215",
-                "fields": "is_admin,admin_level,can_post,can_upload_video,can_upload_clip",
             },
             timeout=(20, 300),
         ),
     ]
 
 
-@pytest.mark.parametrize(
-    ("group", "error"),
-    [
-        ({"id": 238619215, "is_admin": 0}, "is not an administrator"),
-        (
-            {"id": 238619215, "is_admin": 1, "can_upload_video": 0},
-            "cannot upload videos",
-        ),
-        (
-            {"id": 238619215, "is_admin": 1, "can_upload_video": 1, "can_post": 0},
-            "cannot publish posts",
-        ),
-    ],
-)
-def test_vk_identity_rejects_insufficient_group_permissions(monkeypatch, group, error) -> None:
+def test_vk_identity_does_not_require_administrator_role(monkeypatch) -> None:
     monkeypatch.setenv("PUBLISH_GRANDMA_KITCHEN_VK_USER_ID", "1114556285")
     user_response = Mock(ok=True, status_code=200)
     user_response.json.return_value = {
         "response": [{"id": 1114556285, "screen_name": "id1114556285"}]
     }
     group_response = Mock(ok=True, status_code=200)
-    group_response.json.return_value = {"response": {"groups": [group]}}
+    group_response.json.return_value = {
+        "response": {
+            "groups": [
+                {
+                    "id": 238619215,
+                    "is_admin": 0,
+                    "can_upload_video": 0,
+                    "can_post": 0,
+                }
+            ]
+        }
+    }
     monkeypatch.setattr(
         "app.social_publishers.requests.post",
         Mock(side_effect=[user_response, group_response]),
     )
 
-    with pytest.raises(PublicationDeliveryError, match=error):
-        _verify_vk_identity(
-            "grandma_kitchen", token="secret-token", group_id="238619215", api_version="5.199"
-        )
+    _verify_vk_identity(
+        "grandma_kitchen", token="secret-token", group_id="238619215", api_version="5.199"
+    )
 
 
 def test_vk_identity_rejects_wrong_user_without_querying_groups(monkeypatch) -> None:

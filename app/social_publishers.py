@@ -412,7 +412,6 @@ def _verify_vk_identity(project_slug: str, *, token: str, group_id: str, api_ver
             "access_token": token,
             "v": api_version,
             "group_id": group_id,
-            "fields": "is_admin,admin_level,can_post,can_upload_video,can_upload_clip",
         },
         timeout=DEFAULT_REQUEST_TIMEOUT,
     )
@@ -428,24 +427,9 @@ def _verify_vk_identity(project_slug: str, *, token: str, group_id: str, api_ver
         ),
         None,
     )
-    if not isinstance(group, dict) or not bool(group.get("is_admin")):
-        identity = (
-            f"user {actual_user_id}"
-            if actual_user_id
-            else f"@{actual_screen_name or 'unknown'}"
-        )
+    if not isinstance(group, dict):
         raise PublicationDeliveryError(
-            f"VK {identity} is not an administrator of configured group {group_id}."
-        )
-    if group.get("can_upload_video") is not None and not bool(group.get("can_upload_video")):
-        raise PublicationDeliveryError(
-            f"VK user {actual_user_id or actual_screen_name or 'unknown'} cannot upload videos "
-            f"to configured group {group_id}."
-        )
-    if group.get("can_post") is not None and not bool(group.get("can_post")):
-        raise PublicationDeliveryError(
-            f"VK user {actual_user_id or actual_screen_name or 'unknown'} cannot publish posts "
-            f"in configured group {group_id}."
+            f"VK did not return configured group {group_id}."
         )
 
 
