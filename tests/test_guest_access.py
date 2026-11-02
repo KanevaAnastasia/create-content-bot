@@ -1144,6 +1144,51 @@ def test_real_guest_video_runs_in_deduplicated_background_task(monkeypatch):
     ]
 
 
+def test_late_syntax_failure_does_not_overwrite_newer_guest_scene(guest_db, monkeypatch, tmp_path):
+    session, _project_id = _guest_session_with_project(guest_db)
+    start_path = tmp_path / "scene-1.png"
+    start_path.write_bytes(b"scene-1")
+    session["state"] = guest_handlers.STATE_SYNTAX_PENDING
+    session["guest_data"] = {
+        "scene_id": "scene-1",
+        "scene_index": 0,
+        "current_image_candidate_id": "image-1",
+        "current_image_uri": start_path.as_uri(),
+        "video_description": "Старая сцена",
+    }
+
+    def fake_syntax(**_kwargs):
+        data = session["guest_data"]
+        data.update(
+            scene_id="scene-2",
+            scene_index=1,
+            current_image_candidate_id="image-2",
+            current_image_uri="file:///scene-2.png",
+            video_description="Новая сцена",
+        )
+        session["state"] = guest_handlers.STATE_CARTOON_VIDEO_DESCRIPTION
+        return SimpleNamespace(success=False, video_bytes=None, provider_message="closed")
+
+    monkeypatch.setattr(guest_handlers, "try_generate_via_syntax", fake_syntax)
+    message = _Message()
+    update = SimpleNamespace(message=message)
+
+    asyncio.run(
+        guest_handlers._generate_video_now(
+            update,
+            session,
+            target="cartoon",
+            quiet_checked=True,
+            announce=False,
+        )
+    )
+
+    assert session["state"] == guest_handlers.STATE_CARTOON_VIDEO_DESCRIPTION
+    assert session["guest_data"]["scene_id"] == "scene-2"
+    assert "syntax_retry_target" not in session["guest_data"]
+    assert message.sent == []
+
+
 def test_new_syntax_candidate_does_not_unapprove_accepted_video(guest_db, monkeypatch, tmp_path):
     session, _project_id = _guest_session_with_project(guest_db)
     monkeypatch.setenv("SCENE_MEDIA_ARTIFACTS_DIR", str(tmp_path / "artifacts"))

@@ -1726,6 +1726,7 @@ async def _generate_video_now(
     if not quiet_checked and await _reject_generation_in_quiet_mode(update, session):
         return
     data = _guest_data(session)
+    job_context = _guest_video_job_context(session)
     aspect_ratio = _guest_aspect_ratio(session)
     base = str(data.get("video_description") or data.get("scene_description") or "").strip()
     prompt = base
@@ -1761,10 +1762,16 @@ async def _generate_video_now(
         result = None
     video_bytes: bytes | None = None
     if result is not None and result.success:
+        if not _guest_video_job_is_current(session, job_context):
+            logger.info("guest.syntax_stale_result_ignored target=%s", target)
+            return
         try:
             video_bytes = await asyncio.to_thread(video_bytes_from_fallback_result, result)
         except Exception:
             logger.exception("guest.syntax_video_download_failed target=%s", target)
+    if not _guest_video_job_is_current(session, job_context):
+        logger.info("guest.syntax_stale_result_ignored target=%s", target)
+        return
     if result is None or not result.success or not video_bytes:
         if result is not None:
             logger.warning("guest.syntax_unsuccessful target=%s message=%s", target, result.provider_message)
@@ -1813,6 +1820,7 @@ async def _generate_video(update: Update, session: dict[str, Any], *, target: st
         return
 
     data = _guest_data(session)
+    job_context = _guest_video_job_context(session)
     data["syntax_retry_target"] = target
     session["state"] = STATE_SYNTAX_PENDING
     save_loaded_session_if_possible(int(chat_id))
@@ -1845,7 +1853,11 @@ async def _generate_video(update: Update, session: dict[str, Any], *, target: st
                 markup=guest_keyboard_for_session(session),
             )
         finally:
-            if not cancelled and session.get("state") == STATE_SYNTAX_PENDING:
+            if (
+                not cancelled
+                and session.get("state") == STATE_SYNTAX_PENDING
+                and _guest_video_job_is_current(session, job_context)
+            ):
                 data["syntax_retry_target"] = target
                 session["state"] = STATE_SYNTAX_ERROR
             save_loaded_session_if_possible(int(chat_id))
@@ -1855,6 +1867,29 @@ async def _generate_video(update: Update, session: dict[str, Any], *, target: st
         run(),
         name=f"guest-syntax-{int(chat_id)}-{target}",
     )
+
+
+def _guest_video_job_context(session: dict[str, Any]) -> tuple[str, int, str, str, str, str]:
+    """Snapshot fields that identify the exact guest scene/video request."""
+
+    data = _guest_data(session)
+    return (
+        str(data.get("scene_id") or ""),
+        int(data.get("scene_index") or 0),
+        str(data.get("current_image_candidate_id") or ""),
+        str(data.get("current_image_uri") or ""),
+        str(data.get("video_description") or ""),
+        _guest_aspect_ratio(session),
+    )
+
+
+def _guest_video_job_is_current(
+    session: dict[str, Any],
+    expected: tuple[str, int, str, str, str, str],
+) -> bool:
+    """Prevent a late Syntax worker from overwriting a newer guest scene."""
+
+    return _guest_video_job_context(session) == expected
 
 
 def _create_character_from_draft(session: dict[str, Any]) -> uuid.UUID:
