@@ -127,6 +127,18 @@ def test_guest_approval_uses_new_prompt_button():
     assert rows == [["ОК"], ["ПЕРЕГЕНЕРИРОВАТЬ"], ["Другой промпт"], ["В меню"]]
 
 
+def test_guest_video_format_keyboard_offers_vertical_and_horizontal():
+    session = {"state": guest_handlers.STATE_VIDEO_FORMAT, "guest_data": {}}
+
+    rows = [[button.text for button in row] for row in guest_handlers.guest_keyboard_for_session(session).keyboard]
+
+    assert rows == [
+        [guest_handlers.BUTTON_FORMAT_VERTICAL],
+        [guest_handlers.BUTTON_FORMAT_HORIZONTAL],
+        [guest_handlers.BUTTON_MENU],
+    ]
+
+
 def test_guest_final_review_offers_fix_and_add_scene():
     session = {
         "state": guest_handlers.STATE_CARTOON_FINAL_REVIEW,
@@ -584,6 +596,68 @@ def _guest_session_with_project(guest_db):
     }, project.id
 
 
+def test_guest_video_creation_asks_format_and_keeps_vertical_choice(guest_db, monkeypatch):
+    session, project_id = _guest_session_with_project(guest_db)
+    chat_id = 607
+    dict.__setitem__(guest_handlers.SESSIONS, chat_id, session)
+    identity = guest_access.BotIdentity(
+        user_id=uuid.UUID(session["bot_user_id"]),
+        telegram_id=chat_id,
+        normalized_username="guest607",
+        display_name="Гость",
+        role="guest",
+        is_active=True,
+        project_id=project_id,
+    )
+    monkeypatch.setattr(guest_handlers, "save_loaded_session_if_possible", lambda _chat_id: None)
+    message = _Message()
+    update = SimpleNamespace(message=message, effective_chat=SimpleNamespace(id=chat_id))
+
+    message.text = guest_handlers.MENU_VIDEO
+    asyncio.run(guest_handlers.guest_on_text(update, SimpleNamespace(), identity))
+
+    assert session["state"] == guest_handlers.STATE_VIDEO_FORMAT
+    assert session["guest_data"]["format_target"] == "video"
+    assert "Выберите формат видео" in message.sent[-1][1]
+
+    message.text = guest_handlers.BUTTON_FORMAT_VERTICAL
+    asyncio.run(guest_handlers.guest_on_text(update, SimpleNamespace(), identity))
+
+    assert session["state"] == guest_handlers.STATE_VIDEO_CHARACTERS
+    assert session["guest_data"]["aspect_ratio"] == "9:16"
+    assert "format_target" not in session["guest_data"]
+    dict.pop(guest_handlers.SESSIONS, chat_id, None)
+
+
+def test_guest_cartoon_horizontal_choice_is_saved_at_project_start(guest_db, monkeypatch):
+    session, project_id = _guest_session_with_project(guest_db)
+    chat_id = 608
+    dict.__setitem__(guest_handlers.SESSIONS, chat_id, session)
+    identity = guest_access.BotIdentity(
+        user_id=uuid.UUID(session["bot_user_id"]),
+        telegram_id=chat_id,
+        normalized_username="guest608",
+        display_name="Гость",
+        role="guest",
+        is_active=True,
+        project_id=project_id,
+    )
+    monkeypatch.setattr(guest_handlers, "save_loaded_session_if_possible", lambda _chat_id: None)
+    message = _Message()
+    update = SimpleNamespace(message=message, effective_chat=SimpleNamespace(id=chat_id))
+
+    message.text = guest_handlers.MENU_CARTOON
+    asyncio.run(guest_handlers.guest_on_text(update, SimpleNamespace(), identity))
+    message.text = guest_handlers.BUTTON_FORMAT_HORIZONTAL
+    asyncio.run(guest_handlers.guest_on_text(update, SimpleNamespace(), identity))
+
+    assert session["state"] == guest_handlers.STATE_CARTOON_CHARACTERS
+    assert session["guest_data"]["aspect_ratio"] == "16:9"
+    assert session["guest_data"]["approved_scenes"] == []
+    assert session.get("generation_run_id")
+    dict.pop(guest_handlers.SESSIONS, chat_id, None)
+
+
 def test_guest_generation_history_uses_daily_numbers_and_restores_selected_run(guest_db, monkeypatch, tmp_path):
     session, project_id = _guest_session_with_project(guest_db)
     monkeypatch.setenv("SCENE_MEDIA_ARTIFACTS_DIR", str(tmp_path / "artifacts"))
@@ -1016,6 +1090,47 @@ def test_syntax_gets_start_frame_and_only_selected_voice_profiles(guest_db, monk
     assert "Борис" not in captured["prompt"]
     assert b"character-reference-must-not-be-sent" != captured["start_image"]
     assert session["state"] == guest_handlers.STATE_SYNTAX_ERROR
+
+
+def test_horizontal_cartoon_uses_selected_ratio_for_frames_video_and_storage(guest_db, monkeypatch, tmp_path):
+    session, _project_id = _guest_session_with_project(guest_db)
+    session["guest_data"] = {
+        "aspect_ratio": "16:9",
+        "selected_character_ids": [],
+        "scene_description": "Герой идёт по набережной",
+    }
+    guest_handlers._new_run(session, "cartoon", title="Горизонтальный мультфильм")
+    captured_image = {}
+    captured_video = {}
+
+    def fake_vertex(_prompt, **kwargs):
+        captured_image.update(kwargs)
+        return b"generated-horizontal-frame"
+
+    def fake_syntax(**kwargs):
+        captured_video.update(kwargs)
+        return SimpleNamespace(success=True, provider_message="ok")
+
+    monkeypatch.setattr(guest_handlers, "generate_image_vertex", fake_vertex)
+    monkeypatch.setattr(guest_handlers, "try_generate_via_syntax", fake_syntax)
+    monkeypatch.setattr(guest_handlers, "video_bytes_from_fallback_result", lambda _result: b"horizontal-video")
+    monkeypatch.setenv("SCENE_MEDIA_ARTIFACTS_DIR", str(tmp_path / "artifacts"))
+    update = SimpleNamespace(message=_Message())
+
+    asyncio.run(guest_handlers._generate_image(update, session, target="cartoon_frame"))
+    session["guest_data"]["video_description"] = "Герой машет рукой"
+    asyncio.run(guest_handlers._generate_video(update, session, target="cartoon"))
+
+    assert captured_image["aspect_ratio"] == "16:9"
+    assert captured_video["aspect_ratio"] == "16:9"
+    assert guest_handlers._finish_scene_payload(session)["aspect_ratio"] == "16:9"
+    with guest_db() as db:
+        row = db.execute(
+            select(SceneVideoCandidate).where(
+                SceneVideoCandidate.candidate_id == session["guest_data"]["current_video_candidate_id"]
+            )
+        ).scalar_one()
+        assert row.generation_params_json["aspect_ratio"] == "16:9"
 
 
 def test_voice_profile_short_description_falls_back_to_role_in_voice_text():

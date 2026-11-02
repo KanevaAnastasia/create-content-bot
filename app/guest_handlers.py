@@ -104,8 +104,11 @@ BUTTON_RETRY = "Повторить"
 BUTTON_RETRY_DELIVERY = "Повторить отправку"
 BUTTON_HISTORY_PREVIOUS = "Назад"
 BUTTON_HISTORY_NEXT = "Дальше"
+BUTTON_FORMAT_VERTICAL = "Вертикальный 9:16"
+BUTTON_FORMAT_HORIZONTAL = "Горизонтальный 16:9"
 
 STATE_MENU = "guest_menu"
+STATE_VIDEO_FORMAT = "guest_video_format"
 STATE_CHARACTER_METHOD = "guest_character_method"
 STATE_CHARACTER_NAME = "guest_character_name"
 STATE_CHARACTER_SHORT_DESCRIPTION = "guest_character_short_description"
@@ -249,6 +252,10 @@ def _markup(rows: list[list[str]]) -> ReplyKeyboardMarkup:
     return ReplyKeyboardMarkup(rows, resize_keyboard=True, one_time_keyboard=False)
 
 
+def _video_format_markup() -> ReplyKeyboardMarkup:
+    return _markup([[BUTTON_FORMAT_VERTICAL], [BUTTON_FORMAT_HORIZONTAL]])
+
+
 def _approval_markup() -> ReplyKeyboardMarkup:
     return _markup([[BUTTON_OK], [BUTTON_REGENERATE], [BUTTON_NEW_PROMPT]])
 
@@ -273,6 +280,29 @@ def _guest_data(session: dict[str, Any]) -> dict[str, Any]:
         value = {}
         session["guest_data"] = value
     return value
+
+
+def _guest_aspect_ratio(session: dict[str, Any]) -> str:
+    value = str(_guest_data(session).get("aspect_ratio") or "").strip()
+    return value if value in {"9:16", "16:9"} else "9:16"
+
+
+def _guest_aspect_label(aspect_ratio: str) -> str:
+    return "горизонтальное изображение 16:9" if aspect_ratio == "16:9" else "вертикальное изображение 9:16"
+
+
+def _stored_guest_aspect_ratio(video_row: SceneVideoCandidate | None, scene: Scene | None = None) -> str:
+    params = (
+        video_row.generation_params_json
+        if video_row is not None and isinstance(video_row.generation_params_json, dict)
+        else {}
+    )
+    value = str(params.get("aspect_ratio") or "").strip()
+    if value in {"9:16", "16:9"}:
+        return value
+    meta = scene.prompt_meta_json if scene is not None and isinstance(scene.prompt_meta_json, dict) else {}
+    value = str(meta.get("guest_aspect_ratio") or "").strip()
+    return value if value in {"9:16", "16:9"} else "9:16"
 
 
 def _generation_history_items(session: dict[str, Any]) -> list[GuestRunHistoryItem]:
@@ -552,6 +582,7 @@ def _rebuild_guest_session_from_run(identity: BotIdentity, run_id: str) -> tuple
                     "video_description": _video_candidate_user_prompt(video_row),
                     "effective_video_prompt": effective_prompt,
                     "last_video_target": "video",
+                    "aspect_ratio": _stored_guest_aspect_ratio(video_row, scene),
                 }
             )
             restored["state"] = STATE_VIDEO_APPROVAL
@@ -626,7 +657,7 @@ def _rebuild_guest_session_from_run(identity: BotIdentity, run_id: str) -> tuple
                     "scene": index + 1,
                     "text": str(scene.text or ""),
                     "duration_sec": 8,
-                    "aspect_ratio": "9:16",
+                    "aspect_ratio": _stored_guest_aspect_ratio(video_row, scene),
                     "video_uri": str(video_row.media_uri or ""),
                     "selected_character_ids": _selected_character_ids_from_scene(scene),
                     "video_prompt_by_lang": {"ru": stored_prompt},
@@ -655,6 +686,7 @@ def _rebuild_guest_session_from_run(identity: BotIdentity, run_id: str) -> tuple
                         last["video_candidates_by_lang"]["ru"][0]["candidate_id"]
                     ),
                     "current_video_uri": str(last.get("video_uri") or ""),
+                    "aspect_ratio": str(last.get("aspect_ratio") or "9:16"),
                 }
             )
             restored["scene_db_ids_by_index"] = scene_map
@@ -938,6 +970,8 @@ def guest_keyboard_for_session(session: dict[str, Any]) -> object:
     state = str(session.get("state") or "")
     if state == STATE_MENU:
         return guest_main_menu_markup(session)
+    if state == STATE_VIDEO_FORMAT:
+        return _video_format_markup()
     if state == STATE_GENERATION_HISTORY:
         return _generation_history_markup(session)
     if state == STATE_PRIMARY_CHARACTER:
@@ -1238,6 +1272,7 @@ def _guest_scene_prompt_meta(session: dict[str, Any], existing: object = None) -
         str(value) for value in data.get("selected_character_ids") or []
     ]
     meta["guest_mode"] = True
+    meta["guest_aspect_ratio"] = _guest_aspect_ratio(session)
     return meta
 
 
@@ -1333,6 +1368,7 @@ def _persist_video_candidate(
 ) -> tuple[str, str]:
     run_id, scene_id = _run_uuid(session), _scene_uuid(session)
     data = _guest_data(session)
+    aspect_ratio = _guest_aspect_ratio(session)
     candidate_id = f"guest-video-{uuid.uuid4().hex}"
     uri = store_project_artifact_media(
         project_id=_project_uuid(session),
@@ -1365,7 +1401,7 @@ def _persist_video_candidate(
                     "syntax_provider": "veo",
                     "model": "veo3_fast",
                     "duration_sec": 8,
-                    "aspect_ratio": "9:16",
+                    "aspect_ratio": aspect_ratio,
                     "user_prompt": str(user_prompt if user_prompt is not None else prompt),
                 },
             )
@@ -1581,6 +1617,7 @@ async def _generate_image(update: Update, session: dict[str, Any], *, target: st
         await _reply(update, GUEST_IMAGE_QUOTA_EXHAUSTED_MESSAGE, markup=guest_keyboard_for_session(session))
         return
     data = _guest_data(session)
+    aspect_ratio = _guest_aspect_ratio(session) if target == "cartoon_frame" else "9:16"
     if target == "character":
         base = str(data.get("appearance") or "")
         feedback = list(data.get("character_feedback") or [])
@@ -1616,7 +1653,7 @@ async def _generate_image(update: Update, session: dict[str, Any], *, target: st
         prefix = "\n\n".join(
             item
             for item in (
-                "Создай вертикальное изображение 9:16.",
+                f"Создай {_guest_aspect_label(aspect_ratio)}.",
                 _character_reference_instructions(character_references),
             )
             if item
@@ -1631,7 +1668,7 @@ async def _generate_image(update: Update, session: dict[str, Any], *, target: st
             generate_image_vertex,
             prompt,
             reference_images=refs,
-            aspect_ratio="9:16",
+            aspect_ratio=aspect_ratio,
         )
     except Exception:
         logger.exception("guest.image_generation_failed target=%s", target)
@@ -1651,6 +1688,7 @@ async def _generate_video(update: Update, session: dict[str, Any], *, target: st
     if await _reject_generation_in_quiet_mode(update, session):
         return
     data = _guest_data(session)
+    aspect_ratio = _guest_aspect_ratio(session)
     base = str(data.get("video_description") or data.get("scene_description") or "").strip()
     prompt = base
     voices = _voice_profiles(session)
@@ -1671,7 +1709,7 @@ async def _generate_video(update: Update, session: dict[str, Any], *, target: st
             start_image=start_image,
             end_image=None,
             syntax_provider="veo",
-            aspect_ratio="9:16",
+            aspect_ratio=aspect_ratio,
         )
     except Exception:
         logger.exception("guest.syntax_generation_failed target=%s", target)
@@ -1945,9 +1983,17 @@ async def _show_menu(update: Update, session: dict[str, Any]) -> None:
     await _reply(update, "Выберите действие.", markup=guest_main_menu_markup(session))
 
 
-async def _begin_selection(update: Update, session: dict[str, Any], state: str) -> None:
+async def _begin_selection(
+    update: Update,
+    session: dict[str, Any],
+    state: str,
+    *,
+    aspect_ratio: str | None = None,
+) -> None:
     _clear_workflow_data(session)
     data = _guest_data(session)
+    if aspect_ratio in {"9:16", "16:9"}:
+        data["aspect_ratio"] = aspect_ratio
     data["selected_character_ids"] = []
     data["character_selection_confirmed"] = False
     data["character_selection_changed"] = False
@@ -1966,7 +2012,7 @@ def _finish_scene_payload(session: dict[str, Any]) -> dict[str, Any]:
         "scene": int(data.get("scene_index") or 0) + 1,
         "text": str(data.get("scene_description") or ""),
         "duration_sec": 8,
-        "aspect_ratio": "9:16",
+        "aspect_ratio": _guest_aspect_ratio(session),
         "video_uri": str(data.get("current_video_uri") or ""),
         "selected_character_ids": [str(value) for value in data.get("selected_character_ids") or []],
         "video_prompt_by_lang": {"ru": str(data.get("effective_video_prompt") or "")},
@@ -2082,6 +2128,7 @@ def _restore_cartoon_scene_for_edit(session: dict[str, Any], scene_index: int) -
             "current_video_uri": str(getattr(video_row, "media_uri", "") or ""),
             "editing_existing_scene": True,
             "edit_scene_index": scene_index,
+            "aspect_ratio": str(scene_payload.get("aspect_ratio") or _stored_guest_aspect_ratio(video_row, scene)),
         }
     )
 
@@ -2114,6 +2161,7 @@ def _begin_cartoon_scene_insertion(session: dict[str, Any], insert_at: int) -> N
     if insert_at < 1 or insert_at > len(approved):
         raise ValueError("Позиция для новой сцены не найдена.")
     previous = approved[insert_at - 1]
+    aspect_ratio = str(previous.get("aspect_ratio") or _guest_aspect_ratio(session))
     previous_selection = [str(value) for value in previous.get("selected_character_ids") or []]
     new_scene_id = _append_cartoon_scene(session)
     data.clear()
@@ -2129,6 +2177,7 @@ def _begin_cartoon_scene_insertion(session: dict[str, Any], insert_at: int) -> N
             "scene_id": str(new_scene_id),
             "insert_scene_at": insert_at,
             "inserting_scene": True,
+            "aspect_ratio": aspect_ratio if aspect_ratio in {"9:16", "16:9"} else "9:16",
         }
     )
 
@@ -2479,6 +2528,22 @@ async def guest_on_text(update: Update, context: ContextTypes.DEFAULT_TYPE, iden
             await _open_guest_run_from_history(update, session, identity, run_id)
             return
 
+        if state == STATE_VIDEO_FORMAT:
+            aspect_ratio = {
+                BUTTON_FORMAT_VERTICAL: "9:16",
+                BUTTON_FORMAT_HORIZONTAL: "16:9",
+            }.get(text)
+            if aspect_ratio is None:
+                await _reply(update, "Выберите формат видео кнопкой.", markup=guest_keyboard_for_session(session))
+                return
+            target = str(data.get("format_target") or "video")
+            selection_state = STATE_CARTOON_CHARACTERS if target == "cartoon" else STATE_VIDEO_CHARACTERS
+            await _begin_selection(update, session, selection_state, aspect_ratio=aspect_ratio)
+            if target == "cartoon":
+                _new_run(session, "cartoon", title="Гостевой мультфильм")
+                _guest_data(session)["approved_scenes"] = []
+            return
+
         if state == STATE_CARTOON_FINAL_REVIEW:
             if text == BUTTON_OK:
                 await _show_menu(update, session)
@@ -2639,11 +2704,15 @@ async def guest_on_text(update: Update, context: ContextTypes.DEFAULT_TYPE, iden
             elif text == MENU_IMAGE:
                 await _begin_selection(update, session, STATE_IMAGE_CHARACTERS)
             elif text == MENU_VIDEO:
-                await _begin_selection(update, session, STATE_VIDEO_CHARACTERS)
+                _clear_workflow_data(session)
+                data["format_target"] = "video"
+                session["state"] = STATE_VIDEO_FORMAT
+                await _reply(update, "Выберите формат видео.", markup=guest_keyboard_for_session(session))
             elif text == MENU_CARTOON:
-                await _begin_selection(update, session, STATE_CARTOON_CHARACTERS)
-                _new_run(session, "cartoon", title="Гостевой мультфильм")
-                data["approved_scenes"] = []
+                _clear_workflow_data(session)
+                data["format_target"] = "cartoon"
+                session["state"] = STATE_VIDEO_FORMAT
+                await _reply(update, "Выберите формат мультфильма.", markup=guest_keyboard_for_session(session))
             elif text == MENU_GENERATIONS:
                 save_loaded_session_if_possible(chat_id)
                 data["history_page"] = 0
@@ -3040,6 +3109,7 @@ async def guest_on_text(update: Update, context: ContextTypes.DEFAULT_TYPE, iden
             if text == "Следующая сцена":
                 approved = list(data.get("approved_scenes") or [])
                 previous = approved[-1] if approved else {}
+                aspect_ratio = str(previous.get("aspect_ratio") or _guest_aspect_ratio(session))
                 previous_selection = [
                     str(value)
                     for value in previous.get("selected_character_ids") or data.get("selected_character_ids") or []
@@ -3054,6 +3124,7 @@ async def guest_on_text(update: Update, context: ContextTypes.DEFAULT_TYPE, iden
                 data["previous_video_uri"] = str(previous.get("video_uri") or "")
                 data["scene_index"] = len(approved)
                 data["scene_id"] = _scene_index_map(session)[len(approved)]
+                data["aspect_ratio"] = aspect_ratio if aspect_ratio in {"9:16", "16:9"} else "9:16"
                 session["state"] = STATE_CARTOON_CHARACTERS
                 selection_text = (
                     "Персонажи предыдущей сцены уже выбраны (отмечены ✓). При необходимости измените выбор."
