@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import math
 import mimetypes
+import secrets
 import time
 import uuid
 from dataclasses import dataclass
@@ -23,6 +24,7 @@ from sqlalchemy import select
 from .db import SessionLocal
 from .models import PublicationJob
 from .publication_config import project_env, project_env_name, shared_env
+from .publish_secret_store import set_project_secrets
 from .publications import (
     PUBLICATION_STATUS_APPROVED,
     PUBLICATION_STATUS_FAILED,
@@ -64,7 +66,7 @@ def _required_keys(platform: str, language: str) -> tuple[str, ...]:
             f"INSTAGRAM_BUSINESS_ACCOUNT_ID_{lang}",
         ),
         "tiktok": ("TIKTOK_ACCESS_TOKEN", "TIKTOK_OPEN_ID"),
-        "vk": ("VK_ACCESS_TOKEN", "VK_USER_SCREEN_NAME", f"VK_GROUP_ID_{lang}"),
+        "vk": ("VK_USER_SCREEN_NAME", f"VK_GROUP_ID_{lang}"),
     }.get(str(platform or "").strip().lower(), ())
 
 
@@ -73,6 +75,13 @@ def platform_readiness(project_slug: str, platform: str, language: str) -> Platf
     normalized_language = str(language or "").strip().lower()
     required = _required_keys(normalized_platform, normalized_language)
     missing = [project_env_name(project_slug, key) for key in required if not project_env(project_slug, key)]
+    if normalized_platform == "vk" and not project_env(project_slug, "VK_ACCESS_TOKEN"):
+        oauth_keys = ("VK_CLIENT_ID", "VK_REFRESH_TOKEN", "VK_DEVICE_ID", "VK_REDIRECT_URI")
+        missing.extend(
+            project_env_name(project_slug, key)
+            for key in oauth_keys
+            if not project_env(project_slug, key)
+        )
     if normalized_platform == "instagram":
         for shared_key in ("CONTENT_FABRIC_PUBLIC_BASE_URL", "PUBLICATION_MEDIA_SIGNING_KEY"):
             if not shared_env(shared_key):
@@ -323,6 +332,49 @@ def _vk_error_message(payload: dict[str, Any], context: str) -> None:
     raise PublicationDeliveryError(f"{context}: {message}{suffix}")
 
 
+def _vk_access_token(project_slug: str) -> str:
+    client_id = project_env(project_slug, "VK_CLIENT_ID")
+    refresh_token = project_env(project_slug, "VK_REFRESH_TOKEN")
+    device_id = project_env(project_slug, "VK_DEVICE_ID")
+    redirect_uri = project_env(project_slug, "VK_REDIRECT_URI")
+    if not all((client_id, refresh_token, device_id, redirect_uri)):
+        token = project_env(project_slug, "VK_ACCESS_TOKEN")
+        if not token:
+            raise PublicationDeliveryError("VK user OAuth credentials are not configured.")
+        return token
+
+    state = secrets.token_urlsafe(32)
+    response = requests.post(
+        "https://id.vk.ru/oauth2/auth",
+        params={
+            "grant_type": "refresh_token",
+            "redirect_uri": redirect_uri,
+            "client_id": client_id,
+            "device_id": device_id,
+            "state": state,
+        },
+        data={"refresh_token": refresh_token},
+        timeout=DEFAULT_REQUEST_TIMEOUT,
+    )
+    payload = _response_json(response, "VK ID OAuth refresh")
+    if payload.get("error"):
+        raise PublicationDeliveryError(
+            f"VK ID OAuth refresh: {payload.get('error_description') or payload.get('error')}"
+        )
+    if str(payload.get("state") or "") != state:
+        raise PublicationDeliveryError("VK ID OAuth refresh returned an invalid state.")
+    access_token = str(payload.get("access_token") or "").strip()
+    rotated_refresh_token = str(payload.get("refresh_token") or "").strip()
+    if not access_token or not rotated_refresh_token:
+        raise PublicationDeliveryError("VK ID OAuth refresh returned incomplete credentials.")
+    values = {"VK_ACCESS_TOKEN": access_token, "VK_REFRESH_TOKEN": rotated_refresh_token}
+    returned_device_id = str(payload.get("device_id") or "").strip()
+    if returned_device_id:
+        values["VK_DEVICE_ID"] = returned_device_id
+    set_project_secrets(project_slug, values)
+    return access_token
+
+
 def _verify_vk_identity(project_slug: str, *, token: str, group_id: str, api_version: str) -> None:
     expected_screen_name = project_env(project_slug, "VK_USER_SCREEN_NAME").lstrip("@").lower()
     user_response = requests.post(
@@ -362,7 +414,7 @@ def _verify_vk_identity(project_slug: str, *, token: str, group_id: str, api_ver
 
 
 def _publish_vk(job: PublicationJob, project_slug: str) -> str:
-    token = project_env(project_slug, "VK_ACCESS_TOKEN")
+    token = _vk_access_token(project_slug)
     language = str(job.language or "ru").upper()
     group_id = project_env(project_slug, f"VK_GROUP_ID_{language}")
     api_version = shared_env("VK_API_VERSION", "5.199")

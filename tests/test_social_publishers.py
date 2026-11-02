@@ -7,9 +7,11 @@ from app.publication_config import project_env, project_env_name
 from app.publication_media import publication_media_token, publication_media_token_is_valid
 from app.social_publishers import (
     PublicationDeliveryError,
+    _vk_access_token,
     _verify_vk_identity,
     platform_readiness,
 )
+from app.vk_oauth import build_authorize_url, exchange_authorization_code, new_pkce_pair
 
 
 def test_project_scoped_publish_env_never_falls_back_to_global_tokens(monkeypatch) -> None:
@@ -78,6 +80,104 @@ def test_vk_readiness_requires_expected_user_identity(monkeypatch) -> None:
 
     assert readiness.ready is False
     assert readiness.missing == ("PUBLISH_GRANDMA_KITCHEN_VK_USER_SCREEN_NAME",)
+
+
+def test_vk_readiness_accepts_refresh_credentials_without_static_token(monkeypatch) -> None:
+    monkeypatch.delenv("PUBLISH_GRANDMA_KITCHEN_VK_ACCESS_TOKEN", raising=False)
+    for key, value in {
+        "VK_CLIENT_ID": "54871992",
+        "VK_REFRESH_TOKEN": "refresh",
+        "VK_DEVICE_ID": "device",
+        "VK_REDIRECT_URI": "http://127.0.0.1/callback",
+        "VK_USER_SCREEN_NAME": "gggkanevaag",
+        "VK_GROUP_ID_RU": "238619215",
+    }.items():
+        monkeypatch.setenv(f"PUBLISH_GRANDMA_KITCHEN_{key}", value)
+
+    readiness = platform_readiness("grandma_kitchen", "vk", "ru")
+
+    assert readiness.ready is True
+    assert readiness.missing == ()
+
+
+def test_vk_access_token_refreshes_and_persists_rotated_values(monkeypatch) -> None:
+    for key, value in {
+        "VK_CLIENT_ID": "54871992",
+        "VK_REFRESH_TOKEN": "old-refresh",
+        "VK_DEVICE_ID": "old-device",
+        "VK_REDIRECT_URI": "http://127.0.0.1/callback",
+    }.items():
+        monkeypatch.setenv(f"PUBLISH_GRANDMA_KITCHEN_{key}", value)
+    response = Mock(ok=True, status_code=200)
+    response.json.return_value = {
+        "state": "fixed-state",
+        "access_token": "new-access",
+        "refresh_token": "new-refresh",
+        "device_id": "new-device",
+    }
+    post = Mock(return_value=response)
+    store = Mock()
+    monkeypatch.setattr("app.social_publishers.secrets.token_urlsafe", lambda _n: "fixed-state")
+    monkeypatch.setattr("app.social_publishers.requests.post", post)
+    monkeypatch.setattr("app.social_publishers.set_project_secrets", store)
+
+    assert _vk_access_token("grandma_kitchen") == "new-access"
+    post.assert_called_once_with(
+        "https://id.vk.ru/oauth2/auth",
+        params={
+            "grant_type": "refresh_token",
+            "redirect_uri": "http://127.0.0.1/callback",
+            "client_id": "54871992",
+            "device_id": "old-device",
+            "state": "fixed-state",
+        },
+        data={"refresh_token": "old-refresh"},
+        timeout=(20, 300),
+    )
+    store.assert_called_once_with(
+        "grandma_kitchen",
+        {
+            "VK_ACCESS_TOKEN": "new-access",
+            "VK_REFRESH_TOKEN": "new-refresh",
+            "VK_DEVICE_ID": "new-device",
+        },
+    )
+
+
+def test_vk_oauth_pkce_and_code_exchange(monkeypatch) -> None:
+    verifier, challenge = new_pkce_pair()
+    assert len(verifier) >= 43
+    assert "=" not in challenge
+    url = build_authorize_url(
+        client_id="54871992",
+        redirect_uri="http://127.0.0.1/callback",
+        state="expected-state",
+        code_challenge=challenge,
+    )
+    assert url.startswith("https://id.vk.ru/authorize?")
+    assert "client_id=54871992" in url
+    assert "scope=video+groups+wall" in url
+
+    response = Mock(ok=True, status_code=200)
+    response.json.return_value = {
+        "state": "expected-state",
+        "access_token": "access",
+        "refresh_token": "refresh",
+        "device_id": "device-2",
+        "expires_in": 3600,
+    }
+    monkeypatch.setattr("app.vk_oauth.requests.post", Mock(return_value=response))
+    tokens = exchange_authorization_code(
+        client_id="54871992",
+        redirect_uri="http://127.0.0.1/callback",
+        code="code",
+        code_verifier=verifier,
+        device_id="device-1",
+        state="expected-state",
+    )
+    assert tokens.access_token == "access"
+    assert tokens.refresh_token == "refresh"
+    assert tokens.device_id == "device-2"
 
 
 def test_vk_identity_must_match_user_and_managed_group(monkeypatch) -> None:

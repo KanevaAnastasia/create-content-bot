@@ -9,6 +9,7 @@ from pathlib import Path
 import subprocess
 import sys
 import threading
+import time
 import uuid
 from typing import Any
 from urllib.parse import quote, unquote, urlparse
@@ -61,7 +62,10 @@ from app.publications import (
     publication_target_label,
     queue_publication_bundle,
 )
-from app.social_publishers import platform_readiness
+from app.publication_config import project_env
+from app.publish_secret_store import set_project_secrets
+from app.social_publishers import _verify_vk_identity, platform_readiness
+from app.vk_oauth import build_authorize_url, exchange_authorization_code, new_pkce_pair
 from app.scheduled_generation import (
     DEFAULT_TITLE_COLOR as SCHEDULED_DEFAULT_TITLE_COLOR,
     build_scheduled_generation_template_bytes,
@@ -2460,6 +2464,15 @@ class PublicationQueueAdminForm(django_forms.Form):
         return {key: str(self.cleaned_data.get(key) or "") for key, _label in SOCIAL_COPY_FIELD_LABELS}
 
 
+class VKOAuthSetupAdminForm(django_forms.Form):
+    project_slug = django_forms.ChoiceField(required=True, label="Project / account set")
+    client_id = django_forms.CharField(required=True, label="VK ID App ID", max_length=64)
+
+    def __init__(self, *args, project_choices=(), **kwargs):
+        super().__init__(*args, **kwargs)
+        self.fields["project_slug"].choices = project_choices
+
+
 def _publication_project_choices() -> tuple[tuple[str, str], ...]:
     try:
         projects = Project.objects.filter(is_active=True).exclude(slug__startswith="guest-").order_by("title", "slug")
@@ -4842,13 +4855,126 @@ class PublicationJobAdmin(admin.ModelAdmin):
                 self.admin_site.admin_view(self.prepare_view),
                 name="pipeline_admin_publicationjob_prepare",
             ),
+            path(
+                "vk-oauth/",
+                self.admin_site.admin_view(self.vk_oauth_view),
+                name="pipeline_admin_publicationjob_vk_oauth",
+            ),
+            path(
+                "vk-oauth/callback/",
+                self.admin_site.admin_view(self.vk_oauth_callback_view),
+                name="pipeline_admin_publicationjob_vk_oauth_callback",
+            ),
         ]
         return custom + urls
 
     def changelist_view(self, request, extra_context=None):
         extra = dict(extra_context or {})
         extra["prepare_publication_url"] = reverse("admin:pipeline_admin_publicationjob_prepare")
+        extra["vk_oauth_url"] = reverse("admin:pipeline_admin_publicationjob_vk_oauth")
         return super().changelist_view(request, extra_context=extra)
+
+    def vk_oauth_view(self, request):
+        project_choices = _publication_project_choices()
+        initial_project = "grandma_kitchen" if any(key == "grandma_kitchen" for key, _ in project_choices) else (
+            project_choices[0][0] if project_choices else ""
+        )
+        initial_client_id = project_env(initial_project, "VK_CLIENT_ID") if initial_project else ""
+        form = VKOAuthSetupAdminForm(
+            request.POST or None,
+            project_choices=project_choices,
+            initial={"project_slug": initial_project, "client_id": initial_client_id},
+        )
+        request_callback_url = request.build_absolute_uri(
+            reverse("admin:pipeline_admin_publicationjob_vk_oauth_callback")
+        )
+        callback_url = project_env(initial_project, "VK_REDIRECT_URI") or request_callback_url
+        if request.method == "POST" and form.is_valid():
+            project_slug = str(form.cleaned_data["project_slug"])
+            client_id = str(form.cleaned_data["client_id"]).strip()
+            callback_url = project_env(project_slug, "VK_REDIRECT_URI") or request_callback_url
+            verifier, challenge = new_pkce_pair()
+            state = uuid.uuid4().hex + uuid.uuid4().hex
+            request.session[f"vk_oauth:{state}"] = {
+                "project_slug": project_slug,
+                "client_id": client_id,
+                "redirect_uri": callback_url,
+                "code_verifier": verifier,
+                "created_at": int(time.time()),
+            }
+            request.session.modified = True
+            set_project_secrets(
+                project_slug,
+                {"VK_CLIENT_ID": client_id, "VK_REDIRECT_URI": callback_url},
+            )
+            return HttpResponseRedirect(
+                build_authorize_url(
+                    client_id=client_id,
+                    redirect_uri=callback_url,
+                    state=state,
+                    code_challenge=challenge,
+                )
+            )
+        csrf_token = get_token(request)
+        html = format_html(
+            '<!doctype html><html><head><title>Connect VK publishing</title></head><body>'
+            '<div id="container"><div id="content" class="colM"><h1>Connect VK publishing API</h1>'
+            '<p>First add this exact redirect URL to the Web platform settings of the selected VK ID App:</p>'
+            '<p><code>{}</code></p>'
+            '<p>The authorization requests only <code>video</code>, <code>groups</code>, and <code>wall</code>. '
+            'The returned user and managed community are checked against the selected project settings before any token is saved.</p>'
+            '<form method="post"><input type="hidden" name="csrfmiddlewaretoken" value="{}">{}'
+            '<button type="submit" class="default">Continue to VK ID</button></form>'
+            '<p><a href="{}">Back to publication jobs</a></p></div></div></body></html>',
+            callback_url,
+            csrf_token,
+            mark_safe(form.as_p()),
+            reverse("admin:pipeline_admin_publicationjob_changelist"),
+        )
+        return HttpResponse(html)
+
+    def vk_oauth_callback_view(self, request):
+        state = str(request.GET.get("state") or "")
+        flow_key = f"vk_oauth:{state}"
+        flow = request.session.pop(flow_key, None) if state else None
+        request.session.modified = True
+        if not isinstance(flow, dict) or int(time.time()) - int(flow.get("created_at") or 0) > 900:
+            return HttpResponse("VK authorization session is missing or expired.", status=400)
+        error = str(request.GET.get("error_description") or request.GET.get("error") or "").strip()
+        if error:
+            return HttpResponse(f"VK authorization was not completed: {escape(error)}", status=400)
+        code = str(request.GET.get("code") or "").strip()
+        device_id = str(request.GET.get("device_id") or "").strip()
+        if not code or not device_id:
+            return HttpResponse("VK did not return code/device_id.", status=400)
+        project_slug = str(flow["project_slug"])
+        try:
+            tokens = exchange_authorization_code(
+                client_id=str(flow["client_id"]),
+                redirect_uri=str(flow["redirect_uri"]),
+                code=code,
+                code_verifier=str(flow["code_verifier"]),
+                device_id=device_id,
+                state=state,
+            )
+            _verify_vk_identity(
+                project_slug,
+                token=tokens.access_token,
+                group_id=project_env(project_slug, "VK_GROUP_ID_RU"),
+                api_version=os.getenv("VK_API_VERSION", "5.199"),
+            )
+            set_project_secrets(
+                project_slug,
+                {
+                    "VK_ACCESS_TOKEN": tokens.access_token,
+                    "VK_REFRESH_TOKEN": tokens.refresh_token,
+                    "VK_DEVICE_ID": tokens.device_id,
+                },
+            )
+        except Exception as exc:
+            return HttpResponse(f"VK connection failed: {escape(str(exc))}", status=400)
+        messages.success(request, f"VK publishing API connected for project {project_slug}.")
+        return HttpResponseRedirect(reverse("admin:pipeline_admin_publicationjob_changelist"))
 
     def prepare_view(self, request):
         run_id = str(request.GET.get("run_id") or "").strip()

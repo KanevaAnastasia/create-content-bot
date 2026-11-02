@@ -44,6 +44,10 @@ MP4 по публичному HTTPS URL, поэтому также обязат�
 ## VK
 
 - `VK_ACCESS_TOKEN`
+- `VK_CLIENT_ID`
+- `VK_REFRESH_TOKEN`
+- `VK_DEVICE_ID`
+- `VK_REDIRECT_URI`
 - `VK_USER_SCREEN_NAME`
 - `VK_GROUP_ID_RU`
 
@@ -52,6 +56,11 @@ MP4 по публичному HTTPS URL, поэтому также обязат�
 токена и проверяет, что он администрирует именно указанное сообщество. Токену нужны права `video`,
 `groups`, `wall` и серверный доступ. Для новых приложений VK ID выдаёт access token на один час вместе
 с refresh token; перед включением фоновой публикации оба должны быть настроены и проверены.
+
+Для VK ID OAuth 2.1 откройте в списке публикаций админки ссылку **Connect VK publishing API**.
+Добавьте показанный callback URL в Web-платформу приложения VK ID, затем подтвердите права
+`video`, `groups`, `wall`. Админка сохранит access/refresh token и device ID локально; публикационный
+воркер обновляет короткоживущий access token и атомарно сохраняет ротированный refresh token.
 
 ## Безопасное сохранение
 
