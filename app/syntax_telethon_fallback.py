@@ -297,6 +297,45 @@ async def _wait_for_syntax_configure_button(
     return None, None
 
 
+async def _wait_for_latest_syntax_configure_button(
+    client: Any,
+    target: Any,
+    *,
+    reply_anchor: int,
+    poll: float,
+    attempts: int = 6,
+) -> tuple[Any | None, Any | None]:
+    """Probe the newest bot replies without consuming legacy video iterators.
+
+    Veo's current chat flow posts the ``Настроить и запустить`` WebView button
+    immediately after it has accepted the prompt.  Older Syntax flows start the
+    task directly and never post that button.  Looking only at ``get_messages``
+    lets us support both variants: if no WebView appears after a few bounded
+    probes, the caller continues through the legacy video poll unchanged.
+    """
+
+    for attempt in range(max(1, min(int(attempts), 10))):
+        latest_raw = await client.get_messages(target, limit=5)
+        if latest_raw is None:
+            latest_messages: list[Any] = []
+        elif isinstance(latest_raw, (list, tuple)):
+            latest_messages = list(latest_raw)
+        else:
+            latest_messages = [latest_raw]
+        for message in latest_messages:
+            if message is None or getattr(message, "out", False):
+                continue
+            mid = int(getattr(message, "id", 0) or 0)
+            if mid <= reply_anchor:
+                continue
+            button = _syntax_find_configure_button(message)
+            if button is not None:
+                return message, button
+        if attempt + 1 < attempts:
+            await asyncio.sleep(max(0.5, min(float(poll), 2.0)))
+    return None, None
+
+
 async def _syntax_configure_button_webview_url(
     client: Any,
     target: Any,
@@ -1230,6 +1269,103 @@ def _fill_syntax_model_settings_webapp_sync(
             browser.close()
 
 
+_SYNTAX_VEO_QUEUE_LIMIT_RE = re.compile(
+    r"достигнут\s+лимит\s+очереди\s+veo|veo\s+queue\s+limit|maximum\s+active\s+generations",
+    re.IGNORECASE,
+)
+
+
+def _syntax_veo_uploaded_reference_count_sync(page: Any) -> int:
+    with contextlib.suppress(Exception):
+        text = str(page.locator("body").inner_text() or "")
+        match = re.search(r"Загружено\s*\(\s*(\d+)\s*/", text, flags=re.IGNORECASE)
+        if match:
+            return max(0, int(match.group(1)))
+    return 0
+
+
+def _syntax_veo_queue_is_full_sync(page: Any) -> bool:
+    with contextlib.suppress(Exception):
+        return bool(_SYNTAX_VEO_QUEUE_LIMIT_RE.search(str(page.locator("body").inner_text() or "")))
+    return False
+
+
+def _wait_for_syntax_veo_queue_slot_sync(page: Any, *, timeout_ms: int) -> None:
+    """Wait for an account queue slot before the paid Veo submit click."""
+
+    deadline = time.monotonic() + max(1.0, timeout_ms / 1000.0)
+    while _syntax_veo_queue_is_full_sync(page):
+        if time.monotonic() >= deadline:
+            raise RuntimeError("Syntax Veo queue limit is still active; generation was not started.")
+        page.wait_for_timeout(10_000)
+        with contextlib.suppress(Exception):
+            page.reload(wait_until="commit", timeout=min(timeout_ms, 60_000))
+            page.wait_for_load_state("networkidle", timeout=min(timeout_ms, 30_000))
+
+
+def _fill_syntax_veo_webapp_sync(
+    *,
+    url: str,
+    prompt: str,
+    start_image: bytes,
+    duration_sec: int,
+    aspect_ratio: str,
+    timeout_sec: int,
+) -> None:
+    """Configure and launch the current Syntax Veo WebView.
+
+    Telegram supplies the prompt and uploaded frame to this page.  We verify
+    and re-commit those values, apply the requested duration/aspect ratio, wait
+    for a free Veo queue slot, and only then click the visible Generate button.
+    """
+
+    try:
+        from playwright.sync_api import sync_playwright
+    except Exception as exc:
+        raise RuntimeError(
+            "Syntax Veo settings flow requires Playwright and a Chromium runtime."
+        ) from exc
+
+    timeout_ms = max(30_000, int(timeout_sec) * 1000)
+    with sync_playwright() as p:
+        try:
+            browser = p.chromium.launch(headless=True)
+        except Exception:
+            browser = p.chromium.launch(channel="chrome", headless=True)
+        try:
+            page = browser.new_page(viewport={"width": 430, "height": 932}, is_mobile=True)
+            page.goto(url, wait_until="commit", timeout=min(timeout_ms, 60_000))
+            with contextlib.suppress(Exception):
+                page.wait_for_load_state("networkidle", timeout=min(timeout_ms, 30_000))
+
+            if _syntax_veo_uploaded_reference_count_sync(page) < 1:
+                _upload_syntax_kling_start_frame_sync(page, start_image)
+            _fill_and_commit_syntax_kling_prompt_sync(page, prompt)
+
+            if not _try_click_syntax_option_sync(
+                page,
+                "Длительность",
+                f"{max(1, int(duration_sec))} сек",
+            ):
+                raise RuntimeError(
+                    f"Syntax Veo duration could not be set to {max(1, int(duration_sec))} sec."
+                )
+            _set_syntax_aspect_ratio_sync(page, aspect_ratio)
+            if not _syntax_page_contains_aspect_ratio_sync(page, aspect_ratio):
+                raise RuntimeError(
+                    f"Syntax Veo page does not show selected aspect ratio {_normalize_syntax_aspect_ratio(aspect_ratio)}."
+                )
+
+            # Leave the authenticated page open while the two-account-wide
+            # Syntax queue is full.  Reloading preserves the server-side form
+            # and avoids a paid duplicate submit.
+            queue_wait_ms = max(30_000, timeout_ms - 60_000)
+            _wait_for_syntax_veo_queue_slot_sync(page, timeout_ms=queue_wait_ms)
+            _click_syntax_kling_generate_sync(page, timeout_ms=15_000)
+        finally:
+            browser.close()
+
+
 async def _try_configure_syntax_model_settings(
     client: Any,
     target: Any,
@@ -1371,6 +1507,79 @@ async def _run_syntax_kling_configure_flow(
         initial_last_info=initial_last_info,
         timeout=timeout,
         expected_lang_token=None,
+    )
+
+
+async def _run_syntax_veo_configure_flow(
+    client: Any,
+    target: Any,
+    *,
+    bot_entity: Any,
+    configure_message: Any,
+    configure_button: Any,
+    prompt: str,
+    start_image: bytes,
+    duration_sec: int,
+    aspect_ratio: str,
+    reply_anchor: int,
+    sent_ids: set[int],
+    attempt_id: str,
+    poll: float,
+    deadline: float,
+    timeout: int,
+    initial_last_info: str,
+    expected_lang_token: str | None,
+) -> Any:
+    """Launch Veo through Syntax's mandatory Settings WebView, then poll chat."""
+
+    configure_mid = int(getattr(configure_message, "id", 0) or 0)
+    if configure_mid:
+        sent_ids.add(configure_mid)
+    webview_url = await _syntax_configure_button_webview_url(
+        client,
+        target,
+        bot_entity,
+        configure_message,
+        configure_button,
+    )
+    if not webview_url:
+        return _result(
+            success=False,
+            video_bytes=None,
+            video_uri=None,
+            provider_message="Syntax Veo Настроить и запустить button did not expose a WebView URL.",
+            attempt_id=attempt_id,
+        )
+    try:
+        remaining = max(30, int(deadline - time.monotonic()))
+        await asyncio.to_thread(
+            _fill_syntax_veo_webapp_sync,
+            url=webview_url,
+            prompt=prompt,
+            start_image=start_image,
+            duration_sec=duration_sec,
+            aspect_ratio=aspect_ratio,
+            timeout_sec=remaining,
+        )
+    except Exception as exc:
+        return _result(
+            success=False,
+            video_bytes=None,
+            video_uri=None,
+            provider_message=f"Syntax Veo UI configure failed: {_sanitize_syntax_webview_error(exc)}",
+            attempt_id=attempt_id,
+        )
+    return await _poll_syntax_bot_until_video(
+        client,
+        target,
+        reply_anchor=reply_anchor,
+        sent_ids=sent_ids,
+        attempt_id=attempt_id,
+        poll=poll,
+        deadline=deadline,
+        initial_last_info=initial_last_info,
+        timeout=timeout,
+        expected_lang_token=expected_lang_token,
     )
 
 
@@ -2198,6 +2407,33 @@ async def _run_fallback_async(
                 sent_ids.add(int(request_message.id))
 
                 deadline = time.monotonic() + timeout
+                if provider_kind == SYNTAX_PROVIDER_VEO:
+                    configure_message, configure_button = await _wait_for_latest_syntax_configure_button(
+                        client,
+                        target,
+                        reply_anchor=reply_anchor,
+                        poll=0.5,
+                    )
+                    if configure_message is not None and configure_button is not None:
+                        return await _run_syntax_veo_configure_flow(
+                            client,
+                            target,
+                            bot_entity=target,
+                            configure_message=configure_message,
+                            configure_button=configure_button,
+                            prompt=prompt_text,
+                            start_image=start_image,
+                            duration_sec=duration_sec,
+                            aspect_ratio=aspect_ratio,
+                            reply_anchor=reply_anchor,
+                            sent_ids=sent_ids,
+                            attempt_id=attempt_id,
+                            poll=poll,
+                            deadline=deadline,
+                            timeout=timeout,
+                            initial_last_info=last_info,
+                            expected_lang_token=expected_lang_token,
+                        )
                 return await _poll_syntax_bot_until_video(
                     client,
                     target,

@@ -594,6 +594,121 @@ def test_try_generate_via_syntax_kling_uses_configure_ui_flow(monkeypatch):
     assert captured["reply_anchor"] == 103
 
 
+def test_try_generate_via_syntax_veo_uses_mandatory_settings_webview(monkeypatch):
+    import app.syntax_telethon_fallback as telethon_fallback
+
+    class _SentMessage:
+        def __init__(self, msg_id: int):
+            self.id = msg_id
+
+    class _Entity:
+        id = 999
+
+    class _ConfigureButton:
+        text = "Настроить и запустить"
+
+    class _ConfigureMessage:
+        id = 200
+        out = False
+        buttons = [[_ConfigureButton()]]
+
+    events: list[tuple[str, str | None, int | None]] = []
+    captured: dict[str, object] = {}
+
+    class _FakeClient:
+        def __init__(self, *_args, **_kwargs):
+            pass
+
+        async def connect(self):
+            return None
+
+        async def disconnect(self):
+            return None
+
+        async def is_user_authorized(self):
+            return True
+
+        async def get_entity(self, _username):
+            return _Entity()
+
+        async def send_message(self, _target, text, reply_to=None):
+            events.append(("send_message", str(text), reply_to))
+            return _SentMessage(100 + len(events))
+
+        async def send_file(self, _target, file, caption=None, force_document=False):
+            del caption, force_document
+            events.append(("send_file", getattr(file, "name", ""), None))
+            return _SentMessage(110)
+
+        async def get_messages(self, _target, limit=None, ids=None):
+            del limit, ids
+            return _ConfigureMessage()
+
+    async def _noop_sleep(_sec: float) -> None:
+        return None
+
+    async def _fake_veo_flow(_client, _target, **kwargs):
+        captured.update(kwargs)
+        return telethon_fallback._result(
+            success=True,
+            video_bytes=b"veo-mp4",
+            video_uri=None,
+            provider_message="veo settings ok",
+            attempt_id=str(kwargs["attempt_id"]),
+        )
+
+    monkeypatch.setattr(telethon_fallback, "TelegramClient", _FakeClient)
+    monkeypatch.setattr(telethon_fallback, "StringSession", lambda value: value)
+    monkeypatch.setattr(telethon_fallback, "uuid4", lambda: type("_UUID", (), {"hex": "veo-settings-attempt"})())
+    monkeypatch.setattr(telethon_fallback.asyncio, "sleep", _noop_sleep)
+    monkeypatch.setattr(telethon_fallback, "_run_syntax_veo_configure_flow", _fake_veo_flow)
+    monkeypatch.setenv("TELEGRAM_API_ID", "123")
+    monkeypatch.setenv("TELEGRAM_API_HASH", "hash")
+    monkeypatch.setenv("TELETHON_STRING_SESSION", "session")
+
+    result = try_generate_via_syntax(
+        prompt="video prompt",
+        model="veo3_fast",
+        duration_sec=8,
+        start_image=_syntax_test_frame_bytes(),
+        timeout_sec=5,
+        syntax_provider="veo",
+        aspect_ratio="16:9",
+    )
+
+    assert result.success is True
+    assert result.video_bytes == b"veo-mp4"
+    assert captured["prompt"] == "video prompt"
+    assert captured["duration_sec"] == 8
+    assert captured["aspect_ratio"] == "16:9"
+    assert captured["configure_message"].id == 200
+    assert events == [
+        ("send_message", "/start", None),
+        ("send_message", "/video", None),
+        ("send_message", "Veo", None),
+        ("send_message", "Сгенерировать", None),
+        ("send_file", "start_frame.png", None),
+        ("send_message", "video prompt", 110),
+    ]
+
+
+def test_syntax_veo_webview_helpers_read_uploaded_count_and_queue_limit():
+    import app.syntax_telethon_fallback as telethon_fallback
+
+    class _Body:
+        def inner_text(self):
+            return "Загружено (1/2)\nДостигнут лимит очереди Veo. Максимум активных генераций: 2."
+
+    class _Page:
+        def locator(self, selector):
+            assert selector == "body"
+            return _Body()
+
+    page = _Page()
+    assert telethon_fallback._syntax_veo_uploaded_reference_count_sync(page) == 1
+    assert telethon_fallback._syntax_veo_queue_is_full_sync(page) is True
+
+
 def test_try_generate_via_syntax_kling_passes_horizontal_aspect_ratio(monkeypatch):
     import app.syntax_telethon_fallback as telethon_fallback
 
