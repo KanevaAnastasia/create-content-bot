@@ -14,7 +14,13 @@ from app.social_publishers import (
     _verify_vk_identity,
     platform_readiness,
 )
-from app.vk_oauth import build_authorize_url, exchange_authorization_code, new_pkce_pair
+from app.vk_oauth import (
+    VKOAuthError,
+    build_authorize_url,
+    exchange_authorization_code,
+    new_pkce_pair,
+    validate_redirect_uri,
+)
 
 
 def test_project_scoped_publish_env_never_falls_back_to_global_tokens(monkeypatch) -> None:
@@ -153,7 +159,7 @@ def test_vk_oauth_pkce_and_code_exchange(monkeypatch) -> None:
     assert "=" not in challenge
     url = build_authorize_url(
         client_id="54871992",
-        redirect_uri="http://127.0.0.1/callback",
+        redirect_uri="http://localhost/callback",
         state="expected-state",
         code_challenge=challenge,
     )
@@ -161,7 +167,7 @@ def test_vk_oauth_pkce_and_code_exchange(monkeypatch) -> None:
     query = parse_qs(urlparse(url).query)
     assert query["client_id"] == ["54871992"]
     assert query["app_id"] == ["54871992"]
-    assert query["redirect_uri"] == ["http://127.0.0.1/callback"]
+    assert query["redirect_uri"] == ["http://localhost/callback"]
     assert query["scope"] == ["video groups wall"]
     assert query["sdk_type"] == ["vkid"]
     assert query["v"] == ['"2.6.1"']
@@ -182,7 +188,7 @@ def test_vk_oauth_pkce_and_code_exchange(monkeypatch) -> None:
     monkeypatch.setattr("app.vk_oauth.requests.post", Mock(return_value=response))
     tokens = exchange_authorization_code(
         client_id="54871992",
-        redirect_uri="http://127.0.0.1/callback",
+        redirect_uri="http://localhost/callback",
         code="code",
         code_verifier=verifier,
         device_id="device-1",
@@ -191,6 +197,20 @@ def test_vk_oauth_pkce_and_code_exchange(monkeypatch) -> None:
     assert tokens.access_token == "access"
     assert tokens.refresh_token == "refresh"
     assert tokens.device_id == "device-2"
+
+
+def test_vk_oauth_redirect_validation() -> None:
+    assert validate_redirect_uri("http://localhost/callback") == "http://localhost/callback"
+    assert validate_redirect_uri("https://admin.example.com/vk/callback") == (
+        "https://admin.example.com/vk/callback"
+    )
+    for invalid in (
+        "http://127.0.0.1/callback",
+        "http://localhost:8000/callback",
+        "http://admin.example.com/vk/callback",
+    ):
+        with pytest.raises(VKOAuthError):
+            validate_redirect_uri(invalid)
 
 
 def test_vk_identity_must_match_user_and_managed_group(monkeypatch) -> None:

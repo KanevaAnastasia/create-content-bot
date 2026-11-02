@@ -4888,6 +4888,9 @@ class PublicationJobAdmin(admin.ModelAdmin):
         request_callback_url = request.build_absolute_uri(
             reverse("admin:pipeline_admin_publicationjob_vk_oauth_callback")
         )
+        request_callback_parts = urlparse(request_callback_url)
+        if request_callback_parts.hostname in {"localhost", "127.0.0.1", "::1"}:
+            request_callback_url = f"http://localhost{request_callback_parts.path}"
         callback_url = project_env(initial_project, "VK_REDIRECT_URI") or request_callback_url
         if request.method == "POST" and form.is_valid():
             project_slug = str(form.cleaned_data["project_slug"])

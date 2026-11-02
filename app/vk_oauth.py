@@ -8,7 +8,7 @@ import json
 import secrets
 from dataclasses import dataclass
 from typing import Any
-from urllib.parse import urlencode
+from urllib.parse import urlencode, urlsplit
 
 import requests
 
@@ -39,9 +39,29 @@ def new_pkce_pair() -> tuple[str, str]:
     return verifier, challenge
 
 
+def validate_redirect_uri(redirect_uri: str) -> str:
+    value = str(redirect_uri or "").strip()
+    try:
+        parsed = urlsplit(value)
+        port = parsed.port
+    except ValueError as exc:
+        raise VKOAuthError("VK ID redirect URL is invalid.") from exc
+    if not parsed.hostname or parsed.username or parsed.password or parsed.fragment:
+        raise VKOAuthError("VK ID redirect URL is invalid.")
+    if parsed.hostname in {"localhost", "127.0.0.1", "::1"}:
+        if parsed.scheme != "http" or parsed.hostname != "localhost" or port is not None:
+            raise VKOAuthError(
+                "VK ID local redirect must use http://localhost without a port."
+            )
+    elif parsed.scheme != "https":
+        raise VKOAuthError("VK ID public redirect must use HTTPS.")
+    return value
+
+
 def build_authorize_url(
     *, client_id: str, redirect_uri: str, state: str, code_challenge: str
 ) -> str:
+    redirect_uri = validate_redirect_uri(redirect_uri)
     stats_info = base64.b64encode(
         json.dumps(
             {"flow_source": "from_custom_auth", "session_id": state},
