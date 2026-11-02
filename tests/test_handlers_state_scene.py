@@ -9,6 +9,7 @@ from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 
 from app import db
+from app.models import ChatSession, GenerationArtifact
 from app.handlers.handlers_state_scene import (
     _apply_overlay_title_style_feedback,
     _apply_overlay_title_to_production,
@@ -21,15 +22,31 @@ from app.handlers.handlers_state_scene import (
     _scene_numbers_from_end_frame_feedback,
     _update_end_frame_scene_requests,
     _generate_project_image,
+    _generate_and_send_story_audio,
+    _generate_advertising_post,
+    _attach_story_english_track_to_production,
+    _attach_story_character_references,
+    _handle_advertising_campaign_choice,
+    _handle_advertising_format_choice,
+    _handle_advertising_product_photo,
     _handle_draft_buttons,
+    _handle_waiting_story_english_script_approval_state,
+    _handle_waiting_story_script_approval_state,
+    _handle_waiting_story_audio_approval_state,
+    _handle_visualization_media_upload,
+    _story_character_reference_prompt,
+    _story_character_reference_is_approved,
+    _story_primary_style_reference_bytes,
     keyboard_for_session_state,
     on_photo,
     on_text,
+    _translate_overlay_title_to_en,
 )
 from app.handlers.handlers_media_core import ServiceUnavailableRetriesExhaustedError
 from app.handlers.handlers_state_start import (
     SERIES_CHOICE_CONFIRMED_SESSION_KEY,
     SERIES_NEXT_OVERLAY_TITLE,
+    SERIES_NEXT_ADVERTISING_PLAN,
     SERIES_PENDING_NEXT_SESSION_KEY,
     STATE_WAITING_GENERATION_MODE,
     STATE_WAITING_SERIES_CHOICE,
@@ -37,7 +54,18 @@ from app.handlers.handlers_state_start import (
     STATE_WAITING_SERIES_TRANSLATION_APPROVAL,
     generate,
     _handle_waiting_generation_mode_state,
+    _handle_waiting_story_english_choice_state,
+    _handle_waiting_story_style_choice_state,
     _parse_series_create_text,
+    _story_style_choice_markup,
+)
+from app.handlers.handlers_generation_utils import (
+    OVERLAY_SUBTITLE_BY_LANG_SESSION_KEY,
+    OVERLAY_SUBTITLE_DECIDED_SESSION_KEY,
+    OVERLAY_SUBTITLE_TRANSLATION_PENDING_SESSION_KEY,
+    OVERLAY_TITLE_NEXT_RECIPE_PLAN,
+    OVERLAY_TITLE_NEXT_SERIES_CHOICE,
+    OVERLAY_TITLE_PENDING_NEXT_SESSION_KEY,
 )
 from app.handlers.handlers_state_commands import NAV_BUTTON_PREVIOUS_STEP, NAV_BUTTON_START_OVER
 from app.series_store import (
@@ -47,7 +75,44 @@ from app.series_store import (
     SERIES_TITLE_BY_LANG_SESSION_KEY,
     SeriesPayload,
 )
+from app.story_generation import (
+    STATE_WAITING_STORY_CHARACTER_APPROVAL,
+    STATE_WAITING_STORY_AUDIO_APPROVAL,
+    STATE_WAITING_STORY_ENGLISH_CHOICE,
+    STATE_WAITING_STORY_ENGLISH_SCRIPT_APPROVAL,
+    STATE_WAITING_STORY_STYLE_CHOICE,
+    STATE_WAITING_STORY_SCRIPT_APPROVAL,
+    STORY_AUDIO_PATH_SESSION_KEY,
+    STORY_AUDIO_VERSIONS_SESSION_KEY,
+    STORY_CHARACTER_BIBLE_SESSION_KEY,
+    STORY_CHARACTER_REFERENCES_SESSION_KEY,
+    STORY_CUSTOM_SCRIPT_INPUT_PENDING_SESSION_KEY,
+    STORY_MAX_DURATION_SEC,
+    STORY_SOURCE_SESSION_KEY,
+    STORY_TITLE_EN_SESSION_KEY,
+    STORY_TITLE_SESSION_KEY,
+    STORY_VISUAL_STYLE_SESSION_KEY,
+    STORY_VOICEOVER_SESSION_KEY,
+    STORY_VOICEOVER_EN_SESSION_KEY,
+    STORY_VOICEOVER_VERSIONS_SESSION_KEY,
+    STORY_VOICEOVER_VERSIONS_EN_SESSION_KEY,
+    StoryAudioResult,
+)
+from app.advertising_generation import (
+    ADVERTISING_CAMPAIGNS_SESSION_KEY,
+    ADVERTISING_FORMAT_SESSION_KEY,
+    ADVERTISING_POST_IMAGE_PATHS_SESSION_KEY,
+    ADVERTISING_POST_TEXT_SESSION_KEY,
+    ADVERTISING_PRODUCT_BRIEF_SESSION_KEY,
+    ADVERTISING_PRODUCT_PATH_SESSION_KEY,
+    ADVERTISING_SELECTED_CAMPAIGN_SESSION_KEY,
+    ADVERTISING_SOURCE_SESSION_KEY,
+    STATE_WAITING_ADVERTISING_CAMPAIGN_CHOICE,
+    STATE_WAITING_ADVERTISING_FORMAT_CHOICE,
+    STATE_WAITING_ADVERTISING_PRODUCT_IMAGE,
+)
 from app.state import SESSIONS
+from app.visualization_generation import PreparedVisualizationMedia, VisualizationTranscript
 
 
 @pytest.fixture(autouse=True)
@@ -59,6 +124,145 @@ def _isolate_persistent_db(monkeypatch):
     monkeypatch.setattr(db, "get_session_factory", lambda: factory)
     yield
     engine.dispose()
+
+
+def test_story_style_choice_keyboard_starts_with_primary_then_named_styles():
+    markup = _story_style_choice_markup()
+    labels = [button["text"] for row in markup.to_dict()["keyboard"] for button in row]
+
+    assert labels[:15] == [
+        "Основной",
+        "Сухая акварель",
+        "Ретро-мультфильм",
+        "Книжная гуашь",
+        "Пластилиновый мультфильм",
+        "Кукольный стоп-моушен",
+        "Рисованная ретро-сказка",
+        "Сумеречная акварель",
+        "Светлая анимационная пастель",
+        "Классический рисованный мультфильм",
+        "Фетровая аппликация",
+        "Народная рисованная сказка",
+        "Пастельные мелки",
+        "Вязаная иллюстрация",
+        "Минималистичный ретро-мультфильм",
+    ]
+
+
+def test_primary_story_character_reference_prompt_has_no_separate_style_instruction():
+    prompt = _story_character_reference_prompt(
+        {
+            "id": "hero",
+            "same_person_group": "hero",
+            "age_stage": "adult",
+            "description": "утверждённая внешность",
+            "reference_prompt": "сохранить черты лица",
+        },
+        story_visual_style="primary",
+    )
+
+    assert "Строго заданный стиль" not in prompt
+    assert "акварель" not in prompt.lower()
+
+
+def test_primary_story_character_generation_uses_primary_project_reference_for_style(tmp_path):
+    reference = tmp_path / "knopka.jpg"
+    reference.write_bytes(b"knopka-style-reference")
+    session = {
+        "story_character_bible": [
+            {"id": "discipline_knopka", "is_primary": True},
+            {"id": "new_character", "is_primary": False},
+        ],
+        "story_character_references": {
+            "discipline_knopka": {
+                "selected_path": str(reference),
+                "approved": True,
+            }
+        },
+    }
+
+    payloads = _story_primary_style_reference_bytes(session, {"id": "new_character"})
+    prompt = _story_character_reference_prompt(
+        {
+            "id": "new_character",
+            "same_person_group": "new_character",
+            "age_stage": "adult",
+            "description": "новый человек в деловой одежде",
+            "reference_prompt": "сохранить заданную внешность",
+        },
+        story_visual_style="primary",
+        has_project_style_reference=True,
+    )
+
+    assert payloads == [b"knopka-style-reference"]
+    assert "ТОЛЬКО как референс художественной стилистики" in prompt
+    assert "Не копируй его лицо, вид, анатомию" in prompt
+
+
+def test_story_character_approval_is_invalid_after_style_change(tmp_path):
+    reference = tmp_path / "tourist.png"
+    reference.write_bytes(b"old-style")
+    character = {"id": "tourist", "description": "молодой турист"}
+    session = {
+        "story_visual_style": "crochet",
+        "story_character_references": {
+            "tourist": {
+                "selected_path": str(reference),
+                "approved": True,
+                "description": "молодой турист",
+                "story_visual_style_key": "folk_fairytale",
+            }
+        },
+    }
+
+    assert _story_character_reference_is_approved(session, character) is False
+
+    session["story_character_references"]["tourist"]["story_visual_style_key"] = "crochet"
+    assert _story_character_reference_is_approved(session, character) is True
+
+
+@pytest.mark.parametrize(
+    ("label", "expected_key"),
+    [
+        ("Основной", "primary"),
+        ("Сумеречная акварель", "twilight_watercolor"),
+        ("Светлая анимационная пастель", "soft_animation"),
+        ("Классический рисованный мультфильм", "classic_cel_cartoon"),
+        ("Фетровая аппликация", "felt_applique"),
+        ("Народная рисованная сказка", "folk_fairytale"),
+        ("Пастельные мелки", "oil_pastel"),
+        ("Вязаная иллюстрация", "crochet"),
+        ("Минималистичный ретро-мультфильм", "minimal_retro_cartoon"),
+    ],
+)
+def test_story_style_choice_accepts_each_new_style(monkeypatch, label, expected_key):
+    replies: list[str] = []
+    session = {"state": STATE_WAITING_STORY_STYLE_CHOICE}
+
+    async def fake_start(_update, _context, *, chat_id, session):
+        assert chat_id == 4701
+        return True
+
+    class _Message:
+        async def reply_text(self, text, reply_markup=None):
+            replies.append(text)
+
+    monkeypatch.setattr("app.handlers.handlers_state_start._start_initial_story_voiceover", fake_start)
+    update = SimpleNamespace(message=_Message(), effective_chat=SimpleNamespace(id=4701))
+
+    result = asyncio.run(
+        _handle_waiting_story_style_choice_state(
+            update,
+            context=None,
+            chat_id=4701,
+            session=session,
+            text=label,
+        )
+    )
+
+    assert result is True
+    assert session[STORY_VISUAL_STYLE_SESSION_KEY] == expected_key
+    assert any(label in reply for reply in replies)
 
 
 def test_frame_prompts_slice_from_production_maps_start_end():
@@ -539,6 +743,989 @@ def test_start_generation_with_recipe_asks_for_generation_mode_then_series(monke
     assert any(markup is not None for _text, markup in captured)
 
 
+def test_start_generation_with_recipe_drops_previous_run_and_content():
+    from app.handlers.handlers_state_start import _start_generation_with_recipe
+
+    chat_id = 1061
+    SESSIONS[chat_id] = {
+        "state": "final_videos_delivered",
+        "generation_run_id": "11111111-1111-4111-8111-111111111111",
+        "scene_db_ids_by_index": {0: "old-scene"},
+        "production": {"json_plan": [{"text": "old"}]},
+        "scenes_plan": [{"text": "old"}],
+        "overlay_title_by_lang": {"ru": "Старый заголовок"},
+        "story_title": "Старая история",
+        "series": {"id": "old-series"},
+        "selected_project_key": "grandma-kitchen",
+    }
+
+    class _Message:
+        async def reply_text(self, _text, reply_markup=None):
+            _ = reply_markup
+
+    update = SimpleNamespace(message=_Message(), effective_chat=SimpleNamespace(id=chat_id))
+    asyncio.run(
+        _start_generation_with_recipe(
+            update,
+            context=None,
+            recipe="Новый рецепт",
+            prefer_vertex_api=False,
+        )
+    )
+
+    session = SESSIONS[chat_id]
+    assert "generation_run_id" not in session
+    assert "scene_db_ids_by_index" not in session
+    assert "production" not in session
+    assert "scenes_plan" not in session
+    assert "overlay_title_by_lang" not in session
+    assert "story_title" not in session
+    assert "series" not in session
+    assert session["selected_project_key"] == "grandma-kitchen"
+    assert session[SERIES_PENDING_RECIPE_SESSION_KEY] == "Новый рецепт"
+
+
+def test_silence_generation_mode_asks_for_title_before_series(monkeypatch):
+    captured: list[tuple[str, object | None]] = []
+    SESSIONS[1066] = {
+        "state": STATE_WAITING_GENERATION_MODE,
+        SERIES_PENDING_RECIPE_SESSION_KEY: "Клубника 350 г. Взбить с молоком.",
+        SERIES_PENDING_PREFER_VERTEX_SESSION_KEY: False,
+    }
+    monkeypatch.setattr(
+        "app.handlers.handlers_state_start.list_active_series",
+        lambda _project_slug: pytest.fail("series choice should not be requested before title"),
+    )
+
+    class _Message:
+        async def reply_text(self, text, reply_markup=None):
+            captured.append((text, reply_markup))
+
+    update = SimpleNamespace(message=_Message(), effective_chat=SimpleNamespace(id=1066))
+    asyncio.run(
+        _handle_waiting_generation_mode_state(
+            update,
+            context=None,
+            chat_id=1066,
+            session=SESSIONS[1066],
+            text="Silence",
+        )
+    )
+
+    assert SESSIONS[1066]["state"] == "state_waiting_overlay_title_ru"
+    assert SESSIONS[1066][OVERLAY_TITLE_PENDING_NEXT_SESSION_KEY] == OVERLAY_TITLE_NEXT_SERIES_CHOICE
+    assert SESSIONS[1066]["target_languages"] == ["ru"]
+    assert any("русский заголовок" in text for text, _markup in captured)
+    assert not any("Можно привязать" in text for text, _markup in captured)
+
+
+def test_visualization_generation_mode_waits_for_audio_or_video():
+    captured: list[tuple[str, object | None]] = []
+    SESSIONS[1068] = {
+        "state": STATE_WAITING_GENERATION_MODE,
+        SERIES_PENDING_RECIPE_SESSION_KEY: "Исходный текст не используется для расшифровки.",
+        SERIES_PENDING_PREFER_VERTEX_SESSION_KEY: False,
+    }
+
+    class _Message:
+        async def reply_text(self, text, reply_markup=None):
+            captured.append((text, reply_markup))
+
+    update = SimpleNamespace(message=_Message(), effective_chat=SimpleNamespace(id=1068))
+    asyncio.run(
+        _handle_waiting_generation_mode_state(
+            update,
+            context=None,
+            chat_id=1068,
+            session=SESSIONS[1068],
+            text="Визуализация",
+        )
+    )
+
+    session = SESSIONS[1068]
+    assert session["state"] == "waiting_visualization_media"
+    assert session["generation_mode"] == "visualization"
+    assert session["target_languages"] == ["ru"]
+    assert SERIES_PENDING_RECIPE_SESSION_KEY not in session
+    assert any("аудиофайл" in text for text, _markup in captured)
+
+
+def test_visualization_style_choice_builds_scenes_without_generating_tts(monkeypatch):
+    captured: list[str] = []
+    calls: list[str] = []
+    session = {
+        "state": STATE_WAITING_STORY_STYLE_CHOICE,
+        "generation_mode": "visualization",
+        STORY_SOURCE_SESSION_KEY: "Готовая расшифровка.",
+        STORY_VOICEOVER_SESSION_KEY: "Готовая расшифровка.",
+    }
+    SESSIONS[1069] = session
+
+    async def fake_build(_update, _context, *, chat_id, session):
+        assert chat_id == 1069
+        calls.append(session[STORY_VISUAL_STYLE_SESSION_KEY])
+        return True
+
+    monkeypatch.setattr(
+        "app.handlers.handlers_state_scene._approve_story_audio_and_build_scenes",
+        fake_build,
+    )
+    monkeypatch.setattr(
+        "app.handlers.handlers_state_start.generate_story_voiceover",
+        lambda *_args, **_kwargs: pytest.fail("visualization must not generate a new voiceover"),
+    )
+
+    class _Message:
+        async def reply_text(self, text, reply_markup=None):
+            _ = reply_markup
+            captured.append(text)
+
+    update = SimpleNamespace(message=_Message(), effective_chat=SimpleNamespace(id=1069))
+    result = asyncio.run(
+        _handle_waiting_story_style_choice_state(
+            update,
+            context=None,
+            chat_id=1069,
+            session=session,
+            text="Книжная гуашь",
+        )
+    )
+
+    assert result is True
+    assert calls == ["storybook_gouache"]
+    assert any("Книжная гуашь" in text for text in captured)
+
+
+def test_visualization_upload_saves_source_track_transcript_and_timing(monkeypatch):
+    captured: list[tuple[str, object | None]] = []
+    session = {
+        "state": "waiting_visualization_media",
+        "generation_mode": "visualization",
+        "selected_project_key": "discipline",
+    }
+    SESSIONS[1071] = session
+    alignment = {
+        "characters": list("Точный текст."),
+        "character_start_times_seconds": [0.0] * len("Точный текст."),
+        "character_end_times_seconds": [2.0] * len("Точный текст."),
+    }
+    monkeypatch.setattr(
+        "app.handlers.handlers_state_scene.prepare_visualization_media",
+        lambda *_args, **_kwargs: PreparedVisualizationMedia(
+            audio_bytes=b"mp3",
+            audio_path="/tmp/source-track.mp3",
+            duration_sec=2.0,
+            analysis_video_bytes=b"proxy",
+        ),
+    )
+    monkeypatch.setattr(
+        "app.handlers.handlers_state_scene.transcribe_visualization_media",
+        lambda *_args, **_kwargs: VisualizationTranscript(
+            title="Тема",
+            text="Точный текст.",
+            segments=[{"start_sec": 0.0, "end_sec": 2.0, "text": "Точный текст."}],
+            alignment=alignment,
+        ),
+    )
+
+    async def fake_call(_update, _context, _chat_id, _name, fn):
+        return await fn()
+
+    monkeypatch.setattr("app.handlers.handlers_state_scene._call_with_503_retries", fake_call)
+
+    class _Message:
+        async def reply_text(self, text, reply_markup=None):
+            captured.append((text, reply_markup))
+
+    update = SimpleNamespace(message=_Message(), effective_chat=SimpleNamespace(id=1071))
+    result = asyncio.run(
+        _handle_visualization_media_upload(
+            update,
+            context=None,
+            chat_id=1071,
+            session=session,
+            media_bytes=b"source",
+            input_kind="video",
+            media_meta={"file_name": "source.mp4", "mime_type": "video/mp4"},
+        )
+    )
+
+    assert result is True
+    assert session["state"] == STATE_WAITING_STORY_STYLE_CHOICE
+    assert session[STORY_VOICEOVER_SESSION_KEY] == "Точный текст."
+    assert session["story_audio_path"] == "/tmp/source-track.mp3"
+    assert session["story_audio_alignment"] == alignment
+    assert session["visualization_input_kind"] == "video"
+    assert any("РАСШИФРОВКА" in text for text, _markup in captured)
+    assert captured[-1][1] is not None
+
+
+def test_story_generation_mode_creates_approvable_voiceover_before_audio(monkeypatch):
+    captured: list[tuple[str, object | None]] = []
+    SESSIONS[1067] = {
+        "state": STATE_WAITING_GENERATION_MODE,
+        SERIES_PENDING_RECIPE_SESSION_KEY: "История о старом доме и семейной жемчужине.",
+        SERIES_PENDING_PREFER_VERTEX_SESSION_KEY: False,
+    }
+    monkeypatch.setattr(
+        "app.handlers.handlers_state_start.generate_story_voiceover",
+        lambda source: {"title": "Цена жемчуга", "voiceover_text": f"Когда-то всё началось так: {source}"},
+    )
+
+    class _Message:
+        async def reply_text(self, text, reply_markup=None):
+            captured.append((text, reply_markup))
+
+    update = SimpleNamespace(message=_Message(), effective_chat=SimpleNamespace(id=1067))
+    asyncio.run(
+        _handle_waiting_generation_mode_state(
+            update,
+            context=None,
+            chat_id=1067,
+            session=SESSIONS[1067],
+            text="История",
+        )
+    )
+
+    assert SESSIONS[1067]["state"] == STATE_WAITING_STORY_ENGLISH_CHOICE
+    assert any("Нужна английская версия" in text for text, _markup in captured)
+    asyncio.run(
+        _handle_waiting_story_english_choice_state(
+            update,
+            context=None,
+            chat_id=1067,
+            session=SESSIONS[1067],
+            text="Нет, только RU",
+        )
+    )
+
+    assert SESSIONS[1067]["state"] == STATE_WAITING_STORY_STYLE_CHOICE
+    asyncio.run(
+        _handle_waiting_story_style_choice_state(
+            update,
+            context=None,
+            chat_id=1067,
+            session=SESSIONS[1067],
+            text="Ретро-мультфильм",
+        )
+    )
+
+    session = SESSIONS[1067]
+    assert session["state"] == STATE_WAITING_STORY_SCRIPT_APPROVAL
+    assert session[STORY_SOURCE_SESSION_KEY].startswith("История о старом доме")
+    assert session[STORY_VOICEOVER_SESSION_KEY].startswith("Когда-то всё началось")
+    assert session[STORY_VOICEOVER_VERSIONS_SESSION_KEY][0]["voiceover_text"].startswith("Когда-то всё началось")
+    assert session[STORY_VISUAL_STYLE_SESSION_KEY] == "retro_cartoon"
+    assert session["target_languages"] == ["ru"]
+    assert any("ТЕКСТ RU-ОЗВУЧКИ" in text for text, _markup in captured)
+
+
+def test_story_english_track_adds_metadata_without_creating_another_visual_prompt():
+    production = {
+        "json_plan": [
+            {
+                "generation_mode": "story",
+                "duration_sec": 3.0,
+                "timeline_duration_sec": 3.0,
+                "video_prompt": "one silent Kling prompt",
+                "video_prompt_by_lang": {"ru": "one silent Kling prompt"},
+                "speech_by_lang": {"ru": "Русская фраза"},
+                "speech_cues_by_lang": {},
+            }
+        ]
+    }
+    session = {
+        "story_english_requested": True,
+        "story_voiceover_text_en": "The English line.",
+        "story_audio_duration_sec_en": 3.0,
+        "story_audio_alignment_en": {},
+        "story_visual_duration_sec": 3.0,
+    }
+
+    _attach_story_english_track_to_production(production, session)
+
+    scene = production["json_plan"][0]
+    assert scene["video_prompt_by_lang"]["en"] == "one silent Kling prompt"
+    assert scene["speech_by_lang"]["en"] == "The English line"
+    assert scene["tts"]["text_en"] == "The English line"
+    assert scene["timeline_duration_by_lang"] == {"ru": 3.0, "en": 3.0}
+
+
+def test_story_voiceover_failure_keeps_source_and_keyboard_can_regenerate(monkeypatch):
+    captured: list[tuple[str, object | None]] = []
+    calls = 0
+    SESSIONS[1069] = {
+        "state": STATE_WAITING_GENERATION_MODE,
+        SERIES_PENDING_RECIPE_SESSION_KEY: "История происхождения шарлотки.",
+        SERIES_PENDING_PREFER_VERTEX_SESSION_KEY: False,
+    }
+
+    def fake_generate(source):
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            raise ValueError("Gemini вернул слишком длинный текст озвучки")
+        return {"title": "Шарлотка", "voiceover_text": f"Короткая версия: {source}"}
+
+    monkeypatch.setattr("app.handlers.handlers_state_start.generate_story_voiceover", fake_generate)
+
+    class _Message:
+        async def reply_text(self, text, reply_markup=None):
+            captured.append((text, reply_markup))
+
+    update = SimpleNamespace(message=_Message(), effective_chat=SimpleNamespace(id=1069))
+    asyncio.run(
+        _handle_waiting_generation_mode_state(
+            update,
+            context=None,
+            chat_id=1069,
+            session=SESSIONS[1069],
+            text="История",
+        )
+    )
+    asyncio.run(
+        _handle_waiting_story_english_choice_state(
+            update,
+            context=None,
+            chat_id=1069,
+            session=SESSIONS[1069],
+            text="Нет, только RU",
+        )
+    )
+    asyncio.run(
+        _handle_waiting_story_style_choice_state(
+            update,
+            context=None,
+            chat_id=1069,
+            session=SESSIONS[1069],
+            text="Сухая акварель",
+        )
+    )
+
+    failed_session = SESSIONS[1069]
+    assert failed_session["state"] == STATE_WAITING_GENERATION_MODE
+    assert failed_session[SERIES_PENDING_RECIPE_SESSION_KEY] == "История происхождения шарлотки."
+    assert failed_session[STORY_SOURCE_SESSION_KEY] == "История происхождения шарлотки."
+    error_text, error_markup = captured[-1]
+    assert "Исходная история сохранена" in error_text
+    assert error_markup is not None
+    assert "ПЕРЕГЕНЕРИРОВАТЬ" in str(error_markup.to_dict())
+
+    asyncio.run(
+        _handle_waiting_generation_mode_state(
+            update,
+            context=None,
+            chat_id=1069,
+            session=SESSIONS[1069],
+            text="ПЕРЕГЕНЕРИРОВАТЬ",
+        )
+    )
+    asyncio.run(
+        _handle_waiting_story_english_choice_state(
+            update,
+            context=None,
+            chat_id=1069,
+            session=SESSIONS[1069],
+            text="Нет, только RU",
+        )
+    )
+    asyncio.run(
+        _handle_waiting_story_style_choice_state(
+            update,
+            context=None,
+            chat_id=1069,
+            session=SESSIONS[1069],
+            text="Сухая акварель",
+        )
+    )
+
+    regenerated_session = SESSIONS[1069]
+    assert calls == 2
+    assert regenerated_session["state"] == STATE_WAITING_STORY_SCRIPT_APPROVAL
+    assert regenerated_session[STORY_VOICEOVER_SESSION_KEY].startswith("Короткая версия")
+    assert regenerated_session[STORY_VOICEOVER_VERSIONS_SESSION_KEY][0]["voiceover_text"].startswith("Короткая версия")
+    assert SERIES_PENDING_RECIPE_SESSION_KEY not in regenerated_session
+
+
+def test_paid_story_audio_over_limit_is_saved_and_sent_without_auto_refine(monkeypatch):
+    messages: list[str] = []
+    audio_captions: list[str] = []
+    stored: list[bytes] = []
+    session = {
+        "state": STATE_WAITING_STORY_SCRIPT_APPROVAL,
+        STORY_VOICEOVER_SESSION_KEY: "Утверждённый текст истории.",
+    }
+
+    monkeypatch.setattr(
+        "app.handlers.handlers_state_scene.generate_story_audio",
+        lambda _text: StoryAudioResult(
+            audio_bytes=b"paid-elevenlabs-audio",
+            content_type="audio/mpeg",
+            duration_sec=STORY_MAX_DURATION_SEC + 0.1,
+            alignment={"characters": ["У"]},
+            request_id="request-1",
+            history_item_id="history-1",
+        ),
+    )
+
+    def fake_store(_chat_id, result):
+        stored.append(result.audio_bytes)
+        return "/tmp/story-over-limit.mp3"
+
+    monkeypatch.setattr("app.handlers.handlers_state_scene.store_story_audio", fake_store)
+
+    async def forbid_auto_refine(*_args, **_kwargs):
+        pytest.fail("paid audio must never trigger automatic text refinement")
+
+    monkeypatch.setattr("app.handlers.handlers_state_scene._refine_story_voiceover", forbid_auto_refine)
+
+    class _Message:
+        async def reply_text(self, text, reply_markup=None):
+            _ = reply_markup
+            messages.append(text)
+
+        async def reply_audio(self, audio, caption=None):
+            assert audio.read() == b"paid-elevenlabs-audio"
+            audio_captions.append(str(caption or ""))
+
+    update = SimpleNamespace(message=_Message(), effective_chat=SimpleNamespace(id=1070))
+    asyncio.run(
+        _generate_and_send_story_audio(
+            update,
+            context=None,
+            chat_id=1070,
+            session=session,
+        )
+    )
+
+    assert stored == [b"paid-elevenlabs-audio"]
+    assert session["state"] == STATE_WAITING_STORY_AUDIO_APPROVAL
+    assert session[STORY_AUDIO_PATH_SESSION_KEY] == "/tmp/story-over-limit.mp3"
+    assert session[STORY_AUDIO_VERSIONS_SESSION_KEY][0]["duration_sec"] == STORY_MAX_DURATION_SEC + 0.1
+    assert session[STORY_AUDIO_VERSIONS_SESSION_KEY][0]["history_item_id"] == "history-1"
+    assert any("Ничего не переделываю" in caption for caption in audio_captions)
+    assert any("Сократить текст" in text for text in messages)
+
+
+def test_story_audio_shorten_button_changes_only_text(monkeypatch):
+    captured: list[str] = []
+    session = {
+        "state": STATE_WAITING_STORY_AUDIO_APPROVAL,
+        "story_audio_duration_sec": 60.1,
+    }
+
+    async def fake_refine(_update, _context, **kwargs):
+        captured.append(kwargs["feedback"])
+        return True
+
+    async def forbid_new_audio(*_args, **_kwargs):
+        pytest.fail("shorten text must not create another ElevenLabs generation")
+
+    monkeypatch.setattr("app.handlers.handlers_state_scene._refine_story_voiceover", fake_refine)
+    monkeypatch.setattr("app.handlers.handlers_state_scene._generate_and_send_story_audio", forbid_new_audio)
+    update = SimpleNamespace(message=SimpleNamespace(), effective_chat=SimpleNamespace(id=1071))
+
+    asyncio.run(
+        _handle_waiting_story_audio_approval_state(
+            update,
+            context=None,
+            chat_id=1071,
+            session=session,
+            text="Сократить текст",
+        )
+    )
+
+    assert captured
+    assert "новую озвучку не создавай" in captured[0]
+
+
+def test_approved_ru_story_audio_starts_english_text_before_scene_plan(monkeypatch):
+    captured: list[str] = []
+    session = {
+        "state": STATE_WAITING_STORY_AUDIO_APPROVAL,
+        "story_english_requested": True,
+    }
+
+    async def fake_prepare(_update, _context, **_kwargs):
+        captured.append("english")
+        return True
+
+    async def forbid_scene_plan(*_args, **_kwargs):
+        pytest.fail("scene plan must wait until EN text and EN audio are approved")
+
+    monkeypatch.setattr("app.handlers.handlers_state_scene._prepare_story_english_voiceover", fake_prepare)
+    monkeypatch.setattr("app.handlers.handlers_state_scene._approve_story_audio_and_build_scenes", forbid_scene_plan)
+    update = SimpleNamespace(message=SimpleNamespace(), effective_chat=SimpleNamespace(id=10715))
+
+    asyncio.run(
+        _handle_waiting_story_audio_approval_state(
+            update,
+            context=None,
+            chat_id=10715,
+            session=session,
+            text="ОК",
+        )
+    )
+
+    assert captured == ["english"]
+
+
+def test_story_text_versions_can_be_listed_and_restored_without_generation(monkeypatch):
+    messages: list[str] = []
+    session = {
+        "state": STATE_WAITING_STORY_SCRIPT_APPROVAL,
+        STORY_VOICEOVER_SESSION_KEY: "Текущая версия.",
+        STORY_VOICEOVER_VERSIONS_SESSION_KEY: [
+            {"title": "Первая", "voiceover_text": "Первый сохранённый текст."},
+            {"title": "Вторая", "voiceover_text": "Второй сохранённый текст."},
+        ],
+    }
+
+    async def forbid_new_audio(*_args, **_kwargs):
+        pytest.fail("listing or restoring text must not generate audio")
+
+    monkeypatch.setattr("app.handlers.handlers_state_scene._generate_and_send_story_audio", forbid_new_audio)
+
+    class _Message:
+        async def reply_text(self, text, reply_markup=None):
+            _ = reply_markup
+            messages.append(text)
+
+    update = SimpleNamespace(message=_Message(), effective_chat=SimpleNamespace(id=1072))
+    asyncio.run(
+        _handle_waiting_story_script_approval_state(
+            update,
+            context=None,
+            chat_id=1072,
+            session=session,
+            text="Версии текста",
+        )
+    )
+    assert any("ВЕРСИЯ 1" in text and "Первый сохранённый текст" in text for text in messages)
+
+    asyncio.run(
+        _handle_waiting_story_script_approval_state(
+            update,
+            context=None,
+            chat_id=1072,
+            session=session,
+            text="Версия 1",
+        )
+    )
+    assert session[STORY_VOICEOVER_SESSION_KEY] == "Первый сохранённый текст."
+
+
+def test_story_custom_russian_script_is_saved_verbatim_without_gemini_or_audio(monkeypatch):
+    messages: list[tuple[str, object | None]] = []
+    session = {
+        "state": STATE_WAITING_STORY_SCRIPT_APPROVAL,
+        STORY_TITLE_SESSION_KEY: "Шарлотка",
+        STORY_VOICEOVER_SESSION_KEY: "Текст, который предложил бот.",
+        STORY_VOICEOVER_VERSIONS_SESSION_KEY: [
+            {"title": "Шарлотка", "voiceover_text": "Текст, который предложил бот."},
+        ],
+    }
+
+    async def forbid_gemini(*_args, **_kwargs):
+        pytest.fail("custom script must not be sent to Gemini")
+
+    async def forbid_audio(*_args, **_kwargs):
+        pytest.fail("custom script must be approved before paid audio generation")
+
+    monkeypatch.setattr("app.handlers.handlers_state_scene._refine_story_voiceover", forbid_gemini)
+    monkeypatch.setattr("app.handlers.handlers_state_scene._generate_and_send_story_audio", forbid_audio)
+
+    class _Message:
+        async def reply_text(self, text, reply_markup=None):
+            messages.append((text, reply_markup))
+
+    update = SimpleNamespace(message=_Message(), effective_chat=SimpleNamespace(id=10721))
+    asyncio.run(
+        _handle_waiting_story_script_approval_state(
+            update,
+            context=None,
+            chat_id=10721,
+            session=session,
+            text="СВОЙ ТЕКСТ",
+        )
+    )
+
+    assert session[STORY_CUSTOM_SCRIPT_INPUT_PENDING_SESSION_KEY] == {"language": "ru"}
+    assert any("дословно" in text and "Gemini" in text for text, _markup in messages)
+
+    custom_text = "А вы знаете, откуда появилась шарлотка?\nВот моя версия этой истории."
+    asyncio.run(
+        _handle_waiting_story_script_approval_state(
+            update,
+            context=None,
+            chat_id=10721,
+            session=session,
+            text=custom_text,
+        )
+    )
+
+    assert STORY_CUSTOM_SCRIPT_INPUT_PENDING_SESSION_KEY not in session
+    assert session[STORY_VOICEOVER_SESSION_KEY] == custom_text
+    assert len(session[STORY_VOICEOVER_VERSIONS_SESSION_KEY]) == 2
+    assert session[STORY_VOICEOVER_VERSIONS_SESSION_KEY][0]["voiceover_text"] == "Текст, который предложил бот."
+    saved = session[STORY_VOICEOVER_VERSIONS_SESSION_KEY][1]
+    assert saved["stage"] == "user_supplied"
+    assert saved["voiceover_text"] == custom_text
+    assert any(custom_text in text for text, _markup in messages)
+
+
+def test_story_custom_english_script_is_saved_verbatim_without_gemini_or_audio(monkeypatch):
+    messages: list[str] = []
+    session = {
+        "state": STATE_WAITING_STORY_ENGLISH_SCRIPT_APPROVAL,
+        STORY_TITLE_EN_SESSION_KEY: "Charlotte",
+        STORY_VOICEOVER_EN_SESSION_KEY: "The bot's proposed version.",
+        STORY_VOICEOVER_VERSIONS_EN_SESSION_KEY: [
+            {"title": "Charlotte", "voiceover_text": "The bot's proposed version."},
+        ],
+    }
+
+    async def forbid_gemini(*_args, **_kwargs):
+        pytest.fail("custom English script must not be sent to Gemini")
+
+    async def forbid_audio(*_args, **_kwargs):
+        pytest.fail("custom English script must be approved before paid audio generation")
+
+    monkeypatch.setattr("app.handlers.handlers_state_scene._prepare_story_english_voiceover", forbid_gemini)
+    monkeypatch.setattr("app.handlers.handlers_state_scene._generate_and_send_story_english_audio", forbid_audio)
+
+    class _Message:
+        async def reply_text(self, text, reply_markup=None):
+            _ = reply_markup
+            messages.append(text)
+
+    update = SimpleNamespace(message=_Message(), effective_chat=SimpleNamespace(id=10722))
+    asyncio.run(
+        _handle_waiting_story_english_script_approval_state(
+            update,
+            context=None,
+            chat_id=10722,
+            session=session,
+            text="СВОЙ ТЕКСТ",
+        )
+    )
+
+    assert session[STORY_CUSTOM_SCRIPT_INPUT_PENDING_SESSION_KEY] == {"language": "en"}
+
+    custom_text = "Do you know where apple charlotte came from?\nHere is my version of the story."
+    asyncio.run(
+        _handle_waiting_story_english_script_approval_state(
+            update,
+            context=None,
+            chat_id=10722,
+            session=session,
+            text=custom_text,
+        )
+    )
+
+    assert STORY_CUSTOM_SCRIPT_INPUT_PENDING_SESSION_KEY not in session
+    assert session[STORY_VOICEOVER_EN_SESSION_KEY] == custom_text
+    assert len(session[STORY_VOICEOVER_VERSIONS_EN_SESSION_KEY]) == 2
+    saved = session[STORY_VOICEOVER_VERSIONS_EN_SESSION_KEY][1]
+    assert saved["stage"] == "user_supplied"
+    assert saved["voiceover_text"] == custom_text
+    assert any(custom_text in text for text in messages)
+
+
+def test_story_audio_variants_can_be_replayed_and_selected_without_generation(monkeypatch, tmp_path):
+    first_path = tmp_path / "first.mp3"
+    second_path = tmp_path / "second.mp3"
+    first_path.write_bytes(b"first-audio")
+    second_path.write_bytes(b"second-audio")
+    sent: list[tuple[bytes, str]] = []
+    session = {
+        "state": STATE_WAITING_STORY_AUDIO_APPROVAL,
+        "story_audio_versions": [
+            {
+                "path": str(first_path),
+                "duration_sec": 50.0,
+                "model_id": "eleven_v4",
+                "alignment": {"characters": ["1"]},
+            },
+            {
+                "path": str(second_path),
+                "duration_sec": 51.0,
+                "model_id": "eleven_v4",
+                "alignment": {"characters": ["2"]},
+            },
+        ],
+    }
+
+    async def forbid_new_audio(*_args, **_kwargs):
+        pytest.fail("replaying or selecting a saved variant must not generate audio")
+
+    monkeypatch.setattr("app.handlers.handlers_state_scene._generate_and_send_story_audio", forbid_new_audio)
+
+    class _Message:
+        async def reply_text(self, _text, reply_markup=None):
+            _ = reply_markup
+
+        async def reply_audio(self, audio, caption=None):
+            sent.append((audio.read(), str(caption or "")))
+
+    update = SimpleNamespace(message=_Message(), effective_chat=SimpleNamespace(id=1073))
+    asyncio.run(
+        _handle_waiting_story_audio_approval_state(
+            update,
+            context=None,
+            chat_id=1073,
+            session=session,
+            text="Варианты аудио",
+        )
+    )
+    assert [payload for payload, _caption in sent] == [b"first-audio", b"second-audio"]
+
+    asyncio.run(
+        _handle_waiting_story_audio_approval_state(
+            update,
+            context=None,
+            chat_id=1073,
+            session=session,
+            text="Аудио 1",
+        )
+    )
+    assert session["story_audio_path"] == str(first_path)
+    assert session["story_audio_alignment"] == {"characters": ["1"]}
+
+
+def test_approved_story_character_reference_is_attached_only_to_matching_scenes(tmp_path):
+    antonin_ref = tmp_path / "antonin-young.png"
+    antonin_ref.write_bytes(b"approved-character")
+    session = {
+        "state": STATE_WAITING_STORY_CHARACTER_APPROVAL,
+        STORY_CHARACTER_BIBLE_SESSION_KEY: [
+            {
+                "id": "antonin_young",
+                "description": "Юный Антонен, тёмные вьющиеся волосы и карие глаза.",
+                "requires_reference": True,
+            }
+        ],
+        STORY_CHARACTER_REFERENCES_SESSION_KEY: {
+            "antonin_young": {
+                "selected_path": str(antonin_ref),
+                "approved": True,
+                "description": "Юный Антонен, тёмные вьющиеся волосы и карие глаза.",
+            }
+        },
+        "scenes_plan": [
+            {"characters": ["antonin_young", "cat"]},
+            {"characters": ["grandma", "cat"]},
+        ],
+    }
+
+    _attach_story_character_references(session)
+
+    assert session["scenes_plan"][0]["references"]["antonin_young"] == str(antonin_ref)
+    assert "antonin_young" not in session["scenes_plan"][1]["references"]
+
+
+def test_advertising_generation_mode_requires_product_photo_before_planning():
+    captured: list[tuple[str, object | None]] = []
+    SESSIONS[1068] = {
+        "state": STATE_WAITING_GENERATION_MODE,
+        SERIES_PENDING_RECIPE_SESSION_KEY: "Покажи, как почистить белые кроссовки.",
+        SERIES_PENDING_PREFER_VERTEX_SESSION_KEY: False,
+    }
+
+    class _Message:
+        async def reply_text(self, text, reply_markup=None):
+            captured.append((text, reply_markup))
+
+    update = SimpleNamespace(message=_Message(), effective_chat=SimpleNamespace(id=1068))
+    asyncio.run(
+        _handle_waiting_generation_mode_state(
+            update,
+            context=None,
+            chat_id=1068,
+            session=SESSIONS[1068],
+            text="Реклама",
+        )
+    )
+
+    session = SESSIONS[1068]
+    assert session["state"] == STATE_WAITING_ADVERTISING_PRODUCT_IMAGE
+    assert session["target_languages"] == ["ru"]
+    assert session[ADVERTISING_SOURCE_SESSION_KEY].startswith("Покажи, как почистить")
+    assert session["sponsored_content"] is True
+    assert any("фотографию рекламируемого товара" in text for text, _markup in captured)
+
+
+def test_advertising_product_photo_is_saved_before_campaign_choice(monkeypatch):
+    captured: list[str] = []
+    campaign_started: list[bool] = []
+    session = {
+        "state": STATE_WAITING_ADVERTISING_PRODUCT_IMAGE,
+        ADVERTISING_SOURCE_SESSION_KEY: "Как почистить белые кроссовки",
+    }
+
+    class _Message:
+        caption = "Пена CleanStep"
+
+        async def reply_text(self, text, reply_markup=None):
+            _ = reply_markup
+            captured.append(text)
+
+    async def fake_extract(_update, _context):
+        return b"product-image"
+
+    async def fake_call(_update, _context, _chat_id, _name, _op, **_kwargs):
+        return {"product_name": "CleanStep", "short_product_lock": "белый флакон"}
+
+    async def fake_start_campaign(_update, _context, *, chat_id, session, direction="new"):
+        _ = (chat_id, direction)
+        campaign_started.append(True)
+        session["state"] = STATE_WAITING_ADVERTISING_CAMPAIGN_CHOICE
+        return True
+
+    monkeypatch.setattr("app.handlers.handlers_state_scene._extract_any_image_from_update", fake_extract)
+    monkeypatch.setattr("app.handlers.handlers_state_scene._call_with_503_retries", fake_call)
+    monkeypatch.setattr(
+        "app.handlers.handlers_state_scene.store_advertising_product_reference",
+        lambda _chat_id, _image: "/tmp/product.jpg",
+    )
+    monkeypatch.setattr("app.handlers.handlers_state_scene._start_advertising_campaign_choice", fake_start_campaign)
+
+    update = SimpleNamespace(message=_Message(), effective_chat=SimpleNamespace(id=1069))
+    asyncio.run(
+        _handle_advertising_product_photo(
+            update,
+            context=None,
+            chat_id=1069,
+            session=session,
+        )
+    )
+
+    assert session["advertising_product_path"] == "/tmp/product.jpg"
+    assert session["advertising_product_brief"]["product_name"] == "CleanStep"
+    assert campaign_started == [True]
+    assert session["state"] == STATE_WAITING_ADVERTISING_CAMPAIGN_CHOICE
+    assert any("Фото товара принято" in text for text in captured)
+
+
+def test_advertising_campaign_choice_then_clip_asks_for_series(monkeypatch):
+    captured: list[str] = []
+    series_asked: list[bool] = []
+    session = {
+        "state": STATE_WAITING_ADVERTISING_CAMPAIGN_CHOICE,
+        ADVERTISING_CAMPAIGNS_SESSION_KEY: [
+            {"title": f"Кампания {index}", "hook": "Хук", "idea": f"Сюжет {index}"}
+            for index in range(1, 6)
+        ],
+    }
+
+    class _Message:
+        async def reply_text(self, text, reply_markup=None):
+            _ = reply_markup
+            captured.append(text)
+
+    async def fake_ask_series(_update, current):
+        series_asked.append(True)
+        current["state"] = STATE_WAITING_SERIES_CHOICE
+
+    monkeypatch.setattr("app.handlers.handlers_state_scene._ask_series_choice", fake_ask_series)
+    update = SimpleNamespace(message=_Message(), effective_chat=SimpleNamespace(id=1070))
+
+    asyncio.run(
+        _handle_advertising_campaign_choice(
+            update,
+            context=None,
+            chat_id=1070,
+            session=session,
+            text="3",
+        )
+    )
+    assert session[ADVERTISING_SELECTED_CAMPAIGN_SESSION_KEY]["title"] == "Кампания 3"
+    assert session["state"] == STATE_WAITING_ADVERTISING_FORMAT_CHOICE
+
+    asyncio.run(
+        _handle_advertising_format_choice(
+            update,
+            context=None,
+            chat_id=1070,
+            session=session,
+            text="Клип",
+        )
+    )
+    assert session[ADVERTISING_FORMAT_SESSION_KEY] == "clip"
+    assert session[SERIES_PENDING_NEXT_SESSION_KEY] == SERIES_NEXT_ADVERTISING_PLAN
+    assert series_asked == [True]
+    assert any("шесть Veo-сцен" in text for text in captured)
+
+
+def test_advertising_post_generates_three_images_and_copy(monkeypatch):
+    photos: list[str] = []
+    texts: list[str] = []
+    generated_prompts: list[str] = []
+    session = {
+        "state": STATE_WAITING_ADVERTISING_FORMAT_CHOICE,
+        ADVERTISING_SOURCE_SESSION_KEY: "Как почистить белые кроссовки",
+        ADVERTISING_PRODUCT_BRIEF_SESSION_KEY: {"product_name": "CleanStep"},
+        ADVERTISING_PRODUCT_PATH_SESSION_KEY: "/tmp/product.jpg",
+        ADVERTISING_SELECTED_CAMPAIGN_SESSION_KEY: {"title": "Чистая победа", "idea": "Мини-история"},
+    }
+
+    class _Message:
+        async def reply_text(self, text, reply_markup=None):
+            _ = reply_markup
+            texts.append(text)
+
+        async def reply_photo(self, photo, caption=None, **_kwargs):
+            _ = photo
+            photos.append(str(caption or ""))
+
+    async def fake_call(_update, _context, _chat_id, _name, _op, **_kwargs):
+        return {
+            "post_text": "Красивый рекламный текст\n\n#реклама",
+            "image_prompts": ["Кадр 1", "Кадр 2", "Кадр 3"],
+        }
+
+    async def fake_image(prompt, **_kwargs):
+        generated_prompts.append(prompt)
+        return f"image-{len(generated_prompts)}".encode()
+
+    monkeypatch.setattr("app.handlers.handlers_state_scene._call_with_503_retries", fake_call)
+    monkeypatch.setattr("app.handlers.handlers_state_scene.advertising_product_reference_bytes", lambda _session: [b"product"])
+    monkeypatch.setattr("app.handlers.handlers_state_scene._load_scene_reference_images", lambda *_args, **_kwargs: [b"grandma", b"cat"])
+    monkeypatch.setattr("app.handlers.handlers_state_scene._generate_image_with_lenient_fallback", fake_image)
+    monkeypatch.setattr(
+        "app.handlers.handlers_state_scene.store_advertising_post_image",
+        lambda _chat_id, _payload, *, index: f"/tmp/post-{index}.png",
+    )
+    monkeypatch.setattr("app.handlers.handlers_state_scene.ensure_generation_run_for_session", lambda _session: (None, {}))
+    monkeypatch.setattr("app.handlers.handlers_state_scene.persist_generation_artifact", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr("app.handlers.handlers_state_scene.file_uri", lambda path: f"file://{path}")
+
+    update = SimpleNamespace(message=_Message(), effective_chat=SimpleNamespace(id=1071))
+    asyncio.run(
+        _generate_advertising_post(
+            update,
+            context=None,
+            chat_id=1071,
+            session=session,
+        )
+    )
+
+    assert len(generated_prompts) == 3
+    assert photos == [
+        "Рекламный пост · изображение 1/3",
+        "Рекламный пост · изображение 2/3",
+        "Рекламный пост · изображение 3/3",
+    ]
+    assert session[ADVERTISING_POST_IMAGE_PATHS_SESSION_KEY] == [
+        "/tmp/post-1.png",
+        "/tmp/post-2.png",
+        "/tmp/post-3.png",
+    ]
+    assert session[ADVERTISING_POST_TEXT_SESSION_KEY].startswith("Красивый")
+    assert session["state"] == ""
+    assert any("Готовый текст поста" in text for text in texts)
+
+
 def test_series_skip_continues_generation(monkeypatch):
     continued: list[tuple[str, bool]] = []
     SESSIONS[1061] = {
@@ -588,6 +1775,42 @@ def test_series_skip_before_overlay_title_goes_to_title_input():
     assert SESSIONS[1064][SERIES_CHOICE_CONFIRMED_SESSION_KEY] is True
     assert "series" not in SESSIONS[1064]
     assert any("русский заголовок" in text for text in replies)
+
+
+def test_series_skip_preserves_early_overlay_title_when_generation_session_is_rebuilt(monkeypatch):
+    replies: list[str] = []
+    SESSIONS[1067] = {
+        "state": STATE_WAITING_SERIES_CHOICE,
+        "generation_mode": "silence",
+        "target_languages": ["ru"],
+        SERIES_PENDING_RECIPE_SESSION_KEY: "Идея борща",
+        SERIES_PENDING_PREFER_VERTEX_SESSION_KEY: False,
+        "overlay_title": "Борщ",
+        "overlay_title_by_lang": {"ru": "Борщ", "en": "Борщ"},
+        "overlay_title_style": {"title_color": "#c72638", "top_margin_ratio": 0.15},
+    }
+
+    async def _fake_call(_update, _context, _chat_id, name, _fn):
+        assert name == "generate_recipe_concepts"
+        return {"concepts": [{"name": "Борщ"}], "text_plan": "1. Борщ"}
+
+    monkeypatch.setattr("app.handlers.handlers_state_start._call_with_503_retries", _fake_call)
+
+    class _Message:
+        text = "Без серии"
+
+        async def reply_text(self, text, reply_markup=None):
+            _ = reply_markup
+            replies.append(text)
+
+    update = SimpleNamespace(message=_Message(), effective_chat=SimpleNamespace(id=1067))
+    asyncio.run(on_text(update, context=None))
+
+    assert SESSIONS[1067]["state"] == "waiting_concept"
+    assert SESSIONS[1067]["overlay_title"] == "Борщ"
+    assert SESSIONS[1067]["overlay_title_by_lang"] == {"ru": "Борщ", "en": "Борщ"}
+    assert SESSIONS[1067]["overlay_title_style"]["title_color"] == "#c72638"
+    assert not any("русский заголовок" in text.lower() for text in replies)
 
 
 def test_existing_series_choice_selects_current_day_without_advancing(monkeypatch):
@@ -955,6 +2178,49 @@ def test_on_photo_first_step_generate_extracts_source_and_launches_pipeline(monk
     assert any("Распознаю идею или рецепт по фото" in text for text in replies)
 
 
+def test_on_photo_first_step_description_extracts_source_and_starts_descriptions(monkeypatch):
+    captured_recipes: list[str] = []
+    replies: list[str] = []
+    SESSIONS[1033] = {"state": "state_waiting_first_step_description_text"}
+
+    class _Message:
+        caption = "Нужно описание по этому скриншоту"
+
+        async def reply_text(self, text, reply_markup=None):
+            _ = reply_markup
+            replies.append(text)
+
+    async def _fake_extract(update, context):
+        _ = (update, context)
+        return b"photo"
+
+    async def _fake_source(image_bytes, caption=""):
+        assert image_bytes == b"photo"
+        assert caption == "Нужно описание по этому скриншоту"
+        return "Рецепт домашнего борща"
+
+    async def _fake_call(_update, _context, _chat_id, _name, fn):
+        return await fn()
+
+    async def _fake_start_description_with_recipe(update, context, *, recipe):
+        _ = (update, context)
+        captured_recipes.append(recipe)
+
+    monkeypatch.setattr("app.handlers.handlers_state_scene._extract_any_image_from_update", _fake_extract)
+    monkeypatch.setattr("app.handlers.handlers_state_scene._description_source_from_image", _fake_source)
+    monkeypatch.setattr("app.handlers.handlers_state_scene._call_with_503_retries", _fake_call)
+    monkeypatch.setattr(
+        "app.handlers.handlers_state_scene._start_description_with_recipe",
+        _fake_start_description_with_recipe,
+    )
+
+    update = SimpleNamespace(message=_Message(), effective_chat=SimpleNamespace(id=1033))
+    asyncio.run(on_photo(update, context=None))
+
+    assert captured_recipes == ["Рецепт домашнего борща"]
+    assert any("Распознаю рецепт или блюдо по фото" in text for text in replies)
+
+
 def test_scene_approval_ok_asks_for_russian_overlay_title():
     replies: list[str] = []
     markups: list[object] = []
@@ -978,6 +2244,52 @@ def test_scene_approval_ok_asks_for_russian_overlay_title():
     assert SESSIONS[1040]["state"] == "state_waiting_overlay_title_ru"
     assert any("введите русский заголовок" in text.lower() for text in replies)
     assert markups[-1].__class__.__name__ == "ReplyKeyboardRemove"
+
+
+def test_scene_approval_with_existing_overlay_title_generates_production(monkeypatch):
+    replies: list[str] = []
+    message_text = {"value": "ОК"}
+    SESSIONS[1047] = {
+        "state": "waiting_scene_approval",
+        "scenes_plan": [{"scene": 1, "text": "Сцена"}],
+        "viral_concept_brief": {},
+        "overlay_title": "Борщ",
+        "overlay_title_by_lang": {"ru": "Борщ", "en": "Борщ"},
+        "overlay_title_style": {"title_color": "#c72638"},
+        SERIES_CHOICE_CONFIRMED_SESSION_KEY: True,
+    }
+
+    class _Message:
+        @property
+        def text(self):
+            return message_text["value"]
+
+        async def reply_text(self, text, reply_markup=None):
+            _ = reply_markup
+            replies.append(text)
+
+    async def _fake_call(_update, _context, _chat_id, name, _fn):
+        assert name == "generate_full_production"
+        return {"json_plan": [{"scene": 1, "start_frame_prompt": "s", "video_prompt": "v"}]}
+
+    monkeypatch.setattr("app.handlers.handlers_state_scene._call_with_503_retries", _fake_call)
+
+    update = SimpleNamespace(message=_Message(), effective_chat=SimpleNamespace(id=1047))
+    asyncio.run(on_text(update, context=None))
+
+    assert SESSIONS[1047]["state"] == "state_waiting_overlay_subtitle_ru"
+    assert any("третью строку" in text.lower() for text in replies)
+    message_text["value"] = "ОК"
+    asyncio.run(on_text(update, context=None))
+
+    assert SESSIONS[1047]["state"] == "state_waiting_overlay_title_style_approval"
+    assert SESSIONS[1047][OVERLAY_SUBTITLE_DECIDED_SESSION_KEY] is True
+    asyncio.run(on_text(update, context=None))
+
+    assert SESSIONS[1047]["state"] == "waiting_production_bundle_approval"
+    assert not any("русский заголовок" in text.lower() for text in replies)
+    assert SESSIONS[1047]["production"]["overlay_title_by_lang"] == {"ru": "Борщ", "en": "Борщ"}
+    assert OVERLAY_SUBTITLE_BY_LANG_SESSION_KEY not in SESSIONS[1047]["production"]
 
 
 def test_scene_approval_ok_asks_for_series_before_title_if_not_chosen(monkeypatch):
@@ -1035,6 +2347,128 @@ def test_overlay_title_ru_generates_english_candidate(monkeypatch):
     assert any("EN: Grandma's Borscht" in text for text in replies)
 
 
+def test_overlay_title_ru_only_skips_english_candidate(monkeypatch):
+    replies: list[str] = []
+    SESSIONS[1048] = {
+        "state": "state_waiting_overlay_title_ru",
+        "generation_mode": "silence",
+        "target_languages": ["ru"],
+    }
+
+    class _Message:
+        text = "Борщ как у бабушки"
+
+        async def reply_text(self, text, reply_markup=None):
+            _ = reply_markup
+            replies.append(text)
+
+    async def _unexpected_call(*_args, **_kwargs):
+        raise AssertionError("RU-only title flow should not request English translation")
+
+    monkeypatch.setattr("app.handlers.handlers_state_scene._call_with_503_retries", _unexpected_call)
+
+    update = SimpleNamespace(message=_Message(), effective_chat=SimpleNamespace(id=1048))
+    asyncio.run(on_text(update, context=None))
+
+    assert SESSIONS[1048]["state"] == "state_waiting_overlay_subtitle_ru"
+    assert SESSIONS[1048]["overlay_title_by_lang"] == {
+        "ru": "Борщ как у бабушки",
+        "en": "Борщ как у бабушки",
+    }
+    assert "overlay_title_translation_pending" not in SESSIONS[1048]
+    assert any("третью строку" in text.lower() for text in replies)
+
+
+def test_overlay_subtitle_text_translates_to_en_before_style_approval(monkeypatch):
+    replies: list[str] = []
+    photos: list[str] = []
+    message_text = {"value": "КБЖУ на 100 гр: 126/10/4/24"}
+    SESSIONS[1053] = {
+        "state": "state_waiting_overlay_subtitle_ru",
+        "target_languages": ["ru", "en"],
+        "overlay_title": "Борщ",
+        "overlay_title_by_lang": {"ru": "Борщ", "en": "Borscht"},
+    }
+
+    class _Message:
+        @property
+        def text(self):
+            return message_text["value"]
+
+        async def reply_text(self, text, reply_markup=None):
+            _ = reply_markup
+            replies.append(text)
+
+        async def reply_photo(self, photo, caption):
+            _ = caption
+            photos.append(getattr(photo, "name", ""))
+
+    async def _fake_call(_update, _context, _chat_id, name, _fn):
+        assert name == "translate_overlay_subtitle_en"
+        return "per 100g: 126/10/4/24"
+
+    monkeypatch.setattr("app.handlers.handlers_state_scene._call_with_503_retries", _fake_call)
+
+    update = SimpleNamespace(message=_Message(), effective_chat=SimpleNamespace(id=1053))
+    asyncio.run(on_text(update, context=None))
+
+    assert SESSIONS[1053]["state"] == "state_waiting_overlay_subtitle_en_approval"
+    assert SESSIONS[1053][OVERLAY_SUBTITLE_TRANSLATION_PENDING_SESSION_KEY] == {
+        "ru": "КБЖУ на 100 гр: 126/10/4/24",
+        "en": "per 100g: 126/10/4/24",
+    }
+    assert any("Предлагаю английскую третью строку" in text for text in replies)
+
+    message_text["value"] = "ОК"
+    asyncio.run(on_text(update, context=None))
+
+    assert SESSIONS[1053]["state"] == "state_waiting_overlay_title_style_approval"
+    assert SESSIONS[1053][OVERLAY_SUBTITLE_DECIDED_SESSION_KEY] is True
+    assert SESSIONS[1053][OVERLAY_SUBTITLE_BY_LANG_SESSION_KEY] == {
+        "ru": "КБЖУ на 100 гр: 126/10/4/24",
+        "en": "per 100g: 126/10/4/24",
+    }
+    assert photos == ["overlay_title_preview_ru.png", "overlay_title_preview_en.png"]
+
+
+def test_overlay_subtitle_en_correction_is_saved_before_style_approval():
+    replies: list[str] = []
+    photos: list[str] = []
+    SESSIONS[1055] = {
+        "state": "state_waiting_overlay_subtitle_en_approval",
+        "target_languages": ["ru", "en"],
+        "overlay_title": "Борщ",
+        "overlay_title_by_lang": {"ru": "Борщ", "en": "Borscht"},
+        "overlay_subtitle_translation_pending": {
+            "ru": "КБЖУ на 100 гр: 126/10/4/24",
+            "en": "bad translation",
+        },
+    }
+
+    class _Message:
+        text = "Macros per 100g: 126/10/4/24"
+
+        async def reply_text(self, text, reply_markup=None):
+            _ = reply_markup
+            replies.append(text)
+
+        async def reply_photo(self, photo, caption):
+            _ = caption
+            photos.append(getattr(photo, "name", ""))
+
+    update = SimpleNamespace(message=_Message(), effective_chat=SimpleNamespace(id=1055))
+    asyncio.run(on_text(update, context=None))
+
+    assert SESSIONS[1055]["state"] == "state_waiting_overlay_title_style_approval"
+    assert SESSIONS[1055][OVERLAY_SUBTITLE_BY_LANG_SESSION_KEY] == {
+        "ru": "КБЖУ на 100 гр: 126/10/4/24",
+        "en": "Macros per 100g: 126/10/4/24",
+    }
+    assert OVERLAY_SUBTITLE_TRANSLATION_PENDING_SESSION_KEY not in SESSIONS[1055]
+    assert photos == ["overlay_title_preview_ru.png", "overlay_title_preview_en.png"]
+    assert any("Английскую третью строку исправила" in text for text in replies)
+
+
 def test_overlay_title_ru_translation_error_keeps_ru_input_state(monkeypatch):
     replies: list[str] = []
     SESSIONS[1046] = {"state": "state_waiting_overlay_title_ru"}
@@ -1090,6 +2524,7 @@ def test_overlay_title_ru_empty_translation_falls_back_to_russian(monkeypatch):
 def test_overlay_title_en_ok_asks_for_style_approval():
     replies: list[str] = []
     photos: list[tuple[str, str]] = []
+    message_text = {"value": "ОК"}
     SESSIONS[1042] = {
         "state": "state_waiting_overlay_title_en_approval",
         "scenes_plan": [{"scene": 1, "text": "Сцена"}],
@@ -1097,7 +2532,9 @@ def test_overlay_title_en_ok_asks_for_style_approval():
     }
 
     class _Message:
-        text = "ОК"
+        @property
+        def text(self):
+            return message_text["value"]
 
         async def reply_text(self, text, reply_markup=None):
             _ = reply_markup
@@ -1109,6 +2546,10 @@ def test_overlay_title_en_ok_asks_for_style_approval():
     update = SimpleNamespace(message=_Message(), effective_chat=SimpleNamespace(id=1042))
     asyncio.run(on_text(update, context=None))
 
+    assert SESSIONS[1042]["state"] == "state_waiting_overlay_subtitle_ru"
+    assert any("третью строку" in text.lower() for text in replies)
+    asyncio.run(on_text(update, context=None))
+
     assert SESSIONS[1042]["state"] == "state_waiting_overlay_title_style_approval"
     assert SESSIONS[1042]["overlay_title_by_lang"] == {"ru": "Борщ", "en": "Borscht"}
     assert SESSIONS[1042]["overlay_title_style"]["title_color"] == "#c72638"
@@ -1116,9 +2557,24 @@ def test_overlay_title_en_ok_asks_for_style_approval():
     assert [caption for _name, caption in photos] == ["Превью верхнего заголовка RU.", "Превью верхнего заголовка EN."]
     assert any("Цвет заголовка: #c72638" in text for text in replies)
 
+    with db.SessionLocal() as check_db:
+        saved_session = check_db.query(ChatSession).filter_by(chat_id=1042).one()
+        artifact = (
+            check_db.query(GenerationArtifact)
+            .filter_by(
+                run_id=saved_session.generation_run_id,
+                artifact_type="overlay_title_by_lang",
+            )
+            .one()
+        )
+
+    assert saved_session.session_json["overlay_title_by_lang"] == {"ru": "Борщ", "en": "Borscht"}
+    assert artifact.payload_json["overlay_title_by_lang"] == {"ru": "Борщ", "en": "Borscht"}
+
 
 def test_overlay_title_preview_receives_series_context(monkeypatch):
-    calls: list[tuple[str, str, str, str]] = []
+    calls: list[tuple[str, str, str, str, str]] = []
+    message_text = {"value": "ОК"}
     SESSIONS[1051] = {
         "state": "state_waiting_overlay_title_en_approval",
         "scenes_plan": [{"scene": 1, "text": "Сцена"}],
@@ -1128,7 +2584,9 @@ def test_overlay_title_preview_receives_series_context(monkeypatch):
     }
 
     class _Message:
-        text = "ОК"
+        @property
+        def text(self):
+            return message_text["value"]
 
         async def reply_text(self, text, reply_markup=None):
             _ = (text, reply_markup)
@@ -1136,18 +2594,19 @@ def test_overlay_title_preview_receives_series_context(monkeypatch):
         async def reply_photo(self, photo, caption):
             _ = (photo, caption)
 
-    def _fake_preview(language, title, _style, series_title="", series_counter=""):
-        calls.append((language, title, series_title, series_counter))
+    def _fake_preview(language, title, _style, series_title="", series_counter="", subtitle=""):
+        calls.append((language, title, series_title, series_counter, subtitle))
         return b"png"
 
     monkeypatch.setattr("app.handlers.handlers_state_scene._render_overlay_title_preview", _fake_preview)
 
     update = SimpleNamespace(message=_Message(), effective_chat=SimpleNamespace(id=1051))
     asyncio.run(on_text(update, context=None))
+    asyncio.run(on_text(update, context=None))
 
     assert calls == [
-        ("ru", "Борщ", "Супы у бабушки", "день 2 из 7"),
-        ("en", "Borscht", "Grandma's Soups", "day 2 of 7"),
+        ("ru", "Борщ", "Супы у бабушки", "день 2 из 7", ""),
+        ("en", "Borscht", "Grandma's Soups", "day 2 of 7", ""),
     ]
 
 
@@ -1172,6 +2631,7 @@ def test_overlay_title_en_missing_pending_returns_to_ru_title_state():
 def test_overlay_title_en_correction_asks_for_style_approval():
     replies: list[str] = []
     photos: list[str] = []
+    message_text = {"value": "Real Borscht"}
     SESSIONS[1043] = {
         "state": "state_waiting_overlay_title_en_approval",
         "scenes_plan": [{"scene": 1, "text": "Сцена"}],
@@ -1179,7 +2639,9 @@ def test_overlay_title_en_correction_asks_for_style_approval():
     }
 
     class _Message:
-        text = "Real Borscht"
+        @property
+        def text(self):
+            return message_text["value"]
 
         async def reply_text(self, text, reply_markup=None):
             _ = reply_markup
@@ -1192,15 +2654,20 @@ def test_overlay_title_en_correction_asks_for_style_approval():
     update = SimpleNamespace(message=_Message(), effective_chat=SimpleNamespace(id=1043))
     asyncio.run(on_text(update, context=None))
 
+    assert SESSIONS[1043]["state"] == "state_waiting_overlay_subtitle_ru"
+    assert any("Английский заголовок исправила" in text for text in replies)
+    message_text["value"] = "ОК"
+    asyncio.run(on_text(update, context=None))
+
     assert SESSIONS[1043]["state"] == "state_waiting_overlay_title_style_approval"
     assert SESSIONS[1043]["overlay_title_by_lang"] == {"ru": "Борщ", "en": "Real Borscht"}
     assert photos == ["overlay_title_preview_ru.png", "overlay_title_preview_en.png"]
-    assert any("Английский заголовок исправила" in text for text in replies)
 
 
 def test_overlay_title_style_preview_failure_does_not_block_approval(monkeypatch):
     replies: list[str] = []
     photos: list[str] = []
+    message_text = {"value": "ОК"}
     SESSIONS[1049] = {
         "state": "state_waiting_overlay_title_en_approval",
         "scenes_plan": [{"scene": 1, "text": "Сцена"}],
@@ -1208,7 +2675,9 @@ def test_overlay_title_style_preview_failure_does_not_block_approval(monkeypatch
     }
 
     class _Message:
-        text = "ОК"
+        @property
+        def text(self):
+            return message_text["value"]
 
         async def reply_text(self, text, reply_markup=None):
             _ = reply_markup
@@ -1218,12 +2687,13 @@ def test_overlay_title_style_preview_failure_does_not_block_approval(monkeypatch
             _ = caption
             photos.append(getattr(photo, "name", ""))
 
-    def _raise_preview(_language, _title, _style, _series_title="", _series_counter=""):
+    def _raise_preview(_language, _title, _style, _series_title="", _series_counter="", _subtitle=""):
         raise RuntimeError("font missing")
 
     monkeypatch.setattr("app.handlers.handlers_state_scene._render_overlay_title_preview", _raise_preview)
 
     update = SimpleNamespace(message=_Message(), effective_chat=SimpleNamespace(id=1049))
+    asyncio.run(on_text(update, context=None))
     asyncio.run(on_text(update, context=None))
 
     assert SESSIONS[1049]["state"] == "state_waiting_overlay_title_style_approval"
@@ -1239,6 +2709,7 @@ def test_overlay_title_style_ok_generates_production(monkeypatch):
         "overlay_title": "Борщ",
         "overlay_title_by_lang": {"ru": "Борщ", "en": "Borscht"},
         "overlay_title_style": {"title_color": "#c72638", "top_margin_ratio": 0.15, "side_margin_ratio": 0.1},
+        OVERLAY_SUBTITLE_DECIDED_SESSION_KEY: True,
     }
 
     class _Message:
@@ -1264,7 +2735,67 @@ def test_overlay_title_style_ok_generates_production(monkeypatch):
         "top_margin_ratio": 0.15,
         "side_margin_ratio": 0.1,
     }
-    assert any("Заголовок утверждён" in text for text in replies)
+
+
+def test_legacy_overlay_title_style_ok_asks_for_subtitle_before_generation(monkeypatch):
+    replies: list[str] = []
+    SESSIONS[1054] = {
+        "state": "state_waiting_overlay_title_style_approval",
+        "scenes_plan": [{"scene": 1, "text": "Сцена"}],
+        "overlay_title": "Борщ",
+        "overlay_title_by_lang": {"ru": "Борщ", "en": "Borscht"},
+        "overlay_title_style": {"title_color": "#c72638", "top_margin_ratio": 0.15, "side_margin_ratio": 0.1},
+    }
+
+    class _Message:
+        text = "ОК"
+
+        async def reply_text(self, text, reply_markup=None):
+            _ = reply_markup
+            replies.append(text)
+
+    async def _unexpected_call(*_args, **_kwargs):
+        raise AssertionError("must ask optional subtitle before generating production")
+
+    monkeypatch.setattr("app.handlers.handlers_state_scene._call_with_503_retries", _unexpected_call)
+
+    update = SimpleNamespace(message=_Message(), effective_chat=SimpleNamespace(id=1054))
+    asyncio.run(on_text(update, context=None))
+
+    assert SESSIONS[1054]["state"] == "state_waiting_overlay_subtitle_ru"
+    assert any("третью строку" in text.lower() for text in replies)
+
+
+def test_early_silence_overlay_title_style_ok_asks_for_series(monkeypatch):
+    replies: list[str] = []
+    SESSIONS[1052] = {
+        "state": "state_waiting_overlay_title_style_approval",
+        "generation_mode": "silence",
+        "target_languages": ["ru"],
+        "overlay_title": "Борщ",
+        "overlay_title_by_lang": {"ru": "Борщ", "en": "Борщ"},
+        "overlay_title_style": {"title_color": "#c72638", "top_margin_ratio": 0.15, "side_margin_ratio": 0.1},
+        OVERLAY_TITLE_PENDING_NEXT_SESSION_KEY: OVERLAY_TITLE_NEXT_SERIES_CHOICE,
+        OVERLAY_SUBTITLE_DECIDED_SESSION_KEY: True,
+        SERIES_PENDING_RECIPE_SESSION_KEY: "Идея",
+        SERIES_PENDING_PREFER_VERTEX_SESSION_KEY: False,
+    }
+    monkeypatch.setattr("app.handlers.handlers_state_start.list_active_series", lambda _project_slug: [])
+
+    class _Message:
+        text = "ОК"
+
+        async def reply_text(self, text, reply_markup=None):
+            _ = reply_markup
+            replies.append(text)
+
+    update = SimpleNamespace(message=_Message(), effective_chat=SimpleNamespace(id=1052))
+    asyncio.run(on_text(update, context=None))
+
+    assert SESSIONS[1052]["state"] == STATE_WAITING_SERIES_CHOICE
+    assert OVERLAY_TITLE_PENDING_NEXT_SESSION_KEY not in SESSIONS[1052]
+    assert SESSIONS[1052]["overlay_title_by_lang"] == {"ru": "Борщ", "en": "Борщ"}
+    assert any("Можно привязать это видео к серии" in text for text in replies)
 
 
 def test_overlay_title_style_generation_empty_plan_keeps_style_state(monkeypatch):
@@ -1275,6 +2806,7 @@ def test_overlay_title_style_generation_empty_plan_keeps_style_state(monkeypatch
         "overlay_title": "Борщ",
         "overlay_title_by_lang": {"ru": "Борщ", "en": "Borscht"},
         "overlay_title_style": {"title_color": "#c72638", "top_margin_ratio": 0.15, "side_margin_ratio": 0.1},
+        OVERLAY_SUBTITLE_DECIDED_SESSION_KEY: True,
     }
 
     class _Message:
@@ -1296,6 +2828,35 @@ def test_overlay_title_style_generation_empty_plan_keeps_style_state(monkeypatch
     assert SESSIONS[1050]["state"] == "state_waiting_overlay_title_style_approval"
     assert "production" not in SESSIONS[1050]
     assert any("Модель не вернула production-план" in text for text in replies)
+
+
+def test_production_bundle_empty_feedback_does_not_regenerate(monkeypatch):
+    replies: list[str] = []
+    SESSIONS[1053] = {
+        "state": "waiting_production_bundle_approval",
+        "scenes_plan": [{"scene": 1, "text": "Сцена"}],
+        "production": {"json_plan": [{"scene": 1, "video_prompt": "old"}]},
+    }
+
+    class _Message:
+        text = "ФИДБЕК:"
+
+        async def reply_text(self, text, reply_markup=None):
+            _ = reply_markup
+            replies.append(text)
+
+    async def _unexpected_call(*_args, **_kwargs):
+        raise AssertionError("empty feedback must not regenerate production")
+
+    monkeypatch.setattr("app.handlers.handlers_state_scene._call_with_503_retries", _unexpected_call)
+
+    update = SimpleNamespace(message=_Message(), effective_chat=SimpleNamespace(id=1053))
+    asyncio.run(on_text(update, context=None))
+
+    assert SESSIONS[1053]["state"] == "waiting_production_bundle_approval"
+    assert SESSIONS[1053]["production"]["json_plan"][0]["video_prompt"] == "old"
+    assert any("конкретную правку" in text for text in replies)
+    assert not any("Перегенерирую production" in text for text in replies)
 
 
 def test_overlay_title_style_feedback_updates_settings_without_generating(monkeypatch):
@@ -1341,6 +2902,30 @@ def test_overlay_title_style_feedback_updates_settings_without_generating(monkey
     assert any("Цвет заголовка: #ff4f7b" in text for text in replies)
 
 
+def test_overlay_title_translation_retries_plain_transliteration(monkeypatch):
+    calls: list[str] = []
+
+    async def _fake_call(_update, _context, _chat_id, name, _fn):
+        calls.append(name)
+        if name == "translate_overlay_title_en":
+            return "Kabachkovaya ikra"
+        return "Zucchini Caviar"
+
+    monkeypatch.setattr("app.handlers.handlers_state_scene._call_with_503_retries", _fake_call)
+
+    translated = asyncio.run(
+        _translate_overlay_title_to_en(
+            SimpleNamespace(),
+            context=None,
+            chat_id=1049,
+            ru_title="Кабачковая икра",
+        )
+    )
+
+    assert translated == "Zucchini Caviar"
+    assert calls == ["translate_overlay_title_en", "translate_overlay_title_en_semantic_retry"]
+
+
 def test_overlay_title_helpers_clean_sanitize_and_clamp_values():
     assert _clean_translated_title('"EN: Grandma Borscht"') == "Grandma Borscht"
 
@@ -1348,6 +2933,7 @@ def test_overlay_title_helpers_clean_sanitize_and_clamp_values():
         "overlay_title": "  Борщ  ",
         "overlay_title_by_lang": {"ru": " Борщ ", "": "skip", "en": "", "es": " Sopa "},
         "overlay_title_style": {"title_color": "#C72638", "": "skip", "top_margin_ratio": 15},
+        "overlay_subtitle_by_lang": {"ru": " КБЖУ на 100 гр: 126/10/4/24 ", "en": ""},
     }
     production: dict[str, object] = {}
 
@@ -1356,6 +2942,7 @@ def test_overlay_title_helpers_clean_sanitize_and_clamp_values():
     assert production["overlay_title"] == "Борщ"
     assert production["overlay_title_by_lang"] == {"ru": "Борщ", "es": "Sopa"}
     assert production["overlay_title_style"] == {"title_color": "#C72638", "top_margin_ratio": 15}
+    assert production["overlay_subtitle_by_lang"] == {"ru": "КБЖУ на 100 гр: 126/10/4/24"}
 
     updated = _apply_overlay_title_style_feedback(
         {"title_color": "#fff7e8", "top_margin_ratio": 0.15, "side_margin_ratio": 0.10},
@@ -1399,6 +2986,229 @@ def test_on_text_without_choice_on_recipe_step_is_feedback(monkeypatch):
     asyncio.run(on_text(update, context=None))
 
     assert captured_feedback == ["Добавь в начинку немного корицы"]
+
+
+def test_silence_recipe_approval_shows_scene_plan_before_production(monkeypatch):
+    replies: list[str] = []
+    calls: list[str] = []
+    SESSIONS[1034] = {
+        "state": "waiting_recipe_approval",
+        "generation_mode": "silence",
+        "target_languages": ["ru"],
+        "selected_concept": "Борщ в уютной кухне",
+        "selected_concept_name": "Борщ",
+        "recipe_full_text": "Свеклу потушить, бульон сварить, всё соединить.",
+    }
+
+    class _Message:
+        text = "ОК"
+
+        async def reply_text(self, text, reply_markup=None):
+            _ = reply_markup
+            replies.append(text)
+
+    async def _fake_call(_update, _context, _chat_id, name, _fn):
+        calls.append(name)
+        assert name == "generate_silence_scenes_plan"
+        return {
+            "json_plan": [{"scene": 1, "recipe_step": "Свекла тушится", "action": "close-up"}],
+            "text_plan": "1. Свекла тушится",
+        }
+
+    monkeypatch.setattr("app.handlers.handlers_state_start._call_with_503_retries", _fake_call)
+
+    update = SimpleNamespace(message=_Message(), effective_chat=SimpleNamespace(id=1034))
+    asyncio.run(on_text(update, context=None))
+
+    assert calls == ["generate_silence_scenes_plan"]
+    assert SESSIONS[1034]["state"] == "waiting_scene_approval"
+    assert SESSIONS[1034]["scenes_plan"] == [
+        {
+            "scene": 1,
+            "recipe_step": "Свекла тушится",
+            "action": "close-up",
+            "characters": ["grandma", "cat"],
+        }
+    ]
+    assert SESSIONS[1034]["target_languages"] == ["ru"]
+    assert SESSIONS[1034]["dish_visual_brief"]
+    assert "production" not in SESSIONS[1034]
+    assert any("Это сценарий по сценам" in text for text in replies)
+
+
+def test_silence_recipe_approval_with_early_title_still_waits_for_scene_approval(monkeypatch):
+    replies: list[str] = []
+    calls: list[str] = []
+    SESSIONS[1035] = {
+        "state": "waiting_recipe_approval",
+        "generation_mode": "silence",
+        "target_languages": ["ru"],
+        "selected_concept": "Борщ в уютной кухне",
+        "selected_concept_name": "Борщ",
+        "recipe_full_text": "Свеклу потушить, бульон сварить, всё соединить.",
+        "overlay_title": "Борщ",
+        "overlay_title_by_lang": {"ru": "Борщ", "en": "Борщ"},
+        "overlay_title_style": {"title_color": "#c72638", "top_margin_ratio": 0.15, "side_margin_ratio": 0.1},
+        SERIES_CHOICE_CONFIRMED_SESSION_KEY: True,
+    }
+
+    class _Message:
+        text = "ОК"
+
+        async def reply_text(self, text, reply_markup=None):
+            _ = reply_markup
+            replies.append(text)
+
+    async def _fake_call(_update, _context, _chat_id, name, _fn):
+        calls.append(name)
+        assert name == "generate_silence_scenes_plan"
+        return {
+            "json_plan": [{"scene": 1, "recipe_step": "Свекла тушится", "action": "close-up"}],
+            "text_plan": "1. Свекла тушится",
+        }
+
+    monkeypatch.setattr("app.handlers.handlers_state_start._call_with_503_retries", _fake_call)
+
+    update = SimpleNamespace(message=_Message(), effective_chat=SimpleNamespace(id=1035))
+    asyncio.run(on_text(update, context=None))
+
+    assert calls == ["generate_silence_scenes_plan"]
+    assert SESSIONS[1035]["state"] == "waiting_scene_approval"
+    assert SESSIONS[1035]["overlay_title_by_lang"] == {"ru": "Борщ", "en": "Борщ"}
+    assert "production" not in SESSIONS[1035]
+    assert any("Это сценарий по сценам" in text for text in replies)
+
+
+def test_normal_recipe_approval_asks_overlay_title_before_viral_plan(monkeypatch):
+    replies: list[str] = []
+    SESSIONS[1037] = {
+        "state": "waiting_recipe_approval",
+        "selected_concept": "Белковый салат",
+        "selected_concept_name": "Белковый салат",
+        "recipe_full_text": "Курица, черри, сыр, йогурт.",
+    }
+
+    class _Message:
+        text = "ОК"
+
+        async def reply_text(self, text, reply_markup=None):
+            _ = reply_markup
+            replies.append(text)
+
+    async def _unexpected_call(*_args, **_kwargs):
+        raise AssertionError("viral plan must wait until title and optional third line are answered")
+
+    monkeypatch.setattr("app.handlers.handlers_state_start._call_with_503_retries", _unexpected_call)
+
+    update = SimpleNamespace(message=_Message(), effective_chat=SimpleNamespace(id=1037))
+    asyncio.run(on_text(update, context=None))
+
+    assert SESSIONS[1037]["state"] == "state_waiting_overlay_title_ru"
+    assert SESSIONS[1037][OVERLAY_TITLE_PENDING_NEXT_SESSION_KEY] == OVERLAY_TITLE_NEXT_RECIPE_PLAN
+    assert any("До viral plan" in text for text in replies)
+
+
+def test_overlay_title_recipe_plan_continues_to_viral_plan_after_subtitle_and_style(monkeypatch):
+    replies: list[str] = []
+    calls: list[str] = []
+    SESSIONS[1038] = {
+        "state": "state_waiting_overlay_title_style_approval",
+        "selected_concept": "Белковый салат",
+        "selected_concept_name": "Белковый салат",
+        "recipe_full_text": "Курица, черри, сыр, йогурт.",
+        "overlay_title": "Белковый салат",
+        "overlay_title_by_lang": {"ru": "Белковый салат", "en": "Protein salad"},
+        "overlay_subtitle_by_lang": {"ru": "КБЖУ на 100 гр: 126/10/4/24"},
+        "overlay_subtitle_decided": True,
+        "overlay_title_style": {"title_color": "#fff7e8"},
+        OVERLAY_TITLE_PENDING_NEXT_SESSION_KEY: OVERLAY_TITLE_NEXT_RECIPE_PLAN,
+    }
+
+    class _Message:
+        text = "ОК"
+
+        async def reply_text(self, text, reply_markup=None):
+            _ = reply_markup
+            replies.append(text)
+
+    async def _fake_call(_update, _context, _chat_id, name, _fn):
+        calls.append(name)
+        if name == "generate_viral_concept_brief":
+            return {"dish_name": "Белковый салат", "strongest_first_phrase": "Лёгкий ужин"}
+        assert name == "generate_scenes_plan"
+        return {
+            "json_plan": [{"scene": 1, "text": "Сцена", "characters": ["grandma"]}],
+            "text_plan": "1. Сцена",
+            "viral_concept_brief": {"dish_name": "Белковый салат"},
+        }
+
+    monkeypatch.setattr("app.handlers.handlers_state_start._call_with_503_retries", _fake_call)
+
+    update = SimpleNamespace(message=_Message(), effective_chat=SimpleNamespace(id=1038))
+    asyncio.run(on_text(update, context=None))
+
+    assert calls == ["generate_viral_concept_brief", "generate_scenes_plan"]
+    assert SESSIONS[1038]["state"] == "waiting_scene_approval"
+    assert SESSIONS[1038]["overlay_subtitle_by_lang"] == {"ru": "КБЖУ на 100 гр: 126/10/4/24"}
+    assert OVERLAY_TITLE_PENDING_NEXT_SESSION_KEY not in SESSIONS[1038]
+    assert any("Если план подходит" in text for text in replies)
+
+
+def test_silence_scene_plan_feedback_regenerates_scene_plan_before_production(monkeypatch):
+    replies: list[str] = []
+    captured: dict[str, object] = {}
+    SESSIONS[1036] = {
+        "state": "waiting_scene_approval",
+        "generation_mode": "silence",
+        "target_languages": ["ru"],
+        "selected_concept": "Борщ в уютной кухне",
+        "recipe_full_text": "Свеклу потушить, бульон сварить, всё соединить.",
+        "scenes_plan": [{"scene": 1, "recipe_step": "старая подача", "action": "old"}],
+        "viral_concept_brief": {},
+    }
+
+    class _Message:
+        text = "в последней сцене крупно пюре с 2 котлетами"
+
+        async def reply_text(self, text, reply_markup=None):
+            _ = reply_markup
+            replies.append(text)
+
+    async def _fake_call(_update, _context, _chat_id, name, fn):
+        captured["name"] = name
+        result = fn()
+        captured["result"] = result
+        return {
+            "json_plan": [
+                {
+                    "scene": 1,
+                    "recipe_step": "крупно пюре с 2 котлетами",
+                    "action": "крупно пюре с 2 котлетами",
+                }
+            ],
+            "text_plan": "1. крупно пюре с 2 котлетами",
+            "viral_concept_brief": {},
+            "romantic_drama_subplot": {},
+            "retention_review": {},
+        }
+
+    monkeypatch.setattr("app.handlers.handlers_state_scene._call_with_503_retries", _fake_call)
+    monkeypatch.setattr(
+        "app.handlers.handlers_state_scene.generate_scenes_plan",
+        lambda *args, **kwargs: captured.setdefault("kwargs", kwargs) or {"json_plan": [], "text_plan": ""},
+    )
+
+    update = SimpleNamespace(message=_Message(), effective_chat=SimpleNamespace(id=1036))
+    asyncio.run(on_text(update, context=None))
+
+    assert captured["name"] == "refine_scenes_plan"
+    assert captured["kwargs"]["generation_mode"] == "silence"  # type: ignore[index]
+    assert captured["kwargs"]["user_feedback"] == "в последней сцене крупно пюре с 2 котлетами"  # type: ignore[index]
+    assert SESSIONS[1036]["state"] == "waiting_scene_approval"
+    assert SESSIONS[1036]["scenes_plan"][0]["action"] == "крупно пюре с 2 котлетами"
+    assert SESSIONS[1036]["recipe_steps"] == ["крупно пюре с 2 котлетами"]
+    assert "production" not in SESSIONS[1036]
+    assert any("Обновила план по правкам" in text for text in replies)
 
 
 def test_on_text_first_step_description_text_generates_social_copy(monkeypatch):
@@ -1453,7 +3263,8 @@ def test_on_text_first_step_image_text_generates_image(monkeypatch):
     asyncio.run(on_text(update, context=None))
     assert sent["ok"] is True
     assert "Генерируем изображение" in captured[0][0]
-    assert SESSIONS[1005]["state"] == ""
+    assert SESSIONS[1005]["state"] == "state_waiting_first_step_image_approval"
+    assert SESSIONS[1005]["first_step_image_prompt"] == "Бабушка с котом и пирогом"
     assert SESSIONS[1005]["selected_project_key"] == "grandma_kitchen"
 
 
@@ -1516,7 +3327,28 @@ def test_on_text_first_step_image_accepts_custom_references(monkeypatch):
     assert sent["ok"] is True
     assert seen["prompt"] == "Красивая тарелка супа в мультяшном стиле"
     assert seen["reference_images"] == [b"custom-ref"]
-    assert SESSIONS[1016]["state"] == ""
+    assert SESSIONS[1016]["state"] == "state_waiting_first_step_image_approval"
+
+
+def test_on_text_first_step_image_approval_accepts_ok():
+    captured: list[tuple[str, object | None]] = []
+    SESSIONS[1021] = {
+        "state": "state_waiting_first_step_image_approval",
+        "first_step_image_prompt": "Красивая тарелка супа",
+        "selected_project_key": "grandma_kitchen",
+    }
+
+    class _Message:
+        text = "ОК"
+
+        async def reply_text(self, text, reply_markup=None):
+            captured.append((text, reply_markup))
+
+    update = SimpleNamespace(message=_Message(), effective_chat=SimpleNamespace(id=1021))
+    asyncio.run(on_text(update, context=None))
+    assert SESSIONS[1021]["state"] == ""
+    assert SESSIONS[1021]["selected_project_key"] == "grandma_kitchen"
+    assert "Принято" in captured[-1][0]
 
 
 def test_frame_prompts_approval_can_collect_reference_images(monkeypatch):
@@ -1772,7 +3604,7 @@ def test_on_text_project_image_adds_character_then_generates_with_references(mon
     assert sent["ok"] is True
     assert "дедушка" in str(seen["prompt"])
     assert seen["reference_images"] == [b"ref1", b"ref2"]
-    assert SESSIONS[1013]["state"] == ""
+    assert SESSIONS[1013]["state"] == "state_waiting_first_step_project_image_approval"
 
 
 def test_on_text_project_image_accepts_custom_references(monkeypatch):
@@ -1846,7 +3678,137 @@ def test_on_text_project_image_accepts_custom_references(monkeypatch):
     assert sent["ok"] is True
     assert "бабушка, рыжий кот" in str(seen["prompt"])
     assert seen["reference_images"] == [b"project-ref", b"custom-project-ref"]
-    assert SESSIONS[1017]["state"] == ""
+    assert SESSIONS[1017]["state"] == "state_waiting_first_step_project_image_approval"
+
+
+def test_on_text_project_image_approval_accepts_ok():
+    captured: list[tuple[str, object | None]] = []
+    SESSIONS[1018] = {
+        "state": "state_waiting_first_step_project_image_approval",
+        "first_step_image_prompt": "Бабушка и кот у супа",
+        "first_step_project_image_characters": ["grandma", "cat"],
+        "selected_project_key": "grandma_kitchen",
+    }
+
+    class _Message:
+        text = "ОК"
+
+        async def reply_text(self, text, reply_markup=None):
+            captured.append((text, reply_markup))
+
+    update = SimpleNamespace(message=_Message(), effective_chat=SimpleNamespace(id=1018))
+    asyncio.run(on_text(update, context=None))
+    assert SESSIONS[1018]["state"] == ""
+    assert SESSIONS[1018]["selected_project_key"] == "grandma_kitchen"
+    assert "Принято" in captured[-1][0]
+
+
+def test_on_text_project_image_approval_regenerates_from_feedback(monkeypatch):
+    captured: list[tuple[str, object | None]] = []
+    seen: dict[str, object] = {}
+    SESSIONS[1019] = {
+        "state": "state_waiting_first_step_project_image_approval",
+        "first_step_image_prompt": "Бабушка и кот у супа",
+        "first_step_project_image_characters": ["grandma", "cat"],
+    }
+
+    class _Message:
+        text = "Изменить"
+
+        async def reply_text(self, text, reply_markup=None):
+            captured.append((text, reply_markup))
+
+        async def reply_photo(self, photo, caption):
+            seen["photo"] = photo.getvalue() if hasattr(photo, "getvalue") else b""
+            seen["caption"] = caption
+
+    async def _fake_regenerate(scene, feedback):
+        seen["feedback"] = feedback
+        seen["scene"] = scene
+        return "Обновленный prompt с большим котом"
+
+    async def _fake_generate(prompt: str, reference_images=None):
+        seen["prompt"] = prompt
+        seen["reference_images"] = reference_images
+        return b"project-img-2"
+
+    monkeypatch.setattr("app.handlers.handlers_state_scene._regenerate_image_prompt_from_feedback", _fake_regenerate)
+    monkeypatch.setattr("app.handlers.handlers_state_scene._generate_image_with_lenient_fallback", _fake_generate)
+    monkeypatch.setattr(
+        "app.handlers.handlers_state_scene._load_scene_reference_images",
+        lambda scene, include_location=False: [b"project-ref"],
+    )
+
+    update = SimpleNamespace(message=_Message(), effective_chat=SimpleNamespace(id=1019))
+    asyncio.run(on_text(update, context=None))
+    assert "Что изменить" in captured[-1][0]
+
+    class _FeedbackMessage(_Message):
+        text = "сделай кота крупнее"
+
+    update = SimpleNamespace(message=_FeedbackMessage(), effective_chat=SimpleNamespace(id=1019))
+    asyncio.run(on_text(update, context=None))
+    assert seen["feedback"] == "Исправь: сделай кота крупнее"
+    assert "Обновленный prompt с большим котом" in str(seen["prompt"])
+    assert seen["reference_images"] == [b"project-ref"]
+    assert seen["photo"] == b"project-img-2"
+    assert SESSIONS[1019]["state"] == "state_waiting_first_step_project_image_approval"
+    assert SESSIONS[1019]["first_step_image_prompt"] == "Обновленный prompt с большим котом"
+
+
+def test_on_text_project_image_approval_adds_reference_and_regenerates(monkeypatch):
+    captured: list[tuple[str, object | None]] = []
+    seen: dict[str, object] = {}
+    SESSIONS[1020] = {
+        "state": "state_waiting_first_step_project_image_approval",
+        "first_step_image_prompt": "Бабушка и кот у супа",
+        "first_step_project_image_characters": ["grandma", "cat"],
+    }
+
+    class _Message:
+        text = "Добавить свое"
+
+        async def reply_text(self, text, reply_markup=None):
+            captured.append((text, reply_markup))
+
+        async def reply_photo(self, photo, caption):
+            seen["photo"] = photo.getvalue() if hasattr(photo, "getvalue") else b""
+            seen["caption"] = caption
+
+    update = SimpleNamespace(message=_Message(), effective_chat=SimpleNamespace(id=1020))
+    asyncio.run(on_text(update, context=None))
+    assert SESSIONS[1020]["state"] == "state_waiting_first_step_project_image_references"
+    assert SESSIONS[1020]["first_step_reference_return_state"] == "state_waiting_first_step_project_image_approval"
+
+    async def _fake_extract(update, context):
+        _ = (update, context)
+        return b"new-project-ref"
+
+    async def _fake_generate(prompt: str, reference_images=None):
+        seen["prompt"] = prompt
+        seen["reference_images"] = reference_images
+        return b"project-img-3"
+
+    monkeypatch.setattr("app.handlers.handlers_state_scene._extract_any_image_from_update", _fake_extract)
+    monkeypatch.setattr("app.handlers.handlers_state_scene._generate_image_with_lenient_fallback", _fake_generate)
+    monkeypatch.setattr(
+        "app.handlers.handlers_state_scene._load_scene_reference_images",
+        lambda scene, include_location=False: [b"project-ref"],
+    )
+
+    photo_update = SimpleNamespace(message=_Message(), effective_chat=SimpleNamespace(id=1020))
+    asyncio.run(on_photo(photo_update, context=None))
+    assert SESSIONS[1020]["first_step_custom_reference_images"] == [b"new-project-ref"]
+
+    class _DoneMessage(_Message):
+        text = "больше файлов не нужно"
+
+    update = SimpleNamespace(message=_DoneMessage(), effective_chat=SimpleNamespace(id=1020))
+    asyncio.run(on_text(update, context=None))
+    assert "Бабушка и кот у супа" in str(seen["prompt"])
+    assert seen["reference_images"] == [b"project-ref", b"new-project-ref"]
+    assert seen["photo"] == b"project-img-3"
+    assert SESSIONS[1020]["state"] == "state_waiting_first_step_project_image_approval"
 
 
 def test_generate_project_image_sends_prompt_and_character_references(monkeypatch):
@@ -1993,6 +3955,9 @@ def test_on_text_project_selection_saves_project_and_returns_menu():
     SESSIONS[1011] = {
         "state": "state_waiting_first_step_project_selection",
         "selected_project_key": "grandma_kitchen",
+        "discipline_intro_enabled": True,
+        "discipline_intro_dialogue": {"vasily": "Проблема", "anastasia": "Решение"},
+        "discipline_intro_video_path": "/tmp/discipline-intro.mp4",
     }
 
     class _Message:
@@ -2007,6 +3972,8 @@ def test_on_text_project_selection_saves_project_and_returns_menu():
     assert "Проект выбран" in captured[0][0]
     assert SESSIONS[1011]["state"] == ""
     assert SESSIONS[1011]["selected_project_key"] == "grandma_kitchen"
+    assert "discipline_intro_dialogue" not in SESSIONS[1011]
+    assert "discipline_intro_video_path" not in SESSIONS[1011]
 
 
 def test_on_text_navigation_start_over_resets_session():

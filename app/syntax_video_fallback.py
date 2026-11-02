@@ -45,6 +45,8 @@ def try_generate_via_syntax(
     timeout_sec: int | None = None,
     acquire_timeout_sec: int | None = None,
     syntax_provider: str | None = None,
+    aspect_ratio: str = "9:16",
+    audio_enabled: bool = True,
 ) -> FallbackResult:
     """Try generating video via Syntax Telegram fallback channel."""
     return run_syntax_telethon_fallback(
@@ -56,6 +58,8 @@ def try_generate_via_syntax(
         timeout_sec=timeout_sec,
         acquire_timeout_sec=acquire_timeout_sec,
         syntax_provider=syntax_provider,
+        aspect_ratio=aspect_ratio,
+        audio_enabled=audio_enabled,
     )
 
 
@@ -67,6 +71,8 @@ def try_generate_via_syntax_batch(
     timeout_sec: int | None = None,
     acquire_timeout_sec: int | None = None,
     syntax_provider: str | None = None,
+    aspect_ratio: str = "9:16",
+    audio_enabled: bool = True,
 ) -> dict[str, FallbackResult]:
     """Try generating multiple videos via one Syntax Telegram session."""
     return run_syntax_telethon_fallback_batch(
@@ -76,4 +82,6 @@ def try_generate_via_syntax_batch(
         timeout_sec=timeout_sec,
         acquire_timeout_sec=acquire_timeout_sec,
         syntax_provider=syntax_provider,
+        aspect_ratio=aspect_ratio,
+        audio_enabled=audio_enabled,
     )

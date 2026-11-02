@@ -215,6 +215,12 @@ class ChatSessionAdminForm(forms.ModelForm):
         widget=forms.Textarea(attrs={"rows": 4}),
         help_text='Example: {"ru": "Борщ", "en": "Borscht"}. Used for the titled final master.',
     )
+    overlay_subtitle_by_lang_json = forms.CharField(
+        required=False,
+        label="Optional title subtitle by language (JSON)",
+        widget=forms.Textarea(attrs={"rows": 3}),
+        help_text='Optional third title line, for example {"ru": "КБЖУ на 100 гр: 126/10/4/24"}.',
+    )
     overlay_title_style_json = forms.CharField(
         required=False,
         label="Final title overlay style (JSON)",
@@ -282,6 +288,9 @@ class ChatSessionAdminForm(forms.ModelForm):
         self.fields["overlay_title_by_lang_json"].initial = _pretty(
             production.get("overlay_title_by_lang") or session.get("overlay_title_by_lang") or {}
         )
+        self.fields["overlay_subtitle_by_lang_json"].initial = _pretty(
+            production.get("overlay_subtitle_by_lang") or session.get("overlay_subtitle_by_lang") or {}
+        )
         self.fields["overlay_title_style_json"].initial = _pretty(
             production.get("overlay_title_style") or session.get("overlay_title_style") or {}
         )
@@ -308,6 +317,7 @@ class ChatSessionAdminForm(forms.ModelForm):
             "scenes_plan_json": [],
             "production_plan_json": [],
             "overlay_title_by_lang_json": {},
+            "overlay_subtitle_by_lang_json": {},
             "overlay_title_style_json": {},
             "video_prompt_by_lang_json": {},
             "speech_by_lang_json": {},
@@ -323,6 +333,7 @@ class ChatSessionAdminForm(forms.ModelForm):
             "scenes_plan_json": list,
             "production_plan_json": list,
             "overlay_title_by_lang_json": dict,
+            "overlay_subtitle_by_lang_json": dict,
             "overlay_title_style_json": dict,
             "video_prompt_by_lang_json": dict,
             "speech_by_lang_json": dict,
@@ -368,6 +379,7 @@ class ChatSessionAdminForm(forms.ModelForm):
             production = {}
         production["json_plan"] = self.cleaned_data.get("production_plan_json") or []
         overlay_title_by_lang = self.cleaned_data.get("overlay_title_by_lang_json") or {}
+        overlay_subtitle_by_lang = self.cleaned_data.get("overlay_subtitle_by_lang_json") or {}
         overlay_title_style = self.cleaned_data.get("overlay_title_style_json") or {}
         pending_overlay_title_style = _merged_style_from_sources(PENDING_OVERLAY_TITLE_STYLE_KEY, session, production)
         if "overlay_title_color" in self.data and "overlay_title_color" in self.changed_data:
@@ -382,6 +394,12 @@ class ChatSessionAdminForm(forms.ModelForm):
         else:
             production.pop("overlay_title_by_lang", None)
             session.pop("overlay_title_by_lang", None)
+        if overlay_subtitle_by_lang:
+            production["overlay_subtitle_by_lang"] = overlay_subtitle_by_lang
+            session["overlay_subtitle_by_lang"] = overlay_subtitle_by_lang
+        else:
+            production.pop("overlay_subtitle_by_lang", None)
+            session.pop("overlay_subtitle_by_lang", None)
         if overlay_title_style:
             production["overlay_title_style"] = overlay_title_style
             session["overlay_title_style"] = overlay_title_style

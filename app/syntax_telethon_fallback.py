@@ -18,7 +18,7 @@ from uuid import uuid4
 
 from .syntax_getvideo_download import fetch_mp4_bytes_from_getvideo_page
 from .syntax_image_prepare import prepare_syntax_frame_bytes
-from .llm_utils import extract_json_object, gemini_generate_sync
+from .llm_utils import GEMINI_MODEL_PROFILE_EDIT, extract_json_object, gemini_generate_sync
 from .generation_modes import SYNTAX_PROVIDER_COMMANDS, SYNTAX_PROVIDER_KLING, SYNTAX_PROVIDER_VEO
 from .pipeline_llm_steps import RUSSIAN_YO_RULE
 
@@ -352,9 +352,43 @@ async def _syntax_configure_button_webview_url(
     return None
 
 
+def _syntax_option_already_selected_sync(page: Any, value: str) -> bool:
+    """Return True when the updated Syntax UI already has the requested option selected."""
+    return bool(
+        page.evaluate(
+            r"""({ value }) => {
+                const norm = s => String(s || '').replace(/\s+/g, ' ').trim().toLowerCase();
+                const wanted = norm(value);
+                const selected = el => {
+                    if (!el) return false;
+                    if (el.selected === true || el.checked === true) return true;
+                    if (norm(el.getAttribute('aria-selected')) === 'true') return true;
+                    if (norm(el.getAttribute('aria-checked')) === 'true') return true;
+                    if (['selected', 'checked', 'active', 'on'].includes(norm(el.getAttribute('data-state')))) return true;
+                    const cls = norm(el.className);
+                    return /(^|\s)(is-selected|selected|is-active|active)(\s|$)/.test(cls);
+                };
+                const controls = [...document.querySelectorAll(
+                    '[role="option"], option, [aria-selected], [aria-checked], [data-state], .is-selected, .selected, .is-active'
+                )];
+                return controls.some(el => {
+                    const text = norm(el.textContent || el.value || el.getAttribute('data-value'));
+                    return selected(el) && (text === wanted || text.includes(wanted));
+                });
+            }""",
+            {"value": value},
+        )
+    )
+
+
 def _click_syntax_option_sync(page: Any, label: str, value: str, *, timeout_ms: int = 5000) -> None:
     label_re = re.compile(re.escape(label), re.IGNORECASE)
     value_re = re.compile(rf"^\s*{re.escape(value)}\s*$", re.IGNORECASE)
+    with contextlib.suppress(Exception):
+        if _syntax_option_already_selected_sync(page, value):
+            logger.info("syntax.kling.option_already_selected label=%s value=%s", label, value)
+            return
+
     def _click_visible_option() -> bool:
         return bool(
             page.evaluate(
@@ -372,6 +406,11 @@ def _click_syntax_option_sync(page: Any, label: str, value: str, *, timeout_ms: 
                     const partial = options.find(el => visible(el) && norm(el.textContent).toLowerCase().includes(wanted));
                     const found = exact || partial;
                     if (!found) return false;
+                    const state = String(found.getAttribute('aria-selected') || found.getAttribute('aria-checked') || found.getAttribute('data-state') || '').toLowerCase();
+                    const cls = norm(found.className).toLowerCase();
+                    if (found.selected === true || found.checked === true || ['true', 'selected', 'checked', 'active', 'on'].includes(state) || /(^|\\s)(is-selected|selected|is-active|active)(\\s|$)/.test(cls)) {
+                        return true;
+                    }
                     found.click();
                     return true;
                 }""",
@@ -446,6 +485,232 @@ def _try_click_syntax_option_sync(page: Any, label: str, value: str, *, timeout_
         return False
 
 
+def _set_syntax_kling_duration_slider_sync(page: Any, duration_sec: int) -> bool:
+    """Set the numeric duration slider used by the current Syntax Kling UI."""
+    return bool(
+        page.evaluate(
+            """({ duration }) => {
+                const ranges = [...document.querySelectorAll('input[type="range"]')];
+                if (!ranges.length) return false;
+                const target = ranges.find(el => {
+                    const min = Number(el.min || 0);
+                    const max = Number(el.max || 0);
+                    return min <= duration && max >= duration;
+                });
+                if (!target) return false;
+                const setValue = Object.getOwnPropertyDescriptor(
+                    window.HTMLInputElement.prototype,
+                    'value'
+                )?.set;
+                if (setValue) setValue.call(target, String(duration));
+                else target.value = String(duration);
+                target.dispatchEvent(new Event('input', { bubbles: true }));
+                target.dispatchEvent(new Event('change', { bubbles: true }));
+                return Number(target.value) === Number(duration);
+            }""",
+            {"duration": max(1, int(duration_sec))},
+        )
+    )
+
+
+def _set_syntax_kling_duration_sync(page: Any, duration_sec: int, *, timeout_ms: int = 5000) -> int:
+    """Set Kling duration in either the current slider UI or the legacy select UI."""
+    requested = max(1, int(duration_sec))
+    with contextlib.suppress(Exception):
+        if _set_syntax_kling_duration_slider_sync(page, requested):
+            page.wait_for_timeout(250)
+            logger.info("syntax.kling.duration_slider_set value=%s", requested)
+            return requested
+    if _try_click_syntax_option_sync(
+        page,
+        "Длительность",
+        f"{requested} сек",
+        timeout_ms=timeout_ms,
+    ):
+        return requested
+    raise RuntimeError(f"Syntax Kling duration could not be set to {requested} sec.")
+
+
+def _click_syntax_ratio_by_dom_sync(page: Any, aspect_ratio: str, *, timeout_ms: int = 5000) -> bool:
+    ratio = _normalize_syntax_aspect_ratio(aspect_ratio)
+    return bool(
+        page.evaluate(
+            """({ ratio }) => {
+                const norm = s => String(s || '').replace(/\\s+/g, ' ').trim();
+                const visible = el => {
+                    if (!el) return false;
+                    const style = window.getComputedStyle(el);
+                    const rect = el.getBoundingClientRect();
+                    return style.visibility !== 'hidden' && style.display !== 'none' && rect.width > 0 && rect.height > 0;
+                };
+                const clickEl = el => {
+                    if (!el) return false;
+                    el.scrollIntoView({ block: 'center', inline: 'center' });
+                    el.click();
+                    return true;
+                };
+                const descriptor = el => [
+                    norm(el.textContent),
+                    norm(el.getAttribute('aria-label')),
+                    norm(el.getAttribute('title')),
+                    norm(el.getAttribute('value')),
+                    norm(el.getAttribute('data-value')),
+                    norm(el.getAttribute('data-testid')),
+                    norm(el.className),
+                ].join(' ').toLowerCase();
+                const targetTerms = ratio === '16:9'
+                    ? ['16:9', '16 / 9', '16x9', 'landscape', 'horizontal', 'горизонт', 'альбом', 'широк']
+                    : ['9:16', '9 / 16', '9x16', 'portrait', 'vertical', 'вертик', 'портрет'];
+                const labelRe = /Соотношение сторон|Aspect ratio|Aspect/i;
+                const clickableSelector = 'button, [role="button"], [role="option"], [role="radio"], label, input, [tabindex], li';
+                const allClickables = [...document.querySelectorAll(clickableSelector)].filter(visible);
+                const textMatch = allClickables.find(el => targetTerms.some(term => descriptor(el).includes(term)));
+                if (textMatch) return clickEl(textMatch);
+
+                const labelNodes = [...document.querySelectorAll('body *')].filter(el => visible(el) && labelRe.test(norm(el.textContent)));
+                const roots = [];
+                for (const labelNode of labelNodes) {
+                    let cur = labelNode;
+                    for (let i = 0; i < 5 && cur; i += 1) {
+                        const rect = cur.getBoundingClientRect();
+                        if (rect.width >= 120 && rect.height >= 40 && rect.height <= 420) {
+                            roots.push(cur);
+                            break;
+                        }
+                        cur = cur.parentElement;
+                    }
+                }
+                if (!roots.length) roots.push(document.body);
+                const wantedWide = ratio === '16:9';
+                for (const root of roots) {
+                    const scoped = [...root.querySelectorAll(clickableSelector)].filter(visible);
+                    const scopedTextMatch = scoped.find(el => targetTerms.some(term => descriptor(el).includes(term)));
+                    if (scopedTextMatch) return clickEl(scopedTextMatch);
+                    for (const el of scoped) {
+                        const shapes = [el, ...el.querySelectorAll('svg, img, span, div')].filter(visible);
+                        for (const shape of shapes) {
+                            const r = shape.getBoundingClientRect();
+                            if (r.width < 10 || r.height < 6 || r.width * r.height > 20000) continue;
+                            const shapeRatio = r.width / r.height;
+                            if ((wantedWide && shapeRatio >= 1.35) || (!wantedWide && shapeRatio <= 0.74)) {
+                                return clickEl(el);
+                            }
+                        }
+                    }
+                }
+                return false;
+            }""",
+            {"ratio": ratio},
+        )
+    )
+
+
+def _syntax_visible_controls_snapshot_sync(page: Any) -> str:
+    with contextlib.suppress(Exception):
+        snapshot = page.evaluate(
+            """() => {
+                const norm = s => String(s || '').replace(/\\s+/g, ' ').trim();
+                const visible = el => {
+                    if (!el) return false;
+                    const style = window.getComputedStyle(el);
+                    const rect = el.getBoundingClientRect();
+                    return style.visibility !== 'hidden' && style.display !== 'none' && rect.width > 0 && rect.height > 0;
+                };
+                const controls = [...document.querySelectorAll('button, [role="button"], [role="option"], [role="radio"], select, input, textarea, label')]
+                    .filter(visible)
+                    .slice(0, 80)
+                    .map(el => norm([
+                        el.tagName,
+                        el.getAttribute('role') || '',
+                        el.getAttribute('aria-label') || '',
+                        el.getAttribute('title') || '',
+                        el.getAttribute('value') || '',
+                        el.textContent || '',
+                    ].join(' ')))
+                    .filter(Boolean);
+                return controls.join(' | ');
+            }"""
+        )
+        return str(snapshot or "")[:1200]
+    return ""
+
+
+def _normalize_syntax_aspect_ratio(value: str | None) -> str:
+    raw = str(value or "").strip()
+    return "16:9" if raw == "16:9" else "9:16"
+
+
+def _set_syntax_aspect_ratio_sync(page: Any, aspect_ratio: str, *, timeout_ms: int = 5000) -> None:
+    ratio = _normalize_syntax_aspect_ratio(aspect_ratio)
+    opposite_ratio = "9:16" if ratio == "16:9" else "16:9"
+    if _syntax_page_contains_aspect_ratio_sync(page, ratio) and not _syntax_page_contains_aspect_ratio_sync(page, opposite_ratio):
+        return
+    labels = ("Соотношение сторон", "Aspect ratio", "Aspect")
+    for label in labels:
+        if _try_click_syntax_option_sync(page, label, ratio, timeout_ms=timeout_ms):
+            return
+    with contextlib.suppress(Exception):
+        if _click_syntax_ratio_by_dom_sync(page, ratio, timeout_ms=timeout_ms):
+            page.wait_for_timeout(300)
+            if _syntax_page_contains_aspect_ratio_sync(page, ratio):
+                return
+    controls = _syntax_visible_controls_snapshot_sync(page)
+    suffix = f" Visible controls: {controls}" if controls else ""
+    raise RuntimeError(f"Syntax aspect ratio option was not set to {ratio}.{suffix}")
+
+
+def _click_syntax_settings_apply_sync(page: Any, *, timeout_ms: int = 5000) -> bool:
+    apply_re = re.compile("Сохранить|Save|Применить|Apply|Готово|Done|OK|ОК", re.IGNORECASE)
+    for role in ("button",):
+        with contextlib.suppress(Exception):
+            page.get_by_role(role, name=apply_re).last.click(timeout=timeout_ms)
+            page.wait_for_timeout(800)
+            return True
+    with contextlib.suppress(Exception):
+        clicked = page.evaluate(
+            """() => {
+                const norm = s => String(s || '').replace(/\\s+/g, ' ').trim();
+                const visible = el => {
+                    if (!el) return false;
+                    const style = window.getComputedStyle(el);
+                    const rect = el.getBoundingClientRect();
+                    return style.visibility !== 'hidden' && style.display !== 'none' && rect.width > 0 && rect.height > 0;
+                };
+                const re = /Сохранить|Save|Применить|Apply|Готово|Done|OK|ОК/i;
+                const candidates = [...document.querySelectorAll('button, [role="button"]')]
+                    .filter(el => visible(el) && re.test(norm(el.textContent)));
+                const target = candidates[candidates.length - 1];
+                if (!target) return false;
+                target.click();
+                return true;
+            }"""
+        )
+        if clicked:
+            page.wait_for_timeout(800)
+            return True
+    return False
+
+
+def _syntax_page_contains_aspect_ratio_sync(page: Any, aspect_ratio: str) -> bool:
+    ratio = _normalize_syntax_aspect_ratio(aspect_ratio)
+    with contextlib.suppress(Exception):
+        return bool(
+            page.evaluate(
+                """({ ratio }) => {
+                    const text = String(document.body ? document.body.innerText : '');
+                    return text.includes(ratio);
+                }""",
+                {"ratio": ratio},
+            )
+        )
+    return False
+
+
+def _syntax_model_settings_probe_attempts() -> int:
+    raw = (os.getenv("SYNTAX_MODEL_SETTINGS_PROBE_ATTEMPTS") or "").strip()
+    return max(1, min(8, int(raw))) if raw.isdigit() else 5
+
+
 def _sanitize_syntax_webview_error(error: Exception) -> str:
     text = str(error)
     text = re.sub(r"https://bot\.syntx\.ai/\S+", "[syntx-webview-url]", text)
@@ -474,12 +739,339 @@ def _enable_syntax_audio_sync(page: Any, *, timeout_ms: int = 5000) -> None:
     page.get_by_text(audio_re).last.click(timeout=timeout_ms)
 
 
+def _syntax_audio_checked_state_sync(control: Any) -> bool | None:
+    for attr in ("aria-checked", "checked", "data-state"):
+        with contextlib.suppress(Exception):
+            raw = str(control.get_attribute(attr, timeout=1000) or "").strip().lower()
+            if raw in {"true", "1", "checked", "on"}:
+                return True
+            if raw in {"false", "0", "unchecked", "off"}:
+                return False
+    with contextlib.suppress(Exception):
+        return bool(control.is_checked(timeout=1000))
+    return None
+
+
+def _disable_syntax_audio_sync(page: Any, *, timeout_ms: int = 5000) -> None:
+    """Explicitly disable Kling audio or block the paid launch if state is ambiguous."""
+    audio_re = re.compile("Аудио|Audio|Звуки|Sounds", re.IGNORECASE)
+    ambiguous_control_found = False
+    controls: list[Any] = []
+    for role in ("switch", "checkbox"):
+        with contextlib.suppress(Exception):
+            controls.append(page.get_by_role(role, name=audio_re).last)
+    with contextlib.suppress(Exception):
+        controls.append(
+            page.locator(
+                "xpath=//*[contains(normalize-space(.), 'Аудио') or contains(normalize-space(.), 'Audio')]/following::*[@role='switch' or @role='checkbox' or self::input[@type='checkbox']][1]"
+            ).first
+        )
+    for control in controls:
+        state = _syntax_audio_checked_state_sync(control)
+        if state is None:
+            ambiguous_control_found = True
+            continue
+        if state:
+            control.click(timeout=timeout_ms)
+            page.wait_for_timeout(300)
+            verified = _syntax_audio_checked_state_sync(control)
+            if verified is not False:
+                raise RuntimeError("Syntax audio switch could not be verified as disabled; generation was not started.")
+        return
+    if ambiguous_control_found:
+        raise RuntimeError("Syntax audio switch state is ambiguous; generation was not started.")
+    raise RuntimeError("Syntax audio switch was not found; generation was not started.")
+
+
+_KLING_SUBMISSION_STARTED_RE = re.compile(
+    r"генерац|генерир|созда[её]т|создан|очеред|обраб|ожид|generating|creating|queued|in queue|processing|submitted",
+    re.IGNORECASE,
+)
+_KLING_SUBMISSION_BUTTON_PROGRESS_RE = re.compile(
+    r"обраб|очеред|ожид|созда[её]т|processing|queued|in queue|creating|please wait",
+    re.IGNORECASE,
+)
+_KLING_SUBMISSION_BLOCKED_RE = re.compile(
+    r"ошиб|error|failed|fail|лимит|limit|недостат|insufficient|заполн|invalid|try again|попроб",
+    re.IGNORECASE,
+)
+
+
+def _syntax_kling_submission_state_from_text(text: str) -> str:
+    normalized = re.sub(r"\s+", " ", str(text or "")).strip()
+    if not normalized:
+        return ""
+    if _KLING_SUBMISSION_BLOCKED_RE.search(normalized):
+        return "blocked"
+    if _KLING_SUBMISSION_STARTED_RE.search(normalized):
+        return "started"
+    return ""
+
+
+def _syntax_kling_submit_confirm_timeout_sec() -> float:
+    raw = (os.getenv("SYNTAX_KLING_SUBMIT_CONFIRM_SEC") or "").strip()
+    try:
+        value = float(raw)
+    except ValueError:
+        value = 60.0
+    return max(10.0, min(value, 120.0))
+
+
+def _syntax_kling_submit_snapshot_sync(page: Any) -> dict[str, Any]:
+    return dict(
+        page.evaluate(
+            """() => {
+                const norm = s => String(s || '').replace(/\\s+/g, ' ').trim();
+                const visible = el => {
+                    if (!el) return false;
+                    const style = window.getComputedStyle(el);
+                    const rect = el.getBoundingClientRect();
+                    return style.visibility !== 'hidden' && style.display !== 'none' && rect.width > 0 && rect.height > 0;
+                };
+                const generateRe = /Сгенерировать|Generate/i;
+                const buttons = [...document.querySelectorAll('button, [role="button"]')]
+                    .filter(el => visible(el) && generateRe.test(norm(el.innerText)))
+                    .map(el => ({
+                        text: norm(el.innerText),
+                        disabled: Boolean(el.disabled) || String(el.getAttribute('aria-disabled') || '').toLowerCase() === 'true',
+                    }));
+                return {
+                    text: norm(document.body ? document.body.innerText : ''),
+                    generateButtons: buttons,
+                };
+            }"""
+        )
+        or {}
+    )
+
+
+def _syntax_kling_form_ready_timeout_ms() -> int:
+    """Allow Syntax to finish ingesting an uploaded reference frame."""
+    raw = (os.getenv("SYNTAX_KLING_FORM_READY_SEC") or "").strip()
+    try:
+        seconds = int(raw)
+    except ValueError:
+        seconds = 120
+    return max(30_000, min(seconds * 1000, 300_000))
+
+
+def _wait_for_syntax_kling_form_ready_sync(page: Any, *, timeout_ms: int | None = None) -> None:
+    """Wait until pending reactive setting updates cannot swallow submit."""
+    wait_for_function = getattr(page, "wait_for_function", None)
+    if not callable(wait_for_function):
+        return
+    wait_for_function(
+        """() => {
+            const button = document.querySelector('#btn_submit');
+            if (!button || button.disabled || button.getAttribute('aria-disabled') === 'true') return false;
+            const guard = button.closest('[x-data*="busy"]');
+            if (guard && guard.classList.contains('syntx-submit--busy')) return false;
+            const fieldset = button.closest('.syntx-model-layout')?.querySelector('fieldset');
+            if (fieldset && fieldset.disabled) return false;
+            return true;
+        }""",
+        timeout=max(timeout_ms or 0, _syntax_kling_form_ready_timeout_ms()),
+    )
+
+
+def _click_syntax_kling_generate_sync(page: Any, *, timeout_ms: int = 10_000) -> None:
+    generate_re = re.compile("Сгенерировать|Generate", re.IGNORECASE)
+    before = _syntax_kling_submit_snapshot_sync(page)
+    before_text = str(before.get("text") or "")
+    before_buttons = before.get("generateButtons")
+    before_button_texts = {
+        str(item.get("text") or "").strip()
+        for item in (before_buttons if isinstance(before_buttons, list) else [])
+        if isinstance(item, dict)
+    }
+    submit_responses: list[tuple[int, str]] = []
+
+    def _record_response(response: Any) -> None:
+        with contextlib.suppress(Exception):
+            request = response.request
+            method = str(request.method or "").upper()
+            response_url = str(response.url or "").split("?", 1)[0]
+            if method == "POST" and any(marker in response_url.lower() for marker in ("/livewire/", "/submit", "/generate")):
+                submit_responses.append((int(response.status), response_url))
+
+    with contextlib.suppress(Exception):
+        page.wait_for_load_state("networkidle", timeout=min(timeout_ms, 5000))
+    _wait_for_syntax_kling_form_ready_sync(page)
+    with contextlib.suppress(Exception):
+        page.on("response", _record_response)
+
+    button = page.locator("#btn_submit")
+    visible_label = ""
+    with contextlib.suppress(Exception):
+        visible_label = str(button.inner_text(timeout=timeout_ms) or "").strip()
+    if visible_label and not generate_re.search(visible_label):
+        raise RuntimeError(f"Syntax visible submit button has unexpected label: {visible_label}")
+    logger.info("syntax.kling.click_visible_generate label=%s", visible_label or "<unavailable>")
+    button.click(timeout=timeout_ms)
+
+    deadline = time.monotonic() + _syntax_kling_submit_confirm_timeout_sec()
+    last_text = ""
+    last_buttons: list[Any] = []
+    progress_button_seen = False
+    while time.monotonic() < deadline:
+        page.wait_for_timeout(700)
+        snapshot = _syntax_kling_submit_snapshot_sync(page)
+        last_text = str(snapshot.get("text") or "")
+        buttons = snapshot.get("generateButtons")
+        last_buttons = buttons if isinstance(buttons, list) else []
+        current_button_texts = {
+            str(item.get("text") or "").strip()
+            for item in last_buttons
+            if isinstance(item, dict)
+        }
+        progressed_button_texts = current_button_texts - before_button_texts
+        button_progress_now = any(
+            _KLING_SUBMISSION_BUTTON_PROGRESS_RE.search(text)
+            for text in progressed_button_texts
+        )
+        text_changed = bool(last_text and last_text != before_text)
+        state = _syntax_kling_submission_state_from_text(last_text) if text_changed else ""
+        if state == "blocked":
+            excerpt = last_text[:500].strip()
+            raise RuntimeError(f"Syntax Kling UI rejected generation after Generate click: {excerpt}")
+        if state == "started" and not button_progress_now:
+            return
+        if text_changed:
+            logger.info("syntax.kling.submit_changed_without_known_status text=%s", last_text[:300])
+
+        # The current Syntx Livewire UI first updates only the nested button
+        # text (for example, ``Сгенерировать Обработка...``).  That is
+        # acknowledgement of the click, not proof that the paid generation
+        # was submitted.  Keep the webview alive until the parent component's
+        # second Livewire response arrives; closing it here cancels the launch.
+        if button_progress_now:
+            if not progress_button_seen:
+                progress_button_seen = True
+                logger.info(
+                    "syntax.kling.submit_button_progress_seen buttons=%s; waiting_for_parent_response=true",
+                    sorted(progressed_button_texts),
+                )
+
+        if submit_responses:
+            failed_statuses = [status for status, _response_url in submit_responses if status >= 400]
+            if failed_statuses:
+                raise RuntimeError(f"Syntax Kling submit request failed with HTTP {failed_statuses[-1]}.")
+            # The visible button is a nested Livewire component.  Its child
+            # acknowledgement must be followed by the parent component's
+            # actual generation-submission response.
+            if len(submit_responses) < 2:
+                continue
+            status, response_url = submit_responses[-1]
+            page.wait_for_timeout(1200)
+            final_snapshot = _syntax_kling_submit_snapshot_sync(page)
+            final_text = str(final_snapshot.get("text") or "")
+            if final_text != before_text and _syntax_kling_submission_state_from_text(final_text) == "blocked":
+                raise RuntimeError(
+                    f"Syntax Kling UI rejected generation after Generate click: {final_text[:500].strip()}"
+                )
+            logger.info(
+                "syntax.kling.submit_request_confirmed responses=%s status=%s endpoint=%s",
+                len(submit_responses),
+                status,
+                response_url,
+            )
+            return
+
+    logger.warning(
+        "syntax.kling.submit_not_confirmed responses=%s progress_seen=%s buttons=%s text=%s",
+        submit_responses,
+        progress_button_seen,
+        last_buttons,
+        last_text[:500],
+    )
+    if progress_button_seen:
+        # Generate was clicked and Syntax changed the button to its processing
+        # state. Do not risk paying for a duplicate job merely because the
+        # parent Livewire acknowledgement was late or invisible to Playwright.
+        # The caller will now keep polling the Syntax chat for its video/error.
+        logger.warning("syntax.kling.submit_assumed_started_after_processing_state=true")
+        return
+    raise RuntimeError("Syntax Kling UI did not confirm generation start after Generate click.")
+
+
+def _fill_and_commit_syntax_kling_prompt_sync(page: Any, prompt: str, *, timeout_ms: int = 10_000) -> None:
+    """Replace stale persisted text and commit Livewire's blur-bound prompt before submit."""
+    textarea = page.locator("textarea").first
+    textarea.fill(prompt, timeout=timeout_ms)
+    # Syntx keeps the last prompt in the webview and currently binds this
+    # textarea on blur.  ``fill`` alone updates the DOM but can leave the
+    # parent Livewire component with the previous prompt, so Generate only
+    # acknowledges its nested button without creating a task.
+    committed = False
+    with contextlib.suppress(Exception):
+        textarea.evaluate(
+            """el => {
+                el.dispatchEvent(new Event('input', {bubbles: true}));
+                el.dispatchEvent(new Event('change', {bubbles: true}));
+                el.blur();
+            }"""
+        )
+        committed = True
+    if not committed:
+        with contextlib.suppress(Exception):
+            textarea.press("Tab", timeout=timeout_ms)
+    with contextlib.suppress(Exception):
+        page.wait_for_load_state("networkidle", timeout=min(timeout_ms, 10_000))
+    value = str(textarea.input_value(timeout=timeout_ms) or "")
+    if value != prompt:
+        raise RuntimeError("Syntax Kling prompt field did not keep the requested prompt.")
+    _wait_for_syntax_kling_form_ready_sync(page, timeout_ms=max(timeout_ms, 30_000))
+
+
+def _upload_syntax_kling_start_frame_sync(page: Any, start_image: bytes, *, timeout_ms: int = 30_000) -> None:
+    """Attach the start frame to Syntax's own Image-to-video form.
+
+    Sending an image to the Telegram chat only makes it available to the
+    WebApp's picker; it does not select it.  The current Syntax UI requires a
+    real file in its ``input[type=file]`` before it enables Generate.
+    """
+    if not start_image:
+        raise RuntimeError("Syntax Kling start frame is empty.")
+    with contextlib.suppress(Exception):
+        already_attached = bool(
+            page.evaluate(
+                """() => [...document.querySelectorAll('button, [role=button]')].some(el => {
+                    const text = String(el.innerText || el.textContent || '').replace(/\\s+/g, ' ').trim();
+                    return /^(Remove file|Удалить файл)/i.test(text);
+                })"""
+            )
+        )
+        if already_attached:
+            logger.info("syntax.kling.start_frame_already_attached source=telegram_picker")
+            return
+    extension = _image_ext(start_image)
+    mime_type = "image/png" if extension == "png" else "image/jpeg"
+    file_input = page.locator("input[type=file]").first
+    file_input.set_input_files(
+        {
+            "name": f"start_frame.{extension}",
+            "mimeType": mime_type,
+            "buffer": start_image,
+        },
+        timeout=timeout_ms,
+    )
+    # Syntax's Livewire component can replace the native input immediately
+    # after accepting the file, so checking ``input.files`` afterwards is
+    # racy and falsely reports a failed upload. The form-ready wait below
+    # observes the authoritative UI state instead.
+    with contextlib.suppress(Exception):
+        page.wait_for_timeout(800)
+    logger.info("syntax.kling.start_frame_uploaded bytes=%s extension=%s", len(start_image), extension)
+
+
 def _fill_syntax_kling_webapp_sync(
     *,
     url: str,
     prompt: str,
+    start_image: bytes,
     duration_sec: int,
     quality: str,
+    aspect_ratio: str,
     version: str,
     audio_enabled: bool,
     timeout_sec: int,
@@ -490,6 +1082,113 @@ def _fill_syntax_kling_webapp_sync(
         raise RuntimeError(
             "Kling Syntax UI flow requires Playwright in the bot environment. "
             "Install the python package and browser runtime before using 📼 Kling."
+        ) from exc
+
+    timeout_ms = max(10_000, int(timeout_sec) * 1000)
+    with sync_playwright() as p:
+        # The bundled Playwright Chromium occasionally starts successfully but
+        # loses its DevTools socket on a Telegram WebView navigation. In that
+        # case retry the complete flow through installed Chrome, not merely a
+        # new page in the already-disconnected browser.
+        browser_launches = (
+            ("playwright-chromium", {"headless": True}),
+            ("system-chrome", {"channel": "chrome", "headless": True}),
+        )
+        last_error: Exception | None = None
+        for browser_name, launch_kwargs in browser_launches:
+            browser: Any | None = None
+            try:
+                browser = p.chromium.launch(**launch_kwargs)
+                last_goto_error: Exception | None = None
+                page: Any | None = None
+                for attempt in range(3):
+                    candidate = browser.new_page(viewport={"width": 430, "height": 932}, is_mobile=True)
+                    try:
+                        candidate.goto(url, wait_until="commit", timeout=timeout_ms)
+                        page = candidate
+                        break
+                    except Exception as exc:
+                        last_goto_error = exc
+                        logger.info(
+                            "syntax.kling.webapp_goto_retry browser=%s attempt=%s err=%s",
+                            browser_name,
+                            attempt + 1,
+                            _sanitize_syntax_webview_error(exc),
+                        )
+                        with contextlib.suppress(Exception):
+                            candidate.close()
+                        # A failed WebView navigation can leave Chromium's page
+                        # transport disconnected. Retry in a fresh page rather
+                        # than reusing that poisoned page.
+                        time.sleep(1.5 * (attempt + 1))
+                if page is None:
+                    if last_goto_error is not None:
+                        raise last_goto_error
+                    raise RuntimeError("Syntax Kling webview did not open.")
+                with contextlib.suppress(Exception):
+                    page.wait_for_load_state("networkidle", timeout=min(timeout_ms, 30_000))
+
+                try:
+                    _upload_syntax_kling_start_frame_sync(page, start_image)
+                    _fill_and_commit_syntax_kling_prompt_sync(page, prompt)
+                except Exception as exc:
+                    controls = _syntax_visible_controls_snapshot_sync(page)
+                    suffix = f" Visible controls: {controls}" if controls else ""
+                    raise RuntimeError(f"Syntax Kling form did not become ready.{suffix}") from exc
+
+                _click_syntax_option_sync(page, "Версия", version)
+                page.wait_for_timeout(1200)
+                _click_syntax_option_sync(page, "Качество", quality)
+                _set_syntax_kling_duration_sync(page, duration_sec)
+
+                if audio_enabled:
+                    _enable_syntax_audio_sync(page)
+                else:
+                    _disable_syntax_audio_sync(page)
+
+                _click_syntax_kling_generate_sync(page)
+                return
+            except Exception as exc:
+                last_error = exc
+                disconnected = "ERR_SOCKET_NOT_CONNECTED" in str(exc)
+                # A missing Playwright browser executable is another expected
+                # reason to use the installed Chrome. Once a browser was
+                # actually opened, only retry its disconnected DevTools-socket
+                # failure; configuration errors must surface unchanged.
+                can_fallback_to_system_chrome = (
+                    browser_name == "playwright-chromium"
+                    and (browser is None or disconnected)
+                )
+                if not can_fallback_to_system_chrome:
+                    raise
+                logger.warning(
+                    "syntax.kling.webapp_retry_system_chrome browser_started=%s err=%s",
+                    browser is not None,
+                    _sanitize_syntax_webview_error(exc),
+                )
+            finally:
+                if browser is not None:
+                    with contextlib.suppress(Exception):
+                        browser.close()
+        if last_error is not None:
+            raise last_error
+
+
+def _fill_syntax_model_settings_webapp_sync(
+    *,
+    url: str,
+    model_label: str | None = None,
+    duration_sec: int,
+    quality: str,
+    aspect_ratio: str,
+    timeout_sec: int,
+) -> None:
+    try:
+        from playwright.sync_api import sync_playwright
+    except Exception as exc:
+        raise RuntimeError(
+            "Syntax model settings UI flow requires Playwright in the bot environment. "
+            "Install the python package and browser runtime before using Syntax model settings."
         ) from exc
 
     timeout_ms = max(10_000, int(timeout_sec) * 1000)
@@ -509,7 +1208,7 @@ def _fill_syntax_kling_webapp_sync(
                 except Exception as exc:
                     last_goto_error = exc
                     logger.info(
-                        "syntax.kling.webapp_goto_retry attempt=%s err=%s",
+                        "syntax.settings.webapp_goto_retry attempt=%s err=%s",
                         attempt + 1,
                         _sanitize_syntax_webview_error(exc),
                     )
@@ -519,28 +1218,80 @@ def _fill_syntax_kling_webapp_sync(
             with contextlib.suppress(Exception):
                 page.wait_for_load_state("networkidle", timeout=min(timeout_ms, 30_000))
 
-            prompt_re = re.compile("Промпт|Prompt", re.IGNORECASE)
-            with contextlib.suppress(Exception):
-                page.get_by_label(prompt_re).fill(prompt, timeout=10_000)
-            textarea_filled = False
-            with contextlib.suppress(Exception):
-                textarea_filled = bool(page.locator("textarea").first.input_value(timeout=1000).strip())
-            if not textarea_filled:
-                page.locator("textarea").first.fill(prompt, timeout=10_000)
-
-            _click_syntax_option_sync(page, "Версия", version)
-            page.wait_for_timeout(1200)
-            _click_syntax_option_sync(page, "Качество", quality)
-            _click_syntax_option_sync(page, "Длительность", f"{int(duration_sec)} сек")
-
-            if audio_enabled:
-                _enable_syntax_audio_sync(page)
-
-            generate_re = re.compile("Сгенерировать|Generate", re.IGNORECASE)
-            page.get_by_role("button", name=generate_re).last.click(timeout=10_000)
-            page.wait_for_timeout(1200)
+            if model_label and not _try_click_syntax_option_sync(page, "Модель", model_label):
+                raise RuntimeError(f"Syntax model option was not set to {model_label}.")
+            _try_click_syntax_option_sync(page, "Качество", quality)
+            _try_click_syntax_option_sync(page, "Длительность", f"{int(duration_sec)} сек")
+            _set_syntax_aspect_ratio_sync(page, aspect_ratio)
+            if not _syntax_page_contains_aspect_ratio_sync(page, aspect_ratio):
+                raise RuntimeError(f"Syntax settings page does not show selected aspect ratio {aspect_ratio}.")
+            _click_syntax_settings_apply_sync(page)
         finally:
             browser.close()
+
+
+async def _try_configure_syntax_model_settings(
+    client: Any,
+    target: Any,
+    *,
+    bot_entity: Any,
+    reply_anchor: int,
+    model_label: str | None = None,
+    duration_sec: int,
+    quality: str,
+    aspect_ratio: str,
+    poll: float,
+    timeout: int,
+    required: bool = False,
+) -> str:
+    configure_message: Any | None = None
+    configure_button: Any | None = None
+    deadline = time.monotonic() + max(8.0, min(float(timeout), float(_syntax_model_settings_probe_attempts()) * 2.0))
+    configure_message, configure_button = await _wait_for_syntax_configure_button(
+        client,
+        target,
+        reply_anchor=reply_anchor,
+        poll=max(0.5, min(poll, 2.0)),
+        deadline=deadline,
+    )
+    if configure_message is None or configure_button is None:
+        if required:
+            raise RuntimeError("Syntax model settings button was not found; refusing to dispatch video with unknown aspect ratio.")
+        return ""
+    webview_url = await _syntax_configure_button_webview_url(client, target, bot_entity, configure_message, configure_button)
+    if not webview_url:
+        if required:
+            raise RuntimeError("Syntax model settings button did not expose a webview URL; refusing to dispatch video with unknown aspect ratio.")
+        return ""
+    ratio = _normalize_syntax_aspect_ratio(aspect_ratio)
+    try:
+        await asyncio.to_thread(
+            _fill_syntax_model_settings_webapp_sync,
+            url=webview_url,
+            model_label=model_label,
+            duration_sec=duration_sec,
+            quality=quality,
+            aspect_ratio=ratio,
+            timeout_sec=max(20, min(timeout, 60)),
+        )
+    except Exception as exc:
+        logger.warning(
+            "syntax.settings.configure_failed aspect_ratio=%s err=%s",
+            ratio,
+            _sanitize_syntax_webview_error(exc),
+        )
+        message = f"Syntax model settings were not changed to {ratio}: {_sanitize_syntax_webview_error(exc)}"
+        if required:
+            raise RuntimeError(message) from exc
+        return message
+    return f"Syntax model settings applied: aspect_ratio={ratio}."
+
+
+def _syntax_veo_model_label(model: str | None) -> str | None:
+    normalized = str(model or "").strip().lower().replace("-", "_").replace(" ", "_")
+    if normalized in {"veo_3_1_lite", "veo3_1_lite", "veo31_lite"}:
+        return "Veo3.1 Lite"
+    return None
 
 
 async def _run_syntax_kling_configure_flow(
@@ -549,7 +1300,9 @@ async def _run_syntax_kling_configure_flow(
     *,
     bot_entity: Any,
     prompt: str,
+    start_image: bytes,
     duration_sec: int,
+    aspect_ratio: str,
     reply_anchor: int,
     sent_ids: set[int],
     attempt_id: str,
@@ -557,6 +1310,7 @@ async def _run_syntax_kling_configure_flow(
     deadline: float,
     timeout: int,
     initial_last_info: str,
+    audio_enabled: bool = True,
 ) -> Any:
     configure_message, configure_button = await _wait_for_syntax_configure_button(
         client,
@@ -590,10 +1344,12 @@ async def _run_syntax_kling_configure_flow(
             _fill_syntax_kling_webapp_sync,
             url=webview_url,
             prompt=prompt,
+            start_image=start_image,
             duration_sec=duration_sec,
             quality="720",
+            aspect_ratio=aspect_ratio,
             version="3.0",
-            audio_enabled=True,
+            audio_enabled=audio_enabled,
             timeout_sec=max(30, min(timeout, 180)),
         )
     except Exception as exc:
@@ -618,12 +1374,13 @@ async def _run_syntax_kling_configure_flow(
     )
 
 
-async def _send_syntax_video_preflight(client: Any, target: Any, *, provider: str | None, model: str) -> None:
+async def _send_syntax_video_preflight(client: Any, target: Any, *, provider: str | None, model: str) -> int:
     command = SYNTAX_PROVIDER_COMMANDS[_normalize_syntax_provider(provider, model)]
     await client.send_message(target, "/video")
     await asyncio.sleep(0.8)
-    await client.send_message(target, command)
+    command_message = await client.send_message(target, command)
     await asyncio.sleep(0.8)
+    return int(getattr(command_message, "id", 0) or 0)
 
 
 def _syntax_bot_message_is_hard_reject(text: str, _urls: list[str]) -> bool:
@@ -718,26 +1475,27 @@ def _shorten_prompt_for_syntax_with_gemini_sync(prompt: str, *, max_len: int) ->
         "INPUT:\n"
         + json.dumps(payload, ensure_ascii=False, indent=2)
     )
-    for attempt in (1, 2):
-        extra = "" if attempt == 1 else "\n\nYour previous answer was too long or invalid. Compress more aggressively."
-        try:
-            raw = gemini_generate_sync(instruction + extra)
-            obj = extract_json_object(raw)
-        except Exception as exc:
-            logger.warning("syntax_prompt_shorten.gemini failed attempt=%s err=%s", attempt, exc)
-            continue
-        shortened = obj.get("prompt")
-        if not isinstance(shortened, str):
-            continue
-        shortened = shortened.strip()
-        if shortened and len(shortened) <= max_len:
-            return shortened
-        logger.warning(
-            "syntax_prompt_shorten.invalid_length attempt=%s chars=%s limit=%s",
-            attempt,
-            len(shortened),
-            max_len,
+    try:
+        raw = gemini_generate_sync(
+            instruction,
+            rate_limit_max_attempts=1,
+            model_profile=GEMINI_MODEL_PROFILE_EDIT,
         )
+        obj = extract_json_object(raw)
+    except Exception as exc:
+        logger.warning("syntax_prompt_shorten.gemini failed err=%s", exc)
+        return None
+    shortened = obj.get("prompt")
+    if not isinstance(shortened, str):
+        return None
+    shortened = shortened.strip()
+    if shortened and len(shortened) <= max_len:
+        return shortened
+    logger.warning(
+        "syntax_prompt_shorten.invalid_length chars=%s limit=%s",
+        len(shortened),
+        max_len,
+    )
     return None
 
 
@@ -776,6 +1534,8 @@ def _shorten_prompt_for_syntax_locally(prompt: str, *, max_len: int) -> str:
 def _prepare_prompt_for_syntax(prompt: str, *, max_len: int | None = None) -> tuple[str, bool] | None:
     limit = max_len if max_len is not None else _syntax_prompt_max_chars()
     original = (prompt or "").strip()
+    if not original:
+        return None
     if len(original) <= limit:
         return original, False
     shortened = _shorten_prompt_for_syntax_with_gemini_sync(original, max_len=limit)
@@ -1183,8 +1943,10 @@ async def _run_fallback_async(
     timeout_sec: int | None,
     acquire_timeout_sec: int | None,
     syntax_provider: str | None,
+    aspect_ratio: str = "9:16",
+    audio_enabled: bool = True,
 ) -> Any:
-    _ = model, duration_sec
+    _ = model
     if TelegramClient is None:
         return _result(
             success=False,
@@ -1213,6 +1975,16 @@ async def _run_fallback_async(
     poll = _poll_interval_sec()
     bot_username = _normalize_username(os.getenv("SYNTAX_BOT_USERNAME", "syntxaibot"))
 
+    prompt_source = str(prompt or "").strip()
+    if not prompt_source:
+        return _result(
+            success=False,
+            video_bytes=None,
+            video_uri=None,
+            provider_message="Syntax prompt is empty; refusing to dispatch.",
+            attempt_id=attempt_id,
+        )
+
     try:
         start_image = prepare_syntax_frame_bytes(start_image)
         if end_image:
@@ -1226,7 +1998,7 @@ async def _run_fallback_async(
             attempt_id=attempt_id,
         )
 
-    prepared_prompt = await asyncio.to_thread(_prepare_prompt_for_syntax, prompt)
+    prepared_prompt = await asyncio.to_thread(_prepare_prompt_for_syntax, prompt_source)
     if prepared_prompt is None:
         return _result(
             success=False,
@@ -1301,12 +2073,44 @@ async def _run_fallback_async(
                     )
             try:
                 target = await client.get_entity(bot_username)
-                await _send_syntax_video_preflight(
+                preflight_anchor = await _send_syntax_video_preflight(
                     client,
                     target,
                     provider=syntax_provider,
                     model=model,
                 )
+                if provider_kind == SYNTAX_PROVIDER_KLING:
+                    # Current Syntax exposes the Configure WebApp immediately
+                    # after /kling.  Prefer it before sending a Telegram photo:
+                    # a chat photo is a *picker candidate*, not a form upload,
+                    # and can replace the real file with a failed thumbnail.
+                    configure_message, _configure_button = await _wait_for_syntax_configure_button(
+                        client,
+                        target,
+                        reply_anchor=preflight_anchor,
+                        poll=max(0.5, min(poll, 2.0)),
+                        deadline=time.monotonic() + 12.0,
+                    )
+                    if configure_message is not None:
+                        deadline = time.monotonic() + timeout
+                        return await _run_syntax_kling_configure_flow(
+                            client,
+                            target,
+                            bot_entity=target,
+                            prompt=prompt_text,
+                            start_image=start_image,
+                            duration_sec=duration_sec,
+                            aspect_ratio=aspect_ratio,
+                            reply_anchor=preflight_anchor,
+                            sent_ids=sent_ids,
+                            attempt_id=attempt_id,
+                            poll=poll,
+                            deadline=deadline,
+                            timeout=timeout,
+                            initial_last_info=last_info,
+                            audio_enabled=audio_enabled,
+                        )
+
                 start_file = io.BytesIO(start_image)
                 start_file.name = f"start_frame.{_image_ext(start_image)}"
                 start_msg = await client.send_file(target, file=start_file, force_document=False)
@@ -1331,7 +2135,9 @@ async def _run_fallback_async(
                         target,
                         bot_entity=target,
                         prompt=prompt_text,
+                        start_image=start_image,
                         duration_sec=duration_sec,
+                        aspect_ratio=aspect_ratio,
                         reply_anchor=reply_anchor,
                         sent_ids=sent_ids,
                         attempt_id=attempt_id,
@@ -1339,6 +2145,7 @@ async def _run_fallback_async(
                         deadline=deadline,
                         timeout=timeout,
                         initial_last_info=last_info,
+                        audio_enabled=audio_enabled,
                     )
                 if end_image:
                     end_file = io.BytesIO(end_image)
@@ -1347,13 +2154,13 @@ async def _run_fallback_async(
                     sent_ids.add(int(end_msg.id))
                     reply_anchor = int(end_msg.id)
 
-                request_message = await client.send_message(target, prompt_text, reply_to=reply_anchor)
-                sent_ids.add(int(request_message.id))
                 if prompt_shortened:
                     last_info = (
                         f"Prompt exceeded Syntax limit ({_syntax_prompt_max_chars()} chars) "
                         "and was shortened automatically before send."
                     )
+                request_message = await client.send_message(target, prompt_text, reply_to=reply_anchor)
+                sent_ids.add(int(request_message.id))
 
                 deadline = time.monotonic() + timeout
                 return await _poll_syntax_bot_until_video(
@@ -1419,8 +2226,10 @@ async def _run_batch_fallback_async(
     timeout_sec: int | None,
     acquire_timeout_sec: int | None,
     syntax_provider: str | None,
+    aspect_ratio: str = "9:16",
+    audio_enabled: bool = True,
 ) -> dict[str, Any]:
-    _ = model, duration_sec
+    _ = model
     results: dict[str, Any] = {}
     if not requests:
         return results
@@ -1437,6 +2246,8 @@ async def _run_batch_fallback_async(
                 timeout_sec=timeout_sec,
                 acquire_timeout_sec=acquire_timeout_sec,
                 syntax_provider=syntax_provider,
+                aspect_ratio=aspect_ratio,
+                audio_enabled=audio_enabled,
             )
         return results
     if TelegramClient is None:
@@ -1475,6 +2286,16 @@ async def _run_batch_fallback_async(
     for request in requests:
         key = str(request.key)
         attempt_id = uuid4().hex
+        prompt_source = str(request.prompt or "").strip()
+        if not prompt_source:
+            results[key] = _result(
+                success=False,
+                video_bytes=None,
+                video_uri=None,
+                provider_message="Syntax prompt is empty; refusing to dispatch.",
+                attempt_id=attempt_id,
+            )
+            continue
         try:
             start_image = prepare_syntax_frame_bytes(request.start_image)
             end_image = prepare_syntax_frame_bytes(request.end_image) if request.end_image else None
@@ -1487,7 +2308,7 @@ async def _run_batch_fallback_async(
                 attempt_id=attempt_id,
             )
             continue
-        prepared_prompt = await asyncio.to_thread(_prepare_prompt_for_syntax, request.prompt)
+        prepared_prompt = await asyncio.to_thread(_prepare_prompt_for_syntax, prompt_source)
         if prepared_prompt is None:
             results[key] = _result(
                 success=False,
@@ -1590,14 +2411,14 @@ async def _run_batch_fallback_async(
                 end_msg = await client.send_file(target, file=end_file, force_document=False)
                 sent_ids.add(int(end_msg.id))
                 reply_anchor = int(end_msg.id)
-            request_message = await client.send_message(target, request.prompt_text, reply_to=reply_anchor)
-            sent_ids.add(int(request_message.id))
             last_info = ""
             if request.prompt_shortened:
                 last_info = (
                     f"Prompt exceeded Syntax limit ({_syntax_prompt_max_chars()} chars) "
                     "and was shortened automatically before send."
                 )
+            request_message = await client.send_message(target, request.prompt_text, reply_to=reply_anchor)
+            sent_ids.add(int(request_message.id))
             request_runtime.append((request, reply_anchor, sent_ids, last_info))
 
         deadline = time.monotonic() + timeout
@@ -1768,6 +2589,8 @@ def run_syntax_telethon_fallback(
     timeout_sec: int | None = None,
     acquire_timeout_sec: int | None = None,
     syntax_provider: str | None = None,
+    aspect_ratio: str = "9:16",
+    audio_enabled: bool = True,
 ) -> Any:
     """Run Syntax fallback transport and return unified fallback result."""
     attempt_id = uuid4().hex
@@ -1782,6 +2605,8 @@ def run_syntax_telethon_fallback(
             timeout_sec=timeout_sec,
             acquire_timeout_sec=acquire_timeout_sec,
             syntax_provider=syntax_provider,
+            aspect_ratio=aspect_ratio,
+            audio_enabled=audio_enabled,
         )
     )
 
@@ -1794,6 +2619,8 @@ def run_syntax_telethon_fallback_batch(
     timeout_sec: int | None = None,
     acquire_timeout_sec: int | None = None,
     syntax_provider: str | None = None,
+    aspect_ratio: str = "9:16",
+    audio_enabled: bool = True,
 ) -> dict[str, Any]:
     """Run one Telethon session that sends multiple Syntax requests before waiting for replies."""
     return asyncio.run(
@@ -1804,5 +2631,7 @@ def run_syntax_telethon_fallback_batch(
             timeout_sec=timeout_sec,
             acquire_timeout_sec=acquire_timeout_sec,
             syntax_provider=syntax_provider,
+            aspect_ratio=aspect_ratio,
+            audio_enabled=audio_enabled,
         )
     )

@@ -1,3 +1,5 @@
+import json
+
 from .handlers_state_deps import (
     Any,
     ContextTypes,
@@ -5,7 +7,6 @@ from .handlers_state_deps import (
     STATE_REFINING_CONCEPT,
     STATE_REFINING_RECIPE,
     STATE_WAITING_CONCEPT,
-    STATE_WAITING_PRODUCTION_BUNDLE_APPROVAL,
     STATE_WAITING_RECIPE_APPROVAL,
     STATE_WAITING_SCENE_APPROVAL,
     Update,
@@ -24,14 +25,12 @@ from .handlers_state_deps import (
     asyncio,
     ok_only_markup,
     format_full_recipe_for_approval,
-    format_production_bundle_for_approval,
     format_viral_application_summary,
     format_viral_concept_brief,
     gemini_generate_sync,
     generate_recipe_from_source_text,
     generate_recipe_concepts,
     generate_recipe_full_text,
-    generate_full_production,
     generate_scenes_plan,
     generate_viral_concept_brief,
     logger,
@@ -40,18 +39,106 @@ from .handlers_state_deps import (
 )
 from .handlers_state_commands import _reply_text_chunked
 from .handlers_state_commands import NAV_BUTTON_START_OVER
-from .handlers_keyboards import reply_text_without_keyboard, safe_reply_text
+from .handlers_generation_utils import (
+    OVERLAY_SUBTITLE_BY_LANG_SESSION_KEY,
+    OVERLAY_SUBTITLE_DECIDED_SESSION_KEY,
+    OVERLAY_SUBTITLE_TRANSLATION_PENDING_SESSION_KEY,
+    OVERLAY_TITLE_BY_LANG_SESSION_KEY,
+    OVERLAY_TITLE_NEXT_RECIPE_PLAN,
+    OVERLAY_TITLE_NEXT_SERIES_CHOICE,
+    OVERLAY_TITLE_PENDING_NEXT_SESSION_KEY,
+    OVERLAY_TITLE_SESSION_KEY,
+    OVERLAY_TITLE_STYLE_SESSION_KEY,
+    STATE_WAITING_OVERLAY_SUBTITLE_RU,
+    STATE_WAITING_OVERLAY_TITLE_RU,
+)
+from .handlers_keyboards import DRAFT_BUTTON_SAVE, reply_text_without_keyboard, safe_reply_text
 from .handlers_state_media import send_social_descriptions_for_recipe
 from ..dish_visuals import build_dish_visual_brief
-from ..llm_utils import extract_json_object
+from ..llm_utils import GEMINI_MODEL_PROFILE_EDIT, extract_json_object
+from ..advertising_generation import (
+    ADVERTISING_CAMPAIGNS_SESSION_KEY,
+    ADVERTISING_CONTENT_TYPE_SESSION_KEY,
+    ADVERTISING_FORMAT_SESSION_KEY,
+    ADVERTISING_POST_IMAGE_PATHS_SESSION_KEY,
+    ADVERTISING_POST_TEXT_SESSION_KEY,
+    ADVERTISING_PRODUCT_BRIEF_SESSION_KEY,
+    ADVERTISING_PRODUCT_PATH_SESSION_KEY,
+    ADVERTISING_SELECTED_CAMPAIGN_SESSION_KEY,
+    ADVERTISING_SOURCE_SESSION_KEY,
+    STATE_WAITING_ADVERTISING_CAMPAIGN_CHOICE,
+    STATE_WAITING_ADVERTISING_CUSTOM_CAMPAIGN,
+    STATE_WAITING_ADVERTISING_FORMAT_CHOICE,
+    STATE_WAITING_ADVERTISING_PRODUCT_IMAGE,
+    generate_advertising_campaigns,
+    generate_advertising_scene_plan,
+)
+from ..artifact_store import file_uri, persist_generation_artifact
+from ..discipline_intro import (
+    DISCIPLINE_INTRO_APPROVED_PROVIDER_SESSION_KEY,
+    DISCIPLINE_INTRO_APPROVED_VIDEO_PATH_SESSION_KEY,
+    DISCIPLINE_INTRO_AUDIO_PATH_SESSION_KEY,
+    DISCIPLINE_INTRO_DIALOGUE_SESSION_KEY,
+    DISCIPLINE_INTRO_DIALOGUE_VERSIONS_SESSION_KEY,
+    DISCIPLINE_INTRO_ENABLED_SESSION_KEY,
+    DISCIPLINE_INTRO_IMAGE_PATH_SESSION_KEY,
+    DISCIPLINE_INTRO_IMAGE_VERSIONS_SESSION_KEY,
+    DISCIPLINE_INTRO_VIDEO_PATH_SESSION_KEY,
+    DISCIPLINE_INTRO_VIDEO_VERSIONS_SESSION_KEY,
+    STATE_WAITING_DISCIPLINE_INTRO_DIALOGUE_APPROVAL,
+    format_discipline_intro_dialogue,
+    generate_discipline_intro_dialogue,
+    intro_character_names,
+    parse_intro_dialogue_text,
+)
 from ..generation_modes import (
+    GENERATION_MODE_ADVERTISING,
+    GENERATION_MODE_COPY,
+    GENERATION_MODE_LONG,
     GENERATION_MODE_NORMAL,
     GENERATION_MODE_SESSION_KEY,
     GENERATION_MODE_SILENCE,
+    GENERATION_MODE_STORY,
+    GENERATION_MODE_VISUALIZATION,
+    is_visualization_generation,
     normalize_generation_mode,
     target_languages_for_generation_mode,
 )
+from ..generation_store import ensure_generation_run_for_session
+from ..story_generation import (
+    STATE_WAITING_STORY_ENGLISH_CHOICE,
+    STATE_WAITING_STORY_STYLE_CHOICE,
+    STATE_WAITING_STORY_SCRIPT_APPROVAL,
+    STORY_ENGLISH_REQUESTED_SESSION_KEY,
+    STORY_STYLE_PRIMARY,
+    STORY_STYLE_RETRO_CARTOON,
+    STORY_STYLE_CLAYMATION,
+    STORY_STYLE_FELT_STOP_MOTION,
+    STORY_STYLE_RETRO_FAIRYTALE,
+    STORY_STYLE_STORYBOOK_GOUACHE,
+    STORY_STYLE_TWILIGHT_WATERCOLOR,
+    STORY_STYLE_SOFT_ANIMATION,
+    STORY_STYLE_CLASSIC_CEL_CARTOON,
+    STORY_STYLE_FELT_APPLIQUE,
+    STORY_STYLE_FOLK_FAIRYTALE,
+    STORY_STYLE_OIL_PASTEL,
+    STORY_STYLE_CROCHET,
+    STORY_STYLE_MINIMAL_RETRO_CARTOON,
+    STORY_STYLE_WATERCOLOR,
+    STORY_SOURCE_SESSION_KEY,
+    STORY_TITLE_SESSION_KEY,
+    STORY_VISUAL_STYLE_SESSION_KEY,
+    STORY_VOICEOVER_SESSION_KEY,
+    archive_story_voiceover_version,
+    generate_story_voiceover,
+)
 from ..multilingual import language_name, normalize_language_code, target_languages_from_env
+from ..visualization_generation import (
+    STATE_WAITING_VISUALIZATION_MEDIA,
+    VISUALIZATION_INPUT_KIND_SESSION_KEY,
+    VISUALIZATION_SOURCE_MEDIA_SESSION_KEY,
+    VISUALIZATION_TRANSCRIPT_SEGMENTS_SESSION_KEY,
+)
 from ..series_store import (
     SERIES_PENDING_PREFER_VERTEX_SESSION_KEY,
     SERIES_PENDING_RECIPE_SESSION_KEY,
@@ -78,8 +165,20 @@ SERIES_CHOICE_CONFIRMED_SESSION_KEY = "series_choice_confirmed"
 SERIES_PENDING_NEXT_SESSION_KEY = "series_pending_next"
 SERIES_NEXT_GENERATION = "generation"
 SERIES_NEXT_OVERLAY_TITLE = "overlay_title"
+SERIES_NEXT_ADVERTISING_PLAN = "advertising_plan"
 _GENERATION_MODE_BUTTON_NORMAL = "Обычный"
 _GENERATION_MODE_BUTTON_SILENCE = "Silence"
+_GENERATION_MODE_BUTTON_LONG = "Длинный"
+_GENERATION_MODE_BUTTON_COPY = "Копия"
+_GENERATION_MODE_BUTTON_STORY = "История"
+_GENERATION_MODE_BUTTON_VISUALIZATION = "Визуализация"
+_GENERATION_MODE_BUTTON_ADVERTISING = "Реклама"
+_ADVERTISING_CAMPAIGN_OTHER_BUTTON = "Другие варианты"
+_ADVERTISING_CAMPAIGN_STRENGTHEN_BUTTON = "Усилить варианты"
+_ADVERTISING_CAMPAIGN_CUSTOM_BUTTON = "Свой вариант"
+_ADVERTISING_FORMAT_CLIP_BUTTON = "Клип"
+_ADVERTISING_FORMAT_POST_BUTTON = "Пост"
+_STORY_REGENERATE_BUTTON = "ПЕРЕГЕНЕРИРОВАТЬ"
 _SERIES_BUTTON_NEW = "Создать серию"
 _SERIES_BUTTON_SKIP = "Без серии"
 _SERIES_BUTTON_BACK = "Назад"
@@ -91,6 +190,73 @@ _SERIES_SESSION_KEYS = (
     SERIES_COUNTER_BY_LANG_SESSION_KEY,
     SERIES_CHOICE_CONFIRMED_SESSION_KEY,
 )
+
+# A new /generate or /quick request starts a new piece of content. Keep
+# account/project preferences in the chat session, but never carry database
+# bindings or generated content from the previous run into the new workflow.
+# Continuation/resume paths do not call _start_generation_with_recipe and keep
+# their run binding intact.
+_NEW_GENERATION_STALE_KEYS = (
+    "generation_run_id",
+    "scene_db_ids_by_index",
+    "production",
+    "scenes_plan",
+    "scenes_text",
+    "recipe_steps",
+    "selected_concept",
+    "selected_concept_name",
+    "recipe_title",
+    "recipe_name",
+    "recipe_full_text",
+    "user_input",
+    "viral_concept_brief",
+    "romantic_drama_subplot",
+    "retention_review",
+    OVERLAY_TITLE_SESSION_KEY,
+    OVERLAY_TITLE_BY_LANG_SESSION_KEY,
+    OVERLAY_TITLE_STYLE_SESSION_KEY,
+    OVERLAY_SUBTITLE_BY_LANG_SESSION_KEY,
+    OVERLAY_SUBTITLE_DECIDED_SESSION_KEY,
+    OVERLAY_SUBTITLE_TRANSLATION_PENDING_SESSION_KEY,
+    OVERLAY_TITLE_PENDING_NEXT_SESSION_KEY,
+    STORY_SOURCE_SESSION_KEY,
+    STORY_TITLE_SESSION_KEY,
+    STORY_VOICEOVER_SESSION_KEY,
+    STORY_ENGLISH_REQUESTED_SESSION_KEY,
+    STORY_VISUAL_STYLE_SESSION_KEY,
+    VISUALIZATION_SOURCE_MEDIA_SESSION_KEY,
+    VISUALIZATION_TRANSCRIPT_SEGMENTS_SESSION_KEY,
+    VISUALIZATION_INPUT_KIND_SESSION_KEY,
+    DISCIPLINE_INTRO_ENABLED_SESSION_KEY,
+    DISCIPLINE_INTRO_DIALOGUE_SESSION_KEY,
+    DISCIPLINE_INTRO_DIALOGUE_VERSIONS_SESSION_KEY,
+    DISCIPLINE_INTRO_IMAGE_PATH_SESSION_KEY,
+    DISCIPLINE_INTRO_IMAGE_VERSIONS_SESSION_KEY,
+    DISCIPLINE_INTRO_AUDIO_PATH_SESSION_KEY,
+    DISCIPLINE_INTRO_VIDEO_PATH_SESSION_KEY,
+    DISCIPLINE_INTRO_VIDEO_VERSIONS_SESSION_KEY,
+    DISCIPLINE_INTRO_APPROVED_VIDEO_PATH_SESSION_KEY,
+    DISCIPLINE_INTRO_APPROVED_PROVIDER_SESSION_KEY,
+    ADVERTISING_SOURCE_SESSION_KEY,
+    ADVERTISING_PRODUCT_PATH_SESSION_KEY,
+    ADVERTISING_PRODUCT_BRIEF_SESSION_KEY,
+    ADVERTISING_CONTENT_TYPE_SESSION_KEY,
+    ADVERTISING_CAMPAIGNS_SESSION_KEY,
+    ADVERTISING_SELECTED_CAMPAIGN_SESSION_KEY,
+    ADVERTISING_FORMAT_SESSION_KEY,
+    ADVERTISING_POST_TEXT_SESSION_KEY,
+    ADVERTISING_POST_IMAGE_PATHS_SESSION_KEY,
+    *_SERIES_SESSION_KEYS,
+    _SERIES_CHOICE_IDS_SESSION_KEY,
+    _SERIES_TRANSLATION_PENDING_SESSION_KEY,
+)
+
+
+def _session_for_new_generation(existing_session: dict) -> dict:
+    session = dict(existing_session)
+    for key in _NEW_GENERATION_STALE_KEYS:
+        session.pop(key, None)
+    return session
 
 
 async def _start_description_with_recipe(
@@ -175,13 +341,145 @@ def _parse_concept_choice(text: str) -> int | None:
     return int(match.group(1))
 
 
+def _advertising_campaign_choice_markup() -> object | None:
+    try:
+        from telegram import ReplyKeyboardMarkup
+    except Exception:
+        return None
+    return ReplyKeyboardMarkup(
+        [
+            ["1", "2", "3"],
+            ["4", "5"],
+            [_ADVERTISING_CAMPAIGN_OTHER_BUTTON, _ADVERTISING_CAMPAIGN_STRENGTHEN_BUTTON],
+            [_ADVERTISING_CAMPAIGN_CUSTOM_BUTTON],
+            [NAV_BUTTON_START_OVER],
+        ],
+        resize_keyboard=True,
+        one_time_keyboard=False,
+    )
+
+
+def _advertising_format_choice_markup() -> object | None:
+    try:
+        from telegram import ReplyKeyboardMarkup
+    except Exception:
+        return None
+    return ReplyKeyboardMarkup(
+        [[_ADVERTISING_FORMAT_CLIP_BUTTON, _ADVERTISING_FORMAT_POST_BUTTON], [NAV_BUTTON_START_OVER]],
+        resize_keyboard=True,
+        one_time_keyboard=False,
+    )
+
+
 def _generation_mode_markup() -> object | None:
     try:
         from telegram import ReplyKeyboardMarkup
     except Exception:
         return None
     return ReplyKeyboardMarkup(
-        [[_GENERATION_MODE_BUTTON_NORMAL], [_GENERATION_MODE_BUTTON_SILENCE]],
+        [
+            [_GENERATION_MODE_BUTTON_NORMAL],
+            [_GENERATION_MODE_BUTTON_SILENCE],
+            [_GENERATION_MODE_BUTTON_LONG],
+            [_GENERATION_MODE_BUTTON_COPY],
+            [_GENERATION_MODE_BUTTON_STORY],
+            [_GENERATION_MODE_BUTTON_VISUALIZATION],
+            [_GENERATION_MODE_BUTTON_ADVERTISING],
+        ],
+        resize_keyboard=True,
+        one_time_keyboard=False,
+    )
+
+
+def _story_voiceover_retry_markup() -> object | None:
+    try:
+        from telegram import ReplyKeyboardMarkup
+    except Exception:
+        return None
+    return ReplyKeyboardMarkup(
+        [[_STORY_REGENERATE_BUTTON], [NAV_BUTTON_START_OVER]],
+        resize_keyboard=True,
+        one_time_keyboard=False,
+    )
+
+
+def _story_english_choice_markup() -> object | None:
+    try:
+        from telegram import ReplyKeyboardMarkup
+    except Exception:
+        return None
+    return ReplyKeyboardMarkup(
+        [["Да, нужна EN"], ["Нет, только RU"], [NAV_BUTTON_START_OVER]],
+        resize_keyboard=True,
+        one_time_keyboard=False,
+    )
+
+
+def _story_style_choice_markup() -> object | None:
+    try:
+        from telegram import ReplyKeyboardMarkup
+    except Exception:
+        return None
+    return ReplyKeyboardMarkup(
+        [
+            ["Основной"],
+            ["Сухая акварель"],
+            ["Ретро-мультфильм"],
+            ["Книжная гуашь"],
+            ["Пластилиновый мультфильм"],
+            ["Кукольный стоп-моушен"],
+            ["Рисованная ретро-сказка"],
+            ["Сумеречная акварель"],
+            ["Светлая анимационная пастель"],
+            ["Классический рисованный мультфильм"],
+            ["Фетровая аппликация"],
+            ["Народная рисованная сказка"],
+            ["Пастельные мелки"],
+            ["Вязаная иллюстрация"],
+            ["Минималистичный ретро-мультфильм"],
+            [NAV_BUTTON_START_OVER],
+        ],
+        resize_keyboard=True,
+        one_time_keyboard=False,
+    )
+
+
+def _story_script_approval_markup() -> object | None:
+    try:
+        from telegram import ReplyKeyboardMarkup
+    except Exception:
+        return None
+    return ReplyKeyboardMarkup(
+        [
+            ["ОК"],
+            ["Версии текста"],
+            ["СВОЙ ТЕКСТ"],
+            ["Сократить текст"],
+            [_STORY_REGENERATE_BUTTON],
+            ["Добавь"],
+            ["Исправь"],
+            [NAV_BUTTON_START_OVER],
+        ],
+        resize_keyboard=True,
+        one_time_keyboard=False,
+    )
+
+
+def _discipline_intro_dialogue_approval_markup() -> object | None:
+    try:
+        from telegram import ReplyKeyboardMarkup
+    except Exception:
+        return None
+    return ReplyKeyboardMarkup(
+        [
+            ["ОК"],
+            ["Без интро"],
+            [_STORY_REGENERATE_BUTTON],
+            ["Добавь"],
+            ["Исправь"],
+            [DRAFT_BUTTON_SAVE],
+            [NAV_BUTTON_START_OVER],
+        ],
         resize_keyboard=True,
         one_time_keyboard=False,
     )
@@ -305,7 +603,7 @@ async def _translate_series_titles(
         context,
         chat_id,
         "translate_series_titles",
-        lambda: asyncio.to_thread(gemini_generate_sync, prompt),
+        lambda: asyncio.to_thread(gemini_generate_sync, prompt, model_profile=GEMINI_MODEL_PROFILE_EDIT),
     )
     try:
         data = extract_json_object(str(raw or ""))
@@ -388,6 +686,49 @@ def _copy_generation_mode_context(source: dict, target: dict) -> None:
     )
 
 
+def _copy_overlay_title_context(source: dict, target: dict) -> None:
+    for key in (
+        OVERLAY_TITLE_SESSION_KEY,
+        OVERLAY_TITLE_BY_LANG_SESSION_KEY,
+        OVERLAY_TITLE_STYLE_SESSION_KEY,
+        OVERLAY_SUBTITLE_BY_LANG_SESSION_KEY,
+        OVERLAY_SUBTITLE_DECIDED_SESSION_KEY,
+        OVERLAY_SUBTITLE_TRANSLATION_PENDING_SESSION_KEY,
+    ):
+        if key in source:
+            target[key] = source[key]
+
+
+def _has_overlay_titles(session: dict) -> bool:
+    titles = session.get(OVERLAY_TITLE_BY_LANG_SESSION_KEY)
+    return isinstance(titles, dict) and any(str(value or "").strip() for value in titles.values())
+
+
+async def _ask_overlay_title_before_recipe_plan(update: Update, chat_id: int, session: dict) -> bool:
+    session[OVERLAY_TITLE_PENDING_NEXT_SESSION_KEY] = OVERLAY_TITLE_NEXT_RECIPE_PLAN
+    session["state"] = STATE_WAITING_OVERLAY_TITLE_RU
+    SESSIONS[chat_id] = session
+    await reply_text_without_keyboard(
+        update.message,
+        "Рецепт утверждён. До viral plan введите русский заголовок для верхней надписи.",
+    )
+    return True
+
+
+async def _ask_overlay_subtitle_before_recipe_plan(update: Update, chat_id: int, session: dict) -> bool:
+    session[OVERLAY_TITLE_PENDING_NEXT_SESSION_KEY] = OVERLAY_TITLE_NEXT_RECIPE_PLAN
+    session["state"] = STATE_WAITING_OVERLAY_SUBTITLE_RU
+    SESSIONS[chat_id] = session
+    await safe_reply_text(
+        update.message,
+        "Добавить третью строку под заголовком? Она будет мелкой и спокойной.\n"
+        "Например: КБЖУ на 100 гр: 126/10/4/24\n\n"
+        "Пришлите текст одним сообщением или нажмите «ОК» / напишите «нет», чтобы пропустить.",
+        reply_markup=ok_only_markup(),
+    )
+    return True
+
+
 async def generate(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Команда ``/generate <текст>``: обычный старт пайплайна (без fastpath)."""
     await _start_generation(update, context, prefer_vertex_api=False)
@@ -406,7 +747,8 @@ async def _announce_generation_mode(
 ) -> None:
     """Отправляет сообщения о режиме запуска и обязательные предупреждения."""
     _bump_debounce_generation(chat_id)
-    warn = _elevenlabs_voice_warning()
+    existing = SESSIONS.get(chat_id) or {}
+    warn = None if str(existing.get("project_voice_id") or "").strip() else _elevenlabs_voice_warning()
     if warn:
         await update.message.reply_text(warn)
     if prefer_vertex_api:
@@ -460,7 +802,7 @@ async def _start_generation_with_recipe(
     selected_project_key = str(existing_session.get(_PROJECT_KEY_SESSION) or "").strip()
     await _announce_generation_mode(update, chat_id=chat_id, prefer_vertex_api=prefer_vertex_api)
     session = {
-        **existing_session,
+        **_session_for_new_generation(existing_session),
         "state": STATE_WAITING_GENERATION_MODE,
         SERIES_PENDING_NEXT_SESSION_KEY: SERIES_NEXT_GENERATION,
         SERIES_PENDING_RECIPE_SESSION_KEY: recipe,
@@ -469,7 +811,16 @@ async def _start_generation_with_recipe(
     if selected_project_key:
         session[_PROJECT_KEY_SESSION] = selected_project_key
     SESSIONS[chat_id] = session
-    await _ask_generation_mode(update, session)
+    if session.get("force_story_mode") is True:
+        await _handle_waiting_generation_mode_state(
+            update,
+            context,
+            chat_id=chat_id,
+            session=session,
+            text=_GENERATION_MODE_BUTTON_STORY,
+        )
+    else:
+        await _ask_generation_mode(update, session)
     return
 
 
@@ -529,6 +880,7 @@ async def _continue_generation_with_recipe(
             new_session[_PROJECT_KEY_SESSION] = selected_project_key
         _copy_series_context(existing_session, new_session)
         _copy_generation_mode_context(existing_session, new_session)
+        _copy_overlay_title_context(existing_session, new_session)
         SESSIONS[chat_id] = new_session
         logger.info(
             "chat=%s state=%s (recipe provided directly%s)",
@@ -581,6 +933,7 @@ async def _continue_generation_with_recipe(
         new_session[_PROJECT_KEY_SESSION] = selected_project_key
     _copy_series_context(existing_session, new_session)
     _copy_generation_mode_context(existing_session, new_session)
+    _copy_overlay_title_context(existing_session, new_session)
     SESSIONS[chat_id] = new_session
     logger.info("chat=%s state=%s", chat_id, STATE_WAITING_CONCEPT)
     await _reply_text_chunked(update, result["text_plan"])
@@ -592,6 +945,153 @@ async def _continue_generation_with_recipe(
     )
 
 
+async def _start_advertising_campaign_choice(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+    *,
+    chat_id: int,
+    session: dict,
+    direction: str = "new",
+) -> bool:
+    source_text = str(session.get(ADVERTISING_SOURCE_SESSION_KEY) or "").strip()
+    product_brief = session.get(ADVERTISING_PRODUCT_BRIEF_SESSION_KEY)
+    if not source_text or not isinstance(product_brief, dict):
+        session["state"] = STATE_WAITING_ADVERTISING_PRODUCT_IMAGE
+        SESSIONS[chat_id] = session
+        await update.message.reply_text("Не вижу исходную идею или карточку товара. Пришлите фото товара ещё раз.")
+        return True
+    stronger = str(direction).strip().lower() == "stronger"
+    try:
+        await reply_text_without_keyboard(
+            update.message,
+            "Усиливаю пять рекламных концепций, ждите."
+            if stronger
+            else "Придумываю пять разных рекламных кампаний для товара, ждите.",
+        )
+        result = await _call_with_503_retries(
+            update,
+            context,
+            chat_id,
+            "generate_advertising_campaigns",
+            lambda: asyncio.to_thread(
+                generate_advertising_campaigns,
+                source_text=source_text,
+                product_brief=product_brief,
+                previous_campaigns=(session.get(ADVERTISING_CAMPAIGNS_SESSION_KEY) or []),
+                direction="stronger" if stronger else "new",
+            ),
+        )
+    except ServiceUnavailableRetriesExhaustedError as e:
+        await update.message.reply_text(str(e))
+        return True
+    except Exception as e:
+        logger.exception("advertising campaign generation failed")
+        await update.message.reply_text(f"Ошибка подготовки рекламных идей: {_user_error_message(e)}")
+        return True
+    campaigns = result.get("campaigns") if isinstance(result, dict) else None
+    if not isinstance(campaigns, list) or len(campaigns) != 5:
+        await update.message.reply_text("Не удалось получить пять рекламных вариантов. Нажмите «Другие варианты» и попробуйте ещё раз.")
+        return True
+    session[ADVERTISING_CAMPAIGNS_SESSION_KEY] = campaigns
+    session.pop(ADVERTISING_SELECTED_CAMPAIGN_SESSION_KEY, None)
+    session.pop(ADVERTISING_FORMAT_SESSION_KEY, None)
+    session["state"] = STATE_WAITING_ADVERTISING_CAMPAIGN_CHOICE
+    SESSIONS[chat_id] = session
+    await _reply_text_chunked(update, str(result.get("text") or ""))
+    await _reply_text_with_optional_markup(
+        update,
+        "Выберите идею кнопкой 1–5. Можно запросить другие или усиленные варианты либо прислать свой сюжет.",
+        reply_markup=_advertising_campaign_choice_markup(),
+    )
+    return True
+
+
+async def _start_advertising_scene_plan(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+    *,
+    chat_id: int,
+    session: dict,
+) -> bool:
+    source_text = str(
+        session.get(ADVERTISING_SOURCE_SESSION_KEY)
+        or session.get(SERIES_PENDING_RECIPE_SESSION_KEY)
+        or ""
+    ).strip()
+    product_brief = session.get(ADVERTISING_PRODUCT_BRIEF_SESSION_KEY)
+    product_path = str(session.get(ADVERTISING_PRODUCT_PATH_SESSION_KEY) or "").strip()
+    if not source_text or not isinstance(product_brief, dict) or not product_path:
+        session["state"] = STATE_WAITING_ADVERTISING_PRODUCT_IMAGE
+        SESSIONS[chat_id] = session
+        await update.message.reply_text("Для рекламы нужен исходный текст и фотография товара. Пришлите фото товара ещё раз.")
+        return True
+    try:
+        await reply_text_without_keyboard(update.message, "Строю рекламный план из 6 сцен Veo, ждите.")
+        result = await _call_with_503_retries(
+            update,
+            context,
+            chat_id,
+            "generate_advertising_scene_plan",
+            lambda: asyncio.to_thread(
+                generate_advertising_scene_plan,
+                source_text=source_text,
+                product_brief=product_brief,
+                selected_campaign=session.get(ADVERTISING_SELECTED_CAMPAIGN_SESSION_KEY),
+            ),
+        )
+    except ServiceUnavailableRetriesExhaustedError as e:
+        await update.message.reply_text(str(e))
+        return True
+    except Exception as e:
+        logger.exception("advertising scene plan failed")
+        await update.message.reply_text(f"Ошибка подготовки рекламного плана: {_user_error_message(e)}")
+        return True
+    plan = result.get("json_plan") if isinstance(result, dict) else None
+    if not isinstance(plan, list) or len(plan) != 6:
+        await update.message.reply_text("Не удалось получить полный рекламный план из 6 сцен. Попробуйте ещё раз.")
+        return True
+    title = str(result.get("title") or product_brief.get("product_name") or "Реклама товара").strip()
+    session.pop(SERIES_PENDING_RECIPE_SESSION_KEY, None)
+    session.pop(SERIES_PENDING_PREFER_VERTEX_SESSION_KEY, None)
+    session[ADVERTISING_CONTENT_TYPE_SESSION_KEY] = str(result.get("content_type") or "story")
+    session["selected_concept"] = title
+    session["selected_concept_name"] = title
+    session["recipe_full_text"] = source_text
+    session["user_input"] = source_text
+    session["brand_context"] = json.dumps(product_brief, ensure_ascii=False)
+    session["sponsored_content"] = True
+    session["viral_concept_brief"] = {
+        "main_hook": str(plan[0].get("text") or ""),
+        "brand_integration_plan": "Один и тот же товар целиком виден во всех шести сценах.",
+        "content_type": session[ADVERTISING_CONTENT_TYPE_SESSION_KEY],
+    }
+    session["romantic_drama_subplot"] = {}
+    session["retention_review"] = {}
+    session["scenes_plan"] = plan
+    session["scenes_text"] = str(result.get("text_plan") or "")
+    session["recipe_steps"] = [str(item.get("text") or item.get("action") or "") for item in plan]
+    session["state"] = STATE_WAITING_SCENE_APPROVAL
+    SESSIONS[chat_id] = session
+    run_id, _scene_map = ensure_generation_run_for_session(session)
+    if run_id:
+        persist_generation_artifact(
+            session,
+            artifact_type="advertising_product_reference",
+            label="Mandatory advertising product reference",
+            uri=file_uri(product_path),
+            mime_type="image/jpeg",
+            payload={"product_brief": product_brief, "required_in_every_scene": True},
+        )
+    await _reply_text_chunked(update, session["scenes_text"])
+    await _reply_text_with_optional_markup(
+        update,
+        "Проверьте рекламный план. Товар обязателен во всех 6 сценах. «ОК» — перейти к заголовку и production; "
+        "иначе пришлите правку.",
+        reply_markup=ok_only_markup(),
+    )
+    return True
+
+
 async def _continue_generation_after_series(
     update: Update,
     context: ContextTypes.DEFAULT_TYPE,
@@ -600,9 +1100,22 @@ async def _continue_generation_after_series(
     session: dict,
 ) -> bool:
     next_step = str(session.pop(SERIES_PENDING_NEXT_SESSION_KEY, "") or "").strip()
+    if (
+        not next_step
+        and normalize_generation_mode(session.get(GENERATION_MODE_SESSION_KEY)) == GENERATION_MODE_ADVERTISING
+        and session.get(ADVERTISING_PRODUCT_BRIEF_SESSION_KEY)
+    ):
+        next_step = SERIES_NEXT_ADVERTISING_PLAN
     session.pop(_SERIES_CHOICE_IDS_SESSION_KEY, None)
+    if next_step == SERIES_NEXT_ADVERTISING_PLAN:
+        return await _start_advertising_scene_plan(
+            update,
+            context,
+            chat_id=chat_id,
+            session=session,
+        )
     if next_step == SERIES_NEXT_OVERLAY_TITLE:
-        session["state"] = "state_waiting_overlay_title_ru"
+        session["state"] = STATE_WAITING_OVERLAY_TITLE_RU
         SESSIONS[chat_id] = session
         await reply_text_without_keyboard(
             update.message,
@@ -628,6 +1141,321 @@ async def _continue_generation_after_series(
     return True
 
 
+async def _start_initial_story_voiceover(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+    *,
+    chat_id: int,
+    session: dict,
+) -> bool:
+    source_story = str(
+        session.get(SERIES_PENDING_RECIPE_SESSION_KEY)
+        or session.get(STORY_SOURCE_SESSION_KEY)
+        or session.get("user_input")
+        or ""
+    ).strip()
+    if not source_story:
+        session["state"] = ""
+        SESSIONS[chat_id] = session
+        await update.message.reply_text("Не вижу исходную историю. Начните снова и пришлите её после /generate.")
+        return True
+    session[STORY_SOURCE_SESSION_KEY] = source_story
+    session["user_input"] = source_story
+    session["recipe_full_text"] = source_story
+    SESSIONS[chat_id] = session
+    try:
+        await reply_text_without_keyboard(update.message, "Составляю русский текст закадровой озвучки, ждите.")
+        story = await _call_with_503_retries(
+            update,
+            context,
+            chat_id,
+            "generate_story_voiceover",
+            lambda: asyncio.to_thread(generate_story_voiceover, source_story),
+        )
+    except ServiceUnavailableRetriesExhaustedError as e:
+        session["state"] = STATE_WAITING_GENERATION_MODE
+        SESSIONS[chat_id] = session
+        await _reply_text_with_optional_markup(
+            update,
+            f"{e}\nИсходная история сохранена. Нажмите «{_STORY_REGENERATE_BUTTON}», чтобы повторить.",
+            reply_markup=_story_voiceover_retry_markup(),
+        )
+        return True
+    except Exception as e:
+        logger.exception("story voiceover generation failed")
+        session["state"] = STATE_WAITING_GENERATION_MODE
+        SESSIONS[chat_id] = session
+        await _reply_text_with_optional_markup(
+            update,
+            f"Ошибка подготовки истории: {_user_error_message(e)}\n"
+            f"Исходная история сохранена. Нажмите «{_STORY_REGENERATE_BUTTON}», чтобы повторить.",
+            reply_markup=_story_voiceover_retry_markup(),
+        )
+        return True
+    session.pop(SERIES_PENDING_RECIPE_SESSION_KEY, None)
+    session.pop(SERIES_PENDING_PREFER_VERTEX_SESSION_KEY, None)
+    archive_story_voiceover_version(session, story, stage="initial")
+    session[STORY_SOURCE_SESSION_KEY] = source_story
+    session[STORY_TITLE_SESSION_KEY] = story["title"]
+    session[STORY_VOICEOVER_SESSION_KEY] = story["voiceover_text"]
+    session["user_input"] = source_story
+    session["selected_concept"] = story["title"]
+    session["selected_concept_name"] = story["title"]
+    session["recipe_full_text"] = source_story
+    # Kling is generated once in RU and later reused for the optional EN master.
+    session["target_languages"] = ["ru"]
+    session["state"] = STATE_WAITING_STORY_SCRIPT_APPROVAL
+    SESSIONS[chat_id] = session
+    await _reply_text_chunked(
+        update,
+        f"ТЕКСТ RU-ОЗВУЧКИ · {story['title']}\n\n{story['voiceover_text']}",
+    )
+    length_note = ""
+    if not bool(story.get("within_target_limit", True)):
+        length_note = (
+            f"\n\nТекст длиннее целевого лимита: {story.get('word_count', '?')} слов, "
+            f"{story.get('character_count', '?')} знаков. Я сохранила эту версию и ничего не меняю автоматически."
+        )
+    english_note = (
+        " После утверждения RU-аудио я подготовлю английский перевод на отдельный апрув."
+        if session.get(STORY_ENGLISH_REQUESTED_SESSION_KEY)
+        else ""
+    )
+    await _reply_text_with_optional_markup(
+        update,
+        "Если текст подходит — нажмите «ОК», и я создам цельную RU-озвучку ElevenLabs. "
+        "«Сократить текст» или «ПЕРЕГЕНЕРИРОВАТЬ» создадут новую текстовую версию, сохранив текущую. "
+        "«СВОЙ ТЕКСТ» позволит прислать готовый вариант дословно, без обработки Gemini. "
+        "Если нужны другие изменения — нажмите «Добавь» или «Исправь», затем пришлите фидбэк."
+        + english_note
+        + length_note,
+        reply_markup=_story_script_approval_markup(),
+    )
+    return True
+
+
+async def _start_discipline_intro_dialogue(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+    *,
+    chat_id: int,
+    session: dict,
+    feedback: str = "",
+) -> bool:
+    """Generate the project-specific intro dialogue before the ordinary Story flow."""
+    project_slug = str(session.get(_PROJECT_KEY_SESSION) or "").strip()
+    first_name, second_name = intro_character_names(project_slug)
+    source_story = str(
+        session.get(SERIES_PENDING_RECIPE_SESSION_KEY)
+        or session.get(STORY_SOURCE_SESSION_KEY)
+        or session.get("user_input")
+        or ""
+    ).strip()
+    if not source_story:
+        session["state"] = ""
+        SESSIONS[chat_id] = session
+        await update.message.reply_text("Не вижу исходную тему для вступительного диалога.")
+        return True
+    session[STORY_SOURCE_SESSION_KEY] = source_story
+    session["user_input"] = source_story
+    session["recipe_full_text"] = source_story
+    previous = session.get(DISCIPLINE_INTRO_DIALOGUE_SESSION_KEY)
+    dialogue = parse_intro_dialogue_text(feedback, project_slug=project_slug)
+    if dialogue is not None:
+        await reply_text_without_keyboard(
+            update.message,
+            f"Приняла ваш диалог «{first_name} — {second_name}» дословно.",
+        )
+    else:
+        try:
+            await reply_text_without_keyboard(
+                update.message,
+                f"Готовлю короткий диалог «{first_name} — {second_name}» для интро, ждите.",
+            )
+            dialogue = await _call_with_503_retries(
+                update,
+                context,
+                chat_id,
+                "generate_discipline_intro_dialogue",
+                lambda: asyncio.to_thread(
+                    generate_discipline_intro_dialogue,
+                    source_story,
+                    previous=previous if isinstance(previous, dict) else None,
+                    feedback=feedback,
+                    project_slug=project_slug,
+                ),
+            )
+        except ServiceUnavailableRetriesExhaustedError as exc:
+            await update.message.reply_text(str(exc))
+            return True
+        except Exception as exc:
+            logger.exception("discipline intro dialogue generation failed")
+            await update.message.reply_text(f"Ошибка подготовки диалога: {_user_error_message(exc)}")
+            return True
+    versions = session.get(DISCIPLINE_INTRO_DIALOGUE_VERSIONS_SESSION_KEY)
+    if not isinstance(versions, list):
+        versions = []
+    versions.append({"dialogue": dict(dialogue), "feedback": str(feedback or "")})
+    session[DISCIPLINE_INTRO_DIALOGUE_VERSIONS_SESSION_KEY] = versions
+    session[DISCIPLINE_INTRO_DIALOGUE_SESSION_KEY] = dict(dialogue)
+    for key in (
+        DISCIPLINE_INTRO_IMAGE_PATH_SESSION_KEY,
+        DISCIPLINE_INTRO_AUDIO_PATH_SESSION_KEY,
+        DISCIPLINE_INTRO_VIDEO_PATH_SESSION_KEY,
+        DISCIPLINE_INTRO_APPROVED_VIDEO_PATH_SESSION_KEY,
+        DISCIPLINE_INTRO_APPROVED_PROVIDER_SESSION_KEY,
+    ):
+        session.pop(key, None)
+    session["state"] = STATE_WAITING_DISCIPLINE_INTRO_DIALOGUE_APPROVAL
+    SESSIONS[chat_id] = session
+    await _reply_text_chunked(
+        update,
+        format_discipline_intro_dialogue(dialogue, project_slug=project_slug),
+    )
+    await _reply_text_with_optional_markup(
+        update,
+        "Утвердите диалог до генерации кадра и видео. «ОК» — создать стартовый кадр через Vertex. "
+        "«Без интро» — сразу продолжить основную историю. «ПЕРЕГЕНЕРИРОВАТЬ» или текстовая правка создадут новый вариант.",
+        reply_markup=_discipline_intro_dialogue_approval_markup(),
+    )
+    return True
+
+
+async def _handle_waiting_story_english_choice_state(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+    *,
+    chat_id: int,
+    session: dict,
+    text: str,
+) -> bool:
+    low = str(text or "").strip().lower()
+    if low in {"да", "yes", "y", "да, нужна en", "нужна en", "en"}:
+        session[STORY_ENGLISH_REQUESTED_SESSION_KEY] = True
+        await update.message.reply_text(
+            "Добавлю английскую версию. Сначала полностью согласуем RU-текст и RU-аудио, затем отдельно EN-текст и EN-аудио."
+        )
+    elif low in {"нет", "no", "n", "нет, только ru", "только ru", "ru"}:
+        session[STORY_ENGLISH_REQUESTED_SESSION_KEY] = False
+        await update.message.reply_text("Оставляю только русскую версию.")
+    else:
+        await _reply_text_with_optional_markup(
+            update,
+            "Нужна английская версия этой истории?",
+            reply_markup=_story_english_choice_markup(),
+        )
+        return True
+    session["state"] = STATE_WAITING_STORY_STYLE_CHOICE
+    SESSIONS[chat_id] = session
+    await _reply_text_with_optional_markup(
+        update,
+        "Выберите стиль исторических кадров:\n"
+        "• «Сухая акварель» — мягкая рисованная фактура и лёгкая сепия.\n"
+        "• «Ретро-мультфильм» — угловатая графика, плоские формы, оливково-горчично-коралловая палитра.\n"
+        "• «Книжная гуашь» — тёплая фактурная иллюстрация из детской книги.\n"
+        "• «Пластилиновый мультфильм» — объёмные пластилиновые герои и миниатюрные декорации.\n"
+        "• «Кукольный стоп-моушен» — мягкие войлочные куклы, ткань и ручная фактура.\n"
+        "• «Рисованная ретро-сказка» — гуашевая мультипликация в духе старых рисованных сказок.\n\n"
+        "• «Сумеречная акварель» — глубокие синие тени, бумажная фактура и тёплый свет лампы.\n"
+        "• «Светлая анимационная пастель» — чистая мягкая 2D-анимация в солнечной пастельной гамме.\n"
+        "• «Классический рисованный мультфильм» — выразительный контур, плоский цвет и живая мультипликация.\n"
+        "• «Фетровая аппликация» — весь кадр собран из фетра, ткани и декоративных швов.\n"
+        "• «Народная рисованная сказка» — гуашь, деревянный быт и славянский растительный орнамент.\n\n"
+        "• «Пастельные мелки» — яркие живые штрихи масляной пастели на белой бумаге.\n"
+        "• «Вязаная иллюстрация» — весь кадр связан из пряжи с видимыми петлями и узелками.\n"
+        "• «Минималистичный ретро-мультфильм» — тонкий контур, светлый фон и лаконичная оранжево-бирюзовая палитра.\n\n"
+        "Выбранная стилистика будет единой для всех персонажей и всех кадров ролика.",
+        reply_markup=_story_style_choice_markup(),
+    )
+    return True
+
+
+async def _handle_waiting_story_style_choice_state(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+    *,
+    chat_id: int,
+    session: dict,
+    text: str,
+) -> bool:
+    low = str(text or "").strip().lower()
+    if low in {"основной", "основная", "primary", "main"}:
+        style_key = STORY_STYLE_PRIMARY
+        label = "Основной"
+    elif low in {"сухая акварель", "акварель", "watercolor"}:
+        style_key = STORY_STYLE_WATERCOLOR
+        label = "Сухая акварель"
+    elif low in {"ретро-мультфильм", "ретро мультфильм", "мультфильм", "retro cartoon"}:
+        style_key = STORY_STYLE_RETRO_CARTOON
+        label = "Ретро-мультфильм"
+    elif low in {"книжная гуашь", "книжная иллюстрация", "storybook gouache"}:
+        style_key = STORY_STYLE_STORYBOOK_GOUACHE
+        label = "Книжная гуашь"
+    elif low in {"пластилиновый мультфильм", "пластилин", "claymation"}:
+        style_key = STORY_STYLE_CLAYMATION
+        label = "Пластилиновый мультфильм"
+    elif low in {"кукольный стоп-моушен", "кукольный стоп моушен", "кукольный", "felt stop motion"}:
+        style_key = STORY_STYLE_FELT_STOP_MOTION
+        label = "Кукольный стоп-моушен"
+    elif low in {"рисованная ретро-сказка", "рисованная ретро сказка", "ретро-сказка", "retro fairytale"}:
+        style_key = STORY_STYLE_RETRO_FAIRYTALE
+        label = "Рисованная ретро-сказка"
+    elif low in {"сумеречная акварель", "вечерняя акварель", "twilight watercolor"}:
+        style_key = STORY_STYLE_TWILIGHT_WATERCOLOR
+        label = "Сумеречная акварель"
+    elif low in {"светлая анимационная пастель", "анимационная пастель", "soft animation"}:
+        style_key = STORY_STYLE_SOFT_ANIMATION
+        label = "Светлая анимационная пастель"
+    elif low in {"классический рисованный мультфильм", "рисованный мультфильм", "classic cel cartoon"}:
+        style_key = STORY_STYLE_CLASSIC_CEL_CARTOON
+        label = "Классический рисованный мультфильм"
+    elif low in {"фетровая аппликация", "аппликация", "felt applique"}:
+        style_key = STORY_STYLE_FELT_APPLIQUE
+        label = "Фетровая аппликация"
+    elif low in {"народная рисованная сказка", "народная сказка", "folk fairytale"}:
+        style_key = STORY_STYLE_FOLK_FAIRYTALE
+        label = "Народная рисованная сказка"
+    elif low in {"пастельные мелки", "мелки", "oil pastel"}:
+        style_key = STORY_STYLE_OIL_PASTEL
+        label = "Пастельные мелки"
+    elif low in {"вязаная иллюстрация", "вязание", "crochet"}:
+        style_key = STORY_STYLE_CROCHET
+        label = "Вязаная иллюстрация"
+    elif low in {"минималистичный ретро-мультфильм", "минималистичный мультфильм", "minimal retro cartoon"}:
+        style_key = STORY_STYLE_MINIMAL_RETRO_CARTOON
+        label = "Минималистичный ретро-мультфильм"
+    else:
+        await _reply_text_with_optional_markup(
+            update,
+            "Выберите один из пятнадцати вариантов стилистики.",
+            reply_markup=_story_style_choice_markup(),
+        )
+        return True
+    session[STORY_VISUAL_STYLE_SESSION_KEY] = style_key
+    SESSIONS[chat_id] = session
+    if style_key == STORY_STYLE_PRIMARY:
+        await update.message.reply_text(
+            "Стиль истории: «Основной». Использую только стилистику референсов персонажей."
+        )
+    else:
+        await update.message.reply_text(f"Стиль истории: «{label}». Применю его ко всем персонажам и всем кадрам.")
+    if is_visualization_generation(session):
+        from .handlers_state_scene import _approve_story_audio_and_build_scenes
+
+        return await _approve_story_audio_and_build_scenes(
+            update,
+            context,
+            chat_id=chat_id,
+            session=session,
+        )
+    return await _start_initial_story_voiceover(
+        update,
+        context,
+        chat_id=chat_id,
+        session=session,
+    )
+
+
 async def _handle_waiting_generation_mode_state(
     update: Update,
     context: ContextTypes.DEFAULT_TYPE,
@@ -637,14 +1465,41 @@ async def _handle_waiting_generation_mode_state(
     text: str,
 ) -> bool:
     low = str(text or "").strip().lower()
-    if low in {_GENERATION_MODE_BUTTON_NORMAL.lower(), "normal", "обычная", "обычный режим"}:
+    retry_story = (
+        low in {_STORY_REGENERATE_BUTTON.lower(), "перегенерировать историю"}
+        and normalize_generation_mode(session.get(GENERATION_MODE_SESSION_KEY)) == GENERATION_MODE_STORY
+    )
+    if retry_story:
+        mode = GENERATION_MODE_STORY
+    elif low in {_GENERATION_MODE_BUTTON_NORMAL.lower(), "normal", "обычная", "обычный режим"}:
         mode = GENERATION_MODE_NORMAL
     elif low in {_GENERATION_MODE_BUTTON_SILENCE.lower(), GENERATION_MODE_SILENCE, "silent", "тихий"}:
         mode = GENERATION_MODE_SILENCE
+    elif low in {_GENERATION_MODE_BUTTON_LONG.lower(), GENERATION_MODE_LONG, "длинный", "долгий", "long horizontal"}:
+        mode = GENERATION_MODE_LONG
+    elif low in {_GENERATION_MODE_BUTTON_COPY.lower(), GENERATION_MODE_COPY, "copy", "video copy"}:
+        mode = GENERATION_MODE_COPY
+    elif low in {_GENERATION_MODE_BUTTON_STORY.lower(), GENERATION_MODE_STORY, "story", "narrative"}:
+        mode = GENERATION_MODE_STORY
+    elif low in {
+        _GENERATION_MODE_BUTTON_VISUALIZATION.lower(),
+        GENERATION_MODE_VISUALIZATION,
+        "visualisation",
+        "visualize",
+    }:
+        mode = GENERATION_MODE_VISUALIZATION
+    elif low in {
+        _GENERATION_MODE_BUTTON_ADVERTISING.lower(),
+        GENERATION_MODE_ADVERTISING,
+        "advert",
+        "advertising",
+        "ad",
+    }:
+        mode = GENERATION_MODE_ADVERTISING
     else:
         await _reply_text_with_optional_markup(
             update,
-            "Выберите «Обычный» или «Silence».",
+            "Выберите «Обычный», «Silence», «Длинный», «Копия», «История», «Визуализация» или «Реклама».",
             reply_markup=_generation_mode_markup(),
         )
         return True
@@ -653,11 +1508,96 @@ async def _handle_waiting_generation_mode_state(
         mode,
         target_languages_from_env(),
     )
-    await update.message.reply_text(
-        "Ок, запускаю silence-режим: один RU-формат, Kling, короткие динамичные кадры."
-        if mode == GENERATION_MODE_SILENCE
-        else "Ок, запускаю обычный режим."
-    )
+    if mode == GENERATION_MODE_SILENCE:
+        message = "Ок, запускаю silence-режим: один RU-формат, Kling, короткие динамичные кадры."
+    elif mode == GENERATION_MODE_LONG:
+        message = "Ок, запускаю длинный режим: RU, горизонталь 16:9, подробный ролик от 3:10."
+    elif mode == GENERATION_MODE_COPY:
+        message = "Ок, режим «Копия»: пришлите исходное видео, я разберу его по таймингам и подготовлю Seedance-промпты."
+    elif mode == GENERATION_MODE_STORY:
+        message = (
+            "Повторно составляю текст истории с тем же исходником."
+            if retry_story
+            else "Ок, режим «История»: озвучка ElevenLabs до двух минут и немые 3-секундные сцены Kling. Сначала уточню, нужна ли EN-версия."
+        )
+    elif mode == GENERATION_MODE_VISUALIZATION:
+        message = (
+            "Ок, режим «Визуализация»: пришлите аудио или видео. Из видео я извлеку дорожку, "
+            "распознаю речь с таймингами и построю по ней видеоряд в выбранной стилистике проекта."
+        )
+    elif mode == GENERATION_MODE_ADVERTISING:
+        message = (
+            "Ок, режим «Реклама»: после фото товара предложу 5 рекламных кампаний и дам выбрать формат «Клип» или «Пост». "
+            "Для клипа — 6 русскоязычных сцен Veo; для поста — 3 изображения и готовый текст."
+        )
+    else:
+        message = "Ок, запускаю обычный режим."
+    await update.message.reply_text(message)
+    if mode == GENERATION_MODE_VISUALIZATION:
+        session["state"] = STATE_WAITING_VISUALIZATION_MEDIA
+        session[STORY_ENGLISH_REQUESTED_SESSION_KEY] = False
+        session.pop(SERIES_PENDING_RECIPE_SESSION_KEY, None)
+        session.pop(SERIES_PENDING_PREFER_VERTEX_SESSION_KEY, None)
+        SESSIONS[chat_id] = session
+        await reply_text_without_keyboard(
+            update.message,
+            "Жду аудиофайл, голосовое сообщение или видео. Для видео звук будет отделён автоматически.",
+        )
+        return True
+    if mode == GENERATION_MODE_COPY:
+        session["state"] = "state_waiting_first_step_copy_video"
+        SESSIONS[chat_id] = session
+        await reply_text_without_keyboard(update.message, "Жду исходное видео файлом или video-сообщением. Можно сначала прислать текст или рецепт для описаний. После финальных видео пришлю описания для публикации по вашему рецепту.")
+        return True
+    if mode == GENERATION_MODE_ADVERTISING:
+        source_text = str(session.get(SERIES_PENDING_RECIPE_SESSION_KEY) or "").strip()
+        if not source_text:
+            session["state"] = ""
+            SESSIONS[chat_id] = session
+            await update.message.reply_text("Не вижу исходной идеи, рецепта или истории. Начните генерацию заново.")
+            return True
+        session[ADVERTISING_SOURCE_SESSION_KEY] = source_text
+        session["sponsored_content"] = True
+        session["state"] = STATE_WAITING_ADVERTISING_PRODUCT_IMAGE
+        SESSIONS[chat_id] = session
+        await reply_text_without_keyboard(
+            update.message,
+            "Теперь обязательно пришлите фотографию рекламируемого товара. Можно добавить подпись с названием бренда "
+            "или важными деталями. Без фото товара рекламный сценарий не запускается.",
+        )
+        return True
+    if mode == GENERATION_MODE_STORY:
+        source_story = str(
+            session.get(SERIES_PENDING_RECIPE_SESSION_KEY)
+            or session.get(STORY_SOURCE_SESSION_KEY)
+            or session.get("user_input")
+            or ""
+        ).strip()
+        if not source_story:
+            session["state"] = ""
+            SESSIONS[chat_id] = session
+            await update.message.reply_text("Не вижу исходную историю. Начните снова и пришлите её после /generate.")
+            return True
+        session[STORY_SOURCE_SESSION_KEY] = source_story
+        session["user_input"] = source_story
+        session["recipe_full_text"] = source_story
+        session["state"] = STATE_WAITING_STORY_ENGLISH_CHOICE
+        SESSIONS[chat_id] = session
+        await _reply_text_with_optional_markup(
+            update,
+            "Нужна английская версия этой истории? Видеоряд будет один и тот же; отдельно согласуем RU и EN тексты и аудио.",
+            reply_markup=_story_english_choice_markup(),
+        )
+        return True
+    if mode == GENERATION_MODE_SILENCE:
+        session[OVERLAY_TITLE_PENDING_NEXT_SESSION_KEY] = OVERLAY_TITLE_NEXT_SERIES_CHOICE
+        session["state"] = STATE_WAITING_OVERLAY_TITLE_RU
+        SESSIONS[chat_id] = session
+        await reply_text_without_keyboard(
+            update.message,
+            "Теперь введите русский заголовок для верхней надписи.",
+        )
+        return True
     await _ask_series_choice(update, session)
     SESSIONS[chat_id] = session
     return True
@@ -957,7 +1897,7 @@ async def _continue_silence_after_recipe_approval(
     try:
         await reply_text_without_keyboard(
             update.message,
-            "Silence: сразу готовлю 5–8 Kling-сцен и production-промпты без речи.",
+            "Silence: готовлю разбиение на 5–8 Kling-сцен без речи.",
         )
         scenes = await _call_with_503_retries(
             update,
@@ -971,28 +1911,16 @@ async def _continue_silence_after_recipe_approval(
                 generation_mode=GENERATION_MODE_SILENCE,
             ),
         )
-        production = await _call_with_503_retries(
-            update,
-            context,
-            chat_id,
-            "generate_silence_full_production",
-            lambda: generate_full_production(
-                scenes["json_plan"],
-                approved_frame_prompts=None,
-                generation_mode=GENERATION_MODE_SILENCE,
-                target_languages=["ru"],
-                dish_visual_brief=build_dish_visual_brief(
-                    str(session.get("selected_concept_name") or session.get("selected_concept") or ""),
-                    full_recipe,
-                ),
-            ),
+        dish_visual_brief = build_dish_visual_brief(
+            str(session.get("selected_concept_name") or session.get("selected_concept") or ""),
+            full_recipe,
         )
     except ServiceUnavailableRetriesExhaustedError as e:
         await update.message.reply_text(str(e))
         return True
     except Exception as e:
-        logger.exception("silence production generation failed")
-        await update.message.reply_text(f"Ошибка silence production: {_user_error_message(e)}")
+        logger.exception("silence scene generation failed")
+        await update.message.reply_text(f"Ошибка silence-сцен: {_user_error_message(e)}")
         return True
 
     session["target_languages"] = ["ru"]
@@ -1001,7 +1929,7 @@ async def _continue_silence_after_recipe_approval(
         for s in (scenes.get("json_plan") or [])
         if isinstance(s, dict)
     ]
-    session["state"] = STATE_WAITING_PRODUCTION_BUNDLE_APPROVAL
+    session["state"] = STATE_WAITING_SCENE_APPROVAL
     session["viral_concept_brief"] = {}
     session["romantic_drama_subplot"] = {}
     session["retention_review"] = {}
@@ -1009,15 +1937,114 @@ async def _continue_silence_after_recipe_approval(
     session["scenes_text"] = scenes["text_plan"]
     session["frame_prompts"] = None
     session["frame_prompts_text"] = None
-    session["production"] = production
-    session["image_scene_index"] = 0
-    session["scene_media_language_index"] = 0
-    session["scene_media_substep"] = "start_prompt"
-    await _reply_text_chunked(update, format_production_bundle_for_approval(production["json_plan"]))
+    session["dish_visual_brief"] = dish_visual_brief
+    SESSIONS[chat_id] = session
+    await _reply_text_chunked(update, scenes["text_plan"])
     await _reply_text_with_optional_markup(
         update,
-        "Silence production готов: 5–8 сцен, Kling 3.0, RU-only, без речи и voice lock. "
-        "Если подходит — нажми «ОК», чтобы перейти к генерации кадров и видео.",
+        "Это сценарий по сценам, который уйдёт в production. "
+        "Если подходит — нажми «ОК». Если нужно поменять действия в сценах — пришли правку текстом.",
+        reply_markup=ok_only_markup(),
+    )
+    return True
+
+
+async def _continue_after_recipe_approval_plan(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+    *,
+    chat_id: int,
+    session: dict,
+    full_recipe: str | None = None,
+    on_scene_plan_fail=None,
+) -> bool:
+    full_recipe = str(full_recipe or session.get("recipe_full_text") or "").strip()
+    if not full_recipe:
+        await update.message.reply_text("Нет текста рецепта. Сначала согласуйте рецепт.")
+        return True
+
+    if on_scene_plan_fail is None:
+        async def on_scene_plan_fail(p: dict[str, Any]) -> None:
+            if update.message is not None:
+                await _reply_text_chunked(update, _format_scenes_plan_attempt_notice(p))
+
+    if normalize_generation_mode(session.get(GENERATION_MODE_SESSION_KEY)) == GENERATION_MODE_SILENCE:
+        return await _continue_silence_after_recipe_approval(
+            update,
+            context,
+            chat_id=chat_id,
+            session=session,
+            full_recipe=full_recipe,
+            on_scene_plan_fail=on_scene_plan_fail,
+        )
+
+    try:
+        await reply_text_without_keyboard(update.message, "Готовлю viral brief и план сцен, ждите.")
+        viral_brief = await _call_with_503_retries(
+            update,
+            context,
+            chat_id,
+            "generate_viral_concept_brief",
+            lambda: generate_viral_concept_brief(
+                session["selected_concept"],
+                full_recipe_text=full_recipe,
+                sponsored_content=bool(session.get("sponsored_content")),
+                brand_context=session.get("brand_context"),
+                analytics_feedback=session.get("analytics_feedback"),
+            ),
+        )
+        scenes = await _call_with_503_retries(
+            update,
+            context,
+            chat_id,
+            "generate_scenes_plan",
+            lambda: generate_scenes_plan(
+                session["selected_concept"],
+                full_recipe_text=full_recipe,
+                on_attempt_failure=on_scene_plan_fail,
+                viral_concept_brief=viral_brief,
+                sponsored_content=bool(session.get("sponsored_content")),
+                brand_context=session.get("brand_context"),
+                analytics_feedback=session.get("analytics_feedback"),
+                generation_mode=session.get(GENERATION_MODE_SESSION_KEY, GENERATION_MODE_NORMAL),
+            ),
+        )
+    except ServiceUnavailableRetriesExhaustedError as e:
+        await update.message.reply_text(str(e))
+        return True
+    except Exception as e:
+        logger.exception("scene plan failed")
+        await update.message.reply_text(f"Ошибка генерации сцен: {_user_error_message(e)}")
+        return True
+    session["recipe_steps"] = [
+        str(s.get("text") or "").strip()
+        for s in (scenes.get("json_plan") or [])
+        if isinstance(s, dict)
+    ]
+    session["state"] = STATE_WAITING_SCENE_APPROVAL
+    session["viral_concept_brief"] = scenes.get("viral_concept_brief") or viral_brief
+    session["romantic_drama_subplot"] = scenes.get("romantic_drama_subplot") or {}
+    session["retention_review"] = scenes.get("retention_review") or {}
+    session["scenes_plan"] = scenes["json_plan"]
+    session["scenes_text"] = scenes["text_plan"]
+    session["frame_prompts"] = None
+    session["frame_prompts_text"] = None
+    report = _format_scenes_regeneration_report(scenes.get("regeneration_events") or [])
+    if report:
+        await _reply_text_chunked(update, report)
+    await _reply_text_chunked(
+        update,
+        format_viral_application_summary(
+            session["viral_concept_brief"],
+            session["scenes_plan"],
+            session.get("retention_review"),
+        ),
+    )
+    await _reply_text_chunked(update, scenes["text_plan"])
+    await _reply_text_with_optional_markup(
+        update,
+        "Если план подходит — нажми «ОК». "
+        "Если нужно доработать — нажми «Добавь» или «Исправь», затем пришли текст правки.",
         reply_markup=ok_only_markup(),
     )
     return True
@@ -1050,77 +2077,18 @@ async def _handle_waiting_recipe_approval_state(
                 full_recipe=full_recipe,
                 on_scene_plan_fail=_on_scene_plan_fail,
             )
-
-        try:
-            await reply_text_without_keyboard(update.message, "Готовлю viral brief и план сцен, ждите.")
-            viral_brief = await _call_with_503_retries(
-                update,
-                context,
-                chat_id,
-                "generate_viral_concept_brief",
-                lambda: generate_viral_concept_brief(
-                    session["selected_concept"],
-                    full_recipe_text=full_recipe,
-                    sponsored_content=bool(session.get("sponsored_content")),
-                    brand_context=session.get("brand_context"),
-                    analytics_feedback=session.get("analytics_feedback"),
-                ),
-            )
-            scenes = await _call_with_503_retries(
-                update,
-                context,
-                chat_id,
-                "generate_scenes_plan",
-                lambda: generate_scenes_plan(
-                    session["selected_concept"],
-                    full_recipe_text=full_recipe,
-                    on_attempt_failure=_on_scene_plan_fail,
-                    viral_concept_brief=viral_brief,
-                    sponsored_content=bool(session.get("sponsored_content")),
-                    brand_context=session.get("brand_context"),
-                    analytics_feedback=session.get("analytics_feedback"),
-                    generation_mode=session.get(GENERATION_MODE_SESSION_KEY, GENERATION_MODE_NORMAL),
-                ),
-            )
-        except ServiceUnavailableRetriesExhaustedError as e:
-            await update.message.reply_text(str(e))
-            return True
-        except Exception as e:
-            logger.exception("scene plan failed")
-            await update.message.reply_text(f"Ошибка генерации сцен: {_user_error_message(e)}")
-            return True
-        session["recipe_steps"] = [
-            str(s.get("text") or "").strip()
-            for s in (scenes.get("json_plan") or [])
-            if isinstance(s, dict)
-        ]
-        session["state"] = STATE_WAITING_SCENE_APPROVAL
-        session["viral_concept_brief"] = scenes.get("viral_concept_brief") or viral_brief
-        session["romantic_drama_subplot"] = scenes.get("romantic_drama_subplot") or {}
-        session["retention_review"] = scenes.get("retention_review") or {}
-        session["scenes_plan"] = scenes["json_plan"]
-        session["scenes_text"] = scenes["text_plan"]
-        session["frame_prompts"] = None
-        session["frame_prompts_text"] = None
-        report = _format_scenes_regeneration_report(scenes.get("regeneration_events") or [])
-        if report:
-            await _reply_text_chunked(update, report)
-        await _reply_text_chunked(
+        if not _has_overlay_titles(session):
+            return await _ask_overlay_title_before_recipe_plan(update, chat_id, session)
+        if not session.get(OVERLAY_SUBTITLE_DECIDED_SESSION_KEY):
+            return await _ask_overlay_subtitle_before_recipe_plan(update, chat_id, session)
+        return await _continue_after_recipe_approval_plan(
             update,
-            format_viral_application_summary(
-                session["viral_concept_brief"],
-                session["scenes_plan"],
-                session.get("retention_review"),
-            ),
+            context,
+            chat_id=chat_id,
+            session=session,
+            full_recipe=full_recipe,
+            on_scene_plan_fail=_on_scene_plan_fail,
         )
-        await _reply_text_chunked(update, scenes["text_plan"])
-        await _reply_text_with_optional_markup(
-            update,
-            "Если план подходит — нажми «ОК». "
-            "Если нужно доработать — нажми «Добавь» или «Исправь», затем пришли правку текстом.",
-            reply_markup=ok_only_markup(),
-        )
-        return True
 
     session["state"] = STATE_REFINING_RECIPE
     session["user_feedback"] = text

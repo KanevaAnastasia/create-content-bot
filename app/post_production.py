@@ -26,6 +26,7 @@ from .db import SessionLocal
 from .models import Project
 from .scene_media_candidates import (
     DEFAULT_SCENE_VIDEO_SPEED_COEF,
+    default_scene_video_speed_coef,
     parse_speed_coef,
     resolve_latest_approved_scene_video_for_final_build,
 )
@@ -35,10 +36,15 @@ logger = logging.getLogger("bot.video")
 DEFAULT_BACKGROUND_MUSIC_VOLUME = 0.18
 BACKGROUND_MUSIC_ATTENUATION_DB = 3.0
 SOURCE_AUDIO_VOLUME = 1.0
+DISCIPLINE_ANASTASIA_NARRATION_VOLUME = 2.0
 TARGET_WIDTH = 1080
 TARGET_HEIGHT = 1920
 UPSCALED_4K_WIDTH = 2160
 UPSCALED_4K_HEIGHT = 3840
+HORIZONTAL_TARGET_WIDTH = 1920
+HORIZONTAL_TARGET_HEIGHT = 1080
+HORIZONTAL_UPSCALED_4K_WIDTH = 3840
+HORIZONTAL_UPSCALED_4K_HEIGHT = 2160
 FFPROBE_TIMEOUT_SEC = 60
 FFMPEG_SHORT_TIMEOUT_SEC = 300
 FFMPEG_RENDER_TIMEOUT_SEC = 900
@@ -70,6 +76,14 @@ SUBTITLE_SHADOW_COLOUR = "&H70000000"
 SUBTITLE_BOLD = -1
 SUBTITLE_ALIGNMENT = 1
 SUBTITLE_UPPERCASE = True
+STORY_WORD_SYNC_SUBTITLE_COLOUR = "&H00D8EBF3&"
+STORY_WORD_SYNC_PROJECT_SLUGS = {"discipline", "grandma_kitchen", "kitchen"}
+STORY_WORD_SYNC_MAX_WORDS = 4
+STORY_WORD_SYNC_FONT_NAME = "ZyruaCitrus"
+STORY_WORD_SYNC_FONT_PATH_ENV_NAME = "STORY_SUBTITLE_FONT_PATH"
+STORY_WORD_SYNC_FONT_SIZE_RATIO = 0.75
+STORY_WORD_SYNC_ANCHOR_Y_RATIO = 0.81
+STORY_WORD_SYNC_STYLE_VERSION = "metel_fixed_blocks_v2"
 SUBTITLE_LINE_ADVANCE_RATIO = 1.00
 SUBTITLE_FONTS_DIR_ENV_NAME = "SUBTITLE_FONTS_DIR"
 TITLE_OVERLAY_STYLE_PREFIX = "TitleOverlay"
@@ -134,6 +148,7 @@ TITLE_SERIES_DEFAULT_FONT = "Berezka"
 TITLE_SERIES_DEFAULT_FONT_FILE = "Berezka.ttf"
 TITLE_SERIES_DAY_FONT = "Marianna"
 TITLE_SERIES_DAY_FONT_FILE = "Marianna.ttf"
+STORY_SERIES_COUNTER_FONT_SCALE = 1.35
 TITLE_SERIES_VERTICAL_FONT_SIZE = 82
 TITLE_SERIES_HORIZONTAL_FONT_SIZE = 54
 TITLE_SERIES_SQUARE_FONT_SIZE = 64
@@ -162,9 +177,31 @@ TITLE_SERIES_SHADOW = 10
 TITLE_SERIES_PRIMARY_COLOUR = "&H00FFFFFF"
 TITLE_SERIES_OUTLINE_COLOUR = "&H00000000"
 TITLE_SERIES_SHADOW_COLOUR = "&H00000000"
+TITLE_SUBTITLE_STYLE_PREFIX = "TitleSubtitle"
+TITLE_SUBTITLE_FONT_BY_LANGUAGE = dict(TITLE_SERIES_FONT_BY_LANGUAGE)
+TITLE_SUBTITLE_FONT_FILE_BY_LANGUAGE = dict(TITLE_SERIES_FONT_FILE_BY_LANGUAGE)
+TITLE_SUBTITLE_DEFAULT_FONT = TITLE_SERIES_DEFAULT_FONT
+TITLE_SUBTITLE_DEFAULT_FONT_FILE = TITLE_SERIES_DEFAULT_FONT_FILE
+TITLE_SUBTITLE_FALLBACK_FONT = "Arial Narrow"
+TITLE_SUBTITLE_FALLBACK_FONT_FILE = "Arial Narrow Bold.ttf"
+TITLE_SUBTITLE_VERTICAL_FONT_SIZE = 40
+TITLE_SUBTITLE_HORIZONTAL_FONT_SIZE = 30
+TITLE_SUBTITLE_SQUARE_FONT_SIZE = 34
+TITLE_SUBTITLE_PRIMARY_COLOUR = TITLE_SERIES_PRIMARY_COLOUR
+TITLE_SUBTITLE_OUTLINE_COLOUR = TITLE_SERIES_OUTLINE_COLOUR
+TITLE_SUBTITLE_SHADOW_COLOUR = TITLE_SERIES_SHADOW_COLOUR
+TITLE_SUBTITLE_OUTLINE = TITLE_SERIES_OUTLINE
+TITLE_SUBTITLE_SHADOW = TITLE_SERIES_SHADOW
+TITLE_SUBTITLE_GAP_RATIO = 0.010
 COMBINING_ACCENT_MARKS_RE = re.compile(r"[\u0300-\u036f]")
 CYRILLIC_WORD_RE = re.compile(r"[А-Яа-яЁё]+(?:[А-Яа-яЁё]+)?")
 SUBTITLE_PAUSE_MARKER_RE = re.compile(r"\[\s*(?:pause|пауза)\s*\]", re.IGNORECASE)
+PROMPT_SPEECH_TERMINATOR_RE = re.compile(
+    r"(?is)\s+(?="
+    r"(?:voice_lock(?:_[a-z0-9]+)*|speech_timing_plan|veo3_framing|framing)\s*:"
+    r"|\b(?:natural-fast spoken delivery|render this video|never use horizontal landscape framing)\b"
+    r")"
+)
 CYRILLIC_CHAR_RE = re.compile(r"[А-Яа-яЁё]")
 CYRILLIC_TO_LATIN_TITLE_MAP = str.maketrans(
     {
@@ -243,6 +280,18 @@ POST_PRODUCTION_ARTIFACTS_DIR_ENV_NAME = "POST_PRODUCTION_ARTIFACTS_DIR"
 DEFAULT_POST_PRODUCTION_ARTIFACTS_DIR = "artifacts/post_production"
 FFMPEG_STREAM_RE = re.compile(r"Stream #\d+:\d+(?:\[[^\]]+\])?(?:\([^)]*\))?:\s*([^:]+):")
 FFMPEG_VIDEO_SIZE_RE = re.compile(r"\b(\d{2,5})x(\d{2,5})\b")
+
+
+def _render_dimensions_for_scenes(scenes: list[dict[str, Any]]) -> tuple[int, int]:
+    if any(str(scene.get("aspect_ratio") or "").strip() == "16:9" for scene in scenes if isinstance(scene, dict)):
+        return HORIZONTAL_TARGET_WIDTH, HORIZONTAL_TARGET_HEIGHT
+    return TARGET_WIDTH, TARGET_HEIGHT
+
+
+def _upscaled_dimensions_for_render(width: int, height: int) -> tuple[int, int]:
+    if int(width or 0) > int(height or 0):
+        return HORIZONTAL_UPSCALED_4K_WIDTH, HORIZONTAL_UPSCALED_4K_HEIGHT
+    return UPSCALED_4K_WIDTH, UPSCALED_4K_HEIGHT
 FFMPEG_DURATION_RE = re.compile(r"Duration:\s*(\d+):(\d+):(\d+(?:\.\d+)?)")
 
 
@@ -330,6 +379,29 @@ def _subtitle_font_name(fonts_dir: Path | None = None) -> str:
     return SUBTITLE_FALLBACK_FONT
 
 
+def _story_subtitle_font_path() -> Path | None:
+    raw = (os.getenv(STORY_WORD_SYNC_FONT_PATH_ENV_NAME) or "").strip()
+    candidates = [Path(raw)] if raw else []
+    candidates.extend(
+        [
+            _project_root() / "fonts" / "ZYRUA Citrus.ttf",
+            Path.home()
+            / "Movies"
+            / "CapCut"
+            / "User Data"
+            / "Cache"
+            / "effect"
+            / "7013643779252949505"
+            / "bc22ab40d294bba5c9eb3e5ffa954a98"
+            / "ZYRUA Citrus.ttf",
+        ]
+    )
+    for path in candidates:
+        if path.is_file():
+            return path
+    return None
+
+
 def post_production_artifacts_dir() -> Path:
     raw = (os.getenv(POST_PRODUCTION_ARTIFACTS_DIR_ENV_NAME) or "").strip()
     base = Path(raw or DEFAULT_POST_PRODUCTION_ARTIFACTS_DIR)
@@ -366,6 +438,34 @@ def _make_artifact_bundle_key(scenes: list[dict[str, Any]], *, project_slug: str
     readable = _readable_slug(project_slug) if project_slug else _readable_slug(_scene_title_for_artifacts(scenes))
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     return f"{timestamp}_{readable}_{uuid.uuid4().hex[:8]}"
+
+
+def selected_scene_video_fingerprint_for_language(scenes: list[dict[str, Any]], language: str) -> str:
+    lang = str(language or "ru").strip().lower() or "ru"
+    selected: list[dict[str, Any]] = []
+    for scene_index, scene in enumerate(scenes):
+        if not isinstance(scene, dict):
+            continue
+        candidate = resolve_latest_approved_scene_video_for_final_build(scene, lang)
+        if candidate is None:
+            continue
+        selected.append(
+            {
+                "scene_index": scene_index,
+                "scene": scene.get("scene"),
+                "candidate_id": candidate.get("candidate_id"),
+                "created_at": candidate.get("created_at"),
+                "speed_coef": parse_speed_coef(candidate.get("speed_coef")) or default_scene_video_speed_coef(scene),
+                "byte_size": candidate.get("byte_size"),
+                "media_uri": candidate.get("media_uri"),
+                "source_image_candidate_id": candidate.get("source_image_candidate_id"),
+                "duration_sec": scene.get("duration_sec"),
+                "timeline_duration_sec": scene.get("timeline_duration_sec"),
+                "timeline_duration_by_lang": scene.get("timeline_duration_by_lang"),
+            }
+        )
+    raw = json.dumps(selected, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(raw.encode("utf-8")).hexdigest()
 
 
 def _artifact_filename(*, project_slug: str | None, kind: str, language: str) -> str:
@@ -645,9 +745,9 @@ def _format_burned_subtitle_block(words: list[str], *, max_line_chars: int | Non
     return "\n".join(_subtitle_display_text(line) for line in visible[:SUBTITLE_MAX_LINES])
 
 
-def _subtitle_display_text(text: str) -> str:
+def _subtitle_display_text(text: str, *, preserve_case: bool = False) -> str:
     display = str(text or "")
-    return display.upper() if SUBTITLE_UPPERCASE else display
+    return display.upper() if SUBTITLE_UPPERCASE and not preserve_case else display
 
 
 def _subtitle_line_advance(layout: SubtitleLayout) -> int:
@@ -695,6 +795,11 @@ def _title_series_style_name(language: str) -> str:
     return f"{TITLE_SERIES_STYLE_PREFIX}{code.upper() if code else 'RU'}"
 
 
+def _title_subtitle_style_name(language: str) -> str:
+    code = str(language or "").strip().lower()
+    return f"{TITLE_SUBTITLE_STYLE_PREFIX}{code.upper() if code else 'RU'}"
+
+
 def _title_overlay_ass_safe_width_ratio(language: str) -> float:
     code = str(language or "").strip().lower()
     return float(TITLE_OVERLAY_ASS_SAFE_WIDTH_RATIO_BY_LANGUAGE.get(code) or TITLE_OVERLAY_ASS_SAFE_WIDTH_RATIO)
@@ -715,6 +820,39 @@ def _title_series_font_path(language: str) -> Path | None:
 def _title_series_day_font_path() -> Path | None:
     path = subtitle_fonts_dir() / TITLE_SERIES_DAY_FONT_FILE
     return path if path.exists() else None
+
+
+def _title_subtitle_font_path(language: str = "") -> Path | None:
+    code = str(language or "").strip().lower()
+    filename = TITLE_SUBTITLE_FONT_FILE_BY_LANGUAGE.get(code) or TITLE_SUBTITLE_DEFAULT_FONT_FILE
+    local_path = subtitle_fonts_dir() / filename
+    if local_path.exists():
+        return local_path
+    default_path = subtitle_fonts_dir() / TITLE_SUBTITLE_DEFAULT_FONT_FILE
+    if default_path.exists():
+        return default_path
+    fallback_path = subtitle_fonts_dir() / TITLE_SUBTITLE_FALLBACK_FONT_FILE
+    if fallback_path.exists():
+        return fallback_path
+    system_path = Path("/System/Library/Fonts/Supplemental") / TITLE_SUBTITLE_FALLBACK_FONT_FILE
+    if system_path.exists():
+        return system_path
+    return fallback_path if fallback_path.exists() else None
+
+
+def _title_subtitle_font_name(language: str = "") -> str:
+    code = str(language or "").strip().lower()
+    filename = TITLE_SUBTITLE_FONT_FILE_BY_LANGUAGE.get(code) or TITLE_SUBTITLE_DEFAULT_FONT_FILE
+    if (subtitle_fonts_dir() / filename).exists():
+        return TITLE_SUBTITLE_FONT_BY_LANGUAGE.get(code) or TITLE_SUBTITLE_DEFAULT_FONT
+    if (subtitle_fonts_dir() / TITLE_SUBTITLE_DEFAULT_FONT_FILE).exists():
+        return TITLE_SUBTITLE_DEFAULT_FONT
+    if (
+        (subtitle_fonts_dir() / TITLE_SUBTITLE_FALLBACK_FONT_FILE).exists()
+        or (Path("/System/Library/Fonts/Supplemental") / TITLE_SUBTITLE_FALLBACK_FONT_FILE).exists()
+    ):
+        return TITLE_SUBTITLE_FALLBACK_FONT
+    return TITLE_SUBTITLE_FALLBACK_FONT
 
 
 def _title_series_ass_scale_x(language: str) -> int:
@@ -860,6 +998,17 @@ def _title_series_ru_day_number_font_size(layout: SubtitleLayout, language: str 
     if str(language or "").strip().lower() == "ru":
         return int(round(base * TITLE_SERIES_RU_DAY_NUMBER_FONT_SCALE))
     return base
+
+
+def _title_subtitle_font_size(layout: SubtitleLayout) -> int:
+    scale = layout.height / 1920.0 if layout.height > layout.width else layout.width / 1080.0
+    if layout.height > layout.width:
+        base = TITLE_SUBTITLE_VERTICAL_FONT_SIZE
+    elif layout.width > layout.height:
+        base = TITLE_SUBTITLE_HORIZONTAL_FONT_SIZE
+    else:
+        base = TITLE_SUBTITLE_SQUARE_FONT_SIZE
+    return int(round(base * scale))
 
 
 def _title_series_row_offset(layout: SubtitleLayout, language: str = "") -> int:
@@ -1226,6 +1375,59 @@ def _format_title_overlay_ass_text(
     return f"{{\\fscx{scale_x}\\fs{font_size}}}" + _escape_ass_no_wrap_spaces(clean)
 
 
+def _fit_title_subtitle_ass_text(
+    text: str,
+    *,
+    layout: SubtitleLayout,
+    language: str = "",
+    side_margin_ratio: float = TITLE_OVERLAY_MARGIN_RATIO,
+) -> TitleOverlayFit | None:
+    clean = " ".join(str(text or "").split())
+    font_path = _title_subtitle_font_path(language)
+    if not clean or font_path is None:
+        return None
+
+    margin_h = int(layout.width * side_margin_ratio)
+    max_width = max(1, layout.width - (margin_h * 2) - TITLE_SUBTITLE_SHADOW - (TITLE_SUBTITLE_OUTLINE * 2))
+    base_size = _title_subtitle_font_size(layout)
+    max_size = max(base_size, int(round(layout.height * 0.065)))
+    min_size = max(24, int(round(base_size * 0.62)))
+    draw = ImageDraw.Draw(Image.new("RGB", (1, 1)))
+    for size in range(max_size, min_size - 1, -2):
+        font = ImageFont.truetype(str(font_path), size=size)
+        width, height = _measure_title_block(draw, [clean], font, spacing=0)
+        if width <= max_width:
+            return TitleOverlayFit(clean, size, width, height)
+    font = ImageFont.truetype(str(font_path), size=min_size)
+    width, height = _measure_title_block(draw, [clean], font, spacing=0)
+    return TitleOverlayFit(clean, min_size, width, height)
+
+
+def _format_title_subtitle_ass_text(
+    text: str,
+    *,
+    layout: SubtitleLayout,
+    language: str = "",
+    side_margin_ratio: float = TITLE_OVERLAY_MARGIN_RATIO,
+    fit: TitleOverlayFit | None = None,
+) -> str:
+    clean = " ".join(str(text or "").split())
+    if not clean:
+        return ""
+    try:
+        resolved_fit = fit or _fit_title_subtitle_ass_text(
+            clean,
+            layout=layout,
+            language=language,
+            side_margin_ratio=side_margin_ratio,
+        )
+    except Exception:
+        logger.exception("post_production.title_subtitle_fit_failed")
+        resolved_fit = None
+    font_size = resolved_fit.font_size if resolved_fit is not None else _title_subtitle_font_size(layout)
+    return f"{{\\fscx100\\fs{font_size}}}" + _escape_ass_no_wrap_spaces(clean)
+
+
 def _escape_ass_no_wrap_spaces(text: str) -> str:
     return _escape_ass_text(text).replace(" ", r"\h")
 
@@ -1403,6 +1605,61 @@ def _build_title_overlay_cue(
     }
 
 
+def _scene_end_title_config(scene: dict[str, Any]) -> tuple[dict[str, str], dict[str, Any]]:
+    meta = scene.get("prompt_meta_json") if isinstance(scene.get("prompt_meta_json"), dict) else {}
+    raw_titles = scene.get("end_title_by_lang")
+    if not isinstance(raw_titles, dict):
+        raw_titles = meta.get("end_title_by_lang")
+    titles = {
+        str(key).strip().lower(): " ".join(str(value or "").split())
+        for key, value in (raw_titles or {}).items()
+        if str(key).strip() and str(value or "").strip()
+    } if isinstance(raw_titles, dict) else {}
+    raw_style = scene.get("end_title_style")
+    if not isinstance(raw_style, dict):
+        raw_style = meta.get("end_title_style")
+    return titles, dict(raw_style) if isinstance(raw_style, dict) else {}
+
+
+def _build_end_title_cue(
+    scene: dict[str, Any],
+    *,
+    language: str,
+    start_sec: float,
+    end_sec: float,
+) -> tuple[dict[str, Any] | None, dict[str, Any]]:
+    titles, style = _scene_end_title_config(scene)
+    lang = str(language or "ru").strip().lower() or "ru"
+    title = str(titles.get(lang) or "").strip()
+    if not title:
+        return None, style
+    if bool(style.get("uppercase", True)):
+        title = title.upper()
+    start = max(0.0, float(start_sec or 0.0))
+    end = max(start, float(end_sec or 0.0))
+    if end <= start:
+        return None, style
+    return (
+        {
+            "kind": "end_title",
+            "text": title,
+            "start_sec": start,
+            "end_sec": end,
+            "style": f"EndTitle_{lang.upper()}",
+            "language": lang,
+            "font_name": str(style.get("font_name") or "Arial Narrow"),
+            "font_size_ratio": float(style.get("font_size_ratio") or 0.028),
+            "vertical_anchor_ratio": float(style.get("vertical_anchor_ratio") or 0.43),
+            "tracking": float(style.get("tracking") or 3.0),
+            "scale_x": int(style.get("scale_x_ru") or 82) if lang == "ru" else int(style.get("scale_x") or 100),
+            "title_color": str(style.get("title_color") or "#D2A66D"),
+            "outline": max(0.0, float(style.get("outline") or 0.0)),
+            "shadow": max(0.0, float(style.get("shadow") or 1.0)),
+        },
+        style,
+    )
+
+
 def _build_title_series_overlay_cue(
     overlay_series_title_by_lang: dict[str, Any] | None,
     overlay_series_counter_by_lang: dict[str, Any] | None,
@@ -1416,15 +1673,78 @@ def _build_title_series_overlay_cue(
     if (not series_title and not counter) or duration <= 0:
         return None
     lang = str(language or "ru").strip().lower() or "ru"
+    normalized_counter = " ".join(counter.lower().split())
     return {
         "kind": "series",
         "text": series_title,
         "counter_text": counter,
+        "layout_variant": (
+            "story"
+            if normalized_counter.startswith(("история ", "story "))
+            else "default"
+        ),
         "start_sec": 0.0,
         "end_sec": duration,
         "style": _title_series_style_name(lang),
         "language": lang,
     }
+
+
+def _build_title_subtitle_overlay_cue(
+    overlay_subtitle_by_lang: dict[str, Any] | None,
+    *,
+    language: str,
+    duration_sec: float,
+) -> dict[str, Any] | None:
+    subtitle = _overlay_value_for_language(overlay_subtitle_by_lang, language)
+    duration = max(0.0, float(duration_sec or 0.0))
+    if not subtitle or duration <= 0:
+        return None
+    lang = str(language or "ru").strip().lower() or "ru"
+    return {
+        "kind": "subtitle",
+        "text": subtitle,
+        "start_sec": 0.0,
+        "end_sec": duration,
+        "style": _title_subtitle_style_name(lang),
+        "language": lang,
+    }
+
+
+def _story_fixed_block_ass_text(cue: dict[str, Any], layout: SubtitleLayout) -> str | None:
+    raw_words = cue.get("fixed_block_words")
+    if not isinstance(raw_words, list):
+        return None
+    words = [str(word or "").strip() for word in raw_words if str(word or "").strip()]
+    if not words:
+        return None
+    try:
+        visible_count = int(cue.get("visible_word_count") or 0)
+    except (TypeError, ValueError):
+        visible_count = 0
+    visible_count = max(0, min(len(words), visible_count))
+    visible = " ".join(_escape_ass_text(word) for word in words[:visible_count])
+    hidden = " ".join(_escape_ass_text(word) for word in words[visible_count:])
+    body = visible
+    if hidden:
+        body += (" " if body else "") + r"{\alpha&HFF&}" + hidden + r"{\alpha&H00&}"
+
+    font_size = max(20, int(round(layout.font_size * STORY_WORD_SYNC_FONT_SIZE_RATIO)))
+    resolution_scale = max(0.5, layout.height / 1920.0)
+    outline = max(2, int(round(3.0 * resolution_scale)))
+    shadow = max(1, int(round(1.5 * resolution_scale)))
+    anchor_x = layout.width // 2
+    anchor_y = int(round(layout.height * STORY_WORD_SYNC_ANCHOR_Y_RATIO))
+    prefix = (
+        "{"
+        f"\\an2\\pos({anchor_x},{anchor_y})"
+        f"\\fn{STORY_WORD_SYNC_FONT_NAME}\\fs{font_size}\\b1\\q2"
+        f"\\c{STORY_WORD_SYNC_SUBTITLE_COLOUR}"
+        "\\3c&H00000000&\\4c&H70000000&"
+        f"\\bord{outline}\\shad{shadow}"
+        "}"
+    )
+    return prefix + body
 
 
 def _write_burned_subtitle_ass(
@@ -1455,20 +1775,34 @@ def _write_burned_subtitle_ass(
     title_margin_h = max(0, int(layout.width * title_margin_ratio))
     base_title_margin_v = max(0, int(layout.height * title_top_margin_ratio))
     has_series_cue = any(str(cue.get("kind") or "") == "series" for cue in title_cues or [])
+    story_series_layout = any(
+        str(cue.get("kind") or "") == "series"
+        and str(cue.get("layout_variant") or "") == "story"
+        for cue in title_cues or []
+    )
     series_row_offsets: list[int] = []
     for cue in title_cues or []:
         if str(cue.get("kind") or "") != "series":
             continue
         language = str(cue.get("language") or "ru").strip().lower() or "ru"
+        is_story_series = str(cue.get("layout_variant") or "") == "story"
         fit = _fit_title_series_ass_text(
             str(cue.get("text") or ""),
-            str(cue.get("counter_text") or ""),
+            "" if is_story_series else str(cue.get("counter_text") or ""),
             layout=layout,
             language=language,
             side_margin_ratio=title_margin_ratio,
             max_width=layout.width - (title_margin_h * 2),
         )
-        if fit is not None:
+        if is_story_series:
+            series_font_size = fit.series_font_size if fit is not None else _title_series_font_size(layout)
+            counter_font_size = max(24, int(round(series_font_size * STORY_SERIES_COUNTER_FONT_SCALE)))
+            series_row_offsets.append(
+                series_font_size
+                + counter_font_size
+                + int(round(layout.height * 0.018))
+            )
+        elif fit is not None:
             series_row_offsets.append(
                 _title_series_main_row_offset(layout, fit)
             )
@@ -1476,6 +1810,40 @@ def _write_burned_subtitle_ass(
             series_row_offsets.append(_title_series_row_offset(layout, language))
     series_row_offset = max(series_row_offsets, default=0)
     main_title_margin_v = base_title_margin_v + (series_row_offset if has_series_cue else 0)
+    subtitle_margin_v = main_title_margin_v
+    subtitle_fits_by_key: dict[int, TitleOverlayFit | None] = {}
+    main_title_heights: list[int] = []
+    for cue in title_cues or []:
+        kind = str(cue.get("kind") or "title")
+        language = str(cue.get("language") or "ru").strip().lower() or "ru"
+        if kind == "title":
+            try:
+                fit = _fit_title_overlay_ass_text(
+                    str(cue.get("text") or ""),
+                    layout=layout,
+                    language=language,
+                    side_margin_ratio=title_margin_ratio,
+                    top_margin_ratio=title_top_margin_ratio,
+                    has_series_cue=has_series_cue,
+                )
+            except Exception:
+                logger.exception("post_production.title_overlay_fit_failed language=%s", language)
+                fit = None
+            if fit is not None:
+                main_title_heights.append(fit.height)
+        elif kind == "subtitle":
+            try:
+                subtitle_fits_by_key[id(cue)] = _fit_title_subtitle_ass_text(
+                    str(cue.get("text") or ""),
+                    layout=layout,
+                    language=str(cue.get("language") or "ru"),
+                    side_margin_ratio=title_margin_ratio,
+                )
+            except Exception:
+                logger.exception("post_production.title_subtitle_fit_failed language=%s", language)
+                subtitle_fits_by_key[id(cue)] = None
+    if main_title_heights:
+        subtitle_margin_v = main_title_margin_v + max(main_title_heights) + int(round(layout.height * TITLE_SUBTITLE_GAP_RATIO))
     series_margin_l = title_margin_h
     title_styles: list[str] = []
     if title_cues:
@@ -1490,7 +1858,28 @@ def _write_burned_subtitle_ass(
             if style_name in seen_styles:
                 continue
             seen_styles.add(style_name)
-            if kind == "series":
+            if kind == "end_title":
+                font_size = max(18, int(round(layout.height * float(cue.get("font_size_ratio") or 0.028))))
+                anchor_ratio = min(max(float(cue.get("vertical_anchor_ratio") or 0.43), 0.05), 0.90)
+                style_specs.append(
+                    {
+                        "style_name": style_name,
+                        "font": str(cue.get("font_name") or "Arial Narrow"),
+                        "font_size": font_size,
+                        "primary_colour": _ass_colour_from_hex(cue.get("title_color"), default="&H006DA6D2"),
+                        "outline_colour": "&H00000000",
+                        "shadow_colour": "&H50000000",
+                        "bold": 0,
+                        "spacing": float(cue.get("tracking") or 3.0),
+                        "outline": float(cue.get("outline") or 0.0),
+                        "shadow": float(cue.get("shadow") or 1.0),
+                        "margin_v": int(round(layout.height * anchor_ratio)),
+                        "margin_l": max(0, int(layout.width * 0.05)),
+                        "margin_r": max(0, int(layout.width * 0.05)),
+                        "alignment": 8,
+                    }
+                )
+            elif kind == "series":
                 style_specs.append(
                     {
                         "style_name": style_name,
@@ -1499,6 +1888,7 @@ def _write_burned_subtitle_ass(
                         "primary_colour": TITLE_SERIES_PRIMARY_COLOUR,
                         "outline_colour": TITLE_SERIES_OUTLINE_COLOUR,
                         "shadow_colour": TITLE_SERIES_SHADOW_COLOUR,
+                        "bold": 0,
                         "spacing": 0,
                         "outline": TITLE_SERIES_OUTLINE,
                         "shadow": TITLE_SERIES_SHADOW,
@@ -1506,6 +1896,25 @@ def _write_burned_subtitle_ass(
                         "margin_l": series_margin_l,
                         "margin_r": title_margin_h,
                         "alignment": 7,
+                    }
+                )
+            elif kind == "subtitle":
+                style_specs.append(
+                    {
+                        "style_name": style_name,
+                        "font": _title_subtitle_font_name(language),
+                        "font_size": _title_subtitle_font_size(layout),
+                        "primary_colour": TITLE_SUBTITLE_PRIMARY_COLOUR,
+                        "outline_colour": TITLE_SUBTITLE_OUTLINE_COLOUR,
+                        "shadow_colour": TITLE_SUBTITLE_SHADOW_COLOUR,
+                        "bold": 0,
+                        "spacing": 0,
+                        "outline": TITLE_SUBTITLE_OUTLINE,
+                        "shadow": TITLE_SUBTITLE_SHADOW,
+                        "margin_v": subtitle_margin_v,
+                        "margin_l": title_margin_h,
+                        "margin_r": title_margin_h,
+                        "alignment": 8,
                     }
                 )
             else:
@@ -1517,6 +1926,7 @@ def _write_burned_subtitle_ass(
                         "primary_colour": title_primary_colour,
                         "outline_colour": TITLE_OVERLAY_OUTLINE_COLOUR,
                         "shadow_colour": TITLE_OVERLAY_SHADOW_COLOUR,
+                        "bold": 0,
                         "spacing": TITLE_OVERLAY_SPACING,
                         "outline": TITLE_OVERLAY_OUTLINE,
                         "shadow": TITLE_OVERLAY_SHADOW,
@@ -1531,7 +1941,7 @@ def _write_burned_subtitle_ass(
                 (
                     f"Style: {spec['style_name']},{spec['font']},{spec['font_size']},"
                     f"{spec['primary_colour']},&H00FFFFFF,{spec['outline_colour']},{spec['shadow_colour']},"
-                    f"0,0,0,0,100,100,{spec['spacing']},0,1,{spec['outline']},{spec['shadow']},{spec['alignment']},"
+                    f"{spec.get('bold', 0)},0,0,0,100,100,{spec['spacing']},0,1,{spec['outline']},{spec['shadow']},{spec['alignment']},"
                     f"{spec['margin_l']},{spec['margin_r']},{spec['margin_v']},1"
                 )
             )
@@ -1561,12 +1971,27 @@ def _write_burned_subtitle_ass(
     lines = [header]
     for cue in title_cues or []:
         kind = str(cue.get("kind") or "title")
-        if kind == "series":
+        if kind == "end_title":
             language = str(cue.get("language") or "ru")
+            anchor_y = int(
+                round(
+                    layout.height
+                    * min(max(float(cue.get("vertical_anchor_ratio") or 0.43), 0.05), 0.90)
+                )
+            )
+            scale_x = max(40, min(120, int(cue.get("scale_x") or 100)))
+            text = (
+                f"{{\\an8\\pos({layout.width // 2},{anchor_y})\\q2\\fscx{scale_x}}}"
+                + _escape_ass_no_wrap_spaces(str(cue.get("text") or ""))
+            )
+            layer = 3
+        elif kind == "series":
+            language = str(cue.get("language") or "ru")
+            is_story_series = str(cue.get("layout_variant") or "") == "story"
             max_series_row_width = layout.width - series_margin_l - title_margin_h
             fit = _fit_title_series_ass_text(
                 str(cue.get("text") or ""),
-                str(cue.get("counter_text") or ""),
+                "" if is_story_series else str(cue.get("counter_text") or ""),
                 layout=layout,
                 language=language,
                 side_margin_ratio=title_margin_ratio,
@@ -1584,9 +2009,33 @@ def _write_burned_subtitle_ass(
                 str(cue.get("counter_text") or ""),
                 layout=layout,
                 language=language,
-                base_size=fit.counter_font_size if fit is not None else None,
-                number_size=fit.counter_number_font_size if fit is not None else None,
-                scale_x=fit.counter_scale_x if fit is not None else 100,
+                base_size=(
+                    max(
+                        24,
+                        int(
+                            round(
+                                (fit.series_font_size if fit is not None else _title_series_font_size(layout))
+                                * STORY_SERIES_COUNTER_FONT_SCALE
+                            )
+                        ),
+                    )
+                    if is_story_series
+                    else fit.counter_font_size if fit is not None else None
+                ),
+                number_size=(
+                    max(
+                        24,
+                        int(
+                            round(
+                                (fit.series_font_size if fit is not None else _title_series_font_size(layout))
+                                * STORY_SERIES_COUNTER_FONT_SCALE
+                            )
+                        ),
+                    )
+                    if is_story_series
+                    else fit.counter_number_font_size if fit is not None else None
+                ),
+                scale_x=100 if is_story_series else fit.counter_scale_x if fit is not None else 100,
             )
             style_name = str(cue.get("style") or _title_series_style_name(language))
             if series_text:
@@ -1595,23 +2044,39 @@ def _write_burned_subtitle_ass(
                         start=_ass_timestamp(float(cue.get("start_sec") or 0.0)),
                         end=_ass_timestamp(float(cue.get("end_sec") or 0.0)),
                         style=style_name,
-                        text=series_text,
+                        text=(
+                            f"{{\\an8\\pos({layout.width // 2},{base_title_margin_v})}}" + series_text
+                            if is_story_series
+                            else series_text
+                        ),
                     )
                 )
             if counter_text:
-                day_pos_x = _title_series_day_x(
-                    layout=layout,
-                    fit=fit,
-                    series_left=series_margin_l,
-                    title_margin_h=title_margin_h,
-                    language=language,
-                    side_margin_ratio=title_margin_ratio,
-                )
-                day_font_size = fit.counter_font_size if fit is not None else _title_series_day_font_size(layout, language)
-                day_pos_y = max(
-                    0,
-                    int(round(base_title_margin_v - (day_font_size * _title_series_day_y_shift_ratio(language)))),
-                )
+                if is_story_series:
+                    series_font_size = fit.series_font_size if fit is not None else _title_series_font_size(layout)
+                    day_font_size = max(
+                        24,
+                        int(round(series_font_size * STORY_SERIES_COUNTER_FONT_SCALE)),
+                    )
+                    day_pos_x = layout.width // 2
+                    day_pos_y = int(
+                        round(base_title_margin_v + series_font_size + (layout.height * 0.006))
+                    )
+                    counter_text = f"{{\\an8}}" + counter_text
+                else:
+                    day_pos_x = _title_series_day_x(
+                        layout=layout,
+                        fit=fit,
+                        series_left=series_margin_l,
+                        title_margin_h=title_margin_h,
+                        language=language,
+                        side_margin_ratio=title_margin_ratio,
+                    )
+                    day_font_size = fit.counter_font_size if fit is not None else _title_series_day_font_size(layout, language)
+                    day_pos_y = max(
+                        0,
+                        int(round(base_title_margin_v - (day_font_size * _title_series_day_y_shift_ratio(language)))),
+                    )
                 lines.append(
                     "Dialogue: 2,{start},{end},{style},,{margin_l},{margin_r},{margin_v},,{text}".format(
                         start=_ass_timestamp(float(cue.get("start_sec") or 0.0)),
@@ -1622,8 +2087,20 @@ def _write_burned_subtitle_ass(
                         margin_v=0,
                         text=f"{{\\q2\\pos({day_pos_x},{day_pos_y})}}" + counter_text,
                     )
-                )
+            )
             continue
+        elif kind == "subtitle":
+            language = str(cue.get("language") or "ru")
+            text = _format_title_subtitle_ass_text(
+                str(cue.get("text") or ""),
+                layout=layout,
+                language=language,
+                side_margin_ratio=title_margin_ratio,
+                fit=subtitle_fits_by_key.get(id(cue)),
+            )
+            if text:
+                text = f"{{\\an8\\pos({layout.width // 2},{subtitle_margin_v})}}" + text
+            layer = 1
         else:
             text = _format_title_overlay_ass_text(
                 str(cue.get("text") or " "),
@@ -1633,6 +2110,8 @@ def _write_burned_subtitle_ass(
                 top_margin_ratio=title_top_margin_ratio,
                 has_series_cue=has_series_cue,
             )
+            if story_series_layout and text:
+                text = f"{{\\an8\\pos({layout.width // 2},{main_title_margin_v})}}" + text
             layer = 1
         if not text:
             continue
@@ -1646,10 +2125,22 @@ def _write_burned_subtitle_ass(
             )
         )
     for cue in cues:
+        fixed_block_text = _story_fixed_block_ass_text(cue, layout)
+        if fixed_block_text:
+            lines.append(
+                "Dialogue: 0,{start},{end},{style},,0,0,0,,{text}".format(
+                    start=_ass_timestamp(float(cue.get("start_sec") or 0.0)),
+                    end=_ass_timestamp(float(cue.get("end_sec") or 0.0)),
+                    style=SUBTITLE_STYLE_NAME,
+                    text=fixed_block_text,
+                )
+            )
+            continue
         cue_lines = str(cue.get("text") or " ").splitlines() or [" "]
         for index, line in enumerate(cue_lines):
             anchor_y = _subtitle_line_anchor_y(layout, line_count=len(cue_lines), index=index)
-            text = f"{{\\an1\\pos({layout.margin_l},{anchor_y})}}" + _escape_ass_text(line)
+            colour_override = f"\\c{STORY_WORD_SYNC_SUBTITLE_COLOUR}" if cue.get("word_synced") else ""
+            text = f"{{\\an1\\pos({layout.margin_l},{anchor_y}){colour_override}}}" + _escape_ass_text(line)
             lines.append(
                 "Dialogue: 0,{start},{end},{style},,{margin_l},{margin_r},{margin_v},,{text}".format(
                     start=_ass_timestamp(float(cue.get("start_sec") or 0.0)),
@@ -1689,6 +2180,300 @@ def _subtitle_pages(
             idx += 1
         pages.append(page_words)
     return pages
+
+
+def _alignment_word_rows(alignment: dict[str, Any] | None) -> list[tuple[str, float, float]]:
+    """Collapse ElevenLabs character alignment into exact spoken-word timings."""
+    if not isinstance(alignment, dict):
+        return []
+    characters = alignment.get("characters")
+    starts = alignment.get("character_start_times_seconds")
+    ends = alignment.get("character_end_times_seconds")
+    if not isinstance(characters, list) or not isinstance(starts, list) or not isinstance(ends, list):
+        return []
+    count = min(len(characters), len(starts), len(ends))
+    words: list[tuple[str, float, float]] = []
+    token: list[str] = []
+    token_start = 0.0
+    token_end = 0.0
+    for index in range(count):
+        character = str(characters[index])
+        try:
+            character_start = float(starts[index])
+            character_end = float(ends[index])
+        except (TypeError, ValueError):
+            continue
+        if character.isspace():
+            if token:
+                words.append(("".join(token), token_start, token_end))
+                token = []
+            continue
+        if not token:
+            token_start = character_start
+        token.append(character)
+        token_end = character_end
+    if token:
+        words.append(("".join(token), token_start, token_end))
+    return [(word, start, end) for word, start, end in words if word and end > start]
+
+
+def _story_caption_word_blocks(
+    words: list[tuple[str, float, float]],
+) -> list[list[tuple[str, float, float]]]:
+    """Create short, readable phrase blocks without exceeding four words."""
+    blocks: list[list[tuple[str, float, float]]] = []
+    current: list[tuple[str, float, float]] = []
+    for row in words:
+        current.append(row)
+        token = str(row[0] or "").rstrip()
+        if len(current) >= STORY_WORD_SYNC_MAX_WORDS or token.endswith((".", "!", "?", "…")):
+            blocks.append(current)
+            current = []
+    if current:
+        blocks.append(current)
+    return blocks
+
+
+def _story_scene_intervals(
+    scenes: list[dict[str, Any]],
+    *,
+    language: str,
+    narration_duration_sec: float,
+) -> list[tuple[float, float]]:
+    """Map Story clips onto the approved narration duration without cutting words."""
+    raw_durations: list[float] = []
+    for scene in scenes:
+        duration_map = scene.get("timeline_duration_by_lang")
+        raw_duration: Any = duration_map.get(language) if isinstance(duration_map, dict) else None
+        if raw_duration in (None, "", 0, 0.0):
+            raw_duration = scene.get("timeline_duration_sec")
+        if raw_duration in (None, "", 0, 0.0):
+            try:
+                raw_duration = float(scene.get("end_sec") or 0.0) - float(scene.get("start_sec") or 0.0)
+            except (TypeError, ValueError):
+                raw_duration = 0.0
+        if not raw_duration:
+            raw_duration = scene.get("duration_sec")
+        try:
+            raw_durations.append(max(0.0, float(raw_duration or 0.0)))
+        except (TypeError, ValueError):
+            raw_durations.append(0.0)
+    duration = max(0.0, float(narration_duration_sec or 0.0))
+    raw_total = sum(raw_durations)
+    if duration <= 0 or raw_total <= 0:
+        return []
+    scale = duration / raw_total
+    intervals: list[tuple[float, float]] = []
+    cursor = 0.0
+    for index, raw_duration in enumerate(raw_durations):
+        start = cursor
+        cursor = duration if index == len(raw_durations) - 1 else cursor + (raw_duration * scale)
+        intervals.append((start, cursor))
+    return intervals
+
+
+def _estimated_story_word_rows_from_scenes(
+    scenes: list[dict[str, Any]],
+    *,
+    language: str,
+    intervals: list[tuple[float, float]],
+) -> list[tuple[str, float, float]]:
+    """Recover readable progressive captions for legacy Story runs.
+
+    Early Story runs stored the narration MP3 and its exact transcript but not
+    ElevenLabs' character-level alignment.  Their scene text is already split
+    against the narration, so distribute each scene's words over that scene as
+    a backwards-compatible fallback. New runs always use the exact alignment.
+    """
+    if len(scenes) != len(intervals):
+        return []
+    words: list[tuple[str, float, float]] = []
+    for scene, (scene_start, scene_end) in zip(scenes, intervals, strict=True):
+        speech_by_lang = scene.get("speech_by_lang")
+        text = speech_by_lang.get(language) if isinstance(speech_by_lang, dict) else None
+        tokens = str(text or scene.get("text") or "").split()
+        if not tokens or scene_end <= scene_start:
+            continue
+        weights = [max(1, len(re.sub(r"[^\\w]+", "", token, flags=re.UNICODE))) for token in tokens]
+        total_weight = sum(weights)
+        cursor = scene_start
+        for index, (token, weight) in enumerate(zip(tokens, weights, strict=True)):
+            end = scene_end if index == len(tokens) - 1 else cursor + ((scene_end - scene_start) * weight / total_weight)
+            if end > cursor:
+                words.append((token, cursor, end))
+            cursor = end
+    return words
+
+
+def _estimated_story_word_rows_from_voiceover(
+    voiceover_text: str,
+    *,
+    duration_sec: float,
+) -> list[tuple[str, float, float]]:
+    """Last-resort caption recovery for legacy language tracks without scene text."""
+    tokens = str(voiceover_text or "").split()
+    if not tokens or duration_sec <= 0:
+        return []
+    weights = [max(1, len(re.sub(r"[^\\w]+", "", token, flags=re.UNICODE))) for token in tokens]
+    total_weight = sum(weights)
+    rows: list[tuple[str, float, float]] = []
+    cursor = 0.0
+    for index, (token, weight) in enumerate(zip(tokens, weights, strict=True)):
+        end = duration_sec if index == len(tokens) - 1 else cursor + (duration_sec * weight / total_weight)
+        if end > cursor:
+            rows.append((token, cursor, end))
+        cursor = end
+    return rows
+
+
+def apply_story_word_synced_subtitles(
+    scenes: list[dict[str, Any]],
+    *,
+    project_slug: str | None,
+    voiceover_by_lang: dict[str, str] | None,
+    alignment_by_lang: dict[str, dict[str, Any]] | None,
+    duration_by_lang: dict[str, float] | None,
+) -> list[dict[str, Any]]:
+    """Attach progressive, exact word-timed captions to Discipline/Kitchen Story scenes.
+
+    Each caption grows by one spoken word.  Timing and spelling come from the
+    approved ElevenLabs alignment, so final rendering does not have to infer
+    timings from scene length or restore language text from a video candidate.
+    """
+    slug = str(project_slug or "").strip().lower()
+    if slug not in STORY_WORD_SYNC_PROJECT_SLUGS or not scenes:
+        return scenes
+    alignments = alignment_by_lang if isinstance(alignment_by_lang, dict) else {}
+    durations = duration_by_lang if isinstance(duration_by_lang, dict) else {}
+    voiceovers = voiceover_by_lang if isinstance(voiceover_by_lang, dict) else {}
+    languages = list(dict.fromkeys([*alignments, *durations, *voiceovers]))
+    for language in languages:
+        alignment = alignments.get(language)
+        lang = str(language or "").strip().lower()
+        if not lang:
+            continue
+        try:
+            duration = float(durations.get(lang) or 0.0)
+        except (TypeError, ValueError):
+            duration = 0.0
+        words = _alignment_word_rows(alignment)
+        if duration <= 0 and words:
+            duration = float(words[-1][2])
+        intervals = _story_scene_intervals(scenes, language=lang, narration_duration_sec=duration)
+        legacy_timing_source = ""
+        if not words and str(voiceovers.get(lang) or "").strip() and intervals:
+            has_scene_language_text = all(
+                bool(
+                    str(
+                        (
+                            (scene.get("speech_by_lang") or {}).get(lang)
+                            if isinstance(scene.get("speech_by_lang"), dict)
+                            else ""
+                        )
+                        or ""
+                    ).strip()
+                )
+                for scene in scenes
+            )
+            voiceover_text = str(voiceovers.get(lang) or "").strip()
+            scene_text = " ".join(
+                str((scene.get("speech_by_lang") or {}).get(lang) or "").strip()
+                for scene in scenes
+                if isinstance(scene.get("speech_by_lang"), dict)
+            ).strip()
+
+            def comparable_story_text(value: str) -> str:
+                return " ".join(re.findall(r"\w+", value.lower(), flags=re.UNICODE))
+
+            # A semantic Story beat may be split into several visual clips. In
+            # legacy runs every clip then contains the whole beat transcript,
+            # so concatenating scene speech duplicates narration phrases. Use
+            # per-scene timing only when it reconstructs the approved narration
+            # exactly; otherwise distribute the canonical voiceover transcript.
+            use_scene_text = (
+                has_scene_language_text
+                and comparable_story_text(scene_text) == comparable_story_text(voiceover_text)
+            )
+            if use_scene_text:
+                words = _estimated_story_word_rows_from_scenes(scenes, language=lang, intervals=intervals)
+                legacy_timing_source = "estimated_legacy_scene"
+            else:
+                words = _estimated_story_word_rows_from_voiceover(
+                    voiceover_text,
+                    duration_sec=duration,
+                )
+                legacy_timing_source = "estimated_legacy_voiceover"
+        if not words or len(intervals) != len(scenes):
+            continue
+        words_by_scene: list[list[tuple[str, float, float]]] = [[] for _ in scenes]
+        scene_index = 0
+        for word, word_start, word_end in words:
+            midpoint = (word_start + word_end) / 2.0
+            while scene_index + 1 < len(intervals) and midpoint >= intervals[scene_index][1]:
+                scene_index += 1
+            words_by_scene[scene_index].append((word, word_start, word_end))
+        for index, scene in enumerate(scenes):
+            interval_start, interval_end = intervals[index]
+            assigned = words_by_scene[index]
+            tokens = [word for word, _start, _end in assigned]
+            speech_map = dict(scene.get("speech_by_lang") or {}) if isinstance(scene.get("speech_by_lang"), dict) else {}
+            speech_map[lang] = " ".join(tokens).strip()
+            scene["speech_by_lang"] = speech_map
+            duration_map = (
+                dict(scene.get("timeline_duration_by_lang") or {})
+                if isinstance(scene.get("timeline_duration_by_lang"), dict)
+                else {}
+            )
+            duration_map[lang] = max(0.0, interval_end - interval_start)
+            scene["timeline_duration_by_lang"] = duration_map
+            cues: list[dict[str, Any]] = []
+            blocks = _story_caption_word_blocks(assigned)
+            for block_index, block in enumerate(blocks):
+                block_tokens = [word for word, _start, _end in block]
+                next_block_start = (
+                    blocks[block_index + 1][0][1]
+                    if block_index + 1 < len(blocks)
+                    else interval_end
+                )
+                for word_index, (_word, word_start, word_end) in enumerate(block):
+                    visible_text = " ".join(block_tokens[: word_index + 1]).strip()
+                    next_start = block[word_index + 1][1] if word_index + 1 < len(block) else next_block_start
+                    local_start = max(0.0, min(interval_end, word_start) - interval_start)
+                    local_end = max(local_start, min(interval_end, max(word_end, next_start)) - interval_start)
+                    if visible_text and local_end > local_start:
+                        cues.append(
+                            {
+                                "text": visible_text,
+                                "start_sec": local_start,
+                                "end_sec": local_end,
+                                "word_synced": True,
+                                "preserve_case": True,
+                                "fixed_block_words": block_tokens,
+                                "visible_word_count": word_index + 1,
+                                "story_style_version": STORY_WORD_SYNC_STYLE_VERSION,
+                                "story_timing_source": legacy_timing_source or "elevenlabs_alignment",
+                            }
+                        )
+            cues_map = (
+                dict(scene.get("speech_cues_by_lang") or {})
+                if isinstance(scene.get("speech_cues_by_lang"), dict)
+                else {}
+            )
+            cues_map[lang] = cues
+            scene["speech_cues_by_lang"] = cues_map
+            synced_languages = [str(item).strip().lower() for item in scene.get("word_synced_subtitle_languages") or []]
+            if lang not in synced_languages:
+                synced_languages.append(lang)
+            scene["word_synced_subtitle_languages"] = synced_languages
+        logger.info(
+            "post_production.story_word_subtitles project=%s language=%s words=%s scenes=%s source_chars=%s",
+            slug,
+            lang,
+            len(words),
+            len(scenes),
+            len(str(voiceovers.get(lang) or "")),
+        )
+    return scenes
 
 
 def _expand_dense_subtitle_entry(item: dict[str, Any]) -> list[dict[str, Any]]:
@@ -1735,6 +2520,20 @@ def _build_burned_subtitle_cues(
 ) -> list[dict[str, Any]]:
     start_sec = float(item.get("start_sec") or 0.0)
     end_sec = float(item.get("end_sec") or start_sec)
+    fixed_block_words = item.get("fixed_block_words")
+    if isinstance(fixed_block_words, list) and fixed_block_words and end_sec > start_sec:
+        return [
+            {
+                "start_sec": start_sec,
+                "end_sec": end_sec,
+                "text": str(item.get("text") or ""),
+                "word_synced": True,
+                "preserve_case": True,
+                "fixed_block_words": list(fixed_block_words),
+                "visible_word_count": int(item.get("visible_word_count") or 0),
+                "story_style_version": str(item.get("story_style_version") or STORY_WORD_SYNC_STYLE_VERSION),
+            }
+        ]
     layout = _subtitle_layout_for_dimensions(video_width, video_height)
     pages = _subtitle_pages(str(item.get("text") or ""), video_width=video_width, video_height=video_height)
     page_lines = [
@@ -1755,13 +2554,19 @@ def _build_burned_subtitle_cues(
             cue_end = end_sec
         else:
             cue_end = start_sec + (duration * (sum(weights[: index + 1]) / float(total_weight)))
-        cues.append(
-            {
-                "start_sec": cue_start,
-                "end_sec": cue_end,
-                "text": "\n".join(_subtitle_display_text(line) for line in lines),
-            }
-        )
+        cue = {
+            "start_sec": cue_start,
+            "end_sec": cue_end,
+            "text": "\n".join(
+                _subtitle_display_text(line, preserve_case=bool(item.get("preserve_case")))
+                for line in lines
+            ),
+        }
+        if item.get("word_synced"):
+            cue["word_synced"] = True
+        if item.get("preserve_case"):
+            cue["preserve_case"] = True
+        cues.append(cue)
         cursor = cue_end
     return cues
 
@@ -1795,20 +2600,36 @@ def _scene_subtitle_entries(
                 end_sec = min(max(start_sec, end_sec), safe_duration)
             if not text or end_sec <= start_sec:
                 continue
-            entries.append(
-                {
-                    "scene": int(scene.get("scene") or 0) or None,
-                    "language": language,
-                    "text": text,
-                    "start_sec": start_offset + start_sec,
-                    "end_sec": start_offset + end_sec,
-                }
-            )
+            entry = {
+                "scene": int(scene.get("scene") or 0) or None,
+                "language": language,
+                "text": text,
+                "start_sec": start_offset + start_sec,
+                "end_sec": start_offset + end_sec,
+            }
+            if cue.get("word_synced"):
+                entry["word_synced"] = True
+            if cue.get("preserve_case"):
+                entry["preserve_case"] = True
+            if isinstance(cue.get("fixed_block_words"), list):
+                entry["fixed_block_words"] = list(cue["fixed_block_words"])
+                entry["visible_word_count"] = int(cue.get("visible_word_count") or 0)
+                entry["story_style_version"] = str(
+                    cue.get("story_style_version") or STORY_WORD_SYNC_STYLE_VERSION
+                )
+            entries.append(entry)
     if entries:
         expanded: list[dict[str, Any]] = []
         for entry in entries:
             expanded.extend(_expand_dense_subtitle_entry(entry))
         return expanded
+    synced_languages = {
+        str(item).strip().lower()
+        for item in scene.get("word_synced_subtitle_languages") or []
+        if str(item).strip()
+    }
+    if str(language or "").strip().lower() in synced_languages:
+        return []
     raw_text = _subtitle_source_text_for_scene(scene, language)
     pause_entries = _subtitle_entries_from_pause_markers(
         raw_text,
@@ -1877,6 +2698,27 @@ def _subtitle_entries_from_pause_markers(
     return out
 
 
+def _snapshot_text_for_language(value: Any, language: str) -> str:
+    lang = str(language or "").strip().lower()
+    if isinstance(value, str):
+        return _speech_text_from_prompt(value) or value
+    if isinstance(value, dict):
+        item_text = " ".join(str(value.get(key) or "") for key in ("text", "phrase", "line")).strip()
+        if item_text:
+            return item_text
+        direct = value.get(lang)
+        if isinstance(direct, str):
+            return _speech_text_from_prompt(direct) or direct
+        if isinstance(direct, list):
+            return " ".join(_snapshot_text_for_language(item, lang) for item in direct)
+        if isinstance(direct, dict):
+            return " ".join(str(direct.get(key) or "") for key in ("text", "phrase", "line"))
+        return ""
+    if isinstance(value, list):
+        return " ".join(_snapshot_text_for_language(item, lang) for item in value)
+    return ""
+
+
 def _scene_with_candidate_subtitle_snapshot(
     scene: dict[str, Any],
     selected: dict[str, Any] | None,
@@ -1892,6 +2734,10 @@ def _scene_with_candidate_subtitle_snapshot(
         snapshot = selected.get(key)
         if not isinstance(snapshot, dict) or not snapshot.get(lang):
             continue
+        if lang == "ru":
+            raw_text = _snapshot_text_for_language(snapshot, lang)
+            if raw_text and not CYRILLIC_CHAR_RE.search(raw_text):
+                continue
         merged = dict(out.get(key) or {}) if isinstance(out.get(key), dict) else {}
         merged[lang] = snapshot.get(lang)
         out[key] = merged
@@ -1900,8 +2746,50 @@ def _scene_with_candidate_subtitle_snapshot(
 
 def _speech_text_from_prompt(prompt: Any) -> str:
     raw = str(prompt or "")
-    match = re.search(r"(?is)\bCHARACTERS\s+SPEAKS:\s*(.+?)(?:\n|$)", raw)
-    return " ".join(str(match.group(1) if match else "").split())
+    match = re.search(r"(?is)\bCHARACTERS\s+SPEAKS:\s*", raw)
+    direct = ""
+    if match:
+        tail = raw[match.end() :]
+        terminator = PROMPT_SPEECH_TERMINATOR_RE.search(tail)
+        newline_at = tail.find("\n")
+        stop_at = len(tail)
+        if terminator is not None:
+            stop_at = min(stop_at, terminator.start())
+        if newline_at >= 0:
+            stop_at = min(stop_at, newline_at)
+        direct = " ".join(tail[:stop_at].split())
+    if direct:
+        return direct
+    parts: list[str] = []
+    collecting = False
+    for line in raw.splitlines():
+        if re.search(r"(?i)\bspeech_timing_plan\s*:", line):
+            collecting = True
+            tail = re.sub(r"(?is)^.*?\bspeech_timing_plan\s*:\s*", "", line).strip()
+            terminator = PROMPT_SPEECH_TERMINATOR_RE.search(tail)
+            if terminator is not None:
+                tail = tail[: terminator.start()].strip()
+            if tail:
+                parts.append(tail)
+            continue
+        if not collecting:
+            continue
+        stripped = line.strip()
+        if not stripped:
+            continue
+        if not stripped.startswith("-"):
+            break
+        text = re.sub(
+            r"^\s*-\s*(?:\d+(?:[\.,]\d+)?\s*-\s*\d+(?:[\.,]\d+)?s?\s*:\s*)?",
+            "",
+            stripped,
+        ).strip()
+        terminator = PROMPT_SPEECH_TERMINATOR_RE.search(text)
+        if terminator is not None:
+            text = text[: terminator.start()].strip()
+        if text:
+            parts.append(text)
+    return " ".join(" ".join(parts).split())
 
 
 def _subtitle_source_text_for_scene(scene: dict[str, Any], language: str) -> str:
@@ -1949,7 +2837,7 @@ def _final_scene_speed_coef(scene: dict[str, Any], selected: dict[str, Any] | No
     if _is_speechless_final_scene(scene):
         return 1.0
     value = parse_speed_coef(selected.get("speed_coef")) if isinstance(selected, dict) else None
-    return value or DEFAULT_SCENE_VIDEO_SPEED_COEF
+    return value or default_scene_video_speed_coef(scene)
 
 
 def _run_ffmpeg(cmd: list[str], *, timeout: int = FFMPEG_SHORT_TIMEOUT_SEC, stage: str = "unknown") -> None:
@@ -1981,18 +2869,153 @@ def _atempo_filter(speed_coef: float) -> str:
     return ",".join(f"atempo={factor:.5f}" for factor in factors)
 
 
+def _frame_aligned_duration(duration: float, *, fps: int = 30) -> float:
+    safe_fps = max(1, int(fps or 30))
+    safe_duration = max(0.0, float(duration or 0.0))
+    if safe_duration <= 0:
+        return 0.0
+    frames = max(1, int(round(safe_duration * safe_fps)))
+    return frames / float(safe_fps)
+
+
+def _proportional_frame_aligned_durations(
+    durations: list[float],
+    target_total_sec: float,
+    *,
+    fps: int = 30,
+) -> list[float]:
+    """Fit clip durations to one narration track without cumulative drift."""
+    safe_fps = max(1, int(fps or 30))
+    safe = [max(0.0, float(value or 0.0)) for value in durations]
+    source_total = sum(safe)
+    target_frames = max(len(safe), int(round(max(0.0, float(target_total_sec or 0.0)) * safe_fps)))
+    if not safe or source_total <= 0 or target_frames <= 0:
+        return safe
+    raw_frames = [(value / source_total) * target_frames for value in safe]
+    frames = [max(1, int(value)) for value in raw_frames]
+    while sum(frames) < target_frames:
+        index = max(range(len(frames)), key=lambda i: raw_frames[i] - frames[i])
+        frames[index] += 1
+    while sum(frames) > target_frames:
+        candidates = [i for i, value in enumerate(frames) if value > 1]
+        if not candidates:
+            break
+        index = max(candidates, key=lambda i: frames[i] - raw_frames[i])
+        frames[index] -= 1
+    return [value / float(safe_fps) for value in frames]
+
+
 def _normalize_segment(
     *,
     ffmpeg: str,
     src_path: Path,
     dest_path: Path,
     speed_coef: float,
+    target_width: int = TARGET_WIDTH,
+    target_height: int = TARGET_HEIGHT,
+    target_duration_sec: float | None = None,
 ) -> None:
-    vf = (
-        f"scale={TARGET_WIDTH}:{TARGET_HEIGHT}:force_original_aspect_ratio=increase,"
-        f"crop={TARGET_WIDTH}:{TARGET_HEIGHT},setpts=PTS/{speed_coef:.6f}"
+    source_duration = float(_media_duration(src_path) or 0.0)
+    requested_duration = max(0.0, float(target_duration_sec or 0.0))
+    normalized_duration = (
+        requested_duration
+        if requested_duration > 0
+        else source_duration / max(0.01, float(speed_coef or 1.0)) if source_duration > 0 else 0.0
     )
+    aligned_duration = _frame_aligned_duration(normalized_duration, fps=30)
+    duration_arg = f"{aligned_duration:.6f}" if aligned_duration > 0 else ""
+    vf = (
+        f"scale={int(target_width)}:{int(target_height)}:force_original_aspect_ratio=increase,"
+        f"crop={int(target_width)}:{int(target_height)},setpts=PTS/{speed_coef:.6f},"
+        "fps=30,tpad=stop_mode=clone:stop_duration=0.100000"
+    )
+    if duration_arg:
+        vf = f"{vf},trim=duration={duration_arg}"
+    vf = f"{vf},settb=AVTB,setpts=N/(30*TB)"
     af = _atempo_filter(speed_coef)
+    has_audio = _has_audio_stream(src_path)
+    if duration_arg:
+        if has_audio:
+            filter_complex = (
+                f"[0:v]{vf}[v];"
+                f"[0:a]{af},aresample=async=1:first_pts=0,"
+                f"apad=whole_dur={duration_arg},atrim=duration={duration_arg},asetpts=N/SR/TB[a]"
+            )
+            cmd = [
+                ffmpeg,
+                "-y",
+                "-i",
+                str(src_path),
+                "-filter_complex",
+                filter_complex,
+                "-map",
+                "[v]",
+                "-map",
+                "[a]",
+                "-r",
+                "30",
+                "-c:v",
+                "libx264",
+                "-preset",
+                "medium",
+                "-crf",
+                "18",
+                "-pix_fmt",
+                "yuv420p",
+                "-c:a",
+                "aac",
+                "-ar",
+                "48000",
+                "-ac",
+                "2",
+                "-video_track_timescale",
+                "30000",
+                "-movflags",
+                "+faststart",
+                str(dest_path),
+            ]
+            _run_ffmpeg(cmd, timeout=FFMPEG_RENDER_TIMEOUT_SEC, stage="normalize_segment")
+            return
+        filter_complex = f"[0:v]{vf}[v];[1:a]atrim=duration={duration_arg},asetpts=N/SR/TB[a]"
+        cmd = [
+            ffmpeg,
+            "-y",
+            "-i",
+            str(src_path),
+            "-f",
+            "lavfi",
+            "-i",
+            "anullsrc=channel_layout=stereo:sample_rate=48000",
+            "-filter_complex",
+            filter_complex,
+            "-map",
+            "[v]",
+            "-map",
+            "[a]",
+            "-r",
+            "30",
+            "-c:v",
+            "libx264",
+            "-preset",
+            "medium",
+            "-crf",
+            "18",
+            "-pix_fmt",
+            "yuv420p",
+            "-c:a",
+            "aac",
+            "-ar",
+            "48000",
+            "-ac",
+            "2",
+            "-video_track_timescale",
+            "30000",
+            "-movflags",
+            "+faststart",
+            str(dest_path),
+        ]
+        _run_ffmpeg(cmd, timeout=FFMPEG_RENDER_TIMEOUT_SEC, stage="normalize_segment")
+        return
     cmd = [
         ffmpeg,
         "-y",
@@ -2014,6 +3037,12 @@ def _normalize_segment(
         "yuv420p",
         "-c:a",
         "aac",
+        "-ar",
+        "48000",
+        "-ac",
+        "2",
+        "-video_track_timescale",
+        "30000",
         "-movflags",
         "+faststart",
         str(dest_path),
@@ -2038,9 +3067,108 @@ def _concat_segments(*, ffmpeg: str, list_path: Path, dest_path: Path) -> None:
     _run_ffmpeg(cmd, timeout=FFMPEG_RENDER_TIMEOUT_SEC, stage="concat_segments")
 
 
-def _upscale_master_to_4k(*, ffmpeg: str, src_path: Path, dest_path: Path) -> None:
+def _replace_master_audio_with_narration(
+    *,
+    ffmpeg: str,
+    video_path: Path,
+    narration_path: Path,
+    dest_path: Path,
+    narration_volume: float = 1.0,
+) -> None:
+    """Replace generated clip audio with one approved, seamless narration track."""
+    duration = max(0.0, float(_media_duration(video_path) or 0.0))
+    if duration <= 0:
+        raise RuntimeError("Cannot determine story master duration before narration mux.")
+    duration_arg = f"{duration:.6f}"
+    cmd = [
+        ffmpeg,
+        "-y",
+        "-i",
+        str(video_path),
+        "-i",
+        str(narration_path),
+        "-filter_complex",
+        f"[1:a]volume={max(0.0, float(narration_volume)):.4f},alimiter=limit=0.97,"
+        f"aresample=48000,apad=whole_dur={duration_arg},"
+        f"atrim=duration={duration_arg},asetpts=N/SR/TB[a]",
+        "-map",
+        "0:v:0",
+        "-map",
+        "[a]",
+        "-c:v",
+        "copy",
+        "-c:a",
+        "aac",
+        "-ar",
+        "48000",
+        "-ac",
+        "2",
+        "-movflags",
+        "+faststart",
+        str(dest_path),
+    ]
+    _run_ffmpeg(cmd, timeout=FFMPEG_RENDER_TIMEOUT_SEC, stage="replace_master_audio_with_narration")
+
+
+def _replace_master_audio_with_intro_and_narration(
+    *,
+    ffmpeg: str,
+    video_path: Path,
+    intro_video_path: Path,
+    narration_path: Path,
+    dest_path: Path,
+    narration_volume: float = 1.0,
+) -> None:
+    """Keep the approved intro dialogue, then start the ordinary Story narration."""
+    duration = max(0.0, float(_media_duration(video_path) or 0.0))
+    intro_duration = max(0.0, float(_media_duration(intro_video_path) or 0.0))
+    if duration <= 0 or intro_duration <= 0:
+        raise RuntimeError("Cannot determine Discipline intro/master duration before narration mux.")
+    duration_arg = f"{duration:.6f}"
+    cmd = [
+        ffmpeg,
+        "-y",
+        "-i",
+        str(video_path),
+        "-i",
+        str(intro_video_path),
+        "-i",
+        str(narration_path),
+        "-filter_complex",
+        "[1:a]aresample=48000,asetpts=N/SR/TB[intro];"
+        f"[2:a]volume={max(0.0, float(narration_volume)):.4f},alimiter=limit=0.97,"
+        "aresample=48000,asetpts=N/SR/TB[story];"
+        f"[intro][story]concat=n=2:v=0:a=1,apad=whole_dur={duration_arg},"
+        f"atrim=duration={duration_arg},asetpts=N/SR/TB[a]",
+        "-map",
+        "0:v:0",
+        "-map",
+        "[a]",
+        "-c:v",
+        "copy",
+        "-c:a",
+        "aac",
+        "-ar",
+        "48000",
+        "-ac",
+        "2",
+        "-movflags",
+        "+faststart",
+        str(dest_path),
+    ]
+    _run_ffmpeg(cmd, timeout=FFMPEG_RENDER_TIMEOUT_SEC, stage="replace_master_audio_with_intro_and_narration")
+
+
+def _upscale_master_to_4k(
+    *,
+    ffmpeg: str,
+    src_path: Path,
+    dest_path: Path,
+    target_width: int = UPSCALED_4K_WIDTH,
+    target_height: int = UPSCALED_4K_HEIGHT,
+) -> None:
     vf = (
-        f"scale={UPSCALED_4K_WIDTH}:{UPSCALED_4K_HEIGHT}:flags=lanczos,"
+        f"scale={int(target_width)}:{int(target_height)}:flags=lanczos,"
         "unsharp=5:5:0.45:3:3:0.0"
     )
     cmd = [
@@ -2076,7 +3204,16 @@ def _ffmpeg_filter_quote(value: str | os.PathLike[str]) -> str:
 
 
 def _subtitle_filter(subtitles_path: Path, *, fonts_dir: Path | None = None) -> str:
-    resolved_fonts_dir = fonts_dir or subtitle_fonts_dir()
+    resolved_fonts_dir = fonts_dir
+    if resolved_fonts_dir is None:
+        try:
+            uses_story_font = STORY_WORD_SYNC_FONT_NAME in subtitles_path.read_text(
+                encoding="utf-8", errors="ignore"
+            )
+        except OSError:
+            uses_story_font = False
+        story_font_path = _story_subtitle_font_path() if uses_story_font else None
+        resolved_fonts_dir = story_font_path.parent if story_font_path is not None else subtitle_fonts_dir()
     parts = [f"filename={_ffmpeg_filter_quote(subtitles_path)}"]
     if resolved_fonts_dir.exists():
         parts.append(f"fontsdir={_ffmpeg_filter_quote(resolved_fonts_dir)}")
@@ -2099,6 +3236,13 @@ def _render_subtitled_music_master(
     has_source_audio = _has_audio_stream(clean_path)
     if music_path:
         if has_source_audio:
+            source_duration = max(0.0, float(_media_duration(clean_path) or 0.0))
+            voice_duration_filter = ""
+            if source_duration > 0:
+                duration_arg = f"{source_duration:.3f}"
+                voice_duration_filter = (
+                    f",apad=whole_dur={duration_arg},atrim=duration={duration_arg},asetpts=N/SR/TB"
+                )
             cmd = [
                 ffmpeg,
                 "-y",
@@ -2110,7 +3254,7 @@ def _render_subtitled_music_master(
                 str(music_path),
                 "-filter_complex",
                 f"[0:v]{subtitle_filter}[v];"
-                f"[0:a]volume={SOURCE_AUDIO_VOLUME:.4f}[voice];"
+                f"[0:a]volume={SOURCE_AUDIO_VOLUME:.4f}{voice_duration_filter}[voice];"
                 f"[1:a]volume={effective_music_volume:.4f}[music];"
                 "[voice][music]amix=inputs=2:duration=first:dropout_transition=0:normalize=0[a]",
                 "-map",
@@ -2263,6 +3407,7 @@ def build_post_production(
     *,
     project_slug: str | None = None,
     overlay_title_by_lang: dict[str, Any] | None = None,
+    overlay_subtitle_by_lang: dict[str, Any] | None = None,
     overlay_title_style: dict[str, Any] | None = None,
     overlay_series_title_by_lang: dict[str, Any] | None = None,
     overlay_series_counter_by_lang: dict[str, Any] | None = None,
@@ -2270,6 +3415,9 @@ def build_post_production(
     target_variants: list[str] | tuple[str, ...] | set[str] | None = None,
     progress_callback: Any | None = None,
     use_candidate_subtitle_snapshot: bool = True,
+    narration_audio_path_by_lang: dict[str, str | os.PathLike[str]] | None = None,
+    intro_video_path_by_lang: dict[str, str | os.PathLike[str]] | None = None,
+    include_background_music: bool = True,
 ) -> dict[str, Any]:
     ffmpeg = _resolve_ffmpeg()
     if not ffmpeg:
@@ -2305,16 +3453,47 @@ def build_post_production(
         except Exception:
             logger.exception("post_production.progress_callback_failed language=%s stage=%s", language, stage)
 
-    music_path, music_volume = _resolve_music_path(project_slug)
+    music_path, music_volume = (
+        _resolve_music_path(project_slug) if include_background_music else (None, 0.0)
+    )
     renders_by_language: dict[str, dict[str, Any]] = {}
     subtitle_entries_by_language: dict[str, list[dict[str, Any]]] = {}
     subtitle_fingerprint_by_language: dict[str, str] = {}
     original_audio_preserved_by_language: dict[str, bool] = {}
     title_overlay_by_language: dict[str, dict[str, Any]] = {}
+    end_title_overlay_by_language: dict[str, dict[str, Any]] = {}
+    subtitle_overlay_by_language: dict[str, dict[str, Any]] = {}
     series_overlay_by_language: dict[str, dict[str, Any]] = {}
     artifact_bundle_key = _make_artifact_bundle_key(scenes, project_slug=project_slug)
+    narration_paths = {
+        str(language).strip().lower(): Path(path)
+        for language, path in (narration_audio_path_by_lang or {}).items()
+        if str(language).strip() and str(path).strip() and Path(path).is_file()
+    }
+    intro_paths = {
+        str(language).strip().lower(): Path(path)
+        for language, path in (intro_video_path_by_lang or {}).items()
+        if str(language).strip() and str(path).strip() and Path(path).is_file()
+    }
+    if narration_paths:
+        narration_fingerprint = hashlib.sha256()
+        narration_fingerprint.update(artifact_bundle_key.encode("utf-8"))
+        for language, path in sorted(narration_paths.items()):
+            narration_fingerprint.update(language.encode("utf-8"))
+            narration_fingerprint.update(path.read_bytes())
+        artifact_bundle_key = narration_fingerprint.hexdigest()
+    if intro_paths:
+        intro_fingerprint = hashlib.sha256()
+        intro_fingerprint.update(artifact_bundle_key.encode("utf-8"))
+        for language, path in sorted(intro_paths.items()):
+            intro_fingerprint.update(language.encode("utf-8"))
+            intro_fingerprint.update(path.read_bytes())
+        artifact_bundle_key = intro_fingerprint.hexdigest()
+    target_width, target_height = _render_dimensions_for_scenes(scenes)
+    upscaled_target_width, upscaled_target_height = _upscaled_dimensions_for_render(target_width, target_height)
 
     for language in languages:
+        scene_video_fingerprint = selected_scene_video_fingerprint_for_language(scenes, language)
         selected_segments: list[dict[str, Any]] = []
         for scene_index, scene in enumerate(scenes):
             selected = resolve_latest_approved_scene_video_for_final_build(scene, language)
@@ -2329,7 +3508,41 @@ def build_post_production(
                 continue
             speed_coef = _final_scene_speed_coef(scene, selected)
             source_duration = float(scene.get("duration_sec") or 0) or 0.0
-            planned_final_duration = source_duration / speed_coef if source_duration > 0 else 0.0
+            try:
+                story_timeline_duration = (
+                    float(scene.get("timeline_duration_sec") or 0.0)
+                    if str(scene.get("generation_mode") or "").strip().lower() == "story"
+                    else 0.0
+                )
+            except (TypeError, ValueError):
+                story_timeline_duration = 0.0
+            story_duration_by_lang = scene.get("timeline_duration_by_lang")
+            try:
+                language_story_duration = (
+                    float(story_duration_by_lang.get(language) or 0.0)
+                    if isinstance(story_duration_by_lang, dict)
+                    else 0.0
+                )
+            except (TypeError, ValueError):
+                language_story_duration = 0.0
+            planned_final_duration = (
+                language_story_duration
+                if language_story_duration > 0
+                else story_timeline_duration
+                if story_timeline_duration > 0
+                else source_duration / speed_coef
+                if source_duration > 0
+                else 0.0
+            )
+            # Scene.duration_sec is a generation plan, not proof of the media
+            # file's real duration. Providers can return a longer clip (for
+            # example 8 seconds for a 6-second request). Only an explicit Story
+            # timeline, or a later narration fit, is allowed to trim the source.
+            target_duration = (
+                planned_final_duration
+                if language_story_duration > 0 or story_timeline_duration > 0
+                else None
+            )
             selected_segments.append(
                 {
                     "scene_index": scene_index,
@@ -2341,15 +3554,67 @@ def build_post_production(
                     "speed_coef": speed_coef,
                     "source_duration": source_duration,
                     "planned_final_duration": planned_final_duration,
+                    "target_duration": target_duration,
                 }
             )
         if not selected_segments:
             continue
 
+        narration_path = narration_paths.get(language)
+        narration_volume = (
+            DISCIPLINE_ANASTASIA_NARRATION_VOLUME
+            if str(project_slug or "").strip().lower() == "discipline" and language == "ru"
+            else 1.0
+        )
+        narration_duration = float(_media_duration(narration_path) or 0.0) if narration_path is not None else 0.0
+        planned_track_total = sum(
+            float(item.get("planned_final_duration") or 0.0) for item in selected_segments
+        )
+        # English narration often runs faster than the source-language edit.
+        # Shorten every internal clip proportionally in every workflow that has
+        # an approved EN narration track.  Trimming only the master tail would
+        # leave the whole middle of the video semantically out of sync.
+        if (
+            language == "en"
+            and narration_duration > 0
+            and selected_segments
+            and planned_track_total - narration_duration > (1.0 / 30.0)
+        ):
+            fitted = _proportional_frame_aligned_durations(
+                [float(item.get("planned_final_duration") or 0.0) for item in selected_segments],
+                narration_duration,
+                fps=30,
+            )
+            for item, fitted_duration in zip(selected_segments, fitted):
+                item["planned_final_duration"] = fitted_duration
+                item["target_duration"] = fitted_duration
+            logger.info(
+                "post_production.english_narration_fit language=%s planned=%.3f narration=%.3f clips=%s",
+                language,
+                planned_track_total,
+                narration_duration,
+                len(selected_segments),
+            )
+
         with tempfile.TemporaryDirectory(prefix=f"post_production_{language}_") as tmp:
             emit_progress(language, "normalizing", "Preparing scene clips")
             tmp_path = Path(tmp)
             normalized_paths: list[Path] = []
+            normalized_intro_path: Path | None = None
+            intro_duration = 0.0
+            intro_path = intro_paths.get(language)
+            if intro_path is not None:
+                normalized_intro_path = tmp_path / f"discipline_intro_{language}_norm.mp4"
+                _normalize_segment(
+                    ffmpeg=ffmpeg,
+                    src_path=intro_path,
+                    dest_path=normalized_intro_path,
+                    speed_coef=1.0,
+                    target_width=target_width,
+                    target_height=target_height,
+                )
+                intro_duration = float(_media_duration(normalized_intro_path) or 0.0)
+                normalized_paths.append(normalized_intro_path)
             for item in selected_segments:
                 src_path = tmp_path / f"scene_{item['scene_index'] + 1}_{item['language']}.mp4"
                 src_path.write_bytes(item["video_bytes"])
@@ -2362,12 +3627,39 @@ def build_post_production(
                     height,
                 )
                 normalized_path = tmp_path / f"scene_{item['scene_index'] + 1}_{item['language']}_norm.mp4"
-                _normalize_segment(
-                    ffmpeg=ffmpeg,
-                    src_path=src_path,
-                    dest_path=normalized_path,
-                    speed_coef=float(item["speed_coef"]),
-                )
+                try:
+                    _normalize_segment(
+                        ffmpeg=ffmpeg,
+                        src_path=src_path,
+                        dest_path=normalized_path,
+                        speed_coef=float(item["speed_coef"]),
+                        target_width=target_width,
+                        target_height=target_height,
+                        target_duration_sec=(
+                            float(item["target_duration"] or 0.0)
+                            if item.get("target_duration") is not None
+                            else None
+                        ),
+                    )
+                except TypeError as exc:
+                    if "target_duration_sec" in str(exc):
+                        _normalize_segment(
+                            ffmpeg=ffmpeg,
+                            src_path=src_path,
+                            dest_path=normalized_path,
+                            speed_coef=float(item["speed_coef"]),
+                            target_width=target_width,
+                            target_height=target_height,
+                        )
+                    elif "target_width" in str(exc) or "target_height" in str(exc):
+                        _normalize_segment(
+                            ffmpeg=ffmpeg,
+                            src_path=src_path,
+                            dest_path=normalized_path,
+                            speed_coef=float(item["speed_coef"]),
+                        )
+                    else:
+                        raise
                 item["actual_duration"] = _media_duration(normalized_path) or float(
                     item["planned_final_duration"] or 0.0
                 )
@@ -2381,6 +3673,71 @@ def build_post_production(
             clean_path = tmp_path / f"final_clean_master_{language}.mp4"
             emit_progress(language, "clean_building", "Building clean master")
             _concat_segments(ffmpeg=ffmpeg, list_path=concat_list, dest_path=clean_path)
+            if selected_segments:
+                end_item = selected_segments[-1]
+                end_duration = float(
+                    end_item.get("actual_duration") or end_item.get("planned_final_duration") or 0.0
+                )
+                end_start = intro_duration + sum(
+                    float(item.get("actual_duration") or item.get("planned_final_duration") or 0.0)
+                    for item in selected_segments[:-1]
+                )
+                end_cue, end_style = _build_end_title_cue(
+                    end_item["scene"],
+                    language=language,
+                    start_sec=end_start,
+                    end_sec=end_start + end_duration,
+                )
+                if end_cue is not None:
+                    end_title_ass_path = tmp_path / f"end_title_{language}.ass"
+                    _write_burned_subtitle_ass(
+                        end_title_ass_path,
+                        [],
+                        title_cues=[end_cue],
+                        title_style=end_style,
+                        video_width=target_width,
+                        video_height=target_height,
+                    )
+                    end_title_path = tmp_path / f"final_clean_master_{language}_end_title.mp4"
+                    emit_progress(language, "end_title_building", "Burning localized final title")
+                    _render_subtitled_music_master(
+                        ffmpeg=ffmpeg,
+                        clean_path=clean_path,
+                        subtitles_path=end_title_ass_path,
+                        music_path=None,
+                        music_volume=0.0,
+                        dest_path=end_title_path,
+                    )
+                    clean_path = end_title_path
+                    end_title_overlay_by_language[language] = {
+                        "title": str(end_cue.get("text") or ""),
+                        "start_sec": float(end_cue.get("start_sec") or 0.0),
+                        "end_sec": float(end_cue.get("end_sec") or 0.0),
+                        "style": end_style,
+                    }
+                    emit_progress(language, "end_title_ready", "Localized final title ready")
+            if narration_path is not None:
+                narrated_path = tmp_path / f"final_clean_master_{language}_narrated.mp4"
+                emit_progress(language, "narration_building", "Adding approved ElevenLabs narration")
+                if normalized_intro_path is not None:
+                    _replace_master_audio_with_intro_and_narration(
+                        ffmpeg=ffmpeg,
+                        video_path=clean_path,
+                        intro_video_path=normalized_intro_path,
+                        narration_path=narration_path,
+                        dest_path=narrated_path,
+                        narration_volume=narration_volume,
+                    )
+                else:
+                    _replace_master_audio_with_narration(
+                        ffmpeg=ffmpeg,
+                        video_path=clean_path,
+                        narration_path=narration_path,
+                        dest_path=narrated_path,
+                        narration_volume=narration_volume,
+                    )
+                clean_path = narrated_path
+                emit_progress(language, "narration_ready", "Approved narration added")
             clean_w, clean_h = _video_dimensions(clean_path)
             emit_progress(language, "clean_ready", "Clean master ready")
             needs_upscaled_4k = bool(
@@ -2392,7 +3749,18 @@ def build_post_production(
             if needs_upscaled_4k:
                 upscaled_path = tmp_path / f"final_upscaled_4k_master_{language}.mp4"
                 emit_progress(language, "upscale_building", "Upscaling to 4K")
-                _upscale_master_to_4k(ffmpeg=ffmpeg, src_path=clean_path, dest_path=upscaled_path)
+                try:
+                    _upscale_master_to_4k(
+                        ffmpeg=ffmpeg,
+                        src_path=clean_path,
+                        dest_path=upscaled_path,
+                        target_width=upscaled_target_width,
+                        target_height=upscaled_target_height,
+                    )
+                except TypeError as exc:
+                    if "target_width" not in str(exc) and "target_height" not in str(exc):
+                        raise
+                    _upscale_master_to_4k(ffmpeg=ffmpeg, src_path=clean_path, dest_path=upscaled_path)
                 upscaled_w, upscaled_h = _video_dimensions(upscaled_path)
                 emit_progress(language, "upscale_ready", "4K master ready")
             render_base_path = upscaled_path or clean_path
@@ -2402,7 +3770,7 @@ def build_post_production(
             subtitle_entries: list[dict[str, Any]] = []
             needs_subtitled = bool(requested_variants & {"subtitled_music", "titled_subtitled_music"})
             if needs_subtitled:
-                current_start = 0.0
+                current_start = intro_duration
                 for item in selected_segments:
                     actual_duration = float(item.get("actual_duration") or item.get("planned_final_duration") or 0.0)
                     planned_duration = float(item.get("planned_final_duration") or 0.0)
@@ -2448,11 +3816,22 @@ def build_post_production(
                 language=language,
                 duration_sec=first_segment_duration,
             )
+            subtitle_cue = _build_title_subtitle_overlay_cue(
+                overlay_subtitle_by_lang,
+                language=language,
+                duration_sec=first_segment_duration,
+            )
             if title_cue:
                 title_overlay_by_language[language] = {
                     "title": str(title_cue.get("text") or ""),
                     "start_sec": float(title_cue.get("start_sec") or 0.0),
                     "end_sec": float(title_cue.get("end_sec") or 0.0),
+                }
+            if subtitle_cue:
+                subtitle_overlay_by_language[language] = {
+                    "subtitle": str(subtitle_cue.get("text") or ""),
+                    "start_sec": float(subtitle_cue.get("start_sec") or 0.0),
+                    "end_sec": float(subtitle_cue.get("end_sec") or 0.0),
                 }
             if series_cue:
                 series_overlay_by_language[language] = {
@@ -2473,7 +3852,11 @@ def build_post_production(
                 )
 
                 subtitled_path = tmp_path / f"final_subtitled_music_master_{language}.mp4"
-                emit_progress(language, "subtitles_building", "Rendering subtitles and music")
+                emit_progress(
+                    language,
+                    "subtitles_building",
+                    "Rendering subtitles and music" if music_path else "Rendering subtitles without background music",
+                )
                 render_preserved_source_audio = _render_subtitled_music_master(
                     ffmpeg=ffmpeg,
                     clean_path=render_base_path,
@@ -2482,10 +3865,14 @@ def build_post_production(
                     music_volume=music_volume,
                     dest_path=subtitled_path,
                 )
-                emit_progress(language, "subtitles_ready", "Subtitled/music master ready")
+                emit_progress(
+                    language,
+                    "subtitles_ready",
+                    "Subtitled/music master ready" if music_path else "Subtitled master without background music ready",
+                )
             titled_subtitled_path: Path | None = None
             titled_render_preserved_source_audio: bool | None = None
-            title_cues = [cue for cue in (series_cue, title_cue) if cue]
+            title_cues = [cue for cue in (series_cue, title_cue, subtitle_cue) if cue]
             if "titled_subtitled_music" in requested_variants and title_cues:
                 if subtitled_path is None:
                     ass_path = tmp_path / f"subtitles_{language}.ass"
@@ -2496,7 +3883,11 @@ def build_post_production(
                         video_height=render_base_h,
                     )
                     subtitled_path = tmp_path / f"final_subtitled_music_master_{language}.mp4"
-                    emit_progress(language, "subtitles_building", "Rendering subtitles and music")
+                    emit_progress(
+                        language,
+                        "subtitles_building",
+                        "Rendering subtitles and music" if music_path else "Rendering subtitles without background music",
+                    )
                     render_preserved_source_audio = _render_subtitled_music_master(
                         ffmpeg=ffmpeg,
                         clean_path=render_base_path,
@@ -2505,7 +3896,11 @@ def build_post_production(
                         music_volume=music_volume,
                         dest_path=subtitled_path,
                     )
-                    emit_progress(language, "subtitles_ready", "Subtitled/music master ready")
+                    emit_progress(
+                        language,
+                        "subtitles_ready",
+                        "Subtitled/music master ready" if music_path else "Subtitled master without background music ready",
+                    )
                 titled_ass_path = tmp_path / f"title_overlay_{language}.ass"
                 _write_burned_subtitle_ass(
                     titled_ass_path,
@@ -2542,6 +3937,7 @@ def build_post_production(
                     "width": clean_w,
                     "height": clean_h,
                     "source_audio_preserved": _has_audio_stream(clean_path),
+                    "scene_video_fingerprint": scene_video_fingerprint,
                 }
             if "upscaled_4k" in requested_variants and upscaled_path:
                 upscaled_bytes = upscaled_path.read_bytes()
@@ -2561,6 +3957,7 @@ def build_post_production(
                     "height": upscaled_h,
                     "source_audio_preserved": _has_audio_stream(upscaled_path),
                     "source_variant": "clean",
+                    "scene_video_fingerprint": scene_video_fingerprint,
                 }
             if "subtitled_music" in requested_variants and subtitled_path:
                 subtitled_bytes = subtitled_path.read_bytes()
@@ -2587,8 +3984,10 @@ def build_post_production(
                     "height": sub_h,
                     "music_asset_uri": music_path,
                     "music_volume": music_volume,
+                    "background_music_included": bool(music_path),
                     "source_audio_preserved": original_audio_preserved,
                     "subtitle_fingerprint": subtitle_fingerprint_by_language.get(language),
+                    "scene_video_fingerprint": scene_video_fingerprint,
                 }
             if titled_subtitled_path:
                 titled_bytes = titled_subtitled_path.read_bytes()
@@ -2614,8 +4013,10 @@ def build_post_production(
                     "height": titled_h,
                     "music_asset_uri": music_path,
                     "music_volume": music_volume,
+                    "background_music_included": bool(music_path),
                     "source_audio_preserved": titled_original_audio_preserved,
                     "subtitle_fingerprint": subtitle_fingerprint_by_language.get(language),
+                    "scene_video_fingerprint": scene_video_fingerprint,
                 }
             if not renders_by_language[language]:
                 renders_by_language.pop(language, None)
@@ -2641,11 +4042,14 @@ def build_post_production(
         "subtitle_entries_by_language": subtitle_entries_by_language,
         "subtitle_fingerprint_by_language": subtitle_fingerprint_by_language,
         "title_overlay_by_language": title_overlay_by_language,
+        "end_title_overlay_by_language": end_title_overlay_by_language,
+        "subtitle_overlay_by_language": subtitle_overlay_by_language,
         "series_overlay_by_language": series_overlay_by_language,
         "title_overlay_style": dict(overlay_title_style or {}),
         "speech_budget_by_language": speech_budget_by_language,
         "original_audio_preserved_by_language": original_audio_preserved_by_language,
         "music_asset_uri": music_path,
+        "background_music_included": bool(music_path),
         "languages": list(renders_by_language.keys()),
         "artifact_bundle_key": artifact_bundle_key,
     }
@@ -2657,6 +4061,7 @@ def build_upscaled_post_production_from_clean_master(
     language: str,
     project_slug: str | None = None,
     progress_callback: Any | None = None,
+    scene_video_fingerprint: str | None = None,
 ) -> dict[str, Any]:
     ffmpeg = _resolve_ffmpeg()
     if not ffmpeg:
@@ -2688,7 +4093,20 @@ def build_upscaled_post_production_from_clean_master(
         emit_progress("reuse_clean", "Using existing clean master")
         upscaled_path = tmp_path / f"final_upscaled_4k_master_{lang}.mp4"
         emit_progress("upscale_building", "Upscaling to 4K")
-        _upscale_master_to_4k(ffmpeg=ffmpeg, src_path=source_path, dest_path=upscaled_path)
+        clean_w, clean_h = _video_dimensions(source_path)
+        upscale_w, upscale_h = _upscaled_dimensions_for_render(clean_w or TARGET_WIDTH, clean_h or TARGET_HEIGHT)
+        try:
+            _upscale_master_to_4k(
+                ffmpeg=ffmpeg,
+                src_path=source_path,
+                dest_path=upscaled_path,
+                target_width=upscale_w,
+                target_height=upscale_h,
+            )
+        except TypeError as exc:
+            if "target_width" not in str(exc) and "target_height" not in str(exc):
+                raise
+            _upscale_master_to_4k(ffmpeg=ffmpeg, src_path=source_path, dest_path=upscaled_path)
         upscaled_w, upscaled_h = _video_dimensions(upscaled_path)
         emit_progress("upscale_ready", "4K master ready")
         emit_progress("persisting", "Saving 4K artifact")
@@ -2705,6 +4123,7 @@ def build_upscaled_post_production_from_clean_master(
             "source_audio_preserved": _has_audio_stream(upscaled_path),
             "source_variant": "clean",
             "source_video_path": str(source_path),
+            "scene_video_fingerprint": scene_video_fingerprint,
         }
     return {
         "final_upscaled_4k_video": payload,
@@ -2712,6 +4131,7 @@ def build_upscaled_post_production_from_clean_master(
         "subtitle_entries": [],
         "subtitle_entries_by_language": {},
         "title_overlay_by_language": {},
+        "subtitle_overlay_by_language": {},
         "series_overlay_by_language": {},
         "speech_budget_by_language": {},
         "original_audio_preserved_by_language": {},
@@ -2772,7 +4192,12 @@ def subtitle_entries_fingerprint(entries: list[dict[str, Any]]) -> str:
                 "language": str(entry.get("language") or "").strip().lower(),
                 "candidate_id": str(entry.get("candidate_id") or ""),
                 "text": str(entry.get("text") or ""),
+                "start_sec": round(float(entry.get("start_sec") or 0.0), 4),
+                "end_sec": round(float(entry.get("end_sec") or 0.0), 4),
                 "speed_coef": round(float(entry.get("speed_coef") or 0.0), 4),
+                "fixed_block_words": [str(word) for word in entry.get("fixed_block_words") or []],
+                "visible_word_count": int(entry.get("visible_word_count") or 0),
+                "story_style_version": str(entry.get("story_style_version") or ""),
             }
         )
     raw = json.dumps(normalized, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
@@ -2802,6 +4227,7 @@ def build_subtitled_post_production_from_upscaled_master(
     project_slug: str | None = None,
     progress_callback: Any | None = None,
     use_candidate_subtitle_snapshot: bool = True,
+    include_background_music: bool = True,
 ) -> dict[str, Any]:
     ffmpeg = _resolve_ffmpeg()
     if not ffmpeg:
@@ -2828,12 +4254,15 @@ def build_subtitled_post_production_from_upscaled_master(
             logger.exception("post_production.progress_callback_failed language=%s stage=%s", lang, stage)
 
     source_w, source_h = _video_dimensions(source_path)
-    music_path, music_volume = _resolve_music_path(project_slug)
+    music_path, music_volume = (
+        _resolve_music_path(project_slug) if include_background_music else (None, 0.0)
+    )
     subtitle_entries = _subtitle_entries_for_language_from_plan(
         scenes,
         lang,
         use_candidate_subtitle_snapshot=use_candidate_subtitle_snapshot,
     )
+    scene_video_fingerprint = selected_scene_video_fingerprint_for_language(scenes, lang)
     subtitle_fingerprint = subtitle_entries_fingerprint(subtitle_entries)
     subtitle_cues: list[dict[str, Any]] = []
     for item in subtitle_entries:
@@ -2851,7 +4280,10 @@ def build_subtitled_post_production_from_upscaled_master(
             video_height=source_h,
         )
         subtitled_path = tmp_path / f"final_subtitled_music_master_{lang}.mp4"
-        emit_progress("subtitles_building", "Rendering subtitles and music")
+        emit_progress(
+            "subtitles_building",
+            "Rendering subtitles and music" if music_path else "Rendering subtitles without background music",
+        )
         source_audio_preserved = _render_subtitled_music_master(
             ffmpeg=ffmpeg,
             clean_path=source_path,
@@ -2860,7 +4292,10 @@ def build_subtitled_post_production_from_upscaled_master(
             music_volume=music_volume,
             dest_path=subtitled_path,
         )
-        emit_progress("subtitles_ready", "Subtitled/music master ready")
+        emit_progress(
+            "subtitles_ready",
+            "Subtitled/music master ready" if music_path else "Subtitled master without background music ready",
+        )
         subtitled_w, subtitled_h = _video_dimensions(subtitled_path)
         emit_progress("persisting", "Saving subtitled/music artifact")
         subtitled_artifact_path = _persist_render_artifact(
@@ -2875,10 +4310,12 @@ def build_subtitled_post_production_from_upscaled_master(
             "height": subtitled_h,
             "music_asset_uri": music_path,
             "music_volume": music_volume,
+            "background_music_included": bool(music_path),
             "source_audio_preserved": bool(source_audio_preserved),
             "source_variant": "upscaled_4k",
             "source_video_path": str(source_path),
             "subtitle_fingerprint": subtitle_fingerprint,
+            "scene_video_fingerprint": scene_video_fingerprint,
         }
     return {
         "final_subtitled_music_video": payload,
@@ -2887,10 +4324,12 @@ def build_subtitled_post_production_from_upscaled_master(
         "subtitle_entries_by_language": {lang: subtitle_entries},
         "subtitle_fingerprint_by_language": {lang: subtitle_fingerprint},
         "title_overlay_by_language": {},
+        "subtitle_overlay_by_language": {},
         "series_overlay_by_language": {},
         "speech_budget_by_language": {},
         "original_audio_preserved_by_language": {lang: bool(source_audio_preserved)},
         "music_asset_uri": music_path,
+        "background_music_included": bool(music_path),
         "languages": [lang],
         "artifact_bundle_key": artifact_bundle_key,
     }
@@ -2919,6 +4358,7 @@ def build_titled_post_production_from_subtitled_master(
     language: str,
     project_slug: str | None = None,
     overlay_title_by_lang: dict[str, Any] | None = None,
+    overlay_subtitle_by_lang: dict[str, Any] | None = None,
     overlay_title_style: dict[str, Any] | None = None,
     overlay_series_title_by_lang: dict[str, Any] | None = None,
     overlay_series_counter_by_lang: dict[str, Any] | None = None,
@@ -2940,6 +4380,7 @@ def build_titled_post_production_from_subtitled_master(
         lang,
         use_candidate_subtitle_snapshot=use_candidate_subtitle_snapshot,
     )
+    scene_video_fingerprint = selected_scene_video_fingerprint_for_language(scenes, lang)
     title_duration = _estimated_title_duration_for_language(scenes, lang, source_duration)
     title_cue = _build_title_overlay_cue(
         overlay_title_by_lang,
@@ -2952,7 +4393,12 @@ def build_titled_post_production_from_subtitled_master(
         language=lang,
         duration_sec=title_duration,
     )
-    title_cues = [cue for cue in (series_cue, title_cue) if cue]
+    subtitle_cue = _build_title_subtitle_overlay_cue(
+        overlay_subtitle_by_lang,
+        language=lang,
+        duration_sec=title_duration,
+    )
+    title_cues = [cue for cue in (series_cue, title_cue, subtitle_cue) if cue]
     if not title_cues:
         raise RuntimeError("No title overlay text is available for titled final render.")
 
@@ -3018,6 +4464,7 @@ def build_titled_post_production_from_subtitled_master(
             "source_variant": "subtitled_music",
             "source_video_path": str(source_path),
             "subtitle_fingerprint": subtitle_fingerprint,
+            "scene_video_fingerprint": scene_video_fingerprint,
         }
 
     title_overlay_by_language = {}
@@ -3035,6 +4482,13 @@ def build_titled_post_production_from_subtitled_master(
             "start_sec": float(series_cue.get("start_sec") or 0.0),
             "end_sec": float(series_cue.get("end_sec") or 0.0),
         }
+    subtitle_overlay_by_language = {}
+    if subtitle_cue:
+        subtitle_overlay_by_language[lang] = {
+            "subtitle": str(subtitle_cue.get("text") or ""),
+            "start_sec": float(subtitle_cue.get("start_sec") or 0.0),
+            "end_sec": float(subtitle_cue.get("end_sec") or 0.0),
+        }
     return {
         "final_titled_subtitled_music_video": payload,
         "renders_by_language": {lang: {"titled_subtitled_music": payload}},
@@ -3042,6 +4496,7 @@ def build_titled_post_production_from_subtitled_master(
         "subtitle_entries_by_language": {},
         "subtitle_fingerprint_by_language": {lang: subtitle_fingerprint},
         "title_overlay_by_language": title_overlay_by_language,
+        "subtitle_overlay_by_language": subtitle_overlay_by_language,
         "series_overlay_by_language": series_overlay_by_language,
         "title_overlay_style": dict(overlay_title_style or {}),
         "speech_budget_by_language": {},

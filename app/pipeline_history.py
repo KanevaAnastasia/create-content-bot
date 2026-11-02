@@ -22,6 +22,7 @@ from .constants import (
 )
 from .db import SessionLocal
 from .models import PipelineStepCheckpoint
+from .generation_store import SCENE_PROMPT_JSON_KEYS, SCENE_PROMPT_TEXT_KEYS
 from .session_store import _deserialize_value, _serialize_value, save_session_if_possible
 
 logger = logging.getLogger("bot.history")
@@ -352,3 +353,81 @@ def restore_previous_checkpoint(chat_id: int | None, session: dict[str, Any] | N
     except Exception:
         logger.exception("checkpoint.restore_failed chat_id=%s", chat_id)
         return None
+
+
+def restore_scene_prompt_fields_from_history(
+    chat_id: int | None,
+    session: dict[str, Any] | None,
+    scene_index: int,
+    *,
+    limit: int = 40,
+) -> bool:
+    """Restore missing non-media prompt fields for a scene from recent checkpoints."""
+    if chat_id is None or not isinstance(session, dict):
+        return False
+    production = session.get("production")
+    scenes = production.get("json_plan") if isinstance(production, dict) else None
+    if not isinstance(scenes, list) or not (0 <= scene_index < len(scenes)):
+        return False
+    scene = scenes[scene_index]
+    if not isinstance(scene, dict):
+        return False
+
+    missing_text_keys = [
+        key
+        for key in (*SCENE_PROMPT_TEXT_KEYS, "video_prompt")
+        if not str(scene.get(key) or "").strip()
+    ]
+    missing_json_keys = [
+        key
+        for key in (*SCENE_PROMPT_JSON_KEYS, "speech_cues_by_lang", "speech_plan_by_lang")
+        if not isinstance(scene.get(key), dict) or not scene.get(key)
+    ]
+    if not missing_text_keys and not missing_json_keys:
+        return False
+
+    changed = False
+    try:
+        run_id = _generation_run_uuid(session)
+        with SessionLocal() as db:
+            stmt = (
+                select(PipelineStepCheckpoint)
+                .where(PipelineStepCheckpoint.chat_id == int(chat_id))
+                .where(PipelineStepCheckpoint.restored_at.is_(None))
+            )
+            if run_id is not None:
+                stmt = stmt.where(PipelineStepCheckpoint.generation_run_id == run_id)
+            rows = (
+                db.execute(stmt.order_by(PipelineStepCheckpoint.created_at.desc(), PipelineStepCheckpoint.id.desc()).limit(max(1, int(limit))))
+                .scalars()
+                .all()
+            )
+        for row in rows:
+            snapshot = _deserialize_value(dict(row.session_snapshot_json or {}))
+            production_snapshot = snapshot.get("production") if isinstance(snapshot, dict) else None
+            snapshot_scenes = production_snapshot.get("json_plan") if isinstance(production_snapshot, dict) else None
+            if not isinstance(snapshot_scenes, list) or not (0 <= scene_index < len(snapshot_scenes)):
+                continue
+            snapshot_scene = snapshot_scenes[scene_index]
+            if not isinstance(snapshot_scene, dict):
+                continue
+            for key in list(missing_text_keys):
+                value = snapshot_scene.get(key)
+                if isinstance(value, str) and value.strip():
+                    scene[key] = value
+                    missing_text_keys.remove(key)
+                    changed = True
+            for key in list(missing_json_keys):
+                value = snapshot_scene.get(key)
+                if isinstance(value, dict) and value:
+                    scene[key] = copy.deepcopy(value)
+                    missing_json_keys.remove(key)
+                    changed = True
+            if not missing_text_keys and not missing_json_keys:
+                break
+        if changed:
+            save_session_if_possible(int(chat_id), session)
+        return changed
+    except Exception:
+        logger.exception("checkpoint.restore_scene_prompt_fields_failed chat_id=%s scene_index=%s", chat_id, scene_index)
+        return False

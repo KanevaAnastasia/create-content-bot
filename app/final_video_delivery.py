@@ -31,6 +31,7 @@ FINAL_VIDEO_ARTIFACT_TYPES = {
 FINAL_BUILD_STATUS_ARTIFACT_TYPE = "final_build_status"
 FINAL_PUBLICATION_READY_VARIANT = "titled_subtitled_music"
 FINAL_SOCIAL_DESCRIPTIONS_TRIGGER_KEY = "final_social_descriptions_triggered_at"
+GUEST_FINAL_REVIEW_TRIGGER_KEY = "final_review_prompted_run_id"
 TELEGRAM_CLOUD_UPLOAD_LIMIT_BYTES = 49 * 1024 * 1024
 TELEGRAM_DELIVERY_ARTIFACT_DIR = Path(__file__).resolve().parents[1] / "artifacts" / "telegram_delivery"
 
@@ -259,6 +260,98 @@ def _draft_session_for_run(db, run_uuid: uuid.UUID) -> dict[str, Any] | None:
     return dict(snapshot)
 
 
+def _guest_final_artifacts_delivered(run_uuid: uuid.UUID) -> bool:
+    required = {("ru", "clean"), ("ru", "upscaled_4k")}
+    with SessionLocal() as db:
+        status_rows = (
+            db.execute(
+                select(GenerationArtifact)
+                .where(
+                    GenerationArtifact.run_id == run_uuid,
+                    GenerationArtifact.artifact_type == FINAL_BUILD_STATUS_ARTIFACT_TYPE,
+                )
+                .order_by(GenerationArtifact.created_at.desc())
+            )
+            .scalars()
+            .all()
+        )
+        final_rows = (
+            db.execute(
+                select(GenerationArtifact).where(
+                    GenerationArtifact.run_id == run_uuid,
+                    GenerationArtifact.artifact_type.in_({"final_clean", "final_upscaled_4k"}),
+                )
+            )
+            .scalars()
+            .all()
+        )
+    artifacts_by_id = {str(row.id): row for row in final_rows}
+    latest_statuses: dict[tuple[str, str], dict[str, Any]] = {}
+    for row in status_rows:
+        payload = row.payload_json if isinstance(row.payload_json, dict) else {}
+        key = (
+            str(payload.get("language") or row.language or "").strip().lower(),
+            str(payload.get("variant") or "").strip(),
+        )
+        if key in required:
+            latest_statuses.setdefault(key, dict(payload))
+    if set(latest_statuses) != required:
+        return False
+    for payload in latest_statuses.values():
+        if str(payload.get("status") or "").strip().lower() != "success":
+            return False
+        artifact = artifacts_by_id.get(str(payload.get("artifact_id") or ""))
+        artifact_payload = artifact.payload_json if artifact is not None and isinstance(artifact.payload_json, dict) else {}
+        delivery = artifact_payload.get(FINAL_DELIVERY_KEY) if isinstance(artifact_payload, dict) else None
+        if not isinstance(delivery, dict) or str(delivery.get("status") or "").strip().lower() != "sent":
+            return False
+    return True
+
+
+def _trigger_guest_final_review_if_ready(run_id: str | uuid.UUID, chat_id: int) -> bool:
+    run_uuid = uuid.UUID(str(run_id))
+    with SessionLocal() as db:
+        chat_session = _chat_session_for_run(db, run_uuid)
+        raw_session = dict(chat_session.session_json or {}) if chat_session is not None else {}
+    if not bool(raw_session.get("guest_mode")):
+        return False
+    if not _guest_final_artifacts_delivered(run_uuid):
+        return True
+
+    from .guest_handlers import STATE_CARTOON_FINAL_REVIEW, guest_final_review_markup
+    from .session_store import load_session_if_possible, save_session_if_possible
+
+    session = load_session_if_possible(chat_id)
+    if not isinstance(session, dict) or str(session.get("generation_run_id") or "") != str(run_uuid):
+        return True
+    data = session.get("guest_data")
+    if not isinstance(data, dict):
+        data = {}
+        session["guest_data"] = data
+    already_prompted = str(data.get(GUEST_FINAL_REVIEW_TRIGGER_KEY) or "") == str(run_uuid)
+    session["state"] = STATE_CARTOON_FINAL_REVIEW
+    save_session_if_possible(chat_id, session)
+    if already_prompted:
+        return True
+
+    token = os.getenv(TOKEN_ENV_NAME, "").strip()
+    if not token:
+        return True
+    try:
+        message = _FinalDeliveryMessage(token=token, chat_id=chat_id)
+        asyncio.run(
+            message.reply_text(
+                "Итоговый мультфильм готов. Всё устраивает или нужно исправить сцены?",
+                reply_markup=guest_final_review_markup(),
+            )
+        )
+        data[GUEST_FINAL_REVIEW_TRIGGER_KEY] = str(run_uuid)
+        save_session_if_possible(chat_id, session)
+    except Exception:
+        logger.exception("guest final review prompt failed run=%s chat=%s", run_uuid, chat_id)
+    return True
+
+
 def _telegram_chunks(text: str, *, limit: int = 3900) -> list[str]:
     body = str(text or "").strip()
     if not body:
@@ -317,12 +410,49 @@ class _FinalDeliveryMessage:
         return sent
 
 
+def final_builds_settled(run_id: str | uuid.UUID) -> bool:
+    """Return true once every queued final-build track reached a terminal state.
+
+    Publication copy is independent from rendering and Telegram video delivery.  It
+    should wait until the batch is finished (so it is sent once), but a failed
+    render or delivery must not suppress it.
+    """
+    run_uuid = uuid.UUID(str(run_id))
+    with SessionLocal() as db:
+        rows = (
+            db.execute(
+                select(GenerationArtifact)
+                .where(
+                    GenerationArtifact.run_id == run_uuid,
+                    GenerationArtifact.artifact_type == FINAL_BUILD_STATUS_ARTIFACT_TYPE,
+                )
+                .order_by(GenerationArtifact.created_at.desc())
+            )
+            .scalars()
+            .all()
+        )
+    latest: dict[tuple[str, str], str] = {}
+    for row in rows:
+        payload = row.payload_json if isinstance(row.payload_json, dict) else {}
+        key = (
+            str(payload.get("language") or row.language or "").strip().lower(),
+            str(payload.get("variant") or "").strip(),
+        )
+        if not all(key) or key in latest:
+            continue
+        latest[key] = str(payload.get("status") or "").strip().lower()
+    if not latest:
+        # Compatibility for older runs created before per-track status artifacts.
+        return all_final_artifacts_delivered(run_uuid)
+    return all(status in {"success", "failed"} for status in latest.values())
+
+
 def _trigger_final_social_descriptions_if_ready(run_id: str | uuid.UUID, chat_id: int) -> None:
     token = os.getenv(TOKEN_ENV_NAME, "").strip()
     if not token:
         return
     run_uuid = uuid.UUID(str(run_id))
-    if not all_final_artifacts_delivered(run_uuid):
+    if not final_builds_settled(run_uuid):
         return
 
     from types import SimpleNamespace
@@ -340,7 +470,24 @@ def _trigger_final_social_descriptions_if_ready(run_id: str | uuid.UUID, chat_id
                 session = _draft_session_for_run(db, run_uuid)
         if not isinstance(session, dict):
             loaded = load_session_if_possible(int(chat_id)) or {}
-            session = loaded if isinstance(loaded, dict) else None
+            if not isinstance(loaded, dict):
+                return
+            # ``chat_id`` can be the configured admin fallback for an archived
+            # run which no longer owns a ChatSession or a GenerationDraft.  In
+            # that case the admin may already be working on another run.  Do
+            # not relabel and save that unrelated live session as the completed
+            # run: save_session() would also persist its scene plan over the
+            # archived run's scenes.
+            if str(loaded.get("generation_run_id") or "").strip() != str(run_uuid):
+                logger.warning(
+                    "final social descriptions skipped: chat session belongs to another run "
+                    "target_run=%s chat=%s session_run=%s",
+                    run_uuid,
+                    chat_id,
+                    loaded.get("generation_run_id"),
+                )
+                return
+            session = loaded
         if not isinstance(session, dict):
             return
         from .handlers.handlers_state_media import (
@@ -376,6 +523,17 @@ def _trigger_final_social_descriptions_if_ready(run_id: str | uuid.UUID, chat_id
         logger.exception("final social descriptions trigger failed run=%s chat=%s", run_id, chat_id)
 
 
+def trigger_final_completion_followup(run_id: str | uuid.UUID) -> None:
+    """Send the post-build prompt even when one or more video tracks failed."""
+    run_uuid = uuid.UUID(str(run_id))
+    with SessionLocal() as db:
+        chat_id = _chat_id_for_run(db, run_uuid)
+    if chat_id is None:
+        return
+    if not _trigger_guest_final_review_if_ready(run_uuid, chat_id):
+        _trigger_final_social_descriptions_if_ready(run_uuid, chat_id)
+
+
 def deliver_final_artifact_to_telegram(
     run_id: str | uuid.UUID,
     artifact_id: str | uuid.UUID,
@@ -399,7 +557,8 @@ def deliver_final_artifact_to_telegram(
         delivery = dict(payload.get(FINAL_DELIVERY_KEY) or {})
         if str(delivery.get("status") or "").strip().lower() == "sent" and delivery.get("telegram_message_id"):
             if chat_id is not None:
-                _trigger_final_social_descriptions_if_ready(run_uuid, chat_id)
+                if not _trigger_guest_final_review_if_ready(run_uuid, chat_id):
+                    _trigger_final_social_descriptions_if_ready(run_uuid, chat_id)
             return delivery
         attempt_count = int(delivery.get("attempt_count") or 0)
 
@@ -462,7 +621,8 @@ def deliver_final_artifact_to_telegram(
                     payload[FINAL_DELIVERY_KEY] = sent
                     artifact.payload_json = payload
                     db.commit()
-            _trigger_final_social_descriptions_if_ready(run_uuid, chat_id)
+            if not _trigger_guest_final_review_if_ready(run_uuid, chat_id):
+                _trigger_final_social_descriptions_if_ready(run_uuid, chat_id)
             return sent
         except Exception as exc:
             last_error = str(exc)
@@ -522,31 +682,39 @@ def all_final_artifacts_delivered(run_id: str | uuid.UUID) -> bool:
         if not language or not variant:
             continue
         latest_statuses_by_track.setdefault((language, variant), dict(payload))
+
+    def track_artifact_for_status(language: str, variant: str, status: dict[str, Any]) -> GenerationArtifact | None:
+        artifact = None
+        artifact_id = str(status.get("artifact_id") or "").strip()
+        if artifact_id:
+            artifact = artifact_rows_by_id.get(artifact_id)
+        if artifact is None:
+            artifact = latest_rows_by_track.get((language, f"final_{variant}"))
+        return artifact
+
+    def artifact_was_sent(artifact: GenerationArtifact | None) -> bool:
+        if artifact is None:
+            return False
+        payload = artifact.payload_json if isinstance(artifact.payload_json, dict) else {}
+        delivery = payload.get(FINAL_DELIVERY_KEY) if isinstance(payload, dict) else None
+        return isinstance(delivery, dict) and str(delivery.get("status") or "").strip().lower() == "sent"
+
     if latest_statuses_by_track:
         if not any(variant == FINAL_PUBLICATION_READY_VARIANT for _language, variant in latest_statuses_by_track):
             return False
         for (language, variant), status in latest_statuses_by_track.items():
+            artifact = track_artifact_for_status(language, variant, status)
+            if artifact_was_sent(artifact):
+                continue
             if str(status.get("status") or "").strip().lower() != "success":
                 return False
-            artifact = None
-            artifact_id = str(status.get("artifact_id") or "").strip()
-            if artifact_id:
-                artifact = artifact_rows_by_id.get(artifact_id)
-            if artifact is None:
-                artifact = latest_rows_by_track.get((language, f"final_{variant}"))
-            if artifact is None:
-                return False
-            payload = artifact.payload_json if isinstance(artifact.payload_json, dict) else {}
-            delivery = payload.get(FINAL_DELIVERY_KEY) if isinstance(payload, dict) else None
-            if not isinstance(delivery, dict) or str(delivery.get("status") or "").strip().lower() != "sent":
+            if not artifact_was_sent(artifact):
                 return False
         return True
     latest_rows = list(latest_rows_by_track.values())
     if not latest_rows:
         return False
     for row in latest_rows:
-        payload = row.payload_json if isinstance(row.payload_json, dict) else {}
-        delivery = payload.get(FINAL_DELIVERY_KEY) if isinstance(payload, dict) else None
-        if not isinstance(delivery, dict) or str(delivery.get("status") or "").strip().lower() != "sent":
+        if not artifact_was_sent(row):
             return False
     return True

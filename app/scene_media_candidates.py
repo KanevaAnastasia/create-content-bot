@@ -3,14 +3,17 @@
 from __future__ import annotations
 
 import base64
+import re
 import uuid
 from datetime import datetime, UTC
 from typing import Any
 
 from .media_file_store import read_media_uri_bytes
 
-DEFAULT_SCENE_VIDEO_SPEED_COEF = 1.2
+DEFAULT_SCENE_VIDEO_SPEED_COEF = 1.0
+DEFAULT_VEO_SCENE_VIDEO_SPEED_COEF = 1.1
 SCENE_MEDIA_MESSAGE_INDEX_KEY = "scene_media_message_index"
+CYRILLIC_CHAR_RE = re.compile(r"[А-Яа-яЁё]")
 
 
 def _utc_now_iso() -> str:
@@ -33,6 +36,21 @@ def _decode_b64(data: str | None) -> bytes | None:
 
 def _new_candidate_id() -> str:
     return uuid.uuid4().hex
+
+
+def default_scene_video_speed_coef(scene: dict[str, Any] | None) -> float:
+    if not isinstance(scene, dict):
+        return DEFAULT_SCENE_VIDEO_SPEED_COEF
+    model = str(
+        scene.get("model")
+        or scene.get("video_model")
+        or scene.get("video_provider")
+        or scene.get("provider")
+        or ""
+    ).strip().lower()
+    if model.startswith("veo"):
+        return DEFAULT_VEO_SCENE_VIDEO_SPEED_COEF
+    return DEFAULT_SCENE_VIDEO_SPEED_COEF
 
 
 def _ensure_image_candidates(scene: dict[str, Any]) -> list[dict[str, Any]]:
@@ -105,7 +123,7 @@ def _legacy_video_candidate(scene: dict[str, Any], language: str) -> dict[str, A
         "created_at": "",
         "liked": False,
         "approved_for_production": approved,
-        "speed_coef": DEFAULT_SCENE_VIDEO_SPEED_COEF,
+        "speed_coef": default_scene_video_speed_coef(scene),
         "source_image_candidate_id": None,
     }
 
@@ -144,7 +162,7 @@ def register_video_candidate(
         "created_at": _utc_now_iso(),
         "liked": False,
         "approved_for_production": False,
-        "speed_coef": float(speed_coef or DEFAULT_SCENE_VIDEO_SPEED_COEF),
+        "speed_coef": float(speed_coef if speed_coef is not None else default_scene_video_speed_coef(scene)),
         "source_image_candidate_id": source_image_candidate_id,
     }
     mapping = _ensure_video_candidates(scene)
@@ -208,7 +226,11 @@ def resolve_latest_approved_scene_video_for_final_build(
     mapping = _ensure_video_candidates(scene)
     bucket = mapping.get(lang)
     candidates = [item for item in bucket if isinstance(item, dict)] if isinstance(bucket, list) else []
-    approved = [item for item in candidates if bool(item.get("approved_for_production"))]
+    approved = [
+        item
+        for item in candidates
+        if bool(item.get("approved_for_production")) and _candidate_matches_final_build_language(item, lang)
+    ]
     if approved:
         return approved[-1]
     legacy = _legacy_video_candidate(scene, lang)
@@ -244,6 +266,82 @@ def find_video_candidate(scene: dict[str, Any], language: str, candidate_id: str
     return None
 
 
+def _speech_text_from_prompt(prompt: Any) -> str:
+    raw = str(prompt or "")
+    terminator_re = re.compile(
+        r"(?is)\s+(?="
+        r"(?:voice_lock(?:_[a-z0-9]+)*|speech_timing_plan|veo3_framing|framing)\s*:"
+        r"|\b(?:natural-fast spoken delivery|render this video|never use horizontal landscape framing)\b"
+        r")"
+    )
+    match = re.search(r"(?is)\bCHARACTERS\s+SPEAKS:\s*", raw)
+    direct = ""
+    if match:
+        tail = raw[match.end() :]
+        terminator = terminator_re.search(tail)
+        newline_at = tail.find("\n")
+        stop_at = len(tail)
+        if terminator is not None:
+            stop_at = min(stop_at, terminator.start())
+        if newline_at >= 0:
+            stop_at = min(stop_at, newline_at)
+        direct = " ".join(tail[:stop_at].split())
+    if direct:
+        return direct
+    parts: list[str] = []
+    collecting = False
+    for line in raw.splitlines():
+        if re.search(r"(?i)\bspeech_timing_plan\s*:", line):
+            collecting = True
+            tail = re.sub(r"(?is)^.*?\bspeech_timing_plan\s*:\s*", "", line).strip()
+            terminator = terminator_re.search(tail)
+            if terminator is not None:
+                tail = tail[: terminator.start()].strip()
+            if tail:
+                parts.append(tail)
+            continue
+        if not collecting:
+            continue
+        stripped = line.strip()
+        if not stripped:
+            continue
+        if not stripped.startswith("-"):
+            break
+        text = re.sub(
+            r"^\s*-\s*(?:\d+(?:[\.,]\d+)?\s*-\s*\d+(?:[\.,]\d+)?s?\s*:\s*)?",
+            "",
+            stripped,
+        ).strip()
+        terminator = terminator_re.search(text)
+        if terminator is not None:
+            text = text[: terminator.start()].strip()
+        if text:
+            parts.append(text)
+    return " ".join(" ".join(parts).split())
+
+
+def _candidate_language_snapshot_text(candidate: dict[str, Any], language: str) -> str:
+    lang = str(language or "").strip().lower()
+    parts: list[str] = []
+    speech_map = candidate.get("speech_by_lang")
+    if isinstance(speech_map, dict) and str(speech_map.get(lang) or "").strip():
+        parts.append(str(speech_map.get(lang) or "").strip())
+    prompt_map = candidate.get("video_prompt_by_lang")
+    if isinstance(prompt_map, dict):
+        from_prompt = _speech_text_from_prompt(prompt_map.get(lang))
+        if from_prompt:
+            parts.append(from_prompt)
+    return " ".join(parts).strip()
+
+
+def _candidate_matches_final_build_language(candidate: dict[str, Any], language: str) -> bool:
+    lang = str(language or "").strip().lower()
+    if lang != "ru":
+        return True
+    text = _candidate_language_snapshot_text(candidate, lang)
+    return not text or bool(CYRILLIC_CHAR_RE.search(text))
+
+
 def mark_image_candidate_approved(scene: dict[str, Any], candidate_id: str | None) -> dict[str, Any] | None:
     if not candidate_id:
         return None
@@ -269,7 +367,7 @@ def mark_video_candidate_approved(
     if speed_coef is not None:
         candidate["speed_coef"] = float(speed_coef)
     else:
-        candidate["speed_coef"] = float(candidate.get("speed_coef") or DEFAULT_SCENE_VIDEO_SPEED_COEF)
+        candidate["speed_coef"] = float(candidate.get("speed_coef") or default_scene_video_speed_coef(scene))
     return candidate
 
 

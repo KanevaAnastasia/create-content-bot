@@ -2,9 +2,11 @@ import os
 from pathlib import Path
 
 import pytest
+from vertexai.generative_models import GenerationConfig as RealGenerationConfig
 
 from app.vertex_images import (
     LATEST_IMAGE_GENERATION_MODEL,
+    _enforce_aspect_ratio_prompt,
     _coerce_reference_images,
     _enforce_vertical_9_16_prompt,
     _image_size,
@@ -13,6 +15,7 @@ from app.vertex_images import (
     next_image_generation_model,
     primary_image_generation_model,
 )
+from app.media_file_store import image_file_extension, image_mime_type
 
 
 def test_enforce_vertical_prompt_and_russian_labels():
@@ -21,9 +24,42 @@ def test_enforce_vertical_prompt_and_russian_labels():
     assert "все надписи на русском" in out.lower()
 
 
+def test_enforce_vertical_prompt_forbids_sideways_content_even_when_ratio_is_already_present():
+    out = _enforce_vertical_9_16_prompt("Strict vertical 9:16 frame with five scientists")
+
+    assert "UPRIGHT PORTRAIT ORIENTATION IS MANDATORY" in out
+    assert "Never rotate or tilt the artwork 90 degrees" in out
+    assert "heads are above bodies" in out
+
+
+def test_enforce_horizontal_prompt_for_long_mode():
+    out = _enforce_aspect_ratio_prompt("A cooking scene with old aspect ratio 9:16", "16:9")
+    assert "Horizontal composition" in out
+    assert "aspect ratio 16:9" in out
+    assert "все надписи на русском" in out.lower()
+
+
+def test_vertex_transport_does_not_add_project_specific_interior():
+    out = _enforce_aspect_ratio_prompt("Девочка стоит в школьном коридоре", "9:16")
+
+    assert "CRT television" not in out
+    assert "lace tablecloth" not in out
+    assert "Soviet family home" not in out
+
+
 def test_coerce_reference_images_priority():
     assert _coerce_reference_images(b"a", None) == [b"a"]
     assert _coerce_reference_images(None, [b"a", b"", b"b"]) == [b"a", b"b"]
+
+
+def test_image_type_is_detected_from_bytes_not_file_suffix():
+    jpeg = b"\xff\xd8\xff\xe0jpeg-payload"
+    png = b"\x89PNG\r\n\x1a\npng-payload"
+
+    assert image_mime_type(jpeg) == "image/jpeg"
+    assert image_file_extension(jpeg) == "jpg"
+    assert image_mime_type(png) == "image/png"
+    assert image_file_extension(png) == "png"
 
 
 def test_response_excerpt_omits_inline_binary_data():
@@ -327,6 +363,7 @@ def test_vertex_sdk_uses_gemini_image_path(monkeypatch):
     fake_gm = types.ModuleType("vertexai.generative_models")
     fake_gm.GenerativeModel = _GModel
     fake_gm.GenerationConfig = type("GenerationConfig", (), {"__init__": lambda self, **kwargs: setattr(self, "kwargs", kwargs)})
+    fake_gm.GenerationConfig.from_dict = classmethod(lambda cls, data: cls(**data))
     fake_gm.Part = type(
         "Part",
         (),
@@ -354,16 +391,19 @@ def test_vertex_sdk_uses_gemini_image_path(monkeypatch):
     monkeypatch.setenv("GOOGLE_CLOUD_PROJECT", "proj-1")
     monkeypatch.setenv("GOOGLE_CLOUD_LOCATION", "us-central1")
     monkeypatch.setenv("VERTEX_IMAGE_MODEL", "gemini-2.5-flash-image")
-    out = vertex_images._generate_image_vertex_sdk("prompt", reference_images=[b"img-ref"])
+    jpeg_ref = b"\xff\xd8\xff\xe0img-ref"
+    out = vertex_images._generate_image_vertex_sdk("prompt", reference_images=[jpeg_ref])
     assert out == b"gimg"
     assert len(captured["parts"]) == 2
-    assert captured["parts"][1] == {"data": b"img-ref", "mime_type": "image/png"}
+    assert captured["parts"][1] == {"data": jpeg_ref, "mime_type": "image/jpeg"}
     assert captured["kwargs"]["generation_config"].kwargs == {
         "response_modalities": ["IMAGE"],
+        "image_config": {"aspect_ratio": "9:16"},
     }
 
 
-def test_vertex_sdk_gemini_image_generation_config_uses_supported_kwargs(monkeypatch):
+@pytest.mark.parametrize("aspect_ratio", ["9:16", "16:9"])
+def test_vertex_sdk_gemini_image_generation_config_uses_supported_kwargs(monkeypatch, aspect_ratio):
     from app import vertex_images
 
     class _Inline:
@@ -399,11 +439,7 @@ def test_vertex_sdk_gemini_image_generation_config_uses_supported_kwargs(monkeyp
     fake_gm = types.ModuleType("vertexai.generative_models")
     fake_gm.GenerativeModel = _GModel
 
-    class _GenerationConfig:
-        def __init__(self, *, response_modalities=None):
-            self.kwargs = {"response_modalities": response_modalities}
-
-    fake_gm.GenerationConfig = _GenerationConfig
+    fake_gm.GenerationConfig = RealGenerationConfig
     fake_gm.Part = type(
         "Part",
         (),
@@ -432,10 +468,13 @@ def test_vertex_sdk_gemini_image_generation_config_uses_supported_kwargs(monkeyp
     monkeypatch.setenv("GOOGLE_CLOUD_LOCATION", "us-central1")
     monkeypatch.setenv("VERTEX_IMAGE_MODEL", "gemini-3-pro-image-preview")
 
-    out = vertex_images._generate_image_vertex_sdk("prompt", reference_images=[b"img-ref"])
+    out = vertex_images._generate_image_vertex_sdk("prompt", reference_images=[b"img-ref"], aspect_ratio=aspect_ratio)
 
     assert out == b"gimg"
-    assert captured["kwargs"]["generation_config"].kwargs == {"response_modalities": ["IMAGE"]}
+    assert captured["kwargs"]["generation_config"].to_dict() == {
+        "response_modalities": ["IMAGE"],
+        "image_config": {"aspect_ratio": aspect_ratio},
+    }
 
 
 def test_vertex_sdk_requires_project_even_with_api_key(monkeypatch):
@@ -500,7 +539,7 @@ def test_generate_image_vertex_timeout_does_not_try_next_model(monkeypatch):
     monkeypatch.setenv("IMAGE_GENERATION_PROFILE", "legacy")
     monkeypatch.setenv("VERTEX_IMAGE_MODEL", "slow-model")
     monkeypatch.setenv("VERTEX_IMAGE_MODEL_FALLBACKS", "fast-model")
-    monkeypatch.setenv("GEMINI_GENERATE_TIMEOUT_SEC", "45")
+    monkeypatch.setenv("VERTEX_IMAGE_GENERATE_TIMEOUT_SEC", "75")
     timeouts: list[float] = []
     sdk_models: list[str] = []
 
@@ -518,8 +557,27 @@ def test_generate_image_vertex_timeout_does_not_try_next_model(monkeypatch):
     with pytest.raises(RuntimeError, match="timed out"):
         vertex_images.generate_image_vertex("p")
 
-    assert timeouts == [45.0]
+    assert timeouts == [75.0]
     assert sdk_models == []
+
+
+def test_image_timeout_is_independent_from_shorter_text_timeout(monkeypatch):
+    from app import vertex_images
+
+    monkeypatch.setenv("GEMINI_GENERATE_TIMEOUT_SEC", "45")
+    monkeypatch.delenv("VERTEX_IMAGE_GENERATE_TIMEOUT_SEC", raising=False)
+
+    assert vertex_images.resolve_image_generate_timeout_sec() == 480.0
+
+
+def test_image_timeout_clamps_explicit_value(monkeypatch):
+    from app import vertex_images
+
+    monkeypatch.setenv("VERTEX_IMAGE_GENERATE_TIMEOUT_SEC", "10")
+    assert vertex_images.resolve_image_generate_timeout_sec() == 60.0
+
+    monkeypatch.setenv("VERTEX_IMAGE_GENERATE_TIMEOUT_SEC", "1200")
+    assert vertex_images.resolve_image_generate_timeout_sec() == 900.0
 
 
 def test_generate_image_vertex_retries_429_then_succeeds(monkeypatch):

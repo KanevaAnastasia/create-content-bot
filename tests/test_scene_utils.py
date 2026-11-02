@@ -45,7 +45,7 @@ def test_normalize_scenes_for_pipeline_adds_contract_fields():
     assert scenes[-1]["goal"] == "результат"
     assert all(s.get("voice_needed") is True for s in scenes)
     assert all("grandma" in s.get("characters", []) for s in scenes)
-    assert all("cat" in s.get("characters", []) for s in scenes)
+    assert not all("cat" in s.get("characters", []) for s in scenes)
 
 
 def test_normalize_scenes_for_pipeline_adds_mentions_and_continuity():
@@ -67,6 +67,31 @@ def test_normalize_scenes_for_pipeline_adds_mentions_and_continuity():
     assert first["duration_sec"] == 6
     assert "та же деревянная разделочная доска" in first["continuity_anchors"]
     assert first["continuity_state"]
+
+
+def test_normalize_scenes_for_pipeline_uses_scene_context_for_empty_speech():
+    scenes = normalize_scenes_for_pipeline(
+        [
+            {
+                "action": "Бабушка показывает готовое блюдо.",
+                "recipe_step": "Подаем сырники со сметаной.",
+                "text": "",
+            },
+            {
+                "action": "Бабушка режет лук мелкими кубиками.",
+                "text": "",
+            },
+            {
+                "action": "",
+                "text": "",
+            },
+        ]
+    )
+
+    assert scenes[0]["text"] == "Подаем сырники со сметаной."
+    assert scenes[1]["text"] == "Бабушка режет лук мелкими кубиками."
+    assert "Береги плиту" not in " ".join(scene["text"] for scene in scenes)
+    assert "Ну куда ты лезешь" not in " ".join(scene["text"] for scene in scenes)
 
 
 def test_normalize_scenes_for_pipeline_rejects_non_object_items():
@@ -127,8 +152,8 @@ def test_apply_veo3_lowercase_format_normalizes_pause_and_empty_text():
         ]
     )
 
-    assert out[0]["text"] == "привет [пауза] мир"
-    assert out[1]["text"] == "сейчас готовим вкусное блюдо"
+    assert out[0]["text"] == "привет, [пауза] мир!"
+    assert out[1]["text"] == "сейчас готовим вкусное блюдо."
     assert out[2]["text"] == "Keep, punctuation!"
 
 
@@ -165,7 +190,6 @@ def test_scenes_quality_errors_flags_basic_issues():
     }
     errs = scenes_quality_errors([bad_scene], recipe_steps=["Нарезать лук"])
     assert "scene_1: no_speech" in errs
-    assert "scene_1: no_cat" in errs
     assert "scene_1: invalid_duration_for_veo3" in errs
 
 
@@ -206,7 +230,6 @@ def test_scenes_quality_errors_flags_specific_contracts():
 
     errs = scenes_quality_errors(scenes, recipe_steps=["Лук", "Сырники", "Подача"])
 
-    assert "scene_1: no_cat" in errs
     assert "scene_1: cut_style_missing" in errs
     assert "scene_2: stove_burner_missing" in errs
     assert "scene_2: veo3_text_no_pause_token" in errs

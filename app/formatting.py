@@ -140,11 +140,18 @@ def build_human_readable_plan(scenes: list[dict[str, Any]]) -> str:
         duration = scene.get("duration_sec", 4)
         voice_needed = bool(scene.get("voice_needed")) or bool(_safe_text(scene.get("text")).strip())
         model = scene.get("model", "veo3_fast" if voice_needed else "kling")
+        is_silence = str(scene.get("generation_mode") or "").strip().lower() == "silence" or str(model).lower().startswith("kling")
         has_lipsync = bool(scene.get("has_lipsync")) or bool(scene.get("lip_sync"))
         voice_needed = bool(scene.get("voice_needed")) or bool(_safe_text(scene.get("text")).strip())
-        action = _display_text(scene.get("action") or scene.get(
+        action = _display_text(scene.get("display_action")) or _display_text(scene.get("action") or scene.get(
             "recipe_step", "Бабушка выполняет конкретный шаг рецепта, кот активно взаимодействует с ингредиентом."
         ))
+        recipe_step = _display_text(scene.get("recipe_step")) or "—"
+        sound_design = _display_text(scene.get("sound_design")) or "—"
+        silence_base_rules = _display_text(scene.get("silence_base_rules")) or (
+            "Pixar-like non-realistic cartoon style; extreme close-up food-first framing; "
+            "only grandmother and exactly one orange cartoon cat; no dialogue/subtitles/music."
+        )
         chars = scene.get("characters") if isinstance(scene.get("characters"), list) else ["grandma", "cat"]
         chars_text = format_character_short_descriptions([str(x) for x in chars]) or "бабушка, рыжий кот"
         drama_beat = _replace_character_names_with_short_descriptions(
@@ -182,6 +189,28 @@ def build_human_readable_plan(scenes: list[dict[str, Any]]) -> str:
         voice_provider = scene.get(
             "voice_provider", "native" if str(model).lower().startswith("veo3") else "elevenlabs"
         )
+        if is_silence:
+            tail_block = (
+                "Шаг рецепта:\n"
+                f"{recipe_step}\n\n"
+                "ASMR / звук:\n"
+                f"{sound_design}\n\n"
+                "Базовые правила silence:\n"
+                f"{silence_base_rules}\n\n"
+                "Озвучка: нет, silence/Kling\n\n"
+            )
+        else:
+            tail_block = (
+                "Retention:\n"
+                f"Функция: {retention_function}\n"
+                f"Микрособытия: {micro_events}\n"
+                f"Риск скучной сцены: {risk}/10\n"
+                f"Рекомендация: {suggestion}\n\n"
+                f"{first_phrase_block}"
+                f"{speech_block}"
+                f"Нужна ли озвучка: {'да' if voice_needed else 'нет'}\n\n"
+                f"Провайдер озвучки: {voice_provider}\n\n"
+            )
         blocks.append(
             f"СЦЕНА {scene_no} [{audience_type}]\n"
             f"Вид/ракурс: {shot}\n"
@@ -193,15 +222,7 @@ def build_human_readable_plan(scenes: list[dict[str, Any]]) -> str:
             f"Lip sync: {'да' if has_lipsync else 'нет'}\n\n"
             "Что происходит:\n"
             f"{action}\n\n"
-            "Retention:\n"
-            f"Функция: {retention_function}\n"
-            f"Микрособытия: {micro_events}\n"
-            f"Риск скучной сцены: {risk}/10\n"
-            f"Рекомендация: {suggestion}\n\n"
-            f"{first_phrase_block}"
-            f"{speech_block}"
-            f"Нужна ли озвучка: {'да' if voice_needed else 'нет'}\n\n"
-            f"Провайдер озвучки: {voice_provider}\n\n"
+            f"{tail_block}"
             "Почему эта модель:\n"
             f"{human_model_reason(scene)}\n\n"
             f"Примерная стоимость: {cost_label(model)}"
@@ -535,15 +556,25 @@ def format_production_bundle_for_approval(scenes: list[dict[str, Any]]) -> str:
         prompt_map = scene.get("video_prompt_by_lang") if isinstance(scene.get("video_prompt_by_lang"), dict) else {}
         video = _display_text(scene.get("video_prompt")) or "—"
         if prompt_map:
-            video = "\n".join(
-                f"[{lang}] {_display_text(prompt)}"
+            prompt_items = [
+                (str(lang), _display_text(prompt))
                 for lang, prompt in prompt_map.items()
-            )
+                if _display_text(prompt)
+            ]
+            if len(prompt_items) == 1 and str(scene.get("generation_mode") or "").strip().lower() == "silence":
+                video = prompt_items[0][1]
+            else:
+                video = "\n".join(f"[{lang}] {prompt}" for lang, prompt in prompt_items) or "—"
         speech_map = scene.get("speech_by_lang") if isinstance(scene.get("speech_by_lang"), dict) else {}
         phrase = _safe_text(scene.get("text")) or "—"
         if speech_map:
-            phrase = "\n".join(f"[{lang}] {_safe_text(text)}" for lang, text in speech_map.items())
-        action = _display_text(scene.get("action")) or "—"
+            phrase_items = [
+                f"[{lang}] {_safe_text(text)}"
+                for lang, text in speech_map.items()
+                if _safe_text(text)
+            ]
+            phrase = "\n".join(phrase_items) or "—"
+        action = _display_text(scene.get("display_action")) or _display_text(scene.get("action")) or "—"
         chars = scene.get("characters") if isinstance(scene.get("characters"), list) else []
         chars_text = format_character_short_descriptions([str(x) for x in chars]) if chars else "—"
         drama_beat = _replace_character_names_with_short_descriptions(

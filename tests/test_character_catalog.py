@@ -15,18 +15,13 @@ def test_maybe_choose_romantic_subplot_disabled():
     assert "series" in out["series_rule"].lower()
 
 
-def test_maybe_choose_romantic_subplot_uses_forty_percent_thresholds():
-    zaya_disabled = maybe_choose_romantic_subplot(random_fn=lambda: 0.40)
-    assert zaya_disabled["enabled"] is False
+def test_maybe_choose_romantic_subplot_never_auto_adds_neighbor_cats():
+    draws = iter([0.01, 0.01])
 
-    draws = iter([0.39, 0.40])
-    zaya_only = maybe_choose_romantic_subplot(random_fn=lambda: next(draws))
-    assert zaya_only["enabled"] is True
-    assert zaya_only["characters"] == ["zaya"]
+    out = maybe_choose_romantic_subplot(random_fn=lambda: next(draws))
 
-    draws = iter([0.39, 0.39])
-    with_markiz = maybe_choose_romantic_subplot(random_fn=lambda: next(draws))
-    assert with_markiz["characters"] == ["zaya", "markiz"]
+    assert out["enabled"] is False
+    assert out["characters"] == []
 
 
 def test_neighbor_cat_roles_are_encoded():
@@ -80,26 +75,12 @@ def test_sanitize_character_names_and_keys_removes_generated_aliases():
     assert "черно-белый кот" in out
 
 
-def test_maybe_choose_romantic_subplot_adds_zaya_only():
-    draws = iter([0.20, 0.85])
+def test_maybe_choose_romantic_subplot_keeps_disabled_shape():
+    draws = iter([0.05, 0.85])
 
     out = maybe_choose_romantic_subplot(random_fn=lambda: next(draws))
 
-    assert out["enabled"] is True
-    assert out["characters"] == ["zaya"]
+    assert out["enabled"] is False
+    assert out["characters"] == []
     assert out["brief"] == ""
     assert out["decision_scope"] == "episode"
-    assert out["llm_should_create_drama_case"] is True
-    assert out["zaya_timosha_arc"] == ""
-    assert "whole episode" in out["episode_rule"]
-
-
-def test_maybe_choose_romantic_subplot_can_include_markiz():
-    draws = iter([0.20, 0.05])
-
-    out = maybe_choose_romantic_subplot(random_fn=lambda: next(draws))
-
-    assert out["enabled"] is True
-    assert out["characters"] == ["zaya", "markiz"]
-    assert out["brief"] == ""
-    assert out["markiz_arc"] == ""

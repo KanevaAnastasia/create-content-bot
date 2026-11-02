@@ -3,7 +3,7 @@ from sqlalchemy.orm import sessionmaker
 
 from app import db
 from app.models import PipelineStepCheckpoint
-from app.pipeline_history import record_checkpoint, restore_previous_checkpoint
+from app.pipeline_history import record_checkpoint, restore_previous_checkpoint, restore_scene_prompt_fields_from_history
 from app.handlers.handlers_state_scene import on_text
 from app.state import SESSIONS
 
@@ -108,6 +108,71 @@ def test_checkpoint_record_omits_large_media_payloads(monkeypatch):
     assert scene["start_frame_image_b64"] is None
     assert scene["video_candidates_by_lang"] == {}
     assert row.payload_json["checkpoint_omitted_media"]["omitted_values"] >= 2
+
+
+def test_restore_scene_prompt_fields_uses_previous_non_empty_checkpoint(monkeypatch):
+    _install_sqlite(monkeypatch)
+    chat_id = 8107
+    session = {
+        "state": "waiting_scene_media",
+        "image_scene_index": 0,
+        "scene_media_substep": "start_prompt",
+        "production": {
+            "json_plan": [
+                {
+                    "scene": 1,
+                    "start_frame_prompt": "old start prompt",
+                    "video_prompt": "old legacy video prompt",
+                    "video_prompt_by_lang": {"ru": "old ru video prompt", "en": "old en video prompt"},
+                    "speech_by_lang": {"ru": "old speech"},
+                }
+            ]
+        },
+    }
+    record_checkpoint(chat_id, session)
+
+    current = {
+        "state": "waiting_scene_media",
+        "image_scene_index": 0,
+        "scene_media_substep": "video_prompt",
+        "production": {"json_plan": [{"scene": 1, "text": "same scene"}]},
+    }
+    record_checkpoint(chat_id, current)
+
+    restored = restore_scene_prompt_fields_from_history(chat_id, current, 0)
+
+    scene = current["production"]["json_plan"][0]
+    assert restored is True
+    assert scene["start_frame_prompt"] == "old start prompt"
+    assert scene["video_prompt"] == "old legacy video prompt"
+    assert scene["video_prompt_by_lang"] == {"ru": "old ru video prompt", "en": "old en video prompt"}
+    assert scene["speech_by_lang"] == {"ru": "old speech"}
+
+
+def test_restore_scene_prompt_fields_does_not_cross_generation_run(monkeypatch):
+    _install_sqlite(monkeypatch)
+    chat_id = 8108
+    other = {
+        "generation_run_id": "11111111-1111-4111-8111-111111111111",
+        "state": "waiting_scene_media",
+        "image_scene_index": 0,
+        "scene_media_substep": "video_prompt",
+        "production": {"json_plan": [{"scene": 1, "video_prompt_by_lang": {"ru": "wrong run prompt"}}]},
+    }
+    current = {
+        "generation_run_id": "22222222-2222-4222-8222-222222222222",
+        "state": "waiting_scene_media",
+        "image_scene_index": 0,
+        "scene_media_substep": "video_prompt",
+        "production": {"json_plan": [{"scene": 1, "text": "current scene"}]},
+    }
+    record_checkpoint(chat_id, other)
+    record_checkpoint(chat_id, current)
+
+    restored = restore_scene_prompt_fields_from_history(chat_id, current, 0)
+
+    assert restored is False
+    assert "video_prompt_by_lang" not in current["production"]["json_plan"][0]
 
 
 def test_previous_button_uses_deterministic_media_substep_navigation(monkeypatch):

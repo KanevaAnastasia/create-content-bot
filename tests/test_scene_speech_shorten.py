@@ -32,7 +32,7 @@ def test_has_final_subscribe_cta_accepts_veo3_form() -> None:
 def test_shorten_preserves_final_subscribe_cta(monkeypatch) -> None:
     calls: list[str] = []
 
-    def _fake_gemini(prompt: str) -> str:
+    def _fake_gemini(prompt: str, **_kwargs) -> str:
         calls.append(prompt)
         if len(calls) == 1:
             text = "всё готОво"
@@ -51,7 +51,9 @@ def test_shorten_preserves_final_subscribe_cta(monkeypatch) -> None:
     out = shorten_scene_speech_and_sync_video_prompt_sync(scene, duration_sec=6)
 
     assert out is not None
-    assert out["text"] == FINAL_SCENE_SUBSCRIBE_CTA_VEO3
-    assert out["video_prompt"].endswith(FINAL_SCENE_SUBSCRIBE_CTA_VEO3)
+    assert out["text"] == f"{FINAL_SCENE_SUBSCRIBE_CTA_VEO3}."
+    assert out["video_prompt"].endswith(f"{FINAL_SCENE_SUBSCRIBE_CTA_VEO3}.")
     assert "must_keep_final_subscribe_cta" in calls[0]
     assert RUSSIAN_YO_RULE in calls[0]
+    assert "моя бабушка" in calls[0]
+    assert "бабушка научила" in calls[0]

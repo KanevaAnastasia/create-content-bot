@@ -1,6 +1,8 @@
 import asyncio
 import base64
+import sys
 import threading
+from types import ModuleType
 
 import pytest
 from app.syntax_video_fallback import BatchFallbackRequest, FallbackResult, try_generate_via_syntax, try_generate_via_syntax_batch
@@ -16,6 +18,10 @@ def _skip_syntax_frame_resize(monkeypatch):
     import app.syntax_telethon_fallback as telethon_fallback
 
     monkeypatch.setattr(telethon_fallback, "prepare_syntax_frame_bytes", lambda data: data)
+    async def _fake_configure_settings(_client, _target, **kwargs):
+        return f"settings ok {kwargs.get('aspect_ratio')}"
+
+    monkeypatch.setattr(telethon_fallback, "_try_configure_syntax_model_settings", _fake_configure_settings)
 
 
 def _syntax_test_frame_bytes() -> bytes:
@@ -86,12 +92,216 @@ def test_prepare_long_prompt_uses_local_fallback_when_gemini_fails(monkeypatch):
     assert "CHARACTERS SPEAKS: We freeze it and insert the sticks." in shortened
 
 
+def test_prepare_empty_prompt_for_syntax_fails_before_dispatch():
+    import app.syntax_telethon_fallback as telethon_fallback
+
+    assert telethon_fallback._prepare_prompt_for_syntax("   ", max_len=2000) is None
+
+
 def test_expected_lang_token_from_prompt_finds_token_anywhere():
     import app.syntax_telethon_fallback as telethon_fallback
 
     assert telethon_fallback._expected_lang_token_from_prompt("Render lang:en scene") == "lang:en"
     assert telethon_fallback._expected_lang_token_from_prompt("Render LANG=RU scene") == "lang:ru"
     assert telethon_fallback._expected_lang_token_from_prompt("Render scene") is None
+
+
+def test_syntax_kling_submission_state_detects_started_text():
+    import app.syntax_telethon_fallback as telethon_fallback
+
+    assert telethon_fallback._syntax_kling_submission_state_from_text("Видео добавлено в очередь") == "started"
+    assert telethon_fallback._syntax_kling_submission_state_from_text("Generating video, please wait") == "started"
+
+
+def test_syntax_kling_submission_state_detects_blocked_text_first():
+    import app.syntax_telethon_fallback as telethon_fallback
+
+    assert (
+        telethon_fallback._syntax_kling_submission_state_from_text(
+            "Ошибка: недостаточно кредитов для генерации"
+        )
+        == "blocked"
+    )
+    assert telethon_fallback._syntax_kling_submission_state_from_text("Ready to generate") == ""
+
+
+def test_click_syntax_kling_generate_waits_for_livewire_submit_response(monkeypatch):
+    import app.syntax_telethon_fallback as telethon_fallback
+
+    class _Request:
+        method = "POST"
+
+    class _Response:
+        request = _Request()
+        url = "https://bot.syntx.ai/livewire/update"
+        status = 200
+
+    class _Locator:
+        def __init__(self, page):
+            self.page = page
+
+        def click(self, timeout=None):
+            _ = timeout
+            self.page.response_callback(_Response())
+            self.page.response_callback(_Response())
+
+    class _Page:
+        response_callback = lambda *_args: None
+
+        def wait_for_load_state(self, *_args, **_kwargs):
+            return None
+
+        def wait_for_timeout(self, _timeout_ms):
+            return None
+
+        def on(self, event, callback):
+            assert event == "response"
+            self.response_callback = callback
+
+        def locator(self, selector):
+            assert selector == "#btn_submit"
+            return _Locator(self)
+
+        def wait_for_timeout(self, _timeout_ms):
+            return None
+
+    monkeypatch.setattr(
+        telethon_fallback,
+        "_syntax_kling_submit_snapshot_sync",
+        lambda _page: {"text": "Настройте параметры генерации", "generateButtons": [{"disabled": False}]},
+    )
+
+    telethon_fallback._click_syntax_kling_generate_sync(_Page())
+
+
+def test_click_syntax_kling_generate_waits_past_processing_button_for_parent_response(monkeypatch):
+    import app.syntax_telethon_fallback as telethon_fallback
+
+    class _Request:
+        method = "POST"
+
+    class _Response:
+        request = _Request()
+        url = "https://bot.syntx.ai/livewire/update"
+        status = 200
+
+    class _Locator:
+        def __init__(self, page):
+            self.page = page
+
+        def click(self, timeout=None):
+            _ = timeout
+
+    class _Page:
+        response_callback = lambda *_args: None
+        waits = 0
+
+        def wait_for_load_state(self, *_args, **_kwargs):
+            return None
+
+        def on(self, event, callback):
+            assert event == "response"
+            self.response_callback = callback
+
+        def locator(self, _selector):
+            return _Locator(self)
+
+        def wait_for_timeout(self, _timeout_ms):
+            self.waits += 1
+            if self.waits == 2:
+                self.response_callback(_Response())
+                self.response_callback(_Response())
+
+    snapshots = [
+        {
+            "text": "Настройки Kling",
+            "generateButtons": [{"text": "Сгенерировать", "disabled": False}],
+        },
+        {
+            "text": "Настройки Kling",
+            "generateButtons": [{"text": "Сгенерировать Обработка...", "disabled": False}],
+        },
+    ]
+    calls = {"count": 0}
+
+    def _snapshot(_page):
+        calls["count"] += 1
+        return snapshots[0] if calls["count"] == 1 else snapshots[1]
+
+    monkeypatch.setattr(
+        telethon_fallback,
+        "_syntax_kling_submit_snapshot_sync",
+        _snapshot,
+    )
+
+    telethon_fallback._click_syntax_kling_generate_sync(_Page())
+
+
+def test_click_syntax_kling_generate_keeps_waiting_for_video_after_processing_button(monkeypatch):
+    import app.syntax_telethon_fallback as telethon_fallback
+
+    class _Locator:
+        def click(self, timeout=None):
+            _ = timeout
+
+    class _Page:
+        def wait_for_load_state(self, *_args, **_kwargs):
+            return None
+
+        def on(self, *_args, **_kwargs):
+            return None
+
+        def locator(self, _selector):
+            return _Locator()
+
+        def wait_for_timeout(self, _timeout_ms):
+            return None
+
+    snapshots = {"count": 0}
+
+    def _snapshot(_page):
+        snapshots["count"] += 1
+        button = "Сгенерировать" if snapshots["count"] == 1 else "Сгенерировать Обработка..."
+        return {
+            "text": "Настройки Kling",
+            "generateButtons": [{"text": button, "disabled": False}],
+        }
+
+    monkeypatch.setattr(telethon_fallback, "_syntax_kling_submit_snapshot_sync", _snapshot)
+    monkeypatch.setattr(telethon_fallback, "_syntax_kling_submit_confirm_timeout_sec", lambda: 0.001)
+
+    telethon_fallback._click_syntax_kling_generate_sync(_Page())
+
+
+def test_click_syntax_kling_generate_does_not_accept_static_generation_text(monkeypatch):
+    import app.syntax_telethon_fallback as telethon_fallback
+
+    class _Locator:
+        def click(self, timeout=None):
+            _ = timeout
+
+    class _Page:
+        def wait_for_load_state(self, *_args, **_kwargs):
+            return None
+
+        def on(self, *_args, **_kwargs):
+            return None
+
+        def locator(self, _selector):
+            return _Locator()
+
+        def wait_for_timeout(self, _timeout_ms):
+            return None
+
+    monkeypatch.setattr(
+        telethon_fallback,
+        "_syntax_kling_submit_snapshot_sync",
+        lambda _page: {"text": "Настройте параметры генерации", "generateButtons": [{"disabled": False}]},
+    )
+    monkeypatch.setattr(telethon_fallback, "_syntax_kling_submit_confirm_timeout_sec", lambda: 0.001)
+
+    with pytest.raises(RuntimeError, match="did not confirm generation start"):
+        telethon_fallback._click_syntax_kling_generate_sync(_Page())
 
 
 def test_prompt_failure_does_not_acquire_syntax_session(monkeypatch):
@@ -116,6 +326,30 @@ def test_prompt_failure_does_not_acquire_syntax_session(monkeypatch):
 
     assert result.success is False
     assert acquired == []
+
+
+def test_empty_prompt_does_not_acquire_syntax_session(monkeypatch):
+    import app.syntax_telethon_fallback as telethon_fallback
+
+    acquired: list[bool] = []
+    monkeypatch.setattr(
+        telethon_fallback,
+        "_acquire_syntax_session_candidate",
+        lambda _timeout: acquired.append(True),
+    )
+    monkeypatch.setenv("TELEGRAM_API_ID", "123")
+    monkeypatch.setenv("TELEGRAM_API_HASH", "hash")
+
+    result = try_generate_via_syntax(
+        prompt="   ",
+        model="veo3_fast",
+        duration_sec=6,
+        start_image=_syntax_test_frame_bytes(),
+    )
+
+    assert result.success is False
+    assert acquired == []
+    assert "Syntax prompt is empty" in result.provider_message
 
 
 def test_fallback_result_accepts_bytes_payload():
@@ -255,6 +489,7 @@ def test_try_generate_via_syntax_telethon_happy_path(monkeypatch):
         start_image=_syntax_test_frame_bytes(),
         end_image=_syntax_test_frame_bytes(),
         timeout_sec=5,
+        aspect_ratio="16:9",
     )
     assert result.success is True
     assert result.video_bytes == b"mp4-content"
@@ -321,11 +556,15 @@ def test_try_generate_via_syntax_kling_uses_configure_ui_flow(monkeypatch):
             attempt_id=str(kwargs["attempt_id"]),
         )
 
+    async def _no_configure_button(*_args, **_kwargs):
+        return None, None
+
     monkeypatch.setattr(telethon_fallback, "TelegramClient", _FakeClient)
     monkeypatch.setattr(telethon_fallback, "StringSession", lambda value: value)
     monkeypatch.setattr(telethon_fallback, "uuid4", lambda: type("_UUID", (), {"hex": "kling-attempt"})())
     monkeypatch.setattr(telethon_fallback.asyncio, "sleep", _noop_sleep)
     monkeypatch.setattr(telethon_fallback, "_run_syntax_kling_configure_flow", _fake_kling_flow)
+    monkeypatch.setattr(telethon_fallback, "_wait_for_syntax_configure_button", _no_configure_button)
     monkeypatch.setenv("TELEGRAM_API_ID", "123")
     monkeypatch.setenv("TELEGRAM_API_HASH", "hash")
     monkeypatch.setenv("TELETHON_STRING_SESSION", "session")
@@ -348,7 +587,446 @@ def test_try_generate_via_syntax_kling_uses_configure_ui_flow(monkeypatch):
     ]
     assert captured["prompt"] == "video prompt"
     assert captured["duration_sec"] == 3
+    assert captured["aspect_ratio"] == "9:16"
     assert captured["reply_anchor"] == 103
+
+
+def test_try_generate_via_syntax_kling_passes_horizontal_aspect_ratio(monkeypatch):
+    import app.syntax_telethon_fallback as telethon_fallback
+
+    class _SentMessage:
+        def __init__(self, msg_id: int):
+            self.id = msg_id
+
+    class _Entity:
+        id = 999
+
+    captured: dict[str, object] = {}
+
+    class _FakeClient:
+        def __init__(self, *_args, **_kwargs):
+            pass
+
+        async def connect(self):
+            return None
+
+        async def disconnect(self):
+            return None
+
+        async def is_user_authorized(self):
+            return True
+
+        async def get_entity(self, _username):
+            return _Entity()
+
+        async def send_message(self, _target, _text, reply_to=None):
+            assert reply_to is None
+            return _SentMessage(100)
+
+        async def send_file(self, _target, file, caption=None, force_document=False):
+            del file, caption, force_document
+            return _SentMessage(103)
+
+    async def _noop_sleep(_sec: float) -> None:
+        return None
+
+    async def _fake_kling_flow(_client, _target, **kwargs):
+        captured.update(kwargs)
+        return telethon_fallback._result(
+            success=True,
+            video_bytes=b"kling-mp4",
+            video_uri=None,
+            provider_message="kling ok",
+            attempt_id=str(kwargs["attempt_id"]),
+        )
+
+    async def _no_configure_button(*_args, **_kwargs):
+        return None, None
+
+    monkeypatch.setattr(telethon_fallback, "TelegramClient", _FakeClient)
+    monkeypatch.setattr(telethon_fallback, "StringSession", lambda value: value)
+    monkeypatch.setattr(telethon_fallback, "uuid4", lambda: type("_UUID", (), {"hex": "kling-attempt"})())
+    monkeypatch.setattr(telethon_fallback.asyncio, "sleep", _noop_sleep)
+    monkeypatch.setattr(telethon_fallback, "_run_syntax_kling_configure_flow", _fake_kling_flow)
+    monkeypatch.setattr(telethon_fallback, "_wait_for_syntax_configure_button", _no_configure_button)
+    monkeypatch.setenv("TELEGRAM_API_ID", "123")
+    monkeypatch.setenv("TELEGRAM_API_HASH", "hash")
+    monkeypatch.setenv("TELETHON_STRING_SESSION", "session")
+
+    result = try_generate_via_syntax(
+        prompt="video prompt",
+        model="kling_3_0",
+        duration_sec=3,
+        start_image=_syntax_test_frame_bytes(),
+        timeout_sec=5,
+        syntax_provider="kling",
+        aspect_ratio="16:9",
+    )
+
+    assert result.success is True
+    assert captured["aspect_ratio"] == "16:9"
+
+
+def test_set_syntax_aspect_ratio_uses_dom_fallback(monkeypatch):
+    import app.syntax_telethon_fallback as telethon_fallback
+
+    calls: list[str] = []
+
+    monkeypatch.setattr(telethon_fallback, "_try_click_syntax_option_sync", lambda *_args, **_kwargs: False)
+
+    def _dom_click(_page, ratio, **_kwargs):
+        calls.append(ratio)
+        return True
+
+    monkeypatch.setattr(telethon_fallback, "_click_syntax_ratio_by_dom_sync", _dom_click)
+    contains_calls: list[str] = []
+
+    def _contains(_page, ratio):
+        contains_calls.append(ratio)
+        if len(contains_calls) <= 2:
+            return True
+        return ratio == "16:9"
+
+    monkeypatch.setattr(telethon_fallback, "_syntax_page_contains_aspect_ratio_sync", _contains)
+
+    class _Page:
+        def wait_for_timeout(self, _ms):
+            return None
+
+    telethon_fallback._set_syntax_aspect_ratio_sync(_Page(), "16:9")
+
+    assert calls == ["16:9"]
+
+
+def test_click_syntax_option_accepts_already_selected_updated_ui():
+    import app.syntax_telethon_fallback as telethon_fallback
+
+    class _Page:
+        def evaluate(self, _script, payload=None):
+            return bool(payload and payload.get("value") == "3.0")
+
+        def get_by_label(self, _pattern):
+            raise AssertionError("already-selected option must not be clicked")
+
+        def locator(self, _selector):
+            raise AssertionError("already-selected option must not be clicked")
+
+        def get_by_text(self, _pattern):
+            raise AssertionError("already-selected option must not be clicked")
+
+    telethon_fallback._click_syntax_option_sync(_Page(), "Версия", "3.0")
+
+
+def test_set_syntax_kling_duration_uses_range_slider_for_three_seconds(monkeypatch):
+    import app.syntax_telethon_fallback as telethon_fallback
+
+    calls: list[object] = []
+
+    class _Page:
+        def evaluate(self, _script, payload):
+            calls.append(payload)
+            return payload == {"duration": 3}
+
+        def wait_for_timeout(self, timeout_ms):
+            calls.append(timeout_ms)
+
+    monkeypatch.setattr(
+        telethon_fallback,
+        "_try_click_syntax_option_sync",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("legacy select must not be used")),
+    )
+
+    selected = telethon_fallback._set_syntax_kling_duration_sync(_Page(), 3)
+
+    assert selected == 3
+    assert calls == [{"duration": 3}, 250]
+
+
+def test_set_syntax_aspect_ratio_reports_visible_controls(monkeypatch):
+    import app.syntax_telethon_fallback as telethon_fallback
+
+    monkeypatch.setattr(telethon_fallback, "_syntax_page_contains_aspect_ratio_sync", lambda _page, _ratio: False)
+    monkeypatch.setattr(telethon_fallback, "_try_click_syntax_option_sync", lambda *_args, **_kwargs: False)
+    monkeypatch.setattr(telethon_fallback, "_click_syntax_ratio_by_dom_sync", lambda *_args, **_kwargs: False)
+    monkeypatch.setattr(telethon_fallback, "_syntax_visible_controls_snapshot_sync", lambda _page: "BUTTON Generate | BUTTON 9:16")
+
+    try:
+        telethon_fallback._set_syntax_aspect_ratio_sync(object(), "16:9")
+    except RuntimeError as exc:
+        assert "Syntax aspect ratio option was not set to 16:9" in str(exc)
+        assert "BUTTON Generate" in str(exc)
+    else:
+        raise AssertionError("RuntimeError was not raised")
+
+
+def test_fill_syntax_kling_webapp_does_not_set_aspect_ratio(monkeypatch):
+    import app.syntax_telethon_fallback as telethon_fallback
+
+    calls: list[tuple[str, str]] = []
+
+    class _Fillable:
+        value = "stale prompt"
+
+        def fill(self, value, timeout=None):
+            calls.append(("fill", str(value)))
+            self.value = str(value)
+
+        def input_value(self, timeout=None):
+            return self.value
+
+        def evaluate(self, _script):
+            calls.append(("commit", "blur"))
+
+    class _Locator:
+        @property
+        def first(self):
+            return _Fillable()
+
+    class _Page:
+        def goto(self, *args, **kwargs):
+            calls.append(("goto", str(args[0])))
+
+        def wait_for_load_state(self, *args, **kwargs):
+            calls.append(("load", str(args[0])))
+
+        def wait_for_timeout(self, ms):
+            calls.append(("wait", str(ms)))
+
+        def get_by_label(self, _pattern):
+            return _Fillable()
+
+        def locator(self, _selector):
+            return _Locator()
+
+    class _Browser:
+        def new_page(self, **_kwargs):
+            return _Page()
+
+        def close(self):
+            calls.append(("close", ""))
+
+    class _Chromium:
+        def launch(self, **_kwargs):
+            return _Browser()
+
+    class _PlaywrightContext:
+        def __enter__(self):
+            return type("_Playwright", (), {"chromium": _Chromium()})()
+
+        def __exit__(self, *_args):
+            return False
+
+    sync_api = ModuleType("playwright.sync_api")
+    sync_api.sync_playwright = lambda: _PlaywrightContext()
+    package = ModuleType("playwright")
+    package.sync_api = sync_api
+    monkeypatch.setitem(sys.modules, "playwright", package)
+    monkeypatch.setitem(sys.modules, "playwright.sync_api", sync_api)
+
+    def _option(_page, label, value, **_kwargs):
+        calls.append((label, value))
+
+    monkeypatch.setattr(telethon_fallback, "_click_syntax_option_sync", _option)
+    monkeypatch.setattr(
+        telethon_fallback,
+        "_set_syntax_kling_duration_sync",
+        lambda _page, duration_sec, **_kwargs: calls.append(("Длительность", f"{duration_sec} сек")),
+    )
+    monkeypatch.setattr(
+        telethon_fallback,
+        "_set_syntax_aspect_ratio_sync",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("Kling must not set aspect ratio")),
+    )
+    monkeypatch.setattr(telethon_fallback, "_enable_syntax_audio_sync", lambda *_args, **_kwargs: calls.append(("audio", "on")))
+    monkeypatch.setattr(telethon_fallback, "_click_syntax_kling_generate_sync", lambda *_args, **_kwargs: calls.append(("generate", "")))
+    monkeypatch.setattr(telethon_fallback, "_wait_for_syntax_kling_form_ready_sync", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(
+        telethon_fallback,
+        "_upload_syntax_kling_start_frame_sync",
+        lambda _page, image, **_kwargs: calls.append(("upload", str(len(image)))),
+    )
+
+    telethon_fallback._fill_syntax_kling_webapp_sync(
+        url="https://example.invalid/kling",
+        prompt="prompt",
+        start_image=b"\x89PNG\r\n\x1a\nframe",
+        duration_sec=3,
+        quality="720",
+        aspect_ratio="16:9",
+        version="3.0",
+        audio_enabled=True,
+        timeout_sec=5,
+    )
+
+    assert ("Версия", "3.0") in calls
+    assert ("upload", "13") in calls
+    assert ("fill", "prompt") in calls
+    assert ("commit", "blur") in calls
+    assert ("Качество", "720") in calls
+    assert ("Длительность", "3 сек") in calls
+    assert ("audio", "on") in calls
+    assert ("generate", "") in calls
+
+
+def test_fill_syntax_kling_webapp_retries_navigation_in_fresh_page(monkeypatch):
+    import app.syntax_telethon_fallback as telethon_fallback
+
+    calls: list[str] = []
+
+    class _Page:
+        def __init__(self, should_fail: bool):
+            self.should_fail = should_fail
+
+        def goto(self, *_args, **_kwargs):
+            if self.should_fail:
+                raise RuntimeError("net::ERR_SOCKET_NOT_CONNECTED")
+            calls.append("goto-success")
+
+        def close(self):
+            calls.append("failed-page-closed")
+
+        def wait_for_load_state(self, *_args, **_kwargs):
+            return None
+
+        def wait_for_timeout(self, _timeout_ms):
+            return None
+
+    failed_page = _Page(True)
+    ready_page = _Page(False)
+
+    class _Browser:
+        def __init__(self):
+            self.pages = iter((failed_page, ready_page))
+
+        def new_page(self, **_kwargs):
+            return next(self.pages)
+
+        def close(self):
+            calls.append("browser-closed")
+
+    class _Chromium:
+        def launch(self, **_kwargs):
+            return _Browser()
+
+    class _PlaywrightContext:
+        def __enter__(self):
+            return type("_Playwright", (), {"chromium": _Chromium()})()
+
+        def __exit__(self, *_args):
+            return False
+
+    sync_api = ModuleType("playwright.sync_api")
+    sync_api.sync_playwright = lambda: _PlaywrightContext()
+    package = ModuleType("playwright")
+    package.sync_api = sync_api
+    monkeypatch.setitem(sys.modules, "playwright", package)
+    monkeypatch.setitem(sys.modules, "playwright.sync_api", sync_api)
+    monkeypatch.setattr(telethon_fallback.time, "sleep", lambda _seconds: None)
+    monkeypatch.setattr(telethon_fallback, "_upload_syntax_kling_start_frame_sync", lambda _page, _image, **_kwargs: calls.append("upload"))
+    monkeypatch.setattr(telethon_fallback, "_fill_and_commit_syntax_kling_prompt_sync", lambda page, _prompt: calls.append("prompt"))
+    monkeypatch.setattr(telethon_fallback, "_click_syntax_option_sync", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(telethon_fallback, "_set_syntax_kling_duration_sync", lambda *_args, **_kwargs: 3)
+    monkeypatch.setattr(telethon_fallback, "_enable_syntax_audio_sync", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(telethon_fallback, "_click_syntax_kling_generate_sync", lambda *_args, **_kwargs: calls.append("generate"))
+
+    telethon_fallback._fill_syntax_kling_webapp_sync(
+        url="https://example.invalid/kling",
+        prompt="prompt",
+        start_image=b"\x89PNG\r\n\x1a\nframe",
+        duration_sec=3,
+        quality="720",
+        aspect_ratio="9:16",
+        version="3.0",
+        audio_enabled=True,
+        timeout_sec=5,
+    )
+
+    assert calls == ["failed-page-closed", "goto-success", "upload", "prompt", "generate", "browser-closed"]
+
+
+def test_disable_syntax_audio_explicitly_turns_off_checked_switch():
+    import app.syntax_telethon_fallback as telethon_fallback
+
+    class _Control:
+        def __init__(self):
+            self.checked = True
+            self.clicks = 0
+
+        def get_attribute(self, name, timeout=None):
+            _ = timeout
+            if name == "aria-checked":
+                return "true" if self.checked else "false"
+            return None
+
+        def click(self, timeout=None):
+            _ = timeout
+            self.clicks += 1
+            self.checked = False
+
+    control = _Control()
+
+    class _Locator:
+        @property
+        def last(self):
+            return control
+
+        @property
+        def first(self):
+            return control
+
+    class _Page:
+        def get_by_role(self, _role, name=None):
+            _ = name
+            return _Locator()
+
+        def locator(self, _selector):
+            return _Locator()
+
+        def wait_for_timeout(self, _ms):
+            return None
+
+    telethon_fallback._disable_syntax_audio_sync(_Page())
+
+    assert control.clicks == 1
+    assert control.checked is False
+
+
+def test_disable_syntax_audio_does_not_toggle_already_disabled_switch():
+    import app.syntax_telethon_fallback as telethon_fallback
+
+    class _Control:
+        clicks = 0
+
+        def get_attribute(self, name, timeout=None):
+            _ = (name, timeout)
+            return "false"
+
+        def click(self, timeout=None):
+            _ = timeout
+            self.clicks += 1
+
+    control = _Control()
+
+    class _Locator:
+        @property
+        def last(self):
+            return control
+
+        @property
+        def first(self):
+            return control
+
+    class _Page:
+        def get_by_role(self, _role, name=None):
+            _ = name
+            return _Locator()
+
+        def locator(self, _selector):
+            return _Locator()
+
+    telethon_fallback._disable_syntax_audio_sync(_Page())
+
+    assert control.clicks == 0
 
 
 def test_try_generate_via_syntax_batch_kling_runs_sequential_single_flows(monkeypatch):
@@ -559,7 +1237,7 @@ def test_try_generate_via_syntax_caps_long_prompt_to_2000(monkeypatch):
     monkeypatch.setattr(
         telethon_fallback,
         "gemini_generate_sync",
-        lambda _prompt: '{"prompt":"short Gemini prompt"}',
+        lambda _prompt, **_kwargs: '{"prompt":"short Gemini prompt"}',
     )
     monkeypatch.setenv("TELEGRAM_API_ID", "123")
     monkeypatch.setenv("TELEGRAM_API_HASH", "hash")
@@ -582,8 +1260,9 @@ def test_syntax_prompt_shortens_long_prompt_with_gemini(monkeypatch):
 
     seen_prompt = {}
 
-    def _fake_gemini(prompt: str) -> str:
+    def _fake_gemini(prompt: str, **kwargs) -> str:
         seen_prompt["prompt"] = prompt
+        seen_prompt.update(kwargs)
         return '{"prompt":"Gemini kept CHARACTERS SPEAKS: точная реплика"}'
 
     monkeypatch.setattr(telethon_fallback, "gemini_generate_sync", _fake_gemini)
@@ -599,6 +1278,7 @@ def test_syntax_prompt_shortens_long_prompt_with_gemini(monkeypatch):
     assert compact == "Gemini kept CHARACTERS SPEAKS: точная реплика"
     assert len(compact) <= 120
     assert '"max_chars": 120' in seen_prompt["prompt"]
+    assert seen_prompt["rate_limit_max_attempts"] == 1
 
 
 def test_syntax_prompt_uses_local_fallback_when_gemini_returns_too_long(monkeypatch):
@@ -607,7 +1287,7 @@ def test_syntax_prompt_uses_local_fallback_when_gemini_returns_too_long(monkeypa
     monkeypatch.setattr(
         telethon_fallback,
         "gemini_generate_sync",
-        lambda _prompt: '{"prompt":"' + ("x" * 121) + '"}',
+        lambda _prompt, **_kwargs: '{"prompt":"' + ("x" * 121) + '"}',
     )
 
     prepared = telethon_fallback._prepare_prompt_for_syntax("y" * 200, max_len=120)
@@ -615,6 +1295,31 @@ def test_syntax_prompt_uses_local_fallback_when_gemini_returns_too_long(monkeypa
     shortened, was_shortened = prepared
     assert was_shortened is True
     assert len(shortened) <= 120
+
+
+def test_syntax_prompt_uses_local_fallback_after_single_gemini_429(monkeypatch):
+    import app.syntax_telethon_fallback as telethon_fallback
+    from app.llm_utils import GeminiQuotaError
+
+    calls: list[dict[str, object]] = []
+
+    def _fake_gemini(prompt: str, **kwargs) -> str:
+        calls.append({"prompt": prompt, **kwargs})
+        raise GeminiQuotaError("429 RESOURCE_EXHAUSTED")
+
+    monkeypatch.setattr(telethon_fallback, "gemini_generate_sync", _fake_gemini)
+
+    prepared = telethon_fallback._prepare_prompt_for_syntax(
+        "A" * 430 + " CHARACTERS SPEAKS: точная реплика",
+        max_len=120,
+    )
+
+    assert prepared is not None
+    shortened, was_shortened = prepared
+    assert was_shortened is True
+    assert len(shortened) <= 120
+    assert len(calls) == 1
+    assert calls[0]["rate_limit_max_attempts"] == 1
 
 
 def test_syntax_prompt_limit_defaults_to_2000(monkeypatch):

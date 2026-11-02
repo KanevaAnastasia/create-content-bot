@@ -25,20 +25,30 @@ from django.utils.safestring import mark_safe
 
 from app.artifact_store import persist_post_production_artifacts
 from app.db import SessionLocal
-from app.final_video_delivery import all_final_artifacts_delivered, deliver_final_artifact_to_telegram
+from app.final_video_delivery import (
+    all_final_artifacts_delivered,
+    deliver_final_artifact_to_telegram,
+    trigger_final_completion_followup,
+)
 from app.generation_modes import (
+    GENERATION_MODE_LONG,
     GENERATION_MODE_NORMAL,
     GENERATION_MODE_SESSION_KEY,
     GENERATION_MODE_SILENCE,
     normalize_generation_mode,
 )
+from app.guest_final_build import approved_guest_cartoon_scenes
 from app.media_file_store import local_path_from_media_uri, read_media_uri_bytes
 from app.post_production import (
+    STORY_WORD_SYNC_PROJECT_SLUGS,
+    apply_story_word_synced_subtitles,
     build_post_production,
     build_subtitled_post_production_from_upscaled_master,
     build_titled_post_production_from_subtitled_master,
     build_upscaled_post_production_from_clean_master,
     latinize_cyrillic_title,
+    production_languages_for_scenes,
+    selected_scene_video_fingerprint_for_language,
     subtitle_fingerprint_for_language,
 )
 from app.publications import (
@@ -56,7 +66,11 @@ from app.scheduled_generation import (
     import_scheduled_generation_xlsx,
     queue_scheduled_generation_item_now,
 )
-from app.scene_media_store import rebuild_production_session, rebuild_scene_db_ids_for_session
+from app.scene_media_store import (
+    merge_missing_scene_text_from_approved_candidate,
+    rebuild_production_session,
+    rebuild_scene_db_ids_for_session,
+)
 from app.series_store import advance_series_after_successful_render
 
 from .forms import (
@@ -68,6 +82,7 @@ from .forms import (
     _normalize_title_color,
 )
 from .models import (
+    BotUser,
     ChatSession,
     ContentSeries,
     GenerationDraft,
@@ -87,6 +102,40 @@ from .models import (
 )
 
 
+@admin.register(BotUser)
+class BotUserAdmin(admin.ModelAdmin):
+    list_display = (
+        "display_name",
+        "normalized_username",
+        "telegram_id",
+        "role",
+        "is_active",
+        "quiet_mode_enabled",
+        "quiet_mode_auto_enabled",
+        "quiet_mode_auto_generation_count",
+        "quiet_mode_auto_generation_target",
+        "updated_at",
+    )
+    list_filter = ("role", "is_active", "quiet_mode_enabled", "quiet_mode_auto_enabled")
+    search_fields = ("display_name", "normalized_username", "telegram_id")
+    readonly_fields = ("id", "created_at", "updated_at")
+    fields = (
+        "id",
+        "telegram_id",
+        "normalized_username",
+        "display_name",
+        "role",
+        "is_active",
+        "quiet_mode_enabled",
+        "quiet_mode_auto_enabled",
+        "quiet_mode_auto_cycle_date",
+        "quiet_mode_auto_generation_count",
+        "quiet_mode_auto_generation_target",
+        "created_at",
+        "updated_at",
+    )
+
+
 FINAL_VIDEO_VARIANT_LABELS = {
     "clean": "clean",
     "upscaled_4k": "4K upscale",
@@ -100,6 +149,11 @@ TITLE_STYLE_OVERRIDE_ARTIFACT_TYPE = "title_overlay_style_override"
 TITLE_STYLE_OVERRIDE_URI_PREFIX = "admin://title-overlay-style/"
 TITLE_OVERRIDE_ARTIFACT_TYPE = "title_overlay_override"
 TITLE_OVERRIDE_URI_PREFIX = "admin://title-overlay/"
+TITLE_SUBTITLE_OVERRIDE_ARTIFACT_TYPE = "title_subtitle_overlay_override"
+TITLE_SUBTITLE_OVERRIDE_URI_PREFIX = "admin://title-subtitle-overlay/"
+OVERLAY_TITLE_BY_LANG_ARTIFACT_TYPE = "overlay_title_by_lang"
+OVERLAY_TITLE_BY_LANG_URI_PREFIX = "db://generation_runs/"
+OVERLAY_TITLE_BY_LANG_URI_SUFFIX = "/overlay_title_by_lang"
 PUBLICATION_COPY_DRAFT_ARTIFACT_TYPE = "publication_copy_draft"
 PUBLICATION_COPY_DRAFT_URI_PREFIX = "admin://publication-copy-draft/"
 FINAL_BUILD_STALE_AFTER = timedelta(minutes=30)
@@ -409,9 +463,16 @@ def _title_from_run(run: GenerationRun) -> str:
     return " ".join(str(run.human_title or "").split())
 
 
+def _safe_int(value: Any) -> int | None:
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
+
+
 def _default_overlay_title(run: GenerationRun) -> dict[str, str]:
     title = _title_from_run(run)
-    return {"ru": title, "en": latinize_cyrillic_title(title)} if title else {}
+    return {"ru": title} if title else {}
 
 
 def _overlay_series_title_for_admin_render(
@@ -440,7 +501,14 @@ def _series_counter_by_lang_from_series(series: Any) -> dict[str, str]:
     total = getattr(series, "total_videos", None)
     if not index or not total:
         return {}
-    return {"ru": f"день {int(index)} из {int(total)}", "en": f"day {int(index)} of {int(total)}"}
+    meta = getattr(series, "meta_json", None)
+    meta = meta if isinstance(meta, dict) else {}
+    label_ru = " ".join(str(meta.get("counter_label_ru") or "день").split())
+    label_en = " ".join(str(meta.get("counter_label_en") or "day").split())
+    return {
+        "ru": f"{label_ru} {int(index)} из {int(total)}",
+        "en": f"{label_en} {int(index)} of {int(total)}",
+    }
 
 
 def _overlay_series_counter_for_admin_render(
@@ -714,7 +782,36 @@ def _run_session_for_admin_render(run: GenerationRun) -> tuple[ChatSession | Non
     session["production"] = production
     rebuild_production_session(session, str(run.id), include_media_blobs=True)
     production = session.get("production") if isinstance(session.get("production"), dict) else production
+    if bool(session.get("guest_mode")) and str(run.workflow_type or "") == "cartoon":
+        production["json_plan"] = approved_guest_cartoon_scenes(production.get("json_plan"))
     return chat_session, session, production
+
+
+def _ensure_generation_draft_for_admin_run(run: GenerationRun) -> GenerationDraft | None:
+    if not run.pk or not bool(run.is_draft):
+        return None
+    existing = GenerationDraft.objects.filter(run_id=run.id).order_by("-created_at").first()
+    if existing is not None:
+        return existing
+    try:
+        _chat_session, session, _production = _run_session_for_admin_render(run)
+    except Exception:
+        session = {"generation_run_id": str(run.id)}
+    session["generation_run_id"] = str(run.id)
+    session["is_draft"] = True
+    title = _title_from_run(run) or " ".join(str(run.script or "").split())[:180] or "Content Fabric draft"
+    return GenerationDraft.objects.create(
+        chat_id=None,
+        run=run,
+        title=title,
+        stage=str(session.get("state") or "").strip() or None,
+        scene_index=_safe_int(session.get("image_scene_index")),
+        substep=str(session.get("scene_media_substep") or "").strip() or None,
+        language=str(session.get("scene_media_language") or run.language or "").strip() or None,
+        session_snapshot_json={},
+        payload_json={"saved_from": "admin_generation_run_is_draft"},
+        created_at=timezone.now(),
+    )
 
 
 ADMIN_CANDIDATE_SUBTITLE_SNAPSHOT_KEYS = (
@@ -760,6 +857,7 @@ def _admin_final_build_scenes_from_page(run: GenerationRun, scenes: list[dict[st
                     scene.pop(key, None)
         for key in ADMIN_SCENE_DERIVED_SUBTITLE_KEYS:
             scene.pop(key, None)
+        merge_missing_scene_text_from_approved_candidate(scene)
         candidates_by_lang = scene.get("video_candidates_by_lang")
         if not isinstance(candidates_by_lang, dict):
             continue
@@ -780,15 +878,33 @@ def _overlay_title_for_admin_render(
     production: dict[str, Any],
 ) -> dict[str, Any]:
     title = _title_overlay_by_lang_from_post_sources(session, production)
+    title.update(_stored_overlay_title_by_lang_for_run(run))
     for source in (production, session):
         value = source.get("overlay_title_by_lang") if isinstance(source, dict) else None
         if isinstance(value, dict) and any(str(item or "").strip() for item in value.values()):
             source_title = {str(key): str(item) for key, item in value.items() if str(item or "").strip()}
             if _looks_like_default_overlay_title(source_title, run) and title:
+                ru_title = _russian_overlay_title(source_title)
+                if ru_title:
+                    title["ru"] = ru_title
                 continue
             title.update(source_title)
     title.update(_active_title_override_for_run(run))
     return title or _default_overlay_title(run)
+
+
+def _overlay_subtitle_for_admin_render(
+    run: GenerationRun | None,
+    session: dict[str, Any],
+    production: dict[str, Any],
+) -> dict[str, str]:
+    subtitle = _subtitle_overlay_by_lang_from_post_sources(session, production)
+    for source in (production, session):
+        value = source.get("overlay_subtitle_by_lang") if isinstance(source, dict) else None
+        if isinstance(value, dict) and any(str(item or "").strip() for item in value.values()):
+            subtitle.update({str(key): str(item) for key, item in value.items() if str(item or "").strip()})
+    subtitle.update(_active_title_subtitle_override_for_run(run))
+    return subtitle
 
 
 def _post_production_sources(session: dict[str, Any], production: dict[str, Any]):
@@ -818,19 +934,107 @@ def _title_overlay_by_lang_from_post_sources(
     return recovered
 
 
+def _subtitle_overlay_by_lang_from_post_sources(
+    session: dict[str, Any],
+    production: dict[str, Any],
+) -> dict[str, str]:
+    recovered: dict[str, str] = {}
+    for post in _post_production_sources(session, production):
+        by_language = post.get("subtitle_overlay_by_language")
+        if not isinstance(by_language, dict):
+            continue
+        for language, payload in by_language.items():
+            if isinstance(payload, dict):
+                raw = payload.get("subtitle")
+            else:
+                raw = payload
+            subtitle = " ".join(str(raw or "").split())
+            if subtitle:
+                recovered[str(language).strip().lower() or "ru"] = subtitle
+    return recovered
+
+
 def _looks_like_default_overlay_title(value: dict[str, Any], run: GenerationRun) -> bool:
     default = _title_from_run(run)
     if not default or not value:
         return False
+    latinized = latinize_cyrillic_title(default)
+    allowed = {default}
+    if latinized:
+        allowed.add(latinized)
     titles = {" ".join(str(item or "").split()) for item in value.values() if str(item or "").strip()}
-    return bool(titles) and titles == {default}
+    return bool(titles) and titles.issubset(allowed)
+
+
+def _overlay_title_by_lang_artifact_uri(run_id: Any) -> str:
+    return f"{OVERLAY_TITLE_BY_LANG_URI_PREFIX}{run_id}{OVERLAY_TITLE_BY_LANG_URI_SUFFIX}"
+
+
+def _stored_overlay_title_by_lang_for_run(run: GenerationRun | None) -> dict[str, str]:
+    if run is None:
+        return {}
+    try:
+        artifacts = GenerationArtifact.objects.filter(
+            run_id=run.id,
+            artifact_type=OVERLAY_TITLE_BY_LANG_ARTIFACT_TYPE,
+            uri=_overlay_title_by_lang_artifact_uri(run.id),
+            language__isnull=True,
+        ).order_by("-created_at", "-id")
+        for artifact in artifacts:
+            payload = getattr(artifact, "payload_json", None)
+            if not isinstance(payload, dict):
+                continue
+            title_by_lang = _clean_overlay_title_by_lang(payload.get("overlay_title_by_lang"))
+            if title_by_lang and not _looks_like_default_overlay_title(title_by_lang, run):
+                return title_by_lang
+    except Exception:
+        return {}
+    return {}
 
 
 def _project_slug_for_admin_render(run: GenerationRun, session: dict[str, Any]) -> str | None:
     raw = str(session.get("selected_project_key") or "").strip()
     if raw:
         return raw
+    project = getattr(run, "project", None)
+    fallback = str(getattr(project, "slug", "") or "").strip()
+    if fallback:
+        return fallback
     return None
+
+
+def _story_narration_for_admin_render(
+    run: GenerationRun,
+) -> tuple[dict[str, str], dict[str, str], dict[str, float]]:
+    """Recover Story narration even when its original chat session is gone."""
+    paths: dict[str, str] = {}
+    voiceover: dict[str, str] = {}
+    durations: dict[str, float] = {}
+    try:
+        rows = GenerationArtifact.objects.filter(
+            run_id=run.id,
+            artifact_type="story_narration_audio",
+        ).order_by("-created_at", "-id")
+        for row in rows:
+            language = str(row.language or "ru").strip().lower() or "ru"
+            payload = row.payload_json if isinstance(row.payload_json, dict) else {}
+            text = " ".join(str(payload.get("voiceover_text") or "").split())
+            if text and language not in voiceover:
+                voiceover[language] = text
+            try:
+                duration = float(payload.get("duration_sec") or 0.0)
+            except (TypeError, ValueError):
+                duration = 0.0
+            if duration > 0 and language not in durations:
+                durations[language] = duration
+            if language in paths:
+                continue
+            local_path = local_path_from_media_uri(str(row.uri or ""))
+            if local_path is not None and local_path.is_file():
+                paths[language] = str(local_path)
+    except Exception:
+        return {}, {}, {}
+    return paths, voiceover, durations
 
 
 def _title_override_uri(run_id: Any) -> str:
@@ -880,6 +1084,60 @@ def _write_title_override_artifact(
         artifact_type=TITLE_OVERRIDE_ARTIFACT_TYPE,
         label="Title overlay override",
         uri=_title_override_uri(run.id),
+        language=None,
+        mime_type="application/json",
+        payload_json=payload,
+        created_at=timezone.now(),
+    )
+
+
+def _title_subtitle_override_uri(run_id: Any) -> str:
+    return f"{TITLE_SUBTITLE_OVERRIDE_URI_PREFIX}{run_id}"
+
+
+def _latest_title_subtitle_override_payloads_for_run(run: GenerationRun) -> list[dict[str, Any]]:
+    payloads: list[dict[str, Any]] = []
+    try:
+        artifacts = GenerationArtifact.objects.filter(
+            run_id=run.id,
+            artifact_type=TITLE_SUBTITLE_OVERRIDE_ARTIFACT_TYPE,
+            uri=_title_subtitle_override_uri(run.id),
+        ).order_by("-created_at")
+        for artifact in artifacts:
+            payload = getattr(artifact, "payload_json", None)
+            if isinstance(payload, dict):
+                payloads.append(copy.deepcopy(payload))
+    except Exception:
+        return []
+    return payloads
+
+
+def _active_title_subtitle_override_for_run(run: GenerationRun | None) -> dict[str, str]:
+    if run is None:
+        return {}
+    for payload in _latest_title_subtitle_override_payloads_for_run(run):
+        if payload.get("status") == "cleared":
+            return {}
+        value = _clean_overlay_title_by_lang(payload.get("overlay_subtitle_by_lang"))
+        if value:
+            return value
+    return {}
+
+
+def _write_title_subtitle_override_artifact(
+    run: GenerationRun,
+    *,
+    overlay_subtitle_by_lang: dict[str, Any] | None,
+) -> GenerationArtifact:
+    subtitle_by_lang = _clean_overlay_title_by_lang(overlay_subtitle_by_lang)
+    payload: dict[str, Any] = {"status": "active" if subtitle_by_lang else "cleared"}
+    if subtitle_by_lang:
+        payload["overlay_subtitle_by_lang"] = subtitle_by_lang
+    return GenerationArtifact.objects.create(
+        run=run,
+        artifact_type=TITLE_SUBTITLE_OVERRIDE_ARTIFACT_TYPE,
+        label="Title subtitle overlay override",
+        uri=_title_subtitle_override_uri(run.id),
         language=None,
         mime_type="application/json",
         payload_json=payload,
@@ -1143,8 +1401,8 @@ def _merge_post_production(existing: Any, update: dict[str, Any]) -> dict[str, A
     merged = copy.deepcopy(existing) if isinstance(existing, dict) else {}
     for key, value in update.items():
         if key in {"renders_by_language", "subtitle_entries_by_language", "subtitle_fingerprint_by_language",
-                   "title_overlay_by_language", "series_overlay_by_language", "speech_budget_by_language",
-                   "original_audio_preserved_by_language"}:
+                   "title_overlay_by_language", "end_title_overlay_by_language", "subtitle_overlay_by_language", "series_overlay_by_language",
+                   "speech_budget_by_language", "original_audio_preserved_by_language"}:
             current = merged.get(key)
             if not isinstance(current, dict):
                 current = {}
@@ -1178,20 +1436,59 @@ def _build_final_videos_for_run(
         raise RuntimeError("No production scenes are available for this run.")
     scenes = _admin_final_build_scenes_from_page(run, scenes)
 
+    project_slug = _project_slug_for_admin_render(run, session)
+    narration_audio_path_by_lang, stored_voiceover_by_lang, stored_duration_by_lang = _story_narration_for_admin_render(run)
+    voiceover_by_lang = {
+        "ru": str(session.get("story_voiceover_text") or stored_voiceover_by_lang.get("ru") or ""),
+        "en": str(session.get("story_voiceover_text_en") or stored_voiceover_by_lang.get("en") or ""),
+    }
+    duration_by_lang = {
+        "ru": float(session.get("story_audio_duration_sec") or stored_duration_by_lang.get("ru") or 0.0),
+        "en": float(session.get("story_audio_duration_sec_en") or stored_duration_by_lang.get("en") or 0.0),
+    }
+    apply_story_word_synced_subtitles(
+        scenes,
+        project_slug=project_slug,
+        voiceover_by_lang=voiceover_by_lang,
+        alignment_by_lang={
+            "ru": session.get("story_audio_alignment") if isinstance(session.get("story_audio_alignment"), dict) else {},
+            "en": session.get("story_audio_alignment_en") if isinstance(session.get("story_audio_alignment_en"), dict) else {},
+        },
+        duration_by_lang=duration_by_lang,
+    )
+
     overlay_title_by_lang = _overlay_title_for_admin_render(run, session, production)
     if not overlay_title_by_lang:
         raise RuntimeError("Set human_title or overlay_title_by_lang before rendering the titled final master.")
     requested_variants = list(target_variants) if target_variants else ([target_variant] if target_variant else None)
     applies_title_overlay = requested_variants is None or "titled_subtitled_music" in requested_variants
+    if applies_title_overlay:
+        target_languages = [target_language] if target_language else production_languages_for_scenes(scenes)
+        if "en" in {str(item or "").strip().lower() for item in target_languages} and not str(
+            overlay_title_by_lang.get("en") or ""
+        ).strip():
+            raise RuntimeError("Set an explicit Title EN before rendering the English titled final master.")
     overlay_title_style = (
         _apply_pending_overlay_title_style_for_build(session, production, run=run)
         if applies_title_overlay
         else _overlay_title_style_for_admin_render(session, production, run=run)
     )
+    overlay_subtitle_by_lang = _overlay_subtitle_for_admin_render(run, session, production)
     overlay_series_title_by_lang = _overlay_series_title_for_admin_render(run, session, production)
     overlay_series_counter_by_lang = _overlay_series_counter_for_admin_render(run, session, production)
 
-    project_slug = _project_slug_for_admin_render(run, session)
+    intro_video_path_by_lang: dict[str, str] = {}
+    discipline_intro_path = Path(str(session.get("discipline_intro_approved_video_path") or ""))
+    if project_slug == "discipline" and discipline_intro_path.is_file():
+        intro_video_path_by_lang["ru"] = str(discipline_intro_path)
+    is_story_workflow = (
+        str(getattr(run, "workflow_type", "") or "").strip().lower() == "story"
+        or any(bool(str(text or "").strip()) for text in voiceover_by_lang.values())
+        or (
+            str(project_slug or "").strip().lower() in STORY_WORD_SYNC_PROJECT_SLUGS
+            and bool(narration_audio_path_by_lang)
+        )
+    )
     if (
         source_subtitled_video_path
         and target_language
@@ -1214,6 +1511,7 @@ def _build_final_videos_for_run(
             language=target_language,
             project_slug=project_slug,
             progress_callback=progress_callback,
+            scene_video_fingerprint=selected_scene_video_fingerprint_for_language(scenes, target_language),
         )
     elif (
         source_upscaled_video_path
@@ -1227,6 +1525,7 @@ def _build_final_videos_for_run(
             project_slug=project_slug,
             progress_callback=progress_callback,
             use_candidate_subtitle_snapshot=False,
+            include_background_music=not is_story_workflow,
         )
     elif (
         source_subtitled_video_path
@@ -1239,6 +1538,7 @@ def _build_final_videos_for_run(
             language=target_language,
             project_slug=project_slug,
             overlay_title_by_lang=overlay_title_by_lang,
+            overlay_subtitle_by_lang=overlay_subtitle_by_lang,
             overlay_title_style=overlay_title_style,
             overlay_series_title_by_lang=overlay_series_title_by_lang,
             overlay_series_counter_by_lang=overlay_series_counter_by_lang,
@@ -1250,6 +1550,7 @@ def _build_final_videos_for_run(
             scenes,
             project_slug=project_slug,
             overlay_title_by_lang=overlay_title_by_lang,
+            overlay_subtitle_by_lang=overlay_subtitle_by_lang,
             overlay_title_style=overlay_title_style,
             overlay_series_title_by_lang=overlay_series_title_by_lang,
             overlay_series_counter_by_lang=overlay_series_counter_by_lang,
@@ -1257,6 +1558,9 @@ def _build_final_videos_for_run(
             target_variants=requested_variants,
             progress_callback=progress_callback,
             use_candidate_subtitle_snapshot=False,
+            narration_audio_path_by_lang=narration_audio_path_by_lang or None,
+            intro_video_path_by_lang=intro_video_path_by_lang or None,
+            include_background_music=not is_story_workflow,
         )
     production["overlay_title_by_lang"] = overlay_title_by_lang
     ru_title = _russian_overlay_title(overlay_title_by_lang)
@@ -1265,6 +1569,12 @@ def _build_final_videos_for_run(
         run.save(update_fields=["human_title"])
     if overlay_title_style:
         production["overlay_title_style"] = overlay_title_style
+    if overlay_subtitle_by_lang:
+        production["overlay_subtitle_by_lang"] = overlay_subtitle_by_lang
+        session["overlay_subtitle_by_lang"] = overlay_subtitle_by_lang
+    else:
+        production.pop("overlay_subtitle_by_lang", None)
+        session.pop("overlay_subtitle_by_lang", None)
     if overlay_series_title_by_lang:
         production["series_title_by_lang"] = overlay_series_title_by_lang
     if overlay_series_counter_by_lang:
@@ -1594,6 +1904,8 @@ def _subtitled_artifact_matches_current_subtitles(
     if artifact_path is not None and Path(source_path).resolve() != artifact_path.resolve():
         return False
     payload = artifact.payload_json if isinstance(artifact.payload_json, dict) else {}
+    if not _final_artifact_matches_current_scene_videos(artifact, scenes, language):
+        return False
     stored = str(payload.get("subtitle_fingerprint") or "").strip()
     if not stored:
         return False
@@ -1602,6 +1914,21 @@ def _subtitled_artifact_matches_current_subtitles(
         language,
         use_candidate_subtitle_snapshot=False,
     )
+
+
+def _final_artifact_matches_current_scene_videos(
+    artifact: GenerationArtifact | None,
+    scenes: list[dict[str, Any]],
+    language: str,
+) -> bool:
+    if artifact is None:
+        return False
+    payload = artifact.payload_json if isinstance(artifact.payload_json, dict) else {}
+    stored = str(payload.get("scene_video_fingerprint") or "").strip()
+    if not stored:
+        return False
+    current = selected_scene_video_fingerprint_for_language(scenes, language)
+    return bool(current) and stored == current
 
 
 def _heartbeat_final_build_job(run: GenerationRun, language: str, variant: str, worker_id: str, stop_event: threading.Event) -> None:
@@ -1675,9 +2002,21 @@ def _run_final_build_batch(
         GenerationRun.objects.filter(id=run.id).update(status="final_render_running", is_active=True)
         requested_variants = set(normalized_variants)
         required_variants = _final_build_required_variants(normalized_variants)
+        try:
+            _chat_session, _session, reuse_production = _run_session_for_admin_render(run)
+            reuse_scenes = reuse_production.get("json_plan") if isinstance(reuse_production, dict) else None
+            reuse_scenes = (
+                _admin_final_build_scenes_from_page(run, reuse_scenes)
+                if isinstance(reuse_scenes, list)
+                else []
+            )
+        except Exception:
+            reuse_scenes = []
 
         def latest_variant_path(variant: str) -> Path | None:
             artifact = _latest_final_artifact(run.id, language, variant)
+            if reuse_scenes and not _final_artifact_matches_current_scene_videos(artifact, reuse_scenes, language):
+                return None
             path = _artifact_local_path(artifact) if artifact is not None else None
             return path if path is not None and path.exists() else None
 
@@ -1799,8 +2138,13 @@ def _run_final_build_batch(
                     )
         _advance_series_after_successful_queued_final_build(run)
         GenerationRun.objects.filter(id=run.id).update(
-            status="final_videos_delivered" if delivered_all else "final_video_delivery_failed"
+            status="final_videos_delivered" if delivered_all else "final_video_delivery_failed",
+            is_active=False,
+            current_scene_index=None,
+            current_media_substep=None,
+            current_media_language_index=None,
         )
+        trigger_final_completion_followup(run.id)
         stop_event.set()
         if heartbeat_thread is not None:
             heartbeat_thread.join(timeout=5)
@@ -1825,6 +2169,7 @@ def _run_final_build_batch(
                         "progress": _final_build_progress_payload("failed", "Final build failed", percent=100),
                     },
                 )
+            trigger_final_completion_followup(run.id)
         except Exception:
             pass
     finally:
@@ -2991,6 +3336,23 @@ def _sync_overlay_title_from_run(
     session["production"] = production
 
 
+def _sync_overlay_subtitle_from_run(
+    session: dict[str, Any],
+    subtitle_by_lang: dict[str, str] | None = None,
+) -> None:
+    production = session.get("production")
+    if not isinstance(production, dict):
+        production = {}
+    subtitle_by_lang = _clean_overlay_title_by_lang(subtitle_by_lang)
+    if subtitle_by_lang:
+        session["overlay_subtitle_by_lang"] = subtitle_by_lang
+        production["overlay_subtitle_by_lang"] = subtitle_by_lang
+    else:
+        session.pop("overlay_subtitle_by_lang", None)
+        production.pop("overlay_subtitle_by_lang", None)
+    session["production"] = production
+
+
 def _record_scene_text_revision(
     scene: Scene,
     *,
@@ -3222,11 +3584,26 @@ def _overlay_title_for_admin_edit(run: GenerationRun) -> dict[str, str]:
     if chat_session is not None and isinstance(chat_session.session_json, dict):
         session = copy.deepcopy(chat_session.session_json or {})
     production = session.get("production") if isinstance(session.get("production"), dict) else {}
-    title_by_lang: dict[str, str] = {}
+    title_by_lang: dict[str, str] = _stored_overlay_title_by_lang_for_run(run)
     for source in (production, session):
-        title_by_lang.update(_clean_overlay_title_by_lang(source.get("overlay_title_by_lang")))
+        source_title = _clean_overlay_title_by_lang(source.get("overlay_title_by_lang"))
+        if _looks_like_default_overlay_title(source_title, run) and title_by_lang:
+            ru_title = _russian_overlay_title(source_title)
+            if ru_title:
+                title_by_lang["ru"] = ru_title
+            continue
+        title_by_lang.update(source_title)
     title_by_lang.update(_active_title_override_for_run(run))
     return title_by_lang or _default_overlay_title(run)
+
+
+def _overlay_subtitle_for_admin_edit(run: GenerationRun) -> dict[str, str]:
+    session: dict[str, Any] = {}
+    chat_session = ChatSession.objects.filter(generation_run_id=run.id).order_by("-updated_at").first()
+    if chat_session is not None and isinstance(chat_session.session_json, dict):
+        session = copy.deepcopy(chat_session.session_json or {})
+    production = session.get("production") if isinstance(session.get("production"), dict) else {}
+    return _overlay_subtitle_for_admin_render(run, session, production)
 
 
 class GenerationRunAdminForm(django_forms.ModelForm):
@@ -3240,6 +3617,16 @@ class GenerationRunAdminForm(django_forms.ModelForm):
         label="Title EN",
         widget=django_forms.Textarea(attrs={"rows": 2}),
     )
+    overlay_subtitle_ru = django_forms.CharField(
+        required=False,
+        label="Third title RU",
+        widget=django_forms.Textarea(attrs={"rows": 2}),
+    )
+    overlay_subtitle_en = django_forms.CharField(
+        required=False,
+        label="Third title EN",
+        widget=django_forms.Textarea(attrs={"rows": 2}),
+    )
 
     class Meta:
         model = GenerationRun
@@ -3249,21 +3636,25 @@ class GenerationRunAdminForm(django_forms.ModelForm):
         super().__init__(*args, **kwargs)
         if self.instance and self.instance.pk:
             title_by_lang = _overlay_title_for_admin_edit(self.instance)
+            subtitle_by_lang = _overlay_subtitle_for_admin_edit(self.instance)
         else:
             title_by_lang = _default_overlay_title(self.instance)
+            subtitle_by_lang = {}
         self.fields["overlay_title_ru"].initial = title_by_lang.get("ru", "")
         self.fields["overlay_title_en"].initial = title_by_lang.get("en", "")
+        self.fields["overlay_subtitle_ru"].initial = subtitle_by_lang.get("ru", "")
+        self.fields["overlay_subtitle_en"].initial = subtitle_by_lang.get("en", "")
 
     def clean(self):
         cleaned = super().clean()
         ru_title = " ".join(str(cleaned.get("overlay_title_ru") or "").split())
         en_title = " ".join(str(cleaned.get("overlay_title_en") or "").split())
-        if ru_title and not en_title:
-            en_title = latinize_cyrillic_title(ru_title)
         if en_title and not ru_title:
             ru_title = en_title
         cleaned["overlay_title_ru"] = ru_title
         cleaned["overlay_title_en"] = en_title
+        cleaned["overlay_subtitle_ru"] = " ".join(str(cleaned.get("overlay_subtitle_ru") or "").split())
+        cleaned["overlay_subtitle_en"] = " ".join(str(cleaned.get("overlay_subtitle_en") or "").split())
         return cleaned
 
     def overlay_title_by_lang(self) -> dict[str, str]:
@@ -3272,6 +3663,13 @@ class GenerationRunAdminForm(django_forms.ModelForm):
             "en": " ".join(str(self.cleaned_data.get("overlay_title_en") or "").split()),
         }
         return {key: value for key, value in title_by_lang.items() if value}
+
+    def overlay_subtitle_by_lang(self) -> dict[str, str]:
+        subtitle_by_lang = {
+            "ru": " ".join(str(self.cleaned_data.get("overlay_subtitle_ru") or "").split()),
+            "en": " ".join(str(self.cleaned_data.get("overlay_subtitle_en") or "").split()),
+        }
+        return {key: value for key, value in subtitle_by_lang.items() if value}
 
     def save(self, commit=True):
         obj: GenerationRun = super().save(commit=False)
@@ -3288,6 +3686,8 @@ class GenerationRunAdmin(admin.ModelAdmin):
     form = GenerationRunAdminForm
     list_display = (
         "display_title",
+        "project",
+        "workflow_type",
         "status",
         "is_active",
         "is_draft",
@@ -3301,7 +3701,7 @@ class GenerationRunAdmin(admin.ModelAdmin):
     )
     list_editable = ("is_active", "is_draft", "series", "series_video_index", "series_total_videos")
     search_fields = ("human_title", "script", "id", "series__title_ru", "series__title_en")
-    list_filter = ("status", "language", "series", "is_draft")
+    list_filter = ("status", "workflow_type", "language", "series", "is_draft")
     autocomplete_fields = ("series",)
     actions = (build_final_title_and_videos,)
     readonly_fields = (
@@ -3319,6 +3719,10 @@ class GenerationRunAdmin(admin.ModelAdmin):
         "id",
         "overlay_title_ru",
         "overlay_title_en",
+        "overlay_subtitle_ru",
+        "overlay_subtitle_en",
+        "project",
+        "workflow_type",
         "status",
         "is_active",
         "is_draft",
@@ -3344,14 +3748,22 @@ class GenerationRunAdmin(admin.ModelAdmin):
     def save_model(self, request, obj: GenerationRun, form, change):
         changed_fields = set(getattr(form, "changed_data", []) or [])
         sync_overlay_title = (not change) or bool({"human_title", "overlay_title_ru", "overlay_title_en"} & changed_fields)
+        sync_overlay_subtitle = (not change) or bool({"overlay_subtitle_ru", "overlay_subtitle_en"} & changed_fields)
         title_by_lang = form.overlay_title_by_lang() if hasattr(form, "overlay_title_by_lang") else None
+        subtitle_by_lang = form.overlay_subtitle_by_lang() if hasattr(form, "overlay_subtitle_by_lang") else None
         super().save_model(request, obj, form, change)
+        if obj.is_draft:
+            _ensure_generation_draft_for_admin_run(obj)
         if sync_overlay_title:
             _write_title_override_artifact(obj, overlay_title_by_lang=title_by_lang)
+        if sync_overlay_subtitle:
+            _write_title_subtitle_override_artifact(obj, overlay_subtitle_by_lang=subtitle_by_lang)
         for chat_session in ChatSession.objects.filter(generation_run_id=obj.id):
             session = copy.deepcopy(chat_session.session_json or {})
             if sync_overlay_title:
                 _sync_overlay_title_from_run(session, obj, title_by_lang=title_by_lang)
+            if sync_overlay_subtitle:
+                _sync_overlay_subtitle_from_run(session, subtitle_by_lang=subtitle_by_lang)
             _sync_series_context_from_run(session, obj)
             if obj.current_scene_index is not None:
                 session["image_scene_index"] = int(obj.current_scene_index)
@@ -3751,6 +4163,7 @@ class ScheduledGenerationItemAdminForm(django_forms.ModelForm):
         choices=(
             (GENERATION_MODE_NORMAL, "Normal"),
             (GENERATION_MODE_SILENCE, "Silence / Kling RU-only"),
+            (GENERATION_MODE_LONG, "Long / Horizontal RU-only"),
         ),
     )
     title_color = django_forms.CharField(
@@ -3793,8 +4206,8 @@ class ScheduledGenerationItemAdminForm(django_forms.ModelForm):
         obj = super().save(commit=False)
         payload = dict(obj.payload_json or {})
         mode = normalize_generation_mode(self.cleaned_data.get("generation_mode"))
-        if mode == GENERATION_MODE_SILENCE:
-            payload[GENERATION_MODE_SESSION_KEY] = GENERATION_MODE_SILENCE
+        if mode in {GENERATION_MODE_SILENCE, GENERATION_MODE_LONG}:
+            payload[GENERATION_MODE_SESSION_KEY] = mode
         else:
             payload.pop(GENERATION_MODE_SESSION_KEY, None)
         obj.payload_json = payload
@@ -3849,6 +4262,7 @@ class ScheduledGenerationItemAdmin(admin.ModelAdmin):
         "status",
         "is_draft",
         "title_color",
+        "overlay_subtitle_short",
         "generation_mode_short",
         "comment_short",
         "series",
@@ -3858,7 +4272,7 @@ class ScheduledGenerationItemAdmin(admin.ModelAdmin):
         "error_short",
     )
     list_filter = ("status", "is_draft", "series")
-    search_fields = ("title", "recipe", "comment", "series__title_ru", "series__title_en", "source_row_key", "source_file_path", "error_text")
+    search_fields = ("title", "recipe", "comment", "overlay_subtitle", "series__title_ru", "series__title_en", "source_row_key", "source_file_path", "error_text")
     autocomplete_fields = ("series", "generation_run")
     readonly_fields = (
         "id",
@@ -3876,6 +4290,7 @@ class ScheduledGenerationItemAdmin(admin.ModelAdmin):
         "title",
         "recipe",
         "comment",
+        "overlay_subtitle",
         "generation_mode",
         "title_color",
         "run_at",
@@ -3940,11 +4355,19 @@ class ScheduledGenerationItemAdmin(admin.ModelAdmin):
     def comment_short(self, obj: ScheduledGenerationItem) -> str:
         return _short(obj.comment, 60)
 
+    @admin.display(description="Subtitle")
+    def overlay_subtitle_short(self, obj: ScheduledGenerationItem) -> str:
+        return _short(obj.overlay_subtitle, 60)
+
     @admin.display(description="Mode")
     def generation_mode_short(self, obj: ScheduledGenerationItem) -> str:
         payload = obj.payload_json if isinstance(obj.payload_json, dict) else {}
         mode = normalize_generation_mode(payload.get(GENERATION_MODE_SESSION_KEY))
-        return "Silence" if mode == GENERATION_MODE_SILENCE else "Normal"
+        if mode == GENERATION_MODE_SILENCE:
+            return "Silence"
+        if mode == GENERATION_MODE_LONG:
+            return "Long"
+        return "Normal"
 
     @admin.display(description="Run")
     def linked_run(self, obj: ScheduledGenerationItem) -> str:
@@ -4006,7 +4429,7 @@ class ScheduledGenerationItemAdmin(admin.ModelAdmin):
         csrf = get_token(request)
         html = (
             "<h1>Import scheduled generation Excel .xlsx</h1>"
-            "<p>Upload an .xlsx file with columns: title, recipe, comment, title_color, run_at, is_draft, source_row_key.</p>"
+            "<p>Upload an .xlsx file with columns: title, recipe, comment, overlay_subtitle, title_color, run_at, is_draft, source_row_key.</p>"
             f'<form method="post" enctype="multipart/form-data">'
             f'<input type="hidden" name="csrfmiddlewaretoken" value="{escape(csrf)}">'
             f"{form.as_p()}"
@@ -4078,10 +4501,10 @@ class GenerationDraftAdmin(admin.ModelAdmin):
 
 @admin.register(Project)
 class ProjectAdmin(admin.ModelAdmin):
-    list_display = ("slug", "title", "is_default", "is_active", "updated_at")
+    list_display = ("slug", "title", "owner", "is_default", "is_active", "updated_at")
     list_editable = ("is_default", "is_active")
     list_filter = ("is_default", "is_active")
-    search_fields = ("slug", "title", "description")
+    search_fields = ("slug", "title", "description", "owner__normalized_username", "owner__telegram_id")
     readonly_fields = ("id", "created_at", "updated_at")
 
 

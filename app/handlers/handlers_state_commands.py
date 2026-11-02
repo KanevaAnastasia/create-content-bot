@@ -1,6 +1,8 @@
 from ..constants import GEMINI_GENERATE_TIMEOUT_SEC_ENV_NAME
 from ..constants import STATE_WAITING_SCENE_MEDIA
 from ..character_catalog import GRANDMA_KITCHEN_PROJECT_SLUG, GRANDMA_KITCHEN_PROJECT_TITLE
+from ..project_profiles import DISCIPLINE_PROJECT_SLUG, DISCIPLINE_PROJECT_TITLE, project_title
+from ..llm_utils import GEMINI_MODEL_PROFILE_EDIT
 
 from .handlers_state_deps import (
     Any,
@@ -79,6 +81,8 @@ NAV_BUTTON_START_OVER = "В начало"
 PROJECT_KEY_SESSION = "selected_project_key"
 PROJECT_KEY_GRANDMA_CAT_COOKING = GRANDMA_KITCHEN_PROJECT_SLUG
 PROJECT_LABEL_GRANDMA_CAT_COOKING = GRANDMA_KITCHEN_PROJECT_TITLE
+PROJECT_KEY_DISCIPLINE = DISCIPLINE_PROJECT_SLUG
+PROJECT_LABEL_DISCIPLINE = DISCIPLINE_PROJECT_TITLE
 PROJECT_LEGACY_KEY_GRANDMA_CAT_COOKING = "grandma_cat_cooking"
 PROJECT_LEGACY_LABEL_GRANDMA_CAT_COOKING = "Бабушка + кот (кулинарный Shorts)"
 PROJECT_BUTTON_BACK = "Назад"
@@ -118,7 +122,7 @@ def _project_label_by_key(project_key: str | None) -> str:
     """Человекочитаемое имя проекта по ключу."""
     if (project_key or "").strip() in {PROJECT_KEY_GRANDMA_CAT_COOKING, PROJECT_LEGACY_KEY_GRANDMA_CAT_COOKING}:
         return PROJECT_LABEL_GRANDMA_CAT_COOKING
-    return PROJECT_LABEL_GRANDMA_CAT_COOKING
+    return project_title(project_key)
 
 
 def project_choice_markup():
@@ -130,6 +134,7 @@ def project_choice_markup():
     return ReplyKeyboardMarkup(
         keyboard=[
             [PROJECT_LABEL_GRANDMA_CAT_COOKING],
+            [PROJECT_LABEL_DISCIPLINE],
             [PROJECT_BUTTON_BACK],
             [NAV_BUTTON_START_OVER],
         ],
@@ -140,6 +145,7 @@ def project_choice_markup():
 
 async def _regenerate_image_prompt_from_feedback(scene: dict, feedback: str) -> str:
     current = _image_scene_prompt(scene)
+    feedback = str(feedback or "").strip()
     shot = str(scene.get("shot_type", "medium"))
     anchors = ", ".join(str(x) for x in (scene.get("continuity_anchors") or []) if str(x).strip())
     prompt = (
@@ -150,15 +156,30 @@ async def _regenerate_image_prompt_from_feedback(scene: dict, feedback: str) -> 
         "- если есть еда, перечисляй конкретные ингредиенты\n"
         "- если в кадре есть надписи, явно укажи: все надписи на русском\n"
         "- картинка должна быть в одном визуальном стиле с референсами проекта (бабушка и кот как на character sheets)\n"
-        "- сохраняй общую сцену, ракурс и предметную непрерывность: посуда, кастрюля/сковорода, рабочая поверхность, "
-        "ингредиенты и состояние еды\n\n"
+        "- ФИДБЕК ПОЛЬЗОВАТЕЛЯ имеет высший приоритет: обязательно внеси названное изменение\n"
+        "- если фидбек меняет место, действие или состав персонажей, замени конфликтующие части текущего промпта, "
+        "но сохрани художественный стиль и узнаваемость неизменяемых персонажей\n"
+        "- не возвращай текущий промпт без изменений\n"
+        "- всё, чего фидбек не касается, сохраняй максимально близко к текущему промпту: ракурс, композицию, "
+        "палитру, предметную непрерывность и детали окружения\n\n"
         f"РАКУРС: {shot}\n"
         f"CONTINUITY ANCHORS: {anchors or '-'}\n"
         f"ТЕКУЩИЙ ПРОМПТ:\n{current}\n\n"
         f"ФИДБЕК ПОЛЬЗОВАТЕЛЯ:\n{feedback}\n"
     )
-    raw = await asyncio.to_thread(gemini_generate_sync, prompt)
-    return raw.strip()
+    raw = await asyncio.to_thread(gemini_generate_sync, prompt, model_profile=GEMINI_MODEL_PROFILE_EDIT)
+    rewritten = raw.strip()
+    if not rewritten:
+        rewritten = current.strip()
+    # The edit model can occasionally return the original prompt verbatim.  Keep
+    # the user's requested change explicit in the generation prompt so it can
+    # never be silently dropped by that intermediate rewrite step.
+    return (
+        f"{rewritten}\n\n"
+        "ОБЯЗАТЕЛЬНАЯ ПРАВКА ПОЛЬЗОВАТЕЛЯ: "
+        f"{feedback}. При конфликте с предыдущим описанием выполнить именно эту правку; "
+        "остальные детали, художественный стиль и узнаваемость персонажей сохранить максимально близко."
+    ).strip()
 
 
 async def _reply_text_chunked(update: Update, text: str, *, separator: str = "\n\n---\n\n") -> None:
@@ -221,13 +242,36 @@ async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if update.message is None or update.effective_chat is None:
         return
     chat_id = update.effective_chat.id
-    if chat_id in SESSIONS:
-        del SESSIONS[chat_id]
+    existing = SESSIONS.get(chat_id) or {}
+    selected_project = str(existing.get(PROJECT_KEY_SESSION) or PROJECT_KEY_GRANDMA_CAT_COOKING)
+    if selected_project == PROJECT_KEY_DISCIPLINE:
+        from ..project_profiles import discipline_workspace_session
+
+        workspace = discipline_workspace_session()
+        if workspace is not None:
+            SESSIONS[chat_id] = workspace
+        else:
+            SESSIONS[chat_id] = {"state": "", PROJECT_KEY_SESSION: selected_project}
+    else:
+        SESSIONS[chat_id] = {
+            "state": "",
+            PROJECT_KEY_SESSION: selected_project,
+            "target_languages": list(existing.get("target_languages") or ["ru", "en"]),
+        }
     _bump_debounce_generation(chat_id)
-    await update.message.reply_text(
-        "Диалог сброшен. Выберите первый шаг кнопкой.",
-        reply_markup=first_step_menu_markup(),
-    )
+    current = SESSIONS.get(chat_id) or {}
+    if current.get("project_workspace_mode") is True:
+        from ..guest_handlers import guest_main_menu_markup
+
+        await update.message.reply_text(
+            "Диалог сброшен. Выберите действие в проекте «Дисциплина».",
+            reply_markup=guest_main_menu_markup(current),
+        )
+    else:
+        await update.message.reply_text(
+            "Диалог сброшен. Выберите первый шаг кнопкой.",
+            reply_markup=first_step_menu_markup(),
+        )
 
 
 async def check_env(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -673,7 +717,7 @@ async def _handle_video_provider_choice_pending_video_command(
 
 async def _fix_stress_command_impl(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """
-    Команда ``/fix_stress``: приводит реплики veo3 к формату без ударений/пунктуации.
+    Команда ``/fix_stress``: приводит реплики veo3 к нижнему регистру и нормализует паузы/пунктуацию.
     """
     if update.message is None or update.effective_chat is None:
         return
@@ -715,7 +759,7 @@ async def _fix_stress_command_impl(update: Update, context: ContextTypes.DEFAULT
                     if isinstance(tts, dict):
                         tts["text_ru"] = new_text
 
-    await update.message.reply_text("Убрала ударения и нормализовала [пауза] в текущих сценах.")
+    await update.message.reply_text("Нормализовала регистр, [пауза] и пунктуацию в текущих сценах.")
     await _reply_text_chunked(update, session["scenes_text"])
 
 

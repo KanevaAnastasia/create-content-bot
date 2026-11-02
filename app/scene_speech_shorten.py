@@ -7,7 +7,7 @@ import logging
 import re
 from typing import Any
 
-from .llm_utils import extract_json_object, gemini_generate_sync
+from .llm_utils import GEMINI_MODEL_PROFILE_EDIT, extract_json_object, gemini_generate_sync
 from .media_costs import estimate_gemini_text_cost_usd
 from .pipeline_llm_steps import FINAL_SCENE_SUBSCRIBE_CTA, FINAL_SCENE_SUBSCRIBE_CTA_VEO3, RUSSIAN_YO_RULE
 from .scene_speech_budget import (
@@ -60,6 +60,8 @@ def shorten_scene_speech_and_sync_video_prompt_sync(
     language: str = "ru",
     current_text: str | None = None,
     current_video_prompt: str | None = None,
+    max_llm_attempts: int = 2,
+    rate_limit_max_attempts: int | None = None,
 ) -> dict[str, str] | None:
     """
     Сокращает ``scene['text']`` и согласует ``scene['video_prompt']`` через Gemini.
@@ -98,8 +100,11 @@ def shorten_scene_speech_and_sync_video_prompt_sync(
         text_rules = (
             "Поле text:\n"
             "- русский, от первого лица бабушки к зрителю (я/мы);\n"
+            "- не используй «моя бабушка», «у моей бабушки», «как у моей бабушки», «бабушка научила», "
+            "«рецепт моей бабушки»; бабушка говорит сама: я/мы/смотрите;\n"
             f"- {RUSSIAN_YO_RULE}\n"
             "- без ударений и без специальных акцентных меток;\n"
+            "- сохраняй смысловую пунктуацию из исходной фразы; если финального . ! ? или … нет, добавь точку;\n"
             "- без дефиса и тире в самой фразе озвучки: не используй символы -, – или —; для паузы используй только [пауза];\n"
             f"- допускается {PAUSE_TOKEN} только между смысловыми фразами;\n"
             f"- длина речи **без** всех вхождений {PAUSE_TOKEN} — строго не больше max_speech_chars_excluding_pauses.\n"
@@ -111,6 +116,7 @@ def shorten_scene_speech_and_sync_video_prompt_sync(
             "Поле text:\n"
             "- natural spoken English for short dubbing;\n"
             "- concise, easy to say, no stress markers or pronunciation annotations;\n"
+            "- preserve meaningful punctuation from the source line; if there is no final . ! ? or …, add a period;\n"
             "- no hyphen-minus or dash characters in the spoken phrase: do not use -, – or —; use words or [пауза] instead;\n"
             f"- optional {PAUSE_TOKEN} only between major phrases;\n"
             "- if the line is still risky, prefer making it shorter over preserving every detail;\n"
@@ -128,10 +134,15 @@ def shorten_scene_speech_and_sync_video_prompt_sync(
         "INPUT:\n"
         + json.dumps(payload, ensure_ascii=False, indent=2)
     )
-    for attempt in (1, 2):
+    attempts = max(1, int(max_llm_attempts or 1))
+    for attempt in range(1, attempts + 1):
         extra = "" if attempt == 1 else "\n\nПредыдущий ответ нарушил лимит или формат. Сократи агрессивнее."
         full_prompt = prompt + extra
-        raw = gemini_generate_sync(full_prompt)
+        raw = gemini_generate_sync(
+            full_prompt,
+            rate_limit_max_attempts=rate_limit_max_attempts,
+            model_profile=GEMINI_MODEL_PROFILE_EDIT,
+        )
         try:
             obj = extract_json_object(raw)
         except Exception as e:

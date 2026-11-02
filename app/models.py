@@ -8,12 +8,44 @@ ORM-модели проекта.
 from __future__ import annotations
 
 import uuid
+from datetime import date
 
-from sqlalchemy import Boolean, Enum, Float, ForeignKey, Index, Integer, JSON, LargeBinary, String, Text, UniqueConstraint, func
+from sqlalchemy import BigInteger, Boolean, Date, Enum, Float, ForeignKey, Index, Integer, JSON, LargeBinary, String, Text, UniqueConstraint, func
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 from sqlalchemy.sql.sqltypes import DateTime, Uuid
 
 from app.db import Base
+
+
+class BotUser(Base):
+    """Telegram user allowed to access the bot."""
+
+    __tablename__ = "bot_users"
+    __table_args__ = (
+        Index("ix_bot_users_telegram_id", "telegram_id"),
+        Index("ix_bot_users_normalized_username", "normalized_username"),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
+    telegram_id: Mapped[int | None] = mapped_column(BigInteger, nullable=True, unique=True)
+    normalized_username: Mapped[str | None] = mapped_column(String(128), nullable=True, unique=True)
+    display_name: Mapped[str] = mapped_column(Text, nullable=False, default="")
+    role: Mapped[str] = mapped_column(Enum("admin", "guest", name="bot_user_role"), nullable=False)
+    is_active: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
+    quiet_mode_enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    quiet_mode_auto_enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    quiet_mode_auto_cycle_date: Mapped[date | None] = mapped_column(Date, nullable=True)
+    quiet_mode_auto_generation_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    quiet_mode_auto_generation_target: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    created_at: Mapped[DateTime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
+    updated_at: Mapped[DateTime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        server_default=func.now(),
+        onupdate=func.now(),
+    )
+
+    projects: Mapped[list["Project"]] = relationship(back_populates="owner")
 
 
 class Project(Base):
@@ -22,6 +54,12 @@ class Project(Base):
     __tablename__ = "projects"
 
     id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
+    owner_user_id: Mapped[uuid.UUID | None] = mapped_column(
+        Uuid,
+        ForeignKey("bot_users.id", ondelete="SET NULL"),
+        nullable=True,
+        index=True,
+    )
     slug: Mapped[str] = mapped_column(String(128), nullable=False, unique=True)
     title: Mapped[str] = mapped_column(Text, nullable=False)
     description: Mapped[str | None] = mapped_column(Text, nullable=True)
@@ -35,6 +73,9 @@ class Project(Base):
     allowed_video_models: Mapped[dict | None] = mapped_column(JSON, nullable=True)
     background_music_asset_uri: Mapped[str | None] = mapped_column(Text, nullable=True)
     background_music_volume: Mapped[float | None] = mapped_column(Float, nullable=True)
+    elevenlabs_voice_id: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    default_generation_mode: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    style_source_project_slug: Mapped[str | None] = mapped_column(String(128), nullable=True)
     created_at: Mapped[DateTime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
     updated_at: Mapped[DateTime] = mapped_column(
         DateTime(timezone=True),
@@ -43,6 +84,7 @@ class Project(Base):
         onupdate=func.now(),
     )
 
+    owner: Mapped["BotUser | None"] = relationship(back_populates="projects")
     characters: Mapped[list["ProjectCharacter"]] = relationship(back_populates="project", cascade="all, delete-orphan")
     locations: Mapped[list["ProjectLocation"]] = relationship(back_populates="project", cascade="all, delete-orphan")
     visual_props: Mapped[list["VisualProp"]] = relationship(back_populates="project", cascade="all, delete-orphan")
@@ -59,6 +101,7 @@ class Project(Base):
         back_populates="project",
         cascade="all, delete-orphan",
     )
+    generation_runs: Mapped[list["GenerationRun"]] = relationship(back_populates="project")
 
 
 class ContentSeries(Base):
@@ -104,6 +147,7 @@ class Character(Base):
     name: Mapped[str] = mapped_column(Text, nullable=False)
     role: Mapped[str | None] = mapped_column(Text, nullable=True)
     description: Mapped[str | None] = mapped_column(Text, nullable=True)
+    voice_description: Mapped[str | None] = mapped_column(Text, nullable=True)
     default_asset_uri: Mapped[str | None] = mapped_column(Text, nullable=True)
     meta_json: Mapped[dict] = mapped_column(JSON, nullable=False, default=dict)
     is_active: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
@@ -159,6 +203,7 @@ class ProjectCharacter(Base):
     display_name: Mapped[str | None] = mapped_column(Text, nullable=True)
     asset_uri: Mapped[str | None] = mapped_column(Text, nullable=True)
     sort_order: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    is_primary: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
     meta_json: Mapped[dict] = mapped_column(JSON, nullable=False, default=dict)
 
     project: Mapped["Project"] = relationship(back_populates="characters")
@@ -303,6 +348,17 @@ class GenerationRun(Base):
     __tablename__ = "generation_runs"
 
     id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
+    project_id: Mapped[uuid.UUID | None] = mapped_column(
+        Uuid,
+        ForeignKey("projects.id", ondelete="SET NULL"),
+        nullable=True,
+        index=True,
+    )
+    workflow_type: Mapped[str | None] = mapped_column(
+        Enum("image", "video", "cartoon", name="generation_workflow_type"),
+        nullable=True,
+        index=True,
+    )
     status: Mapped[str] = mapped_column(String(64), nullable=False)
     is_active: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
     is_draft: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
@@ -332,6 +388,7 @@ class GenerationRun(Base):
     script: Mapped[str] = mapped_column(Text, nullable=False)
     created_at: Mapped[DateTime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
 
+    project: Mapped["Project | None"] = relationship(back_populates="generation_runs")
     series: Mapped["ContentSeries | None"] = relationship(back_populates="generation_runs")
     scheduled_item: Mapped["ScheduledGenerationItem | None"] = relationship(
         back_populates="generation_runs",
@@ -351,6 +408,7 @@ class ScheduledGenerationItem(Base):
     title: Mapped[str] = mapped_column(Text, nullable=False)
     recipe: Mapped[str] = mapped_column(Text, nullable=False)
     comment: Mapped[str | None] = mapped_column(Text, nullable=True)
+    overlay_subtitle: Mapped[str | None] = mapped_column(Text, nullable=True)
     title_color: Mapped[str] = mapped_column(String(32), nullable=False, default="#c72638")
     run_at: Mapped[DateTime] = mapped_column(DateTime(timezone=True), nullable=False, index=True)
     is_draft: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
@@ -427,7 +485,7 @@ class ScheduledGenerationEvent(Base):
 
 
 class GenerationDraft(Base):
-    """Saved Telegram generation snapshot that can be reopened for fixes."""
+    """Saved draft marker that can reopen a generation run for fixes."""
 
     __tablename__ = "generation_drafts"
 
@@ -682,8 +740,14 @@ class SceneVideoCandidate(Base):
     byte_size: Mapped[int | None] = mapped_column(Integer, nullable=True)
     liked: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
     approved_for_production: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
-    speed_coef: Mapped[float] = mapped_column(Float, nullable=False, default=1.2)
+    speed_coef: Mapped[float] = mapped_column(Float, nullable=False, default=1.0)
     source_image_candidate_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    video_prompt_by_lang: Mapped[dict] = mapped_column(JSON, nullable=False, default=dict)
+    speech_by_lang: Mapped[dict] = mapped_column(JSON, nullable=False, default=dict)
+    speech_cues_by_lang: Mapped[dict] = mapped_column(JSON, nullable=False, default=dict)
+    speech_plan_by_lang: Mapped[dict] = mapped_column(JSON, nullable=False, default=dict)
+    video_speech_qa_by_lang: Mapped[dict] = mapped_column(JSON, nullable=False, default=dict)
+    generation_params_json: Mapped[dict] = mapped_column(JSON, nullable=False, default=dict)
     created_at: Mapped[DateTime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
 
     scene: Mapped["Scene"] = relationship(back_populates="video_candidates")

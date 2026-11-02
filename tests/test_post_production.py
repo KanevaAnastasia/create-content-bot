@@ -12,6 +12,421 @@ def _fake_upscale_master_to_4k(*, ffmpeg, src_path, dest_path):
     dest_path.write_bytes(Path(src_path).read_bytes() + b"|upscaled_4k")
 
 
+def _character_alignment(text: str, *, step: float = 0.1) -> dict[str, list]:
+    return {
+        "characters": list(text),
+        "character_start_times_seconds": [index * step for index in range(len(text))],
+        "character_end_times_seconds": [(index + 1) * step for index in range(len(text))],
+    }
+
+
+def test_story_word_synced_subtitles_follow_exact_alignment_and_preserve_case():
+    scenes = [
+        {"scene": 1, "timeline_duration_sec": 1.0},
+        {"scene": 2, "timeline_duration_sec": 1.0},
+    ]
+    spoken = "Я читаю. Книги здесь."
+
+    post_production.apply_story_word_synced_subtitles(
+        scenes,
+        project_slug="discipline",
+        voiceover_by_lang={"ru": spoken},
+        alignment_by_lang={"ru": _character_alignment(spoken)},
+        duration_by_lang={"ru": 2.2},
+    )
+
+    assert scenes[0]["speech_by_lang"]["ru"] == "Я читаю."
+    assert scenes[1]["speech_by_lang"]["ru"] == "Книги здесь."
+    assert scenes[0]["speech_cues_by_lang"]["ru"] == [
+        {
+            "text": "Я",
+            "start_sec": 0.0,
+            "end_sec": 0.2,
+            "word_synced": True,
+            "preserve_case": True,
+            "fixed_block_words": ["Я", "читаю."],
+            "visible_word_count": 1,
+            "story_style_version": "metel_fixed_blocks_v2",
+            "story_timing_source": "elevenlabs_alignment",
+        },
+        {
+            "text": "Я читаю.",
+            "start_sec": 0.2,
+            "end_sec": 1.1,
+            "word_synced": True,
+            "preserve_case": True,
+            "fixed_block_words": ["Я", "читаю."],
+            "visible_word_count": 2,
+            "story_style_version": "metel_fixed_blocks_v2",
+            "story_timing_source": "elevenlabs_alignment",
+        },
+    ]
+    assert scenes[1]["speech_cues_by_lang"]["ru"][0]["text"] == "Книги"
+    assert scenes[1]["word_synced_subtitle_languages"] == ["ru"]
+
+
+def test_story_word_synced_subtitles_recovers_legacy_story_without_saved_alignment():
+    scenes = [
+        {"duration_sec": 2.0, "speech_by_lang": {"ru": "Первое точное предложение."}},
+        {"duration_sec": 2.0, "speech_by_lang": {"ru": "Второе предложение."}},
+    ]
+
+    post_production.apply_story_word_synced_subtitles(
+        scenes,
+        project_slug="grandma_kitchen",
+        voiceover_by_lang={"ru": "Первое точное предложение. Второе предложение."},
+        alignment_by_lang={},
+        duration_by_lang={"ru": 4.0},
+    )
+
+    first = scenes[0]["speech_cues_by_lang"]["ru"]
+    assert [cue["text"] for cue in first] == ["Первое", "Первое точное", "Первое точное предложение."]
+    assert all(cue["word_synced"] is True for cue in first)
+    assert all(cue["story_timing_source"] == "estimated_legacy_scene" for cue in first)
+
+
+def test_story_word_synced_subtitles_recovers_legacy_language_from_voiceover_text():
+    scenes = [{"duration_sec": 2.0}, {"duration_sec": 2.0}]
+
+    post_production.apply_story_word_synced_subtitles(
+        scenes,
+        project_slug="grandma_kitchen",
+        voiceover_by_lang={"en": "First exact sentence. Second exact sentence."},
+        alignment_by_lang={},
+        duration_by_lang={"en": 4.0},
+    )
+
+    recovered = " ".join(scene["speech_by_lang"]["en"] for scene in scenes)
+    assert recovered == "First exact sentence. Second exact sentence."
+    assert scenes[0]["speech_cues_by_lang"]["en"][0]["text"] == "First"
+
+
+def test_story_word_synced_subtitles_uses_voiceover_when_visual_clips_duplicate_a_beat():
+    scenes = [
+        {"duration_sec": 2.0, "speech_by_lang": {"ru": "Первая фраза."}},
+        {"duration_sec": 2.0, "speech_by_lang": {"ru": "Первая фраза."}},
+        {"duration_sec": 2.0, "speech_by_lang": {"ru": "Вторая фраза."}},
+    ]
+
+    post_production.apply_story_word_synced_subtitles(
+        scenes,
+        project_slug="grandma_kitchen",
+        voiceover_by_lang={"ru": "Первая фраза. Вторая фраза."},
+        alignment_by_lang={},
+        duration_by_lang={"ru": 6.0},
+    )
+
+    recovered = " ".join(scene["speech_by_lang"]["ru"] for scene in scenes)
+    assert recovered == "Первая фраза. Вторая фраза."
+    cues = [cue for scene in scenes for cue in scene["speech_cues_by_lang"]["ru"]]
+    assert cues
+    assert all(cue["story_timing_source"] == "estimated_legacy_voiceover" for cue in cues)
+
+
+def test_word_synced_ass_uses_spoken_case_and_cream_colour(tmp_path):
+    target = tmp_path / "subtitles.ass"
+
+    post_production._write_burned_subtitle_ass(
+        target,
+        [
+            {
+                "text": "Я",
+                "start_sec": 0.0,
+                "end_sec": 0.5,
+                "word_synced": True,
+                "preserve_case": True,
+                "fixed_block_words": ["Я", "читаю", "книги"],
+                "visible_word_count": 1,
+            },
+            {
+                "text": "Я читаю",
+                "start_sec": 0.5,
+                "end_sec": 1.0,
+                "word_synced": True,
+                "preserve_case": True,
+                "fixed_block_words": ["Я", "читаю", "книги"],
+                "visible_word_count": 2,
+            },
+        ],
+        video_width=1080,
+        video_height=1920,
+    )
+
+    payload = target.read_text(encoding="utf-8")
+    assert r"\fnZyruaCitrus\fs66\b1" in payload
+    assert payload.count(r"\pos(540,1555)") == 2
+    assert r"Я {\alpha&HFF&}читаю книги{\alpha&H00&}" in payload
+    assert r"Я читаю {\alpha&HFF&}книги{\alpha&H00&}" in payload
+    assert "Я ЧИТАЮ" not in payload
+    assert r"\c&H00D8EBF3&" in payload
+    assert r"\3c&H00000000&\4c&H70000000&\bord3\shad2" in payload
+
+
+def test_story_series_title_stack_is_centered_in_three_rows(tmp_path):
+    target = tmp_path / "story-title.ass"
+    series_cue = post_production._build_title_series_overlay_cue(
+        {"ru": "Истории любимых блюд"},
+        {"ru": "история 8 из 10"},
+        language="ru",
+        duration_sec=3.0,
+    )
+    title_cue = post_production._build_title_overlay_cue(
+        {"ru": "ОЛИВЬЕ"},
+        language="ru",
+        duration_sec=3.0,
+    )
+
+    assert series_cue is not None
+    assert series_cue["layout_variant"] == "story"
+    post_production._write_burned_subtitle_ass(
+        target,
+        [],
+        title_cues=[series_cue, title_cue],
+        title_style={"title_color": "#ff1a12"},
+        video_width=1080,
+        video_height=1920,
+    )
+
+    payload = target.read_text(encoding="utf-8")
+    series_lines = [line for line in payload.splitlines() if ",TitleSeriesRU," in line]
+    title_lines = [line for line in payload.splitlines() if ",TitleOverlayRU," in line]
+    assert len(series_lines) == 2
+    assert all(r"\pos(540," in line for line in series_lines)
+    assert any(r"\an8\pos(540," in line for line in title_lines)
+    assert "история" in payload
+    assert "ОЛИВЬЕ" in payload
+
+
+def test_story_caption_blocks_never_exceed_four_words():
+    rows = [(word, index * 0.2, (index + 1) * 0.2) for index, word in enumerate(
+        ["один", "два", "три", "четыре", "пять", "шесть.", "семь"]
+    )]
+
+    blocks = post_production._story_caption_word_blocks(rows)
+
+    assert [[word for word, _start, _end in block] for block in blocks] == [
+        ["один", "два", "три", "четыре"],
+        ["пять", "шесть."],
+        ["семь"],
+    ]
+
+
+def test_replace_master_audio_uses_approved_narration_and_exact_video_duration(monkeypatch, tmp_path):
+    captured: dict[str, object] = {}
+    monkeypatch.setattr(post_production, "_media_duration", lambda _path: 57.0)
+
+    def fake_run_ffmpeg(cmd, *, timeout, stage):
+        captured.update(cmd=cmd, timeout=timeout, stage=stage)
+
+    monkeypatch.setattr(post_production, "_run_ffmpeg", fake_run_ffmpeg)
+    video_path = tmp_path / "silent.mp4"
+    narration_path = tmp_path / "approved.mp3"
+    dest_path = tmp_path / "narrated.mp4"
+    video_path.write_bytes(b"video")
+    narration_path.write_bytes(b"voice")
+
+    post_production._replace_master_audio_with_narration(
+        ffmpeg="ffmpeg",
+        video_path=video_path,
+        narration_path=narration_path,
+        dest_path=dest_path,
+    )
+
+    cmd = captured["cmd"]
+    assert str(narration_path) in cmd
+    assert "[a]" in cmd
+    assert any("apad=whole_dur=57.000000" in item for item in cmd)
+    assert captured["stage"] == "replace_master_audio_with_narration"
+
+
+def test_replace_master_audio_can_boost_anastasia_narration_safely(monkeypatch, tmp_path):
+    captured: dict[str, object] = {}
+    monkeypatch.setattr(post_production, "_media_duration", lambda _path: 10.0)
+    monkeypatch.setattr(
+        post_production,
+        "_run_ffmpeg",
+        lambda cmd, *, timeout, stage: captured.update(cmd=cmd, timeout=timeout, stage=stage),
+    )
+    video = tmp_path / "video.mp4"
+    narration = tmp_path / "anastasia.mp3"
+    target = tmp_path / "out.mp4"
+    video.write_bytes(b"video")
+    narration.write_bytes(b"voice")
+
+    post_production._replace_master_audio_with_narration(
+        ffmpeg="ffmpeg",
+        video_path=video,
+        narration_path=narration,
+        dest_path=target,
+        narration_volume=post_production.DISCIPLINE_ANASTASIA_NARRATION_VOLUME,
+    )
+
+    filter_complex = captured["cmd"][captured["cmd"].index("-filter_complex") + 1]
+    assert "[1:a]volume=2.0000,alimiter=limit=0.97" in filter_complex
+
+
+def test_replace_master_audio_keeps_discipline_intro_before_story_narration(monkeypatch, tmp_path):
+    captured: dict[str, object] = {}
+    master = tmp_path / "master.mp4"
+    intro = tmp_path / "intro.mp4"
+    narration = tmp_path / "story.mp3"
+    target = tmp_path / "joined.mp4"
+    for path in (master, intro, narration):
+        path.write_bytes(b"media")
+
+    monkeypatch.setattr(
+        post_production,
+        "_media_duration",
+        lambda path: 68.0 if Path(path) == master else 8.0,
+    )
+
+    def fake_run(cmd, *, timeout, stage):
+        captured.update(cmd=cmd, timeout=timeout, stage=stage)
+
+    monkeypatch.setattr(post_production, "_run_ffmpeg", fake_run)
+
+    post_production._replace_master_audio_with_intro_and_narration(
+        ffmpeg="ffmpeg",
+        video_path=master,
+        intro_video_path=intro,
+        narration_path=narration,
+        dest_path=target,
+    )
+
+    cmd = captured["cmd"]
+    assert str(intro) in cmd
+    assert str(narration) in cmd
+    assert any("[intro][story]concat=n=2" in item for item in cmd)
+    assert any("apad=whole_dur=68.000000" in item for item in cmd)
+    assert captured["stage"] == "replace_master_audio_with_intro_and_narration"
+
+
+def test_proportional_story_durations_match_shorter_narration_without_drift():
+    durations = post_production._proportional_frame_aligned_durations(
+        [3.0, 3.0, 3.0, 1.56],
+        9.79,
+        fps=30,
+    )
+
+    assert len(durations) == 4
+    assert abs(sum(durations) - round(9.79 * 30) / 30) < 0.0001
+    assert all(value < source for value, source in zip(durations, [3.0, 3.0, 3.0, 1.56]))
+
+
+def test_all_english_narrated_workflows_trim_each_internal_clip(monkeypatch, tmp_path):
+    scenes = [
+        {"scene": 1, "duration_sec": 3.0, "speech_by_lang": {"en": "First idea"}},
+        {"scene": 2, "duration_sec": 3.0, "speech_by_lang": {"en": "Second idea"}},
+    ]
+    for index, scene in enumerate(scenes, start=1):
+        candidate = register_video_candidate(scene, language="en", video_bytes=f"clip-{index}".encode())
+        candidate["approved_for_production"] = True
+        candidate["speed_coef"] = 1.0
+
+    narration_path = tmp_path / "english.mp3"
+    narration_path.write_bytes(b"approved-english-audio")
+    normalized_durations: list[float] = []
+
+    monkeypatch.setattr(post_production, "_resolve_ffmpeg", lambda: "/usr/bin/ffmpeg")
+    monkeypatch.setattr(post_production, "_video_dimensions", lambda _path: (1080, 1920))
+    monkeypatch.setattr(post_production, "_has_audio_stream", lambda _path: False)
+    monkeypatch.setattr(post_production, "_resolve_music_path", lambda _slug: (None, 0.18))
+    monkeypatch.setattr(
+        post_production,
+        "_media_duration",
+        lambda path: 4.0 if Path(path) == narration_path else None,
+    )
+
+    def fake_normalize(**kwargs):
+        normalized_durations.append(float(kwargs["target_duration_sec"]))
+        kwargs["dest_path"].write_bytes(kwargs["src_path"].read_bytes())
+
+    monkeypatch.setattr(post_production, "_normalize_segment", fake_normalize)
+    monkeypatch.setattr(
+        post_production,
+        "_concat_segments",
+        lambda **kwargs: kwargs["dest_path"].write_bytes(b"merged"),
+    )
+    monkeypatch.setattr(
+        post_production,
+        "_replace_master_audio_with_narration",
+        lambda **kwargs: kwargs["dest_path"].write_bytes(b"narrated"),
+    )
+
+    post_production.build_post_production(
+        scenes,
+        target_languages=["en"],
+        target_variants=["clean"],
+        narration_audio_path_by_lang={"en": narration_path},
+    )
+
+    assert normalized_durations == [2.0, 2.0]
+
+
+def test_speech_text_from_prompt_stops_before_inline_instruction_blocks():
+    prompt = (
+        "lang:ru Duration: 6 seconds. CHARACTERS SPEAKS: нежное тесто, "
+        "хрустящая посыпка, каждый кусочек. voice_lock_full_grandma: female "
+        "voice Russian language. speech_timing_plan: - 0.00-6.00s: нежное тесто. "
+        "Render this video in vertical portrait 9:16 aspect ratio."
+    )
+
+    assert post_production._speech_text_from_prompt(prompt) == (
+        "нежное тесто, хрустящая посыпка, каждый кусочек."
+    )
+
+
+def test_build_post_production_uses_horizontal_dimensions_for_long_mode(monkeypatch):
+    scenes = [
+        {
+            "duration_sec": 8,
+            "aspect_ratio": "16:9",
+            "text": "Длинная сцена",
+            "speech_by_lang": {"ru": "Длинная сцена"},
+        }
+    ]
+    candidate = register_video_candidate(scenes[0], language="ru", video_bytes=b"scene-1")
+    candidate["approved_for_production"] = True
+
+    normalize_calls: list[tuple[int, int]] = []
+    upscale_calls: list[tuple[int, int]] = []
+
+    monkeypatch.setattr(post_production, "_resolve_ffmpeg", lambda: "/usr/bin/ffmpeg")
+    monkeypatch.setattr(post_production, "_video_dimensions", lambda _path: (1920, 1080))
+    monkeypatch.setattr(post_production, "_has_audio_stream", lambda _path: True)
+    monkeypatch.setattr(post_production, "_resolve_music_path", lambda _slug: ("", 0.0))
+
+    def fake_normalize_segment(*, ffmpeg, src_path, dest_path, speed_coef, target_width, target_height):
+        _ = (ffmpeg, speed_coef)
+        normalize_calls.append((target_width, target_height))
+        dest_path.write_bytes(Path(src_path).read_bytes())
+
+    def fake_concat_segments(*, ffmpeg, list_path, dest_path):
+        _ = ffmpeg
+        source = Path(Path(list_path).read_text(encoding="utf-8").split("'", 2)[1])
+        dest_path.write_bytes(source.read_bytes())
+
+    def fake_upscale(*, ffmpeg, src_path, dest_path, target_width, target_height):
+        _ = ffmpeg
+        upscale_calls.append((target_width, target_height))
+        dest_path.write_bytes(Path(src_path).read_bytes() + b"|upscaled")
+
+    monkeypatch.setattr(post_production, "_normalize_segment", fake_normalize_segment)
+    monkeypatch.setattr(post_production, "_concat_segments", fake_concat_segments)
+    monkeypatch.setattr(post_production, "_upscale_master_to_4k", fake_upscale)
+
+    out = post_production.build_post_production(
+        scenes,
+        target_languages=["ru"],
+        target_variants=["clean", "upscaled_4k"],
+    )
+
+    assert normalize_calls == [(1920, 1080)]
+    assert upscale_calls == [(3840, 2160)]
+    assert out["final_clean_video"]["width"] == 1920
+    assert out["final_upscaled_4k_video"]["height"] == 1080
+
+
 def test_build_post_production_uses_selected_scene_videos_and_speed(monkeypatch):
     scenes = [
         {"duration_sec": 8, "text": "Первая сцена", "speech_by_lang": {"en": "First scene [пауза] line"}},
@@ -92,6 +507,39 @@ def test_build_post_production_uses_selected_scene_videos_and_speed(monkeypatch)
     assert "FIRST SCENE" in en_payload
     assert "LINE" in en_payload
     assert "SECOND LINE" in en_payload
+
+
+def test_normal_recipe_build_does_not_trim_provider_clip_to_planned_duration(monkeypatch):
+    scenes = [{"duration_sec": 6.0, "text": "Полная сцена"}]
+    candidate = register_video_candidate(scenes[0], language="ru", video_bytes=b"eight-second-provider-clip")
+    candidate["approved_for_production"] = True
+    candidate["speed_coef"] = 1.1
+    seen_target_durations: list[float | None] = []
+
+    monkeypatch.setattr(post_production, "_resolve_ffmpeg", lambda: "/usr/bin/ffmpeg")
+    monkeypatch.setattr(post_production, "_video_dimensions", lambda _path: (1080, 1920))
+    monkeypatch.setattr(post_production, "_has_audio_stream", lambda _path: True)
+    monkeypatch.setattr(post_production, "_media_duration", lambda _path: 8.0)
+    monkeypatch.setattr(post_production, "_resolve_music_path", lambda _slug: (None, 0.18))
+
+    def fake_normalize_segment(**kwargs):
+        seen_target_durations.append(kwargs.get("target_duration_sec"))
+        kwargs["dest_path"].write_bytes(kwargs["src_path"].read_bytes())
+
+    monkeypatch.setattr(post_production, "_normalize_segment", fake_normalize_segment)
+    monkeypatch.setattr(
+        post_production,
+        "_concat_segments",
+        lambda **kwargs: kwargs["dest_path"].write_bytes(b"merged"),
+    )
+
+    post_production.build_post_production(
+        scenes,
+        target_languages=["ru"],
+        target_variants=["clean"],
+    )
+
+    assert seen_target_durations == [None]
 
 
 def test_build_post_production_ignores_speed_for_speechless_kling(monkeypatch):
@@ -179,6 +627,7 @@ def test_build_post_production_adds_title_overlay_for_first_segment_duration(mon
     out = post_production.build_post_production(
         scenes,
         overlay_title_by_lang={"ru": "Борщ", "en": "Borscht"},
+        overlay_subtitle_by_lang={"ru": "КБЖУ на 100 гр: 126/10/4/24", "en": "per 100g: 126/10/4/24"},
         overlay_title_style={"title_color": "#c72638", "top_margin_ratio": 0.15, "side_margin_ratio": 0.11},
         overlay_series_title_by_lang={"ru": "Супы у бабушки", "en": "Grandma's Soups"},
         overlay_series_counter_by_lang={"ru": "день 2 из 7", "en": "day 2 of 7"},
@@ -191,18 +640,26 @@ def test_build_post_production_adds_title_overlay_for_first_segment_duration(mon
     assert "Style: TitleOverlayEN,Taller" in ass_by_name["title_overlay_en.ass"]
     assert "Style: TitleSeriesRU,Berezka" in ass_by_name["title_overlay_ru.ass"]
     assert "Style: TitleSeriesEN,Ravsten Demo" in ass_by_name["title_overlay_en.ass"]
+    assert "Style: TitleSubtitleRU,Berezka" in ass_by_name["title_overlay_ru.ass"]
+    assert "Style: TitleSubtitleEN,Ravsten Demo" in ass_by_name["title_overlay_en.ass"]
+    assert "Style: TitleSubtitleRU,Berezka,40,&H00FFFFFF" in ass_by_name["title_overlay_ru.ass"]
     assert "Style: TitleOverlayRU,TD Afisha,118,&H003826C7" in ass_by_name["title_overlay_ru.ass"]
     assert "&H00000000,&H00000000" in ass_by_name["title_overlay_ru.ass"]
     assert ",0,1,5,12,7," in ass_by_name["title_overlay_ru.ass"]
     assert ",0,1,5,10,7," in ass_by_name["title_overlay_ru.ass"]
+    assert ",0,1,5,10,8," in ass_by_name["title_overlay_ru.ass"]
     assert r"\fsp" not in ass_by_name["title_overlay_ru.ass"]
     assert re.search(r",118,118,\d+,1", ass_by_name["title_overlay_ru.ass"])
     assert "Dialogue: 1,0:00:00.00,0:00:04.00,TitleOverlayRU" in ass_by_name["title_overlay_ru.ass"]
     assert "Dialogue: 1,0:00:00.00,0:00:04.00,TitleOverlayEN" in ass_by_name["title_overlay_en.ass"]
+    assert "Dialogue: 1,0:00:00.00,0:00:04.00,TitleSubtitleRU" in ass_by_name["title_overlay_ru.ass"]
+    assert "Dialogue: 1,0:00:00.00,0:00:04.00,TitleSubtitleEN" in ass_by_name["title_overlay_en.ass"]
     assert "Dialogue: 2,0:00:00.00,0:00:04.00,TitleSeriesRU" in ass_by_name["title_overlay_ru.ass"]
     assert "Dialogue: 2,0:00:00.00,0:00:04.00,TitleSeriesEN" in ass_by_name["title_overlay_en.ass"]
     assert "Борщ" in ass_by_name["title_overlay_ru.ass"]
     assert "Borscht" in ass_by_name["title_overlay_en.ass"]
+    assert r"КБЖУ\hна\h100\hгр:\h126/10/4/24" in ass_by_name["title_overlay_ru.ass"]
+    assert r"per\h100g:\h126/10/4/24" in ass_by_name["title_overlay_en.ass"]
     assert r"супы\hу\hбабушки" in ass_by_name["title_overlay_ru.ass"]
     assert r"Grandma's\hSoups" in ass_by_name["title_overlay_en.ass"]
     assert re.search(
@@ -223,6 +680,16 @@ def test_build_post_production_adds_title_overlay_for_first_segment_duration(mon
     )
     assert out["title_overlay_by_language"]["ru"] == {"title": "Борщ", "start_sec": 0.0, "end_sec": 4.0}
     assert out["title_overlay_by_language"]["en"] == {"title": "Borscht", "start_sec": 0.0, "end_sec": 4.0}
+    assert out["subtitle_overlay_by_language"]["ru"] == {
+        "subtitle": "КБЖУ на 100 гр: 126/10/4/24",
+        "start_sec": 0.0,
+        "end_sec": 4.0,
+    }
+    assert out["subtitle_overlay_by_language"]["en"] == {
+        "subtitle": "per 100g: 126/10/4/24",
+        "start_sec": 0.0,
+        "end_sec": 4.0,
+    }
     assert out["series_overlay_by_language"]["ru"] == {
         "series_title": "Супы у бабушки",
         "counter": "день 2 из 7",
@@ -508,6 +975,52 @@ def test_build_subtitled_post_production_reuses_existing_upscaled_master(tmp_pat
         }
     ]
     assert [item["stage"] for item in progress_events] == ["reuse_upscaled", "subtitles_building", "subtitles_ready", "persisting"]
+
+
+def test_story_subtitled_4k_master_keeps_voice_and_omits_background_music(tmp_path, monkeypatch):
+    source = tmp_path / "story_upscaled_4k_master_ru.mp4"
+    source.write_bytes(b"4k-story-with-voice")
+    scene = {
+        "duration_sec": 4,
+        "text": "Дословный текст",
+        "speech_cues_by_lang": {
+            "ru": [{"text": "Дословный текст", "start_sec": 0.0, "end_sec": 4.0}]
+        },
+    }
+    candidate = register_video_candidate(scene, language="ru", video_bytes=b"source-video")
+    candidate["approved_for_production"] = True
+    rendered_inputs = []
+
+    monkeypatch.setattr(post_production, "_resolve_ffmpeg", lambda: "/usr/bin/ffmpeg")
+    monkeypatch.setattr(post_production, "_video_dimensions", lambda _path: (2160, 3840))
+    monkeypatch.setattr(
+        post_production,
+        "_resolve_music_path",
+        lambda _slug: (_ for _ in ()).throw(AssertionError("Story must not resolve background music")),
+    )
+    monkeypatch.setattr(post_production, "_persist_render_artifact", lambda path, **_kwargs: str(path))
+
+    def fake_render(*, ffmpeg, clean_path, subtitles_path, music_path, music_volume, dest_path):
+        rendered_inputs.append((ffmpeg, Path(clean_path), music_path, music_volume))
+        dest_path.write_bytes(Path(clean_path).read_bytes() + b"|subtitles|")
+        return True
+
+    monkeypatch.setattr(post_production, "_render_subtitled_music_master", fake_render)
+
+    out = post_production.build_subtitled_post_production_from_upscaled_master(
+        [scene],
+        upscaled_video_path=source,
+        language="ru",
+        include_background_music=False,
+    )
+
+    assert rendered_inputs == [("/usr/bin/ffmpeg", source, None, 0.0)]
+    payload = out["renders_by_language"]["ru"]["subtitled_music"]
+    assert payload["music_asset_uri"] is None
+    assert payload["music_volume"] == 0.0
+    assert payload["background_music_included"] is False
+    assert payload["source_audio_preserved"] is True
+    assert out["background_music_included"] is False
 
 
 def test_title_overlay_helpers_cover_fallbacks_and_invalid_style_values(tmp_path):
@@ -797,6 +1310,7 @@ def test_build_post_production_prefers_language_specific_speech_cues(monkeypatch
     monkeypatch.setattr(post_production, "_resolve_ffmpeg", lambda: "/usr/bin/ffmpeg")
     monkeypatch.setattr(post_production, "_video_dimensions", lambda _path: (1080, 1920))
     monkeypatch.setattr(post_production, "_has_audio_stream", lambda _path: True)
+    monkeypatch.setattr(post_production, "_media_duration", lambda _path: 5.0)
     monkeypatch.setattr(post_production, "_resolve_music_path", lambda _slug: (None, 0.18))
     monkeypatch.setattr(post_production, "_normalize_segment", lambda **kwargs: kwargs["dest_path"].write_bytes(kwargs["src_path"].read_bytes()))
     monkeypatch.setattr(post_production, "_concat_segments", lambda **kwargs: kwargs["dest_path"].write_bytes(b"merged"))
@@ -847,6 +1361,43 @@ def test_build_post_production_does_not_fallback_english_subtitles_to_russian(mo
         raise AssertionError("English build must not use Russian scene text as subtitles")
 
 
+def test_build_post_production_uses_english_speech_timing_plan_for_subtitles(monkeypatch):
+    scenes = [
+        {
+            "scene": 1,
+            "duration_sec": 6,
+            "text": "Русская фраза",
+            "speech_by_lang": {},
+            "video_prompt_by_lang": {
+                "en": (
+                    "lang:en A 6-second clip.\n"
+                    "voice_lock_full_grandma: English voice.\n"
+                    "speech_timing_plan:\n"
+                    "- 0.00-8.00s: Never throw away watermelon rinds! "
+                    "They make such delicious watermelon jam."
+                )
+            },
+        }
+    ]
+    en = register_video_candidate(scenes[0], language="en", video_bytes=b"en")
+    en["approved_for_production"] = True
+
+    monkeypatch.setattr(post_production, "_resolve_ffmpeg", lambda: "/usr/bin/ffmpeg")
+    monkeypatch.setattr(post_production, "_video_dimensions", lambda _path: (1080, 1920))
+    monkeypatch.setattr(post_production, "_has_audio_stream", lambda _path: True)
+    monkeypatch.setattr(post_production, "_resolve_music_path", lambda _slug: (None, 0.18))
+    monkeypatch.setattr(post_production, "_normalize_segment", lambda **kwargs: kwargs["dest_path"].write_bytes(kwargs["src_path"].read_bytes()))
+    monkeypatch.setattr(post_production, "_concat_segments", lambda **kwargs: kwargs["dest_path"].write_bytes(b"merged"))
+    monkeypatch.setattr(post_production, "_upscale_master_to_4k", _fake_upscale_master_to_4k)
+    monkeypatch.setattr(post_production, "_render_subtitled_music_master", lambda **kwargs: kwargs["dest_path"].write_bytes(kwargs["subtitles_path"].read_bytes()))
+
+    out = post_production.build_post_production(scenes, target_languages=["en"])
+
+    assert out["subtitle_entries_by_language"]["en"][0]["text"] == (
+        "Never throw away watermelon rinds! They make such delicious watermelon jam."
+    )
+
+
 def test_build_post_production_uses_candidate_speech_snapshot_for_subtitles(monkeypatch):
     scenes = [
         {
@@ -872,6 +1423,36 @@ def test_build_post_production_uses_candidate_speech_snapshot_for_subtitles(monk
     out = post_production.build_post_production(scenes, target_languages=["ru"])
 
     assert out["subtitle_entries_by_language"]["ru"][0]["text"] == "Старый текст кандидата"
+
+
+def test_build_post_production_rejects_english_candidate_snapshot_for_ru_subtitles(monkeypatch):
+    scene = {
+        "scene": 1,
+        "duration_sec": 6,
+        "text": "Русский текст сцены",
+        "speech_by_lang": {"ru": "Русский текст сцены"},
+        "speech_cues_by_lang": {
+            "ru": [{"text": "Русский cue сцены", "start_sec": 0.0, "end_sec": 6.0}]
+        },
+    }
+    selected = {
+        "speech_by_lang": {"ru": "English candidate text"},
+        "speech_cues_by_lang": {
+            "ru": [{"text": "English candidate cue", "start_sec": 0.0, "end_sec": 6.0}]
+        },
+        "video_prompt_by_lang": {"ru": "CHARACTERS SPEAKS: English candidate prompt"},
+    }
+
+    merged = post_production._scene_with_candidate_subtitle_snapshot(scene, selected, "ru")
+    entries = post_production._scene_subtitle_entries(
+        merged,
+        "ru",
+        start_offset=0.0,
+        fallback_duration=6.0,
+        speed_coef=1.0,
+    )
+
+    assert entries[0]["text"] == "Русский cue сцены"
 
 
 def test_build_post_production_can_prefer_scene_speech_over_candidate_snapshot(monkeypatch):
@@ -1064,6 +1645,7 @@ def test_render_subtitled_music_mix_keeps_source_audio_leading(monkeypatch, tmp_
     captured = {}
 
     monkeypatch.setattr(post_production, "_has_audio_stream", lambda _path: True)
+    monkeypatch.setattr(post_production, "_media_duration", lambda _path: 6.0)
 
     def fake_run_ffmpeg(cmd, *, timeout, stage):
         captured["cmd"] = cmd
@@ -1084,11 +1666,154 @@ def test_render_subtitled_music_mix_keeps_source_audio_leading(monkeypatch, tmp_
     filter_complex = captured["cmd"][captured["cmd"].index("-filter_complex") + 1]
     assert "subtitles=filename=" in filter_complex
     assert ":fontsdir=" in filter_complex
-    assert "[0:a]volume=1.0000[voice]" in filter_complex
+    assert "[0:a]volume=1.0000,apad=whole_dur=6.000,atrim=duration=6.000,asetpts=N/SR/TB[voice]" in filter_complex
     assert "[1:a]volume=0.1274[music]" in filter_complex
     assert "amix=inputs=2:duration=first:dropout_transition=0:normalize=0[a]" in filter_complex
+    assert "-stream_loop" in captured["cmd"]
+    assert "-shortest" in captured["cmd"]
     assert captured["stage"] == "render_subtitled_music_master_mix"
     assert captured["timeout"] == post_production.FFMPEG_UPSCALE_TIMEOUT_SEC
+
+
+def test_normalize_segment_adds_silent_audio_for_mute_source(monkeypatch, tmp_path):
+    src = tmp_path / "src.mp4"
+    dest = tmp_path / "dest.mp4"
+    src.write_bytes(b"video")
+    captured = {}
+
+    monkeypatch.setattr(post_production, "_media_duration", lambda _path: 4.0)
+    monkeypatch.setattr(post_production, "_has_audio_stream", lambda _path: False)
+
+    def fake_run_ffmpeg(cmd, *, timeout, stage):
+        captured["cmd"] = cmd
+        captured["timeout"] = timeout
+        captured["stage"] = stage
+        dest.write_bytes(b"out")
+
+    monkeypatch.setattr(post_production, "_run_ffmpeg", fake_run_ffmpeg)
+
+    post_production._normalize_segment(
+        ffmpeg="/usr/bin/ffmpeg",
+        src_path=src,
+        dest_path=dest,
+        speed_coef=1.0,
+    )
+
+    assert "-f" in captured["cmd"]
+    assert "anullsrc=channel_layout=stereo:sample_rate=48000" in captured["cmd"]
+    filter_complex = captured["cmd"][captured["cmd"].index("-filter_complex") + 1]
+    assert (
+        "[0:v]scale=1080:1920:force_original_aspect_ratio=increase,crop=1080:1920,"
+        "setpts=PTS/1.000000,fps=30,tpad=stop_mode=clone:stop_duration=0.100000,"
+        "trim=duration=4.000000,settb=AVTB,setpts=N/(30*TB)[v]"
+    ) in filter_complex
+    assert "[1:a]atrim=duration=4.000000,asetpts=N/SR/TB[a]" in filter_complex
+    assert captured["cmd"][captured["cmd"].index("-map") + 1] == "[v]"
+    assert "[a]" in captured["cmd"]
+    assert captured["cmd"][captured["cmd"].index("-ar") + 1] == "48000"
+    assert captured["cmd"][captured["cmd"].index("-ac") + 1] == "2"
+    assert captured["cmd"][captured["cmd"].index("-video_track_timescale") + 1] == "30000"
+    assert captured["stage"] == "normalize_segment"
+    assert captured["timeout"] == post_production.FFMPEG_RENDER_TIMEOUT_SEC
+
+
+def test_normalize_segment_pads_audio_to_video_duration(monkeypatch, tmp_path):
+    src = tmp_path / "src.mp4"
+    dest = tmp_path / "dest.mp4"
+    src.write_bytes(b"video")
+    captured = {}
+
+    monkeypatch.setattr(post_production, "_media_duration", lambda _path: 8.0)
+    monkeypatch.setattr(post_production, "_has_audio_stream", lambda _path: True)
+
+    def fake_run_ffmpeg(cmd, *, timeout, stage):
+        captured["cmd"] = cmd
+        captured["timeout"] = timeout
+        captured["stage"] = stage
+        dest.write_bytes(b"out")
+
+    monkeypatch.setattr(post_production, "_run_ffmpeg", fake_run_ffmpeg)
+
+    post_production._normalize_segment(
+        ffmpeg="/usr/bin/ffmpeg",
+        src_path=src,
+        dest_path=dest,
+        speed_coef=2.0,
+    )
+
+    assert "anullsrc=channel_layout=stereo:sample_rate=48000" not in captured["cmd"]
+    filter_complex = captured["cmd"][captured["cmd"].index("-filter_complex") + 1]
+    assert (
+        "[0:v]scale=1080:1920:force_original_aspect_ratio=increase,crop=1080:1920,"
+        "setpts=PTS/2.000000,fps=30,tpad=stop_mode=clone:stop_duration=0.100000,"
+        "trim=duration=4.000000,settb=AVTB,setpts=N/(30*TB)[v]"
+    ) in filter_complex
+    assert (
+        "[0:a]atempo=2.00000,aresample=async=1:first_pts=0,"
+        "apad=whole_dur=4.000000,atrim=duration=4.000000,asetpts=N/SR/TB[a]"
+    ) in filter_complex
+    assert captured["cmd"][captured["cmd"].index("-map") + 1] == "[v]"
+    assert "[a]" in captured["cmd"]
+    assert captured["cmd"][captured["cmd"].index("-ar") + 1] == "48000"
+    assert captured["cmd"][captured["cmd"].index("-ac") + 1] == "2"
+    assert captured["cmd"][captured["cmd"].index("-video_track_timescale") + 1] == "30000"
+    assert captured["stage"] == "normalize_segment"
+    assert captured["timeout"] == post_production.FFMPEG_RENDER_TIMEOUT_SEC
+
+
+def test_normalize_segment_uses_frame_aligned_audio_duration(monkeypatch, tmp_path):
+    src = tmp_path / "src.mp4"
+    dest = tmp_path / "dest.mp4"
+    src.write_bytes(b"video")
+    captured = {}
+
+    monkeypatch.setattr(post_production, "_media_duration", lambda _path: 8.0)
+    monkeypatch.setattr(post_production, "_has_audio_stream", lambda _path: True)
+
+    def fake_run_ffmpeg(cmd, *, timeout, stage):
+        captured["cmd"] = cmd
+        dest.write_bytes(b"out")
+
+    monkeypatch.setattr(post_production, "_run_ffmpeg", fake_run_ffmpeg)
+
+    post_production._normalize_segment(
+        ffmpeg="/usr/bin/ffmpeg",
+        src_path=src,
+        dest_path=dest,
+        speed_coef=1.1,
+    )
+
+    filter_complex = captured["cmd"][captured["cmd"].index("-filter_complex") + 1]
+    assert "trim=duration=7.266667" in filter_complex
+    assert "apad=whole_dur=7.266667,atrim=duration=7.266667" in filter_complex
+
+
+def test_normalize_story_segment_trims_three_second_clip_to_exact_timeline_window(monkeypatch, tmp_path):
+    src = tmp_path / "story_clip.mp4"
+    dest = tmp_path / "story_clip_trimmed.mp4"
+    src.write_bytes(b"video")
+    captured = {}
+
+    monkeypatch.setattr(post_production, "_media_duration", lambda _path: 3.0)
+    monkeypatch.setattr(post_production, "_has_audio_stream", lambda _path: False)
+
+    def fake_run_ffmpeg(cmd, *, timeout, stage):
+        captured["cmd"] = cmd
+        dest.write_bytes(b"out")
+
+    monkeypatch.setattr(post_production, "_run_ffmpeg", fake_run_ffmpeg)
+
+    post_production._normalize_segment(
+        ffmpeg="/usr/bin/ffmpeg",
+        src_path=src,
+        dest_path=dest,
+        speed_coef=1.0,
+        target_duration_sec=2.4,
+    )
+
+    filter_complex = captured["cmd"][captured["cmd"].index("-filter_complex") + 1]
+    assert "trim=duration=2.400000" in filter_complex
+    assert "atrim=duration=2.400000" in filter_complex
 
 
 def test_has_audio_stream_falls_back_to_ffmpeg_input_probe(monkeypatch, tmp_path):
@@ -1132,6 +1857,27 @@ def test_artifact_names_are_readable():
 
     assert "_grandma_kitchen_" in key
     assert filename == "grandma_kitchen_subtitled_music_master_ru.mp4"
+
+
+def test_selected_scene_video_fingerprint_changes_with_candidate():
+    scenes = [
+        {
+            "scene": 1,
+            "duration_sec": 4,
+            "video_candidates_by_lang": {
+                "ru": [
+                    {"candidate_id": "old", "approved_for_production": True, "speed_coef": 1.0},
+                ]
+            },
+        }
+    ]
+
+    first = post_production.selected_scene_video_fingerprint_for_language(scenes, "ru")
+    scenes[0]["video_candidates_by_lang"]["ru"].append(
+        {"candidate_id": "new", "approved_for_production": True, "speed_coef": 1.0}
+    )
+
+    assert post_production.selected_scene_video_fingerprint_for_language(scenes, "ru") != first
 
 
 def test_dense_subtitle_entry_is_split_into_subwindows():

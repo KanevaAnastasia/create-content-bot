@@ -100,6 +100,7 @@ from .handlers_media_core import (
     video_provider_choice_parse_user_selection,
     syntax_fallback_parse_user_confirmation,
     _user_error_message,
+    _video_prompt_by_lang_with_candidate_fallback,
 )
 from .handlers_media_core_recipe import _try_parse_direct_recipe_from_user_text
 from .handlers_media_reporting import _format_scenes_plan_attempt_notice, _format_scenes_regeneration_report

@@ -11,6 +11,7 @@ from app.pipeline import (
     _extract_production_prompts,
     _normalize_production_prompts,
     _normalize_end_frame_prompt_for_stable_generation,
+    _ensure_silence_video_prompt_requirements,
     _normalize_frame_prompts,
     _ensure_scene_block_len,
     _enforce_voice_lock_if_needed,
@@ -27,12 +28,107 @@ from app.pipeline import (
     generate_viral_concept_brief,
     generate_script,
 )
+from app.generation_modes import GENERATION_MODE_LONG
+
+
+def _long_scene(scene: int, *, model: str = "veo3_fast", action: str | None = None) -> dict:
+    return {
+        "scene": scene,
+        "model": model,
+        "duration_sec": 4 if model.startswith("kling") else 8,
+        "aspect_ratio": "16:9",
+        "shot_type": "close-up",
+        "characters": ["grandma", "cat"],
+        "action": action or f"Подробный шаг рецепта {scene}",
+        "recipe_step": action or f"Подробный шаг рецепта {scene}",
+        "visual_description": action or f"Подробный шаг рецепта {scene}",
+        "continuity_anchors": ["миска", "доска", "рыжий кот"],
+        "continuity_state": f"Состояние блюда {scene}",
+        "text": "" if model.startswith("kling") else f"Показываю шаг {scene} подробно.",
+        "speech_plan": [] if model.startswith("kling") else [{"speaker": "grandma", "text": f"Показываю шаг {scene} подробно."}],
+    }
+
+
+def test_generate_scenes_plan_long_mode_keeps_24_horizontal_veo_scenes(monkeypatch):
+    scenes = [
+        _long_scene(1, action="Аппетитная презентация готового блюда на тарелке."),
+        _long_scene(2, action="Показываем все ингредиенты которые понадобятся для рецепта."),
+        *[_long_scene(i) for i in range(3, 25)],
+    ]
+
+    async def fake_gemini_text(_prompt: str) -> str:
+        return json.dumps(scenes, ensure_ascii=False)
+
+    monkeypatch.setattr(pipeline_llm_steps, "gemini_text", fake_gemini_text)
+    out = asyncio.run(
+        pipeline.generate_scenes_plan(
+            "пирог",
+            full_recipe_text="Ингредиенты: мука, яйца, сахар. Нарезать, смешать, испечь и подать.",
+            generation_mode=GENERATION_MODE_LONG,
+            viral_concept_brief={},
+        )
+    )
+
+    plan = out["json_plan"]
+    assert len(plan) == 24
+    assert sum(1 for scene in plan if scene["model"] == "veo3_fast") == 24
+    assert {scene["duration_sec"] for scene in plan} == {8}
+    assert {scene["aspect_ratio"] for scene in plan} == {"16:9"}
+    assert "готов" in plan[0]["action"].lower()
+    assert "ингредиент" in plan[1]["action"].lower()
+
+
+def test_generate_full_production_long_mode_preserves_kling_insert(monkeypatch):
+    scenes = [
+        _long_scene(1, action="Аппетитная презентация готового блюда."),
+        _long_scene(2, model="kling_3_0", action="Макро нарезка лука кубиком."),
+    ]
+
+    def fake_gemini(_prompt: str, **_kwargs) -> str:
+        return json.dumps(
+            {
+                "prompts": [
+                    {
+                        "start_frame_prompt_ru": "Горизонтальный кадр готового блюда.",
+                        "end_frame_prompt_ru": "пусто",
+                        "video_prompt_en": "8-second Veo clip. CHARACTERS SPEAKS: Показываю готовое блюдо подробно.",
+                    },
+                    {
+                        "start_frame_prompt_ru": "Горизонтальный макро кадр нарезки лука.",
+                        "end_frame_prompt_ru": "пусто",
+                        "video_prompt_en": "4-second Kling 3.0 close-up insert of onion dice falling from the knife.",
+                    },
+                ]
+            },
+            ensure_ascii=False,
+        )
+
+    monkeypatch.setattr(pipeline, "gemini_generate_sync", fake_gemini)
+    out = asyncio.run(
+        generate_full_production(
+            scenes,
+            generation_mode=GENERATION_MODE_LONG,
+            target_languages=["ru", "en"],
+        )
+    )
+
+    plan = out["json_plan"]
+    assert plan[0]["model"] == "veo3_fast"
+    assert plan[0]["duration_sec"] == 8
+    assert plan[0]["aspect_ratio"] == "16:9"
+    assert list(plan[0]["video_prompt_by_lang"]) == ["ru"]
+    assert "CHARACTERS SPEAKS" in plan[0]["video_prompt"]
+    assert plan[1]["model"] == "kling_3_0"
+    assert plan[1]["duration_sec"] == 4
+    assert plan[1]["text"] == ""
+    assert plan[1]["speech_plan_by_lang"] == {"ru": []}
+    assert "No dialogue" in plan[1]["video_prompt"]
 
 
 def test_generate_recipe_steps_prompt_states_length_is_model_only(monkeypatch):
     captured: list[str] = []
 
-    def fake_gemini(prompt: str) -> str:
+    def fake_gemini(prompt: str, **_kwargs) -> str:
         captured.append(prompt)
         return json.dumps(
             [f"нарезать овощи мелко шаг номер {i} подробно" for i in range(1, 5)],
@@ -211,12 +307,13 @@ def test_append_veo3_video_framing_constraints_adds_cooking_cast_rule_by_default
     assert "veo3_cat_count_rule:" in out.lower()
     assert "exactly one orange cat identity in frame" in out.lower()
     assert "different cat identities may appear together" in out.lower()
-    assert "grandmother and the orange cat" in out.lower()
+    assert "grandmother and exactly one orange cartoon cat are mandatory" in out.lower()
+    assert "exactly one orange cartoon cat are mandatory" in out.lower()
     assert "character_identity_rule:" not in out.lower()
     assert "Зая" not in out
     assert "Маркиз" not in out
     assert "cartoon grandmother" not in out
-    assert "cartoon cat" not in out
+    assert "veo3_cartoon_character_rule:" not in out.lower()
 
 
 def test_recipe_visual_rules_cover_cutting_and_stovetop_physics():
@@ -302,6 +399,8 @@ def test_pipeline_llm_steps_scenes_payload_carries_feedback_and_previous():
     assert "previous_scenes" in prompt
     assert "speech_first_person_pov" in prompt
     assert "первого лица" in prompt
+    assert "моя бабушка" in prompt
+    assert "бабушка научила" in prompt
     assert "Готовка по рецепту" in prompt
     assert "начинается строго со СЦЕНЫ 2" in prompt
     assert "режим РЕДАКТИРОВАНИЯ" in prompt
@@ -367,6 +466,13 @@ def test_scenes_payload_can_enable_romantic_drama(monkeypatch):
     assert payload["romantic_drama_subplot"]["characters"] == ["zaya", "markiz"]
     assert "character_descriptions" not in payload
     assert payload["character_short_descriptions"]["cat"] == "рыжий кот"
+
+
+def test_scenes_payload_does_not_auto_enable_romantic_drama():
+    payload = pipeline_llm_steps.build_scenes_plan_payload("пирог", "замесить и испечь", "", [])
+
+    assert payload["romantic_drama_subplot"]["enabled"] is False
+    assert payload["romantic_drama_subplot"]["characters"] == []
 
 
 def test_generate_scenes_plan_text_reports_romantic_drama(monkeypatch):
@@ -472,6 +578,130 @@ def test_generate_scenes_plan_infers_and_keeps_zaya_drama_from_refine(monkeypatc
     assert all(scene.get("romantic_drama_beat") for scene in out["json_plan"])
 
 
+def test_generate_scenes_plan_remove_white_cat_feedback_strips_neighbor_subplot(monkeypatch):
+    scenes_payload = [
+        {
+            "scene": 1,
+            "shot_type": "closeup",
+            "characters": ["grandma", "cat", "zaya", "markiz"],
+            "action": "Бабушка месит тесто, белая кошка смотрит на рыжего кота, черно-белый кот ждёт за окном.",
+            "text": "я мешаю тесто аккуратно",
+            "duration_sec": 6,
+            "model": "veo3_fast",
+            "voice_needed": True,
+            "has_lipsync": True,
+            "romantic_drama_episode": {
+                "brief": "Белая кошка ждёт знак внимания.",
+                "zaya_timosha_arc": "Белая кошка смотрит на рыжего кота.",
+                "markiz_arc": "Черно-белый кот ревнует за окном.",
+                "happy_end": "Белая кошка улыбается рыжему коту.",
+            },
+            "romantic_drama_beat": "Белая кошка смотрит на рыжего кота.",
+        }
+    ]
+
+    monkeypatch.setattr(pipeline, "get_scenes_plan", lambda *a, **k: None)
+    monkeypatch.setattr(pipeline, "set_scenes_plan", lambda *a, **k: None)
+
+    async def _fake_gemini_text(_prompt: str) -> str:
+        return json.dumps(scenes_payload, ensure_ascii=False)
+
+    monkeypatch.setattr("app.pipeline_llm_steps.gemini_text", _fake_gemini_text)
+
+    out = asyncio.run(
+        pipeline.generate_scenes_plan(
+            "пирог",
+            full_recipe_text="замесить и испечь",
+            user_feedback="убери белую кошку",
+            previous_scenes=[
+                {
+                    "scene": 1,
+                    "characters": ["grandma", "cat", "zaya"],
+                    "action": "Бабушка месит тесто, белая кошка рядом.",
+                    "romantic_drama_beat": "Белая кошка смотрит на рыжего кота.",
+                }
+            ],
+            romantic_drama_subplot={"enabled": True, "characters": ["zaya"], "brief": "драма"},
+        )
+    )
+
+    assert out["romantic_drama_subplot"]["enabled"] is False
+    scene = out["json_plan"][0]
+    assert "zaya" not in scene["characters"]
+    assert "markiz" not in scene["characters"]
+    assert "romantic_drama_beat" not in scene
+    assert "romantic_drama_episode" not in scene
+    assert "белая кошка" not in json.dumps(scene, ensure_ascii=False).lower()
+    assert "черно-белый кот" not in json.dumps(scene, ensure_ascii=False).lower()
+
+
+def test_silence_scene_feedback_pins_hook_beats_asmr_and_loop(monkeypatch):
+    scenes_payload = [
+        {
+            "scene": idx + 1,
+            "duration_sec": 4,
+            "shot_type": "Extreme Close-up",
+            "characters": ["grandma", "cat"],
+            "action": f"generic sushi step {idx + 1}",
+            "recipe_step": f"generic recipe step {idx + 1}",
+            "visual_description": f"generic visual {idx + 1}",
+            "sound_design": f"generic sound {idx + 1}",
+        }
+        for idx in range(6)
+    ]
+    feedback = (
+        "Здесь зритель ждёт не вкус, а раскрытие узора. До разреза ролл выглядит обычным. "
+        "После одного точного движения ножа внутри появляется цветная мозаика.\n\n"
+        "Лучший первый кадр\n\n"
+        "Нож заканчивает разрез, половинки расходятся, и на срезе появляется идеальный цветок или шахматный рисунок.\n\n"
+        "Сценарий\n\n"
+        "Рис рассыпается ровным слоем. Полоски огурца, авокадо, омлета, креветки и лосося укладываются как детали конструктора. "
+        "Циновка закручивает ролл. Нож смачивается одной каплей воды. Следуют несколько ритмичных разрезов.\n\n"
+        "ASMR\n\n"
+        "Шорох нори, липкое распределение риса, хруст огурца, натяжение циновки, влажный чистый разрез ножом.\n\n"
+        "Петля\n\n"
+        "Круглые кусочки ролла катятся и превращаются в отдельные ингредиенты."
+    )
+
+    captured: list[str] = []
+
+    async def _fake_gemini_text(prompt: str) -> str:
+        captured.append(prompt)
+        return json.dumps(scenes_payload, ensure_ascii=False)
+
+    monkeypatch.setattr("app.pipeline_llm_steps.gemini_text", _fake_gemini_text)
+
+    out = asyncio.run(
+        pipeline.generate_scenes_plan(
+            "суши",
+            full_recipe_text="рис, нори, огурец, авокадо, омлет, креветки и лосось",
+            user_feedback=feedback,
+            previous_scenes=[{"scene": 1, "action": "old"}],
+            generation_mode="silence",
+        )
+    )
+
+    plan = out["json_plan"]
+    assert "идеальный цветок или шахматный рисунок" in plan[0]["action"]
+    assert "раскрытие узора" in plan[0]["viewer_expectation"]
+    assert "Рис рассыпается ровным слоем" in plan[1]["action"]
+    assert "Полоски огурца" in plan[2]["action"]
+    assert "Нож смачивается одной каплей воды" in plan[4]["action"]
+    assert "Следуют несколько ритмичных разрезов" in plan[4]["action"]
+    assert "Круглые кусочки ролла катятся" in plan[-1]["action"]
+    assert all("Экстремально крупный food-first план" in scene["action"] for scene in plan)
+    assert all("Мультяшный non-realistic/Pixar-like стиль" in scene["action"] for scene in plan)
+    assert all("Бабушкины руки" in scene["action"] for scene in plan)
+    assert all("Pixar-like non-realistic cartoon style" in scene["silence_base_rules"] for scene in plan)
+    assert all("no dialogue" in scene["silence_base_rules"] for scene in plan)
+    assert all("Шорох нори" in scene["sound_design"] for scene in plan)
+    assert "Базовые правила silence:" in out["text_plan"]
+    assert "Pixar-like non-realistic cartoon style" in out["text_plan"]
+    assert "Retention:" not in out["text_plan"]
+    assert "Проверка первой фразы" not in out["text_plan"]
+    assert "previous_scenes" in captured[0]
+
+
 def test_viral_concept_brief_prompt_contract():
     prompt = pipeline_llm_steps.build_viral_concept_brief_prompt(
         concept="медовик",
@@ -533,6 +763,24 @@ def test_postprocess_scenes_output_adds_child_character_only_to_first_and_last_s
         {"scene": 1, "characters": ["grandma", "cat"], "text": "корн-доги хрустят"},
         {"scene": 2, "characters": ["grandma", "cat", "grandfather"], "text": "жарим"},
         {"scene": 3, "characters": ["grandma", "cat"], "text": "подаю"},
+    ]
+
+    out = pipeline._postprocess_scenes_output(
+        scenes,
+        "корн-доги",
+        viral_concept_brief={"dish_audience_type": "child"},
+    )
+
+    assert out[0]["characters"] == ["grandma", "cat", "grandson"]
+    assert out[1]["characters"] == ["grandma", "cat"]
+    assert out[2]["characters"] == ["grandma", "cat", "grandson"]
+
+
+def test_postprocess_scenes_output_keeps_cat_when_child_brief_adds_grandson():
+    scenes = [
+        {"scene": 1, "characters": ["grandma", "grandson"], "text": "корн-доги готовы"},
+        {"scene": 2, "characters": ["grandma"], "text": "жарим до хруста"},
+        {"scene": 3, "characters": ["grandma", "grandson"], "text": "подаю горячими"},
     ]
 
     out = pipeline._postprocess_scenes_output(
@@ -611,7 +859,7 @@ def test_postprocess_scenes_output_strips_optional_family_for_neutral():
 
 
 def test_generate_recipe_full_text_mocked(monkeypatch):
-    def fake_gemini(prompt: str) -> str:
+    def fake_gemini(prompt: str, **_kwargs) -> str:
         return "Ингредиенты: мука, вода.\n\nЗамесить тесто и испечь до готовности."
 
     monkeypatch.setattr("app.pipeline_llm_steps.gemini_generate_sync", fake_gemini)
@@ -622,7 +870,7 @@ def test_generate_recipe_full_text_mocked(monkeypatch):
 def test_generate_recipe_from_source_text_mocked(monkeypatch):
     captured: list[str] = []
 
-    def fake_gemini(prompt: str) -> str:
+    def fake_gemini(prompt: str, **_kwargs) -> str:
         captured.append(prompt)
         return "```text\nИнгредиенты: творог, яйцо, мука.\n\nСмешайте ингредиенты и обжарьте до румяности.\n```"
 
@@ -641,7 +889,7 @@ def test_generate_recipe_from_source_text_mocked(monkeypatch):
 
 
 def test_generate_recipe_from_source_text_rejects_model_extraction_failure(monkeypatch):
-    def fake_gemini(_prompt: str) -> str:
+    def fake_gemini(_prompt: str, **_kwargs) -> str:
         return (
             "К сожалению, я не могу извлечь рецепт из предоставленного текста, "
             "так как это сообщение об ошибке, указывающее на необходимость включить поддержку JavaScript."
@@ -702,7 +950,7 @@ def test_postprocess_scenes_output_keeps_final_cta_at_end_without_duplicate():
     ]
     out = pipeline._postprocess_scenes_output(scenes, "концепт")
     assert out[-1]["text"].count(pipeline.FINAL_SCENE_SUBSCRIBE_CTA_VEO3) == 1
-    assert out[-1]["text"].endswith(pipeline.FINAL_SCENE_SUBSCRIBE_CTA_VEO3)
+    assert out[-1]["text"].endswith(f"{pipeline.FINAL_SCENE_SUBSCRIBE_CTA_VEO3}.")
 
 
 def test_generate_scenes_plan_with_previous_bypasses_cache(monkeypatch):
@@ -733,7 +981,7 @@ def test_generate_scenes_plan_with_previous_bypasses_cache(monkeypatch):
     monkeypatch.setattr(pipeline, "set_scenes_plan", _set)
     monkeypatch.setattr(
         "app.pipeline_llm_steps.gemini_generate_sync",
-        lambda _prompt: json.dumps(scenes_payload, ensure_ascii=False),
+        lambda _prompt, **_kwargs: json.dumps(scenes_payload, ensure_ascii=False),
     )
 
     out = asyncio.run(
@@ -760,7 +1008,7 @@ def test_generate_scenes_plan_coerces_string_scene_array(monkeypatch):
     monkeypatch.setattr(pipeline, "set_scenes_plan", lambda *a, **k: None)
     monkeypatch.setattr(
         "app.pipeline_llm_steps.gemini_generate_sync",
-        lambda _prompt: json.dumps(scenes_payload, ensure_ascii=False),
+        lambda _prompt, **_kwargs: json.dumps(scenes_payload, ensure_ascii=False),
     )
 
     out = asyncio.run(
@@ -774,7 +1022,7 @@ def test_generate_scenes_plan_coerces_string_scene_array(monkeypatch):
 
     assert len(out["json_plan"]) == 3
     assert all(isinstance(scene, dict) for scene in out["json_plan"])
-    assert out["json_plan"][0]["text"] == "показываю готовые сырники крупно"
+    assert out["json_plan"][0]["text"] == "показываю готовые сырники крупно."
     assert out["json_plan"][1]["action"].startswith("смешиваю творог")
 
 
@@ -797,7 +1045,7 @@ def test_generate_scenes_plan_caps_steps_to_six(monkeypatch):
 
     captured_prompt = {"text": ""}
 
-    def _fake_gemini(prompt: str) -> str:
+    def _fake_gemini(prompt: str, **_kwargs) -> str:
         captured_prompt["text"] = prompt
         return json.dumps(scenes_payload, ensure_ascii=False)
 
@@ -815,6 +1063,8 @@ def test_generate_scenes_plan_caps_steps_to_six(monkeypatch):
     assert "full_recipe_text" in captured_prompt["text"]
     assert "frame_framing_rule" in captured_prompt["text"]
     assert "обязательным названием блюда в `text`" in captured_prompt["text"]
+    assert "MANDATORY RECIPE COVERAGE" in captured_prompt["text"]
+    assert "духовка/запекание" in captured_prompt["text"]
 
 
 def test_normalize_production_prompts_accepts_string_items():
@@ -886,7 +1136,9 @@ def test_ensure_image_prompt_framing_requirements_adds_full_visibility_for_veo3(
         "kitchen",
         model="veo3_fast",
     )
-    assert "Бабушка и кот должны быть видны полностью в кадре." in out
+    assert "Бабушка должна быть видна полностью в кадре, лицо и голова бабушки полностью внутри кадра." in out
+    assert "лицо и голова бабушки полностью внутри кадра" in out
+    assert "Ровно один рыжий cartoon cat обязательно есть в кадре" in out
 
 
 def test_ensure_image_prompt_framing_allows_fruit_only_first_moment_exception():
@@ -909,6 +1161,23 @@ def test_ensure_image_prompt_framing_requirements_adds_title_safe_top_for_first_
     assert "верхние примерно 30% кадра должны оставаться свободными" in out
     assert "Не обрезай кадр" in out
     assert "без крупных объектов" in out
+
+
+def test_ensure_image_prompt_framing_requires_stove_for_cooking_pan_or_pot():
+    out = pipeline._ensure_image_prompt_framing_requirements(
+        "Бабушка жарит котлеты на сковороде.",
+        "kitchen",
+    )
+    assert "обязательно стоит на видимой плите" in out
+    assert "не на столе" in out
+
+
+def test_ensure_image_prompt_framing_does_not_duplicate_existing_stove_placement():
+    out = pipeline._ensure_image_prompt_framing_requirements(
+        "Кастрюля кипит на плите, бабушка помешивает суп.",
+        "kitchen",
+    )
+    assert "обязательно стоит на видимой плите" not in out
 
 
 def test_ensure_image_prompt_framing_requirements_skips_full_visibility_for_non_veo3():
@@ -969,7 +1238,9 @@ def test_normalize_frame_prompts_adds_scene_metadata_and_framing():
     assert out[0]["romantic_drama_beat"] == "Белая кошка машет рыжему коту за окном"
     assert "Крупный план" in out[0]["start_frame_prompt_ru"]
     assert "Фоновая драма этой сцены: Белая кошка машет рыжему коту за окном" in out[0]["start_frame_prompt_ru"]
-    assert "Бабушка и кот должны быть видны полностью в кадре." in out[0]["start_frame_prompt_ru"]
+    assert "Бабушка должна быть видна полностью в кадре, лицо и голова бабушки полностью внутри кадра." in out[0]["start_frame_prompt_ru"]
+    assert "лицо и голова бабушки полностью внутри кадра" in out[0]["start_frame_prompt_ru"]
+    assert "Ровно один рыжий cartoon cat обязательно есть в кадре" in out[0]["start_frame_prompt_ru"]
     assert "верхние примерно 30% кадра должны оставаться свободными" in out[0]["start_frame_prompt_ru"]
     assert START_FRAME_RECIPE_VISUAL_DETAIL_RULE not in out[0]["start_frame_prompt_ru"]
     assert out[0]["end_frame_prompt_ru"] == "пусто"
@@ -983,7 +1254,7 @@ def test_generate_frame_prompts_for_approval_builds_plan(monkeypatch):
         ensure_ascii=False,
     )
 
-    def _fake_gemini(prompt: str, *, images=None) -> str:
+    def _fake_gemini(prompt: str, *, images=None, **_kwargs) -> str:
         assert images is None
         captured_prompt["text"] = prompt
         return model_answer
@@ -1007,7 +1278,7 @@ def test_generate_frame_prompts_for_approval_builds_plan(monkeypatch):
 def test_generate_frame_prompts_discards_unrequested_end_frame(monkeypatch):
     monkeypatch.setattr(
         "app.pipeline.gemini_generate_sync",
-        lambda _prompt, *, images=None: json.dumps(
+        lambda _prompt, *, images=None, **_kwargs: json.dumps(
             [
                 {
                     "start_frame_prompt_ru": "Бабушка показывает пирог.",
@@ -1032,7 +1303,7 @@ def test_generate_frame_prompts_for_approval_passes_reference_images(monkeypatch
         ensure_ascii=False,
     )
 
-    def _fake_gemini(prompt: str, *, images=None) -> str:
+    def _fake_gemini(prompt: str, *, images=None, **_kwargs) -> str:
         captured["prompt"] = prompt
         captured["images"] = images
         return model_answer
@@ -1057,7 +1328,7 @@ def test_generate_full_production_with_approved_frames(monkeypatch):
     prompts_obj = {"prompts": [{"video_prompt_en": "cinematic shot with Zaya watching Timosha while Markiz waits"}]}
     captured_prompt = {"text": ""}
 
-    def _fake_gemini(prompt: str) -> str:
+    def _fake_gemini(prompt: str, **_kwargs) -> str:
         captured_prompt["text"] = prompt
         return json.dumps(prompts_obj, ensure_ascii=False)
 
@@ -1108,6 +1379,8 @@ def test_generate_full_production_with_approved_frames(monkeypatch):
     assert "Use the start/end frames as the visual source of truth" in captured_prompt["text"]
     assert "ingredient inventory" in captured_prompt["text"]
     assert "never introduce new food" in captured_prompt["text"]
+    assert "Mandatory recipe coverage" in captured_prompt["text"]
+    assert "духовка/запекание" in captured_prompt["text"]
     assert "scene1_spoken_dish_name_rule" in captured_prompt["text"]
     assert "viewer must hear the dish name in the first scene" in captured_prompt["text"]
     assert "title_safe_top_30" in captured_prompt["text"]
@@ -1128,7 +1401,7 @@ def test_generate_full_production_with_approved_frames(monkeypatch):
 def test_generate_full_production_with_approved_frames_marks_end_frame_requested(monkeypatch):
     prompts_obj = {"prompts": [{"video_prompt_en": "4-second cozy cartoon cooking clip. CHARACTERS SPEAKS: готово"}]}
 
-    def _fake_gemini(_prompt: str) -> str:
+    def _fake_gemini(_prompt: str, **_kwargs) -> str:
         return json.dumps(prompts_obj, ensure_ascii=False)
 
     monkeypatch.setattr("app.pipeline.gemini_generate_sync", _fake_gemini)
@@ -1162,7 +1435,7 @@ def test_generate_full_production_without_approved_frames_fills_placeholders(mon
     }
     captured_prompt = {"text": ""}
 
-    def _fake_gemini(prompt: str) -> str:
+    def _fake_gemini(prompt: str, **_kwargs) -> str:
         captured_prompt["text"] = prompt
         return json.dumps(prompts_obj, ensure_ascii=False)
 
@@ -1206,7 +1479,7 @@ def test_generate_full_production_without_explicit_request_discards_model_end_fr
         ]
     }
 
-    def _fake_gemini(_prompt: str) -> str:
+    def _fake_gemini(_prompt: str, **_kwargs) -> str:
         return json.dumps(prompts_obj, ensure_ascii=False)
 
     monkeypatch.setattr("app.pipeline.gemini_generate_sync", _fake_gemini)
@@ -1238,7 +1511,7 @@ def test_generate_full_production_keeps_end_frame_only_for_explicitly_requested_
 
     monkeypatch.setattr(
         "app.pipeline.gemini_generate_sync",
-        lambda _prompt: json.dumps(prompts_obj, ensure_ascii=False),
+        lambda _prompt, **_kwargs: json.dumps(prompts_obj, ensure_ascii=False),
     )
     monkeypatch.setattr("app.pipeline.target_languages_from_env", lambda: ["ru"])
     scenes = [
@@ -1265,7 +1538,7 @@ def test_generate_full_production_can_add_requested_end_frame_to_approved_starts
     }
     monkeypatch.setattr(
         "app.pipeline.gemini_generate_sync",
-        lambda _prompt: json.dumps(prompts_obj, ensure_ascii=False),
+        lambda _prompt, **_kwargs: json.dumps(prompts_obj, ensure_ascii=False),
     )
     monkeypatch.setattr("app.pipeline.target_languages_from_env", lambda: ["ru"])
     scenes = [{"scene": 1, "model": "veo3_fast", "duration_sec": 4, "text": ""}]
@@ -1281,7 +1554,7 @@ def test_generate_full_production_can_add_requested_end_frame_to_approved_starts
 
 
 def test_generate_full_production_without_approved_frames_falls_back_on_invalid_prompt_format(monkeypatch):
-    def _fake_gemini(_prompt: str) -> str:
+    def _fake_gemini(_prompt: str, **_kwargs) -> str:
         return "not a json production payload"
 
     monkeypatch.setattr("app.pipeline.gemini_generate_sync", _fake_gemini)
@@ -1311,7 +1584,7 @@ def test_generate_full_production_without_approved_frames_falls_back_on_invalid_
 def test_generate_full_production_includes_dish_visual_brief_in_prompt(monkeypatch):
     captured: dict[str, str] = {}
 
-    def _fake_gemini(prompt: str) -> str:
+    def _fake_gemini(prompt: str, **_kwargs) -> str:
         captured["prompt"] = prompt
         return json.dumps(
             {
@@ -1337,10 +1610,84 @@ def test_generate_full_production_includes_dish_visual_brief_in_prompt(monkeypat
     assert brief in captured["prompt"]
     assert "dish_visual_brief" in captured["prompt"]
     assert "not cropped" in captured["prompt"]
+    assert "Mandatory recipe coverage" in captured["prompt"]
+    assert "жарка/обжарка" in captured["prompt"]
+
+
+def test_silence_video_prompt_requirements_do_not_duplicate_existing_rules():
+    prompt = (
+        "Audio enabled; natural cooking sounds only: crisp knife chopping sounds. "
+        "Grandma slices onion while an orange cat watches. "
+        "Pixar-like non-realistic cartoon style. "
+        "4-second Kling 3.0 image-to-video shot. "
+        "No dialogue, no voiceover, no subtitles, no on-screen text. "
+        "Extreme close-up, food-first framing. "
+        "Nostalgic rustic grandma kitchen atmosphere. "
+        "No background music."
+    )
+
+    out = _ensure_silence_video_prompt_requirements(prompt, {"duration_sec": 4})
+
+    assert out.count("4-second Kling 3.0 image-to-video shot") == 1
+    assert out.count("No dialogue") == 1
+    assert out.count("Audio enabled") == 1
+    assert "Only grandmother and exactly one orange cartoon cat are always present" in out
+
+
+def test_silence_production_applies_final_scene_feedback_even_if_model_ignores_it(monkeypatch):
+    captured: dict[str, str] = {}
+
+    def _fake_gemini(prompt: str, **_kwargs) -> str:
+        captured["prompt"] = prompt
+        return json.dumps(
+            {
+                "prompts": [
+                    {
+                        "start_frame_prompt_ru": "Бабушка мешает фарш, рыжий кот рядом.",
+                        "end_frame_prompt_ru": "пусто",
+                        "video_prompt_en": "Grandma mixes meat while the orange cat watches.",
+                    },
+                    {
+                        "start_frame_prompt_ru": "Бабушка ставит тарелку на стол, рыжий кот рядом.",
+                        "end_frame_prompt_ru": "пусто",
+                        "video_prompt_en": "Grandma places a plate on the table while the orange cat watches.",
+                    },
+                ]
+            },
+            ensure_ascii=False,
+        )
+
+    monkeypatch.setattr("app.pipeline.gemini_generate_sync", _fake_gemini)
+    scenes = [
+        {"scene": 1, "model": "kling_3_0", "duration_sec": 4, "action": "мешает фарш"},
+        {"scene": 2, "model": "kling_3_0", "duration_sec": 4, "action": "подаёт блюдо"},
+    ]
+
+    out = asyncio.run(
+        generate_full_production(
+            scenes,
+            None,
+            generation_mode="silence",
+            target_languages=["ru"],
+            user_feedback="в последней сцене крупно пюре с 2 котлетами",
+            previous_enriched_scenes=[
+                {"scene": 1, "start_frame_prompt": "old start", "video_prompt": "old video"}
+            ],
+        )
+    )
+
+    assert "previous_production_prompts" in captured["prompt"]
+    assert "targeted_final_scene_feedback" in captured["prompt"]
+    first, last = out["json_plan"]
+    assert "пюре с 2 котлетами" not in first["start_frame_prompt"]
+    assert last["display_action"] == "крупно пюре с 2 котлетами"
+    assert "крупно пюре с 2 котлетами" in last["start_frame_prompt"]
+    assert "крупно пюре с 2 котлетами" in last["video_prompt"]
+    assert "крупно пюре с 2 котлетами" in last["video_prompt_by_lang"]["ru"]
 
 
 def test_generate_full_production_with_approved_frames_falls_back_on_invalid_prompt_format(monkeypatch):
-    def _fake_gemini(_prompt: str) -> str:
+    def _fake_gemini(_prompt: str, **_kwargs) -> str:
         return "{\"unexpected\": true}"
 
     monkeypatch.setattr("app.pipeline.gemini_generate_sync", _fake_gemini)
@@ -1367,7 +1714,7 @@ def test_generate_full_production_with_approved_frames_falls_back_on_invalid_pro
 
 
 def test_generate_full_production_translates_dialogue_by_language(monkeypatch):
-    def _fake_gemini(_prompt: str) -> str:
+    def _fake_gemini(_prompt: str, **_kwargs) -> str:
         return "not a json production payload"
 
     async def _fake_translate(text: str, target_language: str) -> str:
@@ -1394,17 +1741,17 @@ def test_generate_full_production_translates_dialogue_by_language(monkeypatch):
     out = asyncio.run(generate_full_production(scenes, None))
 
     scene = out["json_plan"][0]
-    assert scene["dialogue_by_lang"]["ru"][0]["text"] == "Ух ты, какие крылья"
-    assert scene["dialogue_by_lang"]["en"][0]["text"] == "EN::Ух ты, какие крылья"
-    assert scene["speech_by_lang"]["en"] == "EN::Ух ты, какие крылья [пауза] EN::Сейчас попробуем вместе"
+    assert scene["dialogue_by_lang"]["ru"][0]["text"] == "Ух ты, какие крылья."
+    assert scene["dialogue_by_lang"]["en"][0]["text"] == "EN::Ух ты, какие крылья."
+    assert scene["speech_by_lang"]["en"] == "EN::Ух ты, какие крылья. [пауза] EN::Сейчас попробуем вместе."
     assert scene["speech_plan_by_lang"]["en"][0]["speaker"] == "grandson"
-    assert "CHARACTERS SPEAKS: EN::Ух ты, какие крылья [пауза] EN::Сейчас попробуем вместе" in scene["video_prompt_by_lang"]["en"]
+    assert "CHARACTERS SPEAKS: EN::Ух ты, какие крылья. [пауза] EN::Сейчас попробуем вместе." in scene["video_prompt_by_lang"]["en"]
     assert "speaker_dialogue_order: GRANDSON, GRANDMA" in scene["video_prompt_by_lang"]["ru"]
-    assert "GRANDSON: Ух ты, какие крылья" in scene["video_prompt_by_lang"]["ru"]
-    assert "GRANDMA: Сейчас попробуем вместе" in scene["video_prompt_by_lang"]["ru"]
+    assert "GRANDSON: Ух ты, какие крылья." in scene["video_prompt_by_lang"]["ru"]
+    assert "GRANDMA: Сейчас попробуем вместе." in scene["video_prompt_by_lang"]["ru"]
     assert "voice_lock_full_grandson:" in scene["video_prompt_by_lang"]["ru"]
     assert "voice_lock_full_grandma:" in scene["video_prompt_by_lang"]["ru"]
-    assert "GRANDSON: EN::Ух ты, какие крылья" in scene["video_prompt_by_lang"]["en"]
+    assert "GRANDSON: EN::Ух ты, какие крылья." in scene["video_prompt_by_lang"]["en"]
     assert "all spoken phrases and voiceover are in Russian language only" in scene["video_prompt_by_lang"]["ru"]
     assert "all spoken phrases and voiceover are in English language only" in scene["video_prompt_by_lang"]["en"]
     assert "Russian language" not in scene["video_prompt_by_lang"]["en"]

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import copy
 import uuid
 from collections import defaultdict
 from typing import Any
@@ -15,7 +16,21 @@ from .generation_store import ensure_generation_run_for_session
 from .generation_store import merge_scene_prompt_payload
 from .media_file_store import read_media_uri_bytes, store_scene_candidate_media
 from .models import GenerationArtifact, GenerationRun, Scene, SceneImageCandidate, SceneMediaMessageLink, SceneVideoCandidate
-from .scene_media_candidates import SCENE_MEDIA_MESSAGE_INDEX_KEY
+from .scene_media_candidates import (
+    DEFAULT_SCENE_VIDEO_SPEED_COEF,
+    SCENE_MEDIA_MESSAGE_INDEX_KEY,
+    default_scene_video_speed_coef,
+)
+
+
+SCENE_TEXT_SNAPSHOT_KEYS = ("speech_by_lang", "speech_cues_by_lang", "speech_plan_by_lang", "video_prompt_by_lang")
+SCENE_VIDEO_CANDIDATE_SNAPSHOT_KEYS = (
+    "speech_by_lang",
+    "speech_cues_by_lang",
+    "speech_plan_by_lang",
+    "video_prompt_by_lang",
+    "video_speech_qa_by_lang",
+)
 
 
 def _run_and_scene_id_for_session(session: dict[str, Any], scene_idx: int) -> tuple[uuid.UUID, uuid.UUID] | None:
@@ -37,7 +52,7 @@ def _scene_id_for_session(session: dict[str, Any], scene_idx: int) -> uuid.UUID 
 def _candidate_text_snapshot_for_scene(scene: dict[str, Any], language: str) -> dict[str, Any]:
     lang = str(language or "").strip().lower() or "ru"
     snapshot: dict[str, Any] = {}
-    for key in ("speech_by_lang", "speech_cues_by_lang", "speech_plan_by_lang", "video_prompt_by_lang"):
+    for key in SCENE_TEXT_SNAPSHOT_KEYS:
         value = scene.get(key)
         if isinstance(value, dict) and value.get(lang):
             if key == "speech_cues_by_lang":
@@ -47,6 +62,118 @@ def _candidate_text_snapshot_for_scene(scene: dict[str, Any], language: str) -> 
                 continue
             snapshot[key] = {lang: value.get(lang)}
     return snapshot
+
+
+def _candidate_generation_params(candidate: dict[str, Any]) -> dict[str, Any]:
+    params: dict[str, Any] = {}
+    for key in (
+        "provider",
+        "model",
+        "duration_sec",
+        "aspect_ratio",
+        "resolution",
+        "seed",
+        "source_image_candidate_id",
+    ):
+        value = candidate.get(key)
+        if value not in (None, "", {}, []):
+            params[key] = copy.deepcopy(value)
+    explicit = candidate.get("generation_params_json")
+    if isinstance(explicit, dict):
+        params.update(copy.deepcopy(explicit))
+    return params
+
+
+def _snapshot_from_candidate(candidate: dict[str, Any], text_snapshot: dict[str, Any]) -> dict[str, dict[str, Any]]:
+    snapshot = dict(text_snapshot)
+    for key in SCENE_VIDEO_CANDIDATE_SNAPSHOT_KEYS:
+        value = candidate.get(key)
+        if isinstance(value, dict) and value:
+            if key == "speech_cues_by_lang":
+                value = _sanitize_speech_cues_by_lang(value)
+            if value:
+                snapshot[key] = copy.deepcopy(value)
+    return snapshot
+
+
+def _apply_video_candidate_snapshot_to_row(
+    row: SceneVideoCandidate,
+    candidate: dict[str, Any],
+    text_snapshot: dict[str, Any],
+) -> None:
+    snapshot = _snapshot_from_candidate(candidate, text_snapshot)
+    row.speech_by_lang = snapshot.get("speech_by_lang", {})
+    row.speech_cues_by_lang = snapshot.get("speech_cues_by_lang", {})
+    row.speech_plan_by_lang = snapshot.get("speech_plan_by_lang", {})
+    row.video_prompt_by_lang = snapshot.get("video_prompt_by_lang", {})
+    row.video_speech_qa_by_lang = snapshot.get("video_speech_qa_by_lang", {})
+    row.generation_params_json = _candidate_generation_params(candidate)
+
+
+def _video_candidate_snapshot_from_row(row: SceneVideoCandidate) -> dict[str, Any]:
+    snapshot: dict[str, Any] = {}
+    for key in SCENE_VIDEO_CANDIDATE_SNAPSHOT_KEYS:
+        value = getattr(row, key, None)
+        if isinstance(value, dict) and value:
+            if key == "speech_cues_by_lang":
+                value = _sanitize_speech_cues_by_lang(value)
+            if value:
+                snapshot[key] = copy.deepcopy(value)
+    params = getattr(row, "generation_params_json", None)
+    if isinstance(params, dict) and params:
+        snapshot["generation_params_json"] = copy.deepcopy(params)
+    return snapshot
+
+
+def _latest_approved_candidate(candidates: Any) -> dict[str, Any] | None:
+    if not isinstance(candidates, list):
+        return None
+    approved = [item for item in candidates if isinstance(item, dict) and bool(item.get("approved_for_production"))]
+    return approved[-1] if approved else None
+
+
+def _scene_has_language_text_source(scene: dict[str, Any], language: str) -> bool:
+    lang = str(language or "").strip().lower()
+    if not lang:
+        return False
+    for key in ("speech_by_lang", "video_prompt_by_lang"):
+        value = scene.get(key)
+        if isinstance(value, dict) and str(value.get(lang) or "").strip():
+            return True
+    return False
+
+
+def merge_missing_scene_text_from_approved_candidate(scene: dict[str, Any]) -> None:
+    candidates_by_lang = scene.get("video_candidates_by_lang")
+    if not isinstance(candidates_by_lang, dict):
+        return
+    for raw_language, candidates in candidates_by_lang.items():
+        language = str(raw_language or "").strip().lower()
+        if not language:
+            continue
+        candidate = _latest_approved_candidate(candidates)
+        if candidate is None:
+            continue
+        current_speech = scene.get("speech_by_lang")
+        current_speech_text = (
+            str(current_speech.get(language) or "").strip() if isinstance(current_speech, dict) else ""
+        )
+        scene_text = str(scene.get("text") or scene.get("recipe_step") or "").strip()
+        speech_is_scene_text_fallback = bool(
+            language == "ru" and current_speech_text and scene_text and current_speech_text == scene_text
+        )
+        has_current_speech = bool(current_speech_text) and not speech_is_scene_text_fallback
+        for key in SCENE_TEXT_SNAPSHOT_KEYS:
+            if has_current_speech and key in {"speech_cues_by_lang", "speech_plan_by_lang"}:
+                continue
+            snapshot = candidate.get(key)
+            if not isinstance(snapshot, dict) or not snapshot.get(language):
+                continue
+            current = scene.get(key)
+            merged = dict(current) if isinstance(current, dict) else {}
+            if not merged.get(language) or (key == "speech_by_lang" and speech_is_scene_text_fallback):
+                merged[language] = copy.deepcopy(snapshot.get(language))
+                scene[key] = merged
 
 
 def _valid_speech_cues(value: Any) -> list[dict[str, Any]]:
@@ -97,6 +224,57 @@ def _candidate_media_bytes(row: SceneImageCandidate | SceneVideoCandidate, blob_
         return from_uri
     blob = getattr(row, blob_attr, None)
     return bytes(blob or b"")
+
+
+def persist_scene_video_prompts(
+    session: dict[str, Any],
+    *,
+    scene_idx: int,
+    prompts_by_lang: dict[str, Any],
+    source: str = "session_sync",
+) -> None:
+    """Persist scene video prompts outside the volatile chat session."""
+    pair = _run_and_scene_id_for_session(session, scene_idx)
+    if pair is None:
+        return
+    _run_id, scene_id = pair
+    clean_prompts: dict[str, str] = {}
+    for raw_language, raw_prompt in prompts_by_lang.items():
+        language = str(raw_language or "").strip().lower()
+        prompt = str(raw_prompt or "").strip()
+        if language and prompt:
+            clean_prompts[language] = prompt
+    if not clean_prompts:
+        return
+    with SessionLocal() as db:
+        row = db.get(Scene, scene_id)
+        if row is not None:
+            current = dict(row.video_prompt_by_lang or {}) if isinstance(row.video_prompt_by_lang, dict) else {}
+            changed = False
+            for language, prompt in clean_prompts.items():
+                if str(current.get(language) or "").strip() != prompt:
+                    current[language] = prompt
+                    changed = True
+            if changed:
+                row.video_prompt_by_lang = current
+                db.commit()
+    for language, prompt in clean_prompts.items():
+        persist_generation_artifact(
+            session,
+            artifact_type="scene_video_prompt",
+            label=f"Scene {scene_idx + 1} video prompt ({language})",
+            uri=f"db://scenes/{scene_id}/video_prompt/{language}",
+            scene_idx=scene_idx,
+            language=language,
+            mime_type="text/plain",
+            payload={
+                "scene_index": int(scene_idx),
+                "language": language,
+                "prompt": prompt,
+                "video_prompt_by_lang": {language: prompt},
+                "source": str(source or "").strip() or "session_sync",
+            },
+        )
 
 
 def persist_image_candidate(session: dict[str, Any], *, scene_idx: int, candidate: dict[str, Any]) -> None:
@@ -170,6 +348,18 @@ def persist_video_candidate(session: dict[str, Any], *, scene_idx: int, candidat
         data=video_blob,
         extension="mp4",
     )
+    language = _normalize_language(candidate.get("language")) or "ru"
+    production = session.get("production") if isinstance(session.get("production"), dict) else {}
+    scenes = production.get("json_plan") if isinstance(production, dict) else []
+    scene = scenes[scene_idx] if isinstance(scenes, list) and 0 <= scene_idx < len(scenes) and isinstance(scenes[scene_idx], dict) else {}
+    speed_coef = float(candidate.get("speed_coef") or default_scene_video_speed_coef(scene))
+    text_snapshot = _candidate_text_snapshot_for_scene(scene, language)
+    existing_cues = _sanitize_speech_cues_by_lang(candidate.get("speech_cues_by_lang"))
+    if existing_cues:
+        candidate["speech_cues_by_lang"] = existing_cues
+    else:
+        candidate.pop("speech_cues_by_lang", None)
+    candidate.update(text_snapshot)
     with SessionLocal() as db:
         row = db.execute(
             select(SceneVideoCandidate).where(SceneVideoCandidate.candidate_id == candidate_id)
@@ -178,30 +368,20 @@ def persist_video_candidate(session: dict[str, Any], *, scene_idx: int, candidat
             row = SceneVideoCandidate(
                 candidate_id=candidate_id,
                 scene_id=scene_id,
-                language=_normalize_language(candidate.get("language")) or "ru",
+                language=language,
             )
             db.add(row)
-        row.language = _normalize_language(candidate.get("language")) or "ru"
+        row.language = language
         row.video_blob = None
         row.media_uri = media_uri
         row.mime_type = "video/mp4"
         row.byte_size = len(video_blob)
         row.liked = bool(candidate.get("liked"))
         row.approved_for_production = bool(candidate.get("approved_for_production"))
-        row.speed_coef = float(candidate.get("speed_coef") or 1.2)
+        row.speed_coef = speed_coef
         row.source_image_candidate_id = str(candidate.get("source_image_candidate_id") or "").strip() or None
+        _apply_video_candidate_snapshot_to_row(row, candidate, text_snapshot)
         db.commit()
-    language = _normalize_language(candidate.get("language")) or "ru"
-    production = session.get("production") if isinstance(session.get("production"), dict) else {}
-    scenes = production.get("json_plan") if isinstance(production, dict) else []
-    scene = scenes[scene_idx] if isinstance(scenes, list) and 0 <= scene_idx < len(scenes) and isinstance(scenes[scene_idx], dict) else {}
-    text_snapshot = _candidate_text_snapshot_for_scene(scene, language)
-    existing_cues = _sanitize_speech_cues_by_lang(candidate.get("speech_cues_by_lang"))
-    if existing_cues:
-        candidate["speech_cues_by_lang"] = existing_cues
-    else:
-        candidate.pop("speech_cues_by_lang", None)
-    candidate.update(text_snapshot)
     persist_generation_artifact(
         session,
         artifact_type="scene_video_candidate",
@@ -217,7 +397,7 @@ def persist_video_candidate(session: dict[str, Any], *, scene_idx: int, candidat
             "byte_size": len(video_blob),
             "liked": bool(candidate.get("liked")),
             "approved_for_production": bool(candidate.get("approved_for_production")),
-            "speed_coef": float(candidate.get("speed_coef") or 1.2),
+            "speed_coef": speed_coef,
             "source_image_candidate_id": str(candidate.get("source_image_candidate_id") or "").strip() or None,
             **text_snapshot,
             **(
@@ -296,8 +476,10 @@ def persist_video_candidate_state(candidate: dict[str, Any]) -> None:
             return
         row.liked = bool(candidate.get("liked"))
         row.approved_for_production = bool(candidate.get("approved_for_production"))
-        row.speed_coef = float(candidate.get("speed_coef") or 1.2)
+        row.speed_coef = float(candidate.get("speed_coef") or DEFAULT_SCENE_VIDEO_SPEED_COEF)
         row.source_image_candidate_id = str(candidate.get("source_image_candidate_id") or "").strip() or None
+        if any(isinstance(candidate.get(key), dict) and candidate.get(key) for key in SCENE_VIDEO_CANDIDATE_SNAPSHOT_KEYS):
+            _apply_video_candidate_snapshot_to_row(row, candidate, {})
         artifact_rows = db.execute(
             select(GenerationArtifact).where(
                 GenerationArtifact.artifact_type == "scene_video_candidate",
@@ -310,7 +492,7 @@ def persist_video_candidate_state(candidate: dict[str, Any]) -> None:
                 {
                     "liked": bool(candidate.get("liked")),
                     "approved_for_production": bool(candidate.get("approved_for_production")),
-                    "speed_coef": float(candidate.get("speed_coef") or 1.2),
+                    "speed_coef": float(candidate.get("speed_coef") or DEFAULT_SCENE_VIDEO_SPEED_COEF),
                     "source_image_candidate_id": str(candidate.get("source_image_candidate_id") or "").strip() or None,
                 }
             )
@@ -396,6 +578,7 @@ def rebuild_production_session(
     message_links_by_scene_id: dict[str, list[SceneMediaMessageLink]] = defaultdict(list)
     prompt_payloads_by_id: dict[str, dict[str, Any]] = {}
     video_artifact_payloads_by_candidate_id: dict[str, dict[str, Any]] = {}
+    video_prompt_artifacts_by_scene_id: dict[str, dict[str, str]] = defaultdict(dict)
     with SessionLocal() as db:
         run = db.get(GenerationRun, run_uuid) if run_uuid is not None else None
         scene_ids = []
@@ -436,6 +619,12 @@ def rebuild_production_session(
                     SceneVideoCandidate.media_uri,
                     SceneVideoCandidate.mime_type,
                     SceneVideoCandidate.byte_size,
+                    SceneVideoCandidate.video_prompt_by_lang,
+                    SceneVideoCandidate.speech_by_lang,
+                    SceneVideoCandidate.speech_cues_by_lang,
+                    SceneVideoCandidate.speech_plan_by_lang,
+                    SceneVideoCandidate.video_speech_qa_by_lang,
+                    SceneVideoCandidate.generation_params_json,
                 )
             )
         image_rows = db.execute(image_stmt).scalars().all()
@@ -457,15 +646,50 @@ def rebuild_production_session(
                         candidate_id = raw_uri.rsplit("/", 1)[-1]
                 if candidate_id in candidate_ids:
                     video_artifact_payloads_by_candidate_id[candidate_id] = dict(payload)
+        prompt_artifact_rows = db.execute(
+            select(GenerationArtifact)
+            .where(
+                GenerationArtifact.artifact_type == "scene_video_prompt",
+                GenerationArtifact.scene_id.in_(scene_ids),
+            )
+            .order_by(GenerationArtifact.created_at.asc(), GenerationArtifact.id.asc())
+        ).scalars().all()
+        for artifact in prompt_artifact_rows:
+            scene_key = str(artifact.scene_id or "")
+            language = _normalize_language(artifact.language)
+            payload = artifact.payload_json if isinstance(artifact.payload_json, dict) else {}
+            prompt = str(payload.get("prompt") or "").strip()
+            prompt_map = payload.get("video_prompt_by_lang")
+            if not prompt and language and isinstance(prompt_map, dict):
+                prompt = str(prompt_map.get(language) or "").strip()
+            if not prompt and isinstance(prompt_map, dict):
+                for raw_language, raw_prompt in prompt_map.items():
+                    candidate_language = _normalize_language(str(raw_language))
+                    candidate_prompt = str(raw_prompt or "").strip()
+                    if candidate_language and candidate_prompt:
+                        video_prompt_artifacts_by_scene_id[scene_key][candidate_language] = candidate_prompt
+                continue
+            if language and prompt:
+                video_prompt_artifacts_by_scene_id[scene_key][language] = prompt
         link_rows = db.execute(
             select(SceneMediaMessageLink).where(SceneMediaMessageLink.scene_id.in_(scene_ids))
         ).scalars().all()
         for row in scene_rows:
+            prompt_map = row.video_prompt_by_lang or {}
+            if not isinstance(prompt_map, dict):
+                prompt_map = {}
+            artifact_prompt_map = video_prompt_artifacts_by_scene_id.get(str(row.id), {})
+            if artifact_prompt_map:
+                merged_prompt_map = dict(prompt_map)
+                for language, prompt in artifact_prompt_map.items():
+                    if not str(merged_prompt_map.get(language) or "").strip():
+                        merged_prompt_map[language] = prompt
+                prompt_map = merged_prompt_map
             prompt_payloads_by_id[str(row.id)] = {
                 "start_frame_prompt": row.start_frame_prompt,
                 "start_frame_prompt_effective": row.start_frame_prompt_effective,
                 "end_frame_prompt": row.end_frame_prompt,
-                "video_prompt_by_lang": row.video_prompt_by_lang or {},
+                "video_prompt_by_lang": prompt_map,
                 "speech_by_lang": row.speech_by_lang or {},
                 "syntax_prompt_by_lang": row.syntax_prompt_by_lang or {},
                 "prompt_meta_json": row.prompt_meta_json or {},
@@ -533,6 +757,7 @@ def rebuild_production_session(
                 "byte_size": row.byte_size,
             }
             artifact_payload = video_artifact_payloads_by_candidate_id.get(str(row.candidate_id), {})
+            payload.update(_video_candidate_snapshot_from_row(row))
             for key in (
                 "speech_by_lang",
                 "speech_cues_by_lang",
@@ -540,6 +765,8 @@ def rebuild_production_session(
                 "video_prompt_by_lang",
                 "video_speech_qa_by_lang",
             ):
+                if key in payload:
+                    continue
                 value = artifact_payload.get(key)
                 if isinstance(value, dict) and value:
                     if key == "speech_cues_by_lang":
@@ -552,6 +779,7 @@ def rebuild_production_session(
                     payload["video_b64"] = __import__("base64").b64encode(video_payload).decode("ascii")
             by_lang[str(row.language)].append(payload)
         scene["video_candidates_by_lang"] = dict(by_lang)
+        merge_missing_scene_text_from_approved_candidate(scene)
         for row in message_links_by_scene_id.get(scene_id, []):
             message_index[str(row.telegram_message_id)] = {
                 "scene_idx": int(idx),

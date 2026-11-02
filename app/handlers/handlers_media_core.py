@@ -14,9 +14,11 @@ from telegram.constants import ChatAction
 from telegram.ext import ContextTypes
 
 from ..assets import ASSETS
+from ..character_catalog import sanitize_character_names_and_keys
 from ..constants import ELEVENLABS_VOICE_ID_ENV_NAME, STATE_READY_FOR_PRODUCTION
 from ..generation_modes import SYNTAX_PROVIDER_VEO
 from ..llm_utils import (
+    GEMINI_MODEL_PROFILE_EDIT,
     GEMINI_QUOTA_EXHAUSTED_USER_MESSAGE,
     GeminiQuotaError,
     gemini_generate_sync,
@@ -71,9 +73,12 @@ _CHARACTER_ALIASES: dict[str, str] = {
     "тимофей": "cat",
     "koshka": "cat",
     "zaya": "zaya",
+    "white cat": "zaya",
+    "white cartoon cat": "zaya",
     "зая": "zaya",
     "заю": "zaya",
     "заи": "zaya",
+    "белая кошка": "zaya",
     "белая кошечка": "zaya",
     "markiz": "markiz",
     "маркиз": "markiz",
@@ -365,11 +370,14 @@ async def _call_with_503_retries(
     chat_id: int | None,
     action_name: str,
     op: Callable[[], Awaitable[T]],
+    *,
+    retry_ai_rate_limit: bool = False,
 ) -> T:
     """
     Выполняет LLM-операцию с retry на временные сбои:
     - 503/UNAVAILABLE/high demand: короткие повторы;
-    - 429/quota/rate limit: редкие повторы с минутной паузой.
+    - 429/quota/rate limit: без внешних минутных повторов по умолчанию,
+      чтобы не складывать retry поверх retry самого провайдера.
     """
     session = SESSIONS.get(chat_id) or {}
     prefer_vertex = bool(session.get("prefer_vertex_api"))
@@ -413,7 +421,7 @@ async def _call_with_503_retries(
                 raise ServiceUnavailableRetriesExhaustedError(
                     "Сервис модели перегружен слишком долго. Попробуйте позже."
                 ) from e
-            if _is_ai_rate_limit_retryable(e) and rate_attempt < AI_RATE_LIMIT_RETRY_COUNT:
+            if retry_ai_rate_limit and _is_ai_rate_limit_retryable(e) and rate_attempt < AI_RATE_LIMIT_RETRY_COUNT:
                 rate_attempt += 1
                 logger.warning(
                     "%s got AI rate limit, retry %s/%s after %ss: %s",
@@ -436,6 +444,10 @@ async def _call_with_503_retries(
                 await asyncio.sleep(AI_RATE_LIMIT_RETRY_DELAY_SEC)
                 continue
             if _is_ai_rate_limit_retryable(e):
+                if not retry_ai_rate_limit:
+                    raise ServiceUnavailableRetriesExhaustedError(
+                        "Лимит AI: слишком много запросов подряд. Попробуйте позже или введите перевод вручную."
+                    ) from e
                 raise ServiceUnavailableRetriesExhaustedError(
                     "Лимит AI держится слишком долго. Я уже попробовала несколько раз; повторите позже."
                 ) from e
@@ -508,13 +520,186 @@ def _end_frame_image_warranted(scene: dict) -> bool:
     return bool(extra)
 
 
+def _first_prompt_from_lang_map(value: Any) -> str:
+    if not isinstance(value, dict):
+        return ""
+    for language in ("ru", "en"):
+        prompt = str(value.get(language) or "").strip()
+        if prompt:
+            return prompt
+    for item in value.values():
+        prompt = str(item or "").strip()
+        if prompt:
+            return prompt
+    return ""
+
+
+def _candidate_video_prompt(scene: dict, *, approved_only: bool) -> str:
+    return _first_prompt_from_lang_map(_candidate_video_prompt_by_lang(scene, approved_only=approved_only))
+
+
+def _candidate_video_prompt_by_lang(scene: dict, *, approved_only: bool) -> dict[str, str]:
+    candidates_by_lang = scene.get("video_candidates_by_lang")
+    if not isinstance(candidates_by_lang, dict):
+        return {}
+    candidate_groups: list[tuple[str, list[Any]]] = []
+    for language in ("ru", "en"):
+        candidates = candidates_by_lang.get(language)
+        if isinstance(candidates, list):
+            candidate_groups.append((language, candidates))
+    for candidates in candidates_by_lang.values():
+        if isinstance(candidates, list) and not any(candidates is group for _lang, group in candidate_groups):
+            candidate_groups.append(("", candidates))
+    out: dict[str, str] = {}
+    for group_language, candidates in candidate_groups:
+        for candidate in reversed(candidates):
+            if not isinstance(candidate, dict):
+                continue
+            if approved_only and not bool(candidate.get("approved_for_production")):
+                continue
+            prompt_by_lang = candidate.get("video_prompt_by_lang")
+            if not isinstance(prompt_by_lang, dict):
+                continue
+            if group_language:
+                prompt = str(prompt_by_lang.get(group_language) or "").strip()
+                if prompt and group_language not in out:
+                    out[group_language] = prompt
+            for raw_language, raw_prompt in prompt_by_lang.items():
+                language = str(raw_language or "").strip().lower()
+                prompt = str(raw_prompt or "").strip()
+                if language and prompt and language not in out:
+                    out[language] = prompt
+            if group_language and group_language in out:
+                break
+    return out
+
+
+def _approved_candidate_video_prompt(scene: dict) -> str:
+    return _candidate_video_prompt(scene, approved_only=True)
+
+
+def _latest_candidate_video_prompt(scene: dict) -> str:
+    return _candidate_video_prompt(scene, approved_only=False)
+
+
+def _video_prompt_by_lang_with_candidate_fallback(scene: dict) -> dict[str, str]:
+    out: dict[str, str] = {}
+    mapping = scene.get("video_prompt_by_lang")
+    if isinstance(mapping, dict):
+        for raw_language, raw_prompt in mapping.items():
+            language = str(raw_language or "").strip().lower()
+            prompt = str(raw_prompt or "").strip()
+            if language and prompt:
+                out[language] = prompt
+    legacy_prompt = str(scene.get("video_prompt", "")).strip()
+    current_language = str(scene.get("video_prompt_current_language") or "").strip().lower() or "ru"
+    if legacy_prompt and current_language not in out:
+        out[current_language] = legacy_prompt
+    for fallback in (
+        _candidate_video_prompt_by_lang(scene, approved_only=True),
+        _candidate_video_prompt_by_lang(scene, approved_only=False),
+    ):
+        for language, prompt in fallback.items():
+            if language not in out and prompt:
+                out[language] = prompt
+    return out
+
+
+def _video_context_as_start_frame_prompt(scene: dict, video_prompt: str) -> str:
+    text = str(video_prompt or "").strip()
+    text = re.sub(r"^\s*lang\s*:\s*[a-z]{2}\b", "", text, flags=re.IGNORECASE).strip()
+    text = re.sub(r"\bclip duration\s*:\s*[^.\n]*(?:\.|\n)", " ", text, flags=re.IGNORECASE)
+    text = re.sub(r"\blanguage\s*:\s*[^\n.]+(?:\.|\n)", " ", text, flags=re.IGNORECASE)
+    text = re.sub(r"\bvoice(?:over)?(?:_language|_lock_full(?:_grandma)?)?\s*:\s*[^\n]+", " ", text, flags=re.IGNORECASE)
+    text = re.sub(r"\bCHARACTERS?\s+SPEAKS?\s*:[^\n]*(?:\n|$)", " ", text, flags=re.IGNORECASE)
+    text = re.sub(r"\bspeech_timing_plan\s*:\s*(?:\n\s*-\s*[^\n]+)+", " ", text, flags=re.IGNORECASE)
+    text = re.sub(r"\ball spoken phrases[^\n.]*(?:\.|\n)", " ", text, flags=re.IGNORECASE)
+    text = re.sub(r"\baccurate lip sync[^\n.]*(?:\.|\n)", " ", text, flags=re.IGNORECASE)
+    text = re.sub(r"\b(?:her|his|their)?\s*lips?\s+sync(?:hronize|hronise)?[^\n.]*(?:\.|\n)", " ", text, flags=re.IGNORECASE)
+    text = re.sub(r"\blipsync[^\n.]*(?:\.|\n)", " ", text, flags=re.IGNORECASE)
+    text = re.sub(r"\bcamera(?:\s+\w+){0,5}\s*(?:maintains|smoothly|subtly|gently|tracks|pans|zooms|shifts|follows)[^\n.]*(?:\.|\n)", " ", text, flags=re.IGNORECASE)
+    text = re.sub(r"\bno background music[^\n.]*(?:\.|\n)", " ", text, flags=re.IGNORECASE)
+    text = re.sub(r"\bno on-screen text[^\n.]*(?:\.|\n)", " ", text, flags=re.IGNORECASE)
+    text = re.sub(r"\bnatural-fast spoken delivery[^\n.]*(?:\.|\n)", " ", text, flags=re.IGNORECASE)
+    text = re.sub(r"\bfinish the spoken line[^\n.]*(?:\.|\n)", " ", text, flags=re.IGNORECASE)
+    text = " ".join(text.split())
+    if len(text) > 1200:
+        text = text[:1200].rsplit(" ", 1)[0].strip()
+
+    story_scene = str(scene.get("generation_mode") or "").strip().lower() == "story"
+    scene_text = sanitize_character_names_and_keys(
+        str(
+            (scene.get("action") or scene.get("text") or scene.get("recipe_step"))
+            if story_scene
+            else (scene.get("text") or scene.get("action") or scene.get("recipe_step"))
+            or ""
+        ).strip()
+    )
+    aspect = str(scene.get("aspect_ratio") or "").strip()
+    frame_rule = (
+        "Горизонтальный 16:9, landscape frame, крупный план, не medium shot."
+        if aspect == "16:9"
+        else "Вертикальный 9:16, крупный план, не medium shot."
+    )
+    prompt_parts = [f"Стартовый кадр, статичное изображение до начала движения. {frame_rule}"]
+    if story_scene:
+        characters = [str(item).strip() for item in scene.get("characters") or [] if str(item).strip()]
+        prompt_parts.append(
+            "В кадре только явно перечисленные персонажи: "
+            + (", ".join(characters) if characters else "людей и животных нет")
+            + ". Не добавлять бабушку, кота или других героев из текста озвучки."
+        )
+        era_style = str(scene.get("era_style") or "").strip()
+        if era_style:
+            prompt_parts.append(f"Эпоха и техника изображения: {era_style}.")
+        shot_type = str(scene.get("shot_type") or "").strip()
+        if shot_type:
+            prompt_parts.append(f"План: {shot_type}.")
+        location = str(scene.get("location") or "").strip()
+        if location:
+            prompt_parts.append(f"Локация: {location}.")
+        lighting = str(scene.get("lighting") or "").strip()
+        if lighting:
+            prompt_parts.append(f"Свет: {lighting}.")
+        color_palette = str(scene.get("color_palette") or "").strip()
+        if color_palette:
+            prompt_parts.append(f"Цветовая гамма: {color_palette}.")
+    else:
+        prompt_parts.append(
+            "Бабушка, рыжий кот и все дополнительно упомянутые персонажи полностью видны в кадре; без дублей персонажей."
+        )
+    if scene_text:
+        prompt_parts.append(f"Сюжет сцены: {scene_text.rstrip('. ')}.")
+    if text:
+        prompt_parts.append(f"Визуальная композиция: {sanitize_character_names_and_keys(text)}")
+    prompt_parts.append("Без озвучки, без синхронизации губ, без таймингов, без текста на экране, без субтитров, без водяных знаков.")
+    return " ".join(part.strip() for part in prompt_parts if part.strip())
+
+
 def _image_scene_prompt(scene: dict) -> str:
     start = str(scene.get("start_frame_prompt", "")).strip() or str(scene.get("start_frame_prompt_ru", "")).strip()
     if start:
         return start
+    if str(scene.get("generation_mode") or "").strip().lower() == "story" and str(
+        scene.get("action") or scene.get("text") or scene.get("recipe_step") or ""
+    ).strip():
+        # Story video prompts may describe motion, transitions, or an older
+        # approved composition. START must reflect only the current visual beat.
+        return _video_context_as_start_frame_prompt(scene, "")
     fallback = str(scene.get("video_prompt", "")).strip()
     if fallback:
-        return fallback
+        return _video_context_as_start_frame_prompt(scene, fallback)
+    fallback = _first_prompt_from_lang_map(scene.get("video_prompt_by_lang"))
+    if fallback:
+        return _video_context_as_start_frame_prompt(scene, fallback)
+    fallback = _approved_candidate_video_prompt(scene)
+    if fallback:
+        return _video_context_as_start_frame_prompt(scene, fallback)
+    fallback = _latest_candidate_video_prompt(scene)
+    if fallback:
+        return _video_context_as_start_frame_prompt(scene, fallback)
+    if str(scene.get("text") or scene.get("action") or scene.get("recipe_step") or "").strip():
+        return _video_context_as_start_frame_prompt(scene, "")
     raise RuntimeError("В сцене нет промпта для генерации изображения.")
 
 
@@ -814,14 +999,19 @@ async def run_syntax_fallback_from_session_payload(payload: dict[str, Any]) -> b
     """Runs Syntax fallback using a dict from :func:`encode_syntax_fallback_pending_for_session`."""
     start_im = _decode_fallback_payload_image(payload, "start_image_b64", "start_frame_image_b64")
     end_im = _decode_fallback_payload_image(payload, "end_image_b64", "end_frame_image_b64", required=False)
+    prompt = enforce_video_prompt_visual_source_rule(str(payload.get("prompt") or "")).strip()
+    if not prompt:
+        raise SyntaxFallbackDispatchError("prompt для Syntax пустой; отправка остановлена.")
     return await _attempt_syntax_video_fallback_bytes(
-        prompt=enforce_video_prompt_visual_source_rule(str(payload["prompt"])),
+        prompt=prompt,
         model=str(payload["model"]),
         duration_sec=int(payload["duration_sec"]),
         start_image=start_im,
         end_image=end_im,
         raise_on_dispatch_failure=True,
         syntax_provider=str(payload.get("syntax_provider") or SYNTAX_PROVIDER_VEO),
+        aspect_ratio=str(payload.get("aspect_ratio") or "9:16"),
+        audio_enabled=bool(payload.get("audio_enabled", True)),
     )
 
 
@@ -829,9 +1019,12 @@ async def run_vertex_fallback_from_session_payload(payload: dict[str, Any]) -> b
     """Runs the reserve Vertex path from a serialized pending payload."""
     start_im = _decode_fallback_payload_image(payload, "start_image_b64", "start_frame_image_b64")
     end_im = _decode_fallback_payload_image(payload, "end_image_b64", "end_frame_image_b64", required=False)
+    prompt = enforce_video_prompt_visual_source_rule(str(payload.get("prompt") or "")).strip()
+    if not prompt:
+        raise RuntimeError("empty video prompt")
     return await asyncio.to_thread(
         generate_video_bytes,
-        prompt=enforce_video_prompt_visual_source_rule(str(payload["prompt"])),
+        prompt=prompt,
         model=str(payload["model"]),
         duration_sec=int(payload.get("vertex_duration_sec") or payload["duration_sec"]),
         start_image=start_im,
@@ -863,6 +1056,8 @@ async def _attempt_syntax_video_fallback_bytes(
     timeout_sec: int | None = None,
     acquire_timeout_sec: int | None = None,
     syntax_provider: str | None = None,
+    aspect_ratio: str = "9:16",
+    audio_enabled: bool = True,
 ) -> bytes | None:
     """Runs Syntax adapter in a worker thread; returns bytes or None."""
     if not _syntax_fallback_env_enabled():
@@ -881,6 +1076,8 @@ async def _attempt_syntax_video_fallback_bytes(
                 timeout_sec=timeout_sec,
                 acquire_timeout_sec=lock_timeout_sec,
                 syntax_provider=syntax_provider,
+                aspect_ratio=aspect_ratio,
+                audio_enabled=audio_enabled,
             ),
             timeout=lock_timeout_sec + timeout_sec + SYNTAX_FALLBACK_TIMEOUT_GRACE_SEC,
         )
@@ -940,6 +1137,7 @@ def _syntax_failure_happened_before_dispatch(provider_message: str) -> bool:
             "telethon stringsession is unavailable",
             "telethon session is not authorized",
             "syntax frame prepare failed",
+            "syntax prompt is empty",
             "syntax prompt is longer than",
         )
     )
@@ -947,6 +1145,8 @@ def _syntax_failure_happened_before_dispatch(provider_message: str) -> bool:
 
 def _syntax_dispatch_error_user_message(provider_message: str) -> str:
     low = str(provider_message or "").lower()
+    if "syntax prompt is empty" in low:
+        return "prompt для Syntax пустой; отправка остановлена."
     if "syntax prompt is longer than" in low:
         return (
             "prompt превышает лимит Syntax, а автоматически сократить его сейчас не удалось. "
@@ -975,6 +1175,8 @@ async def _attempt_syntax_video_fallback_batch(
     timeout_sec: int | None = None,
     acquire_timeout_sec: int | None = None,
     syntax_provider: str | None = None,
+    aspect_ratio: str = "9:16",
+    audio_enabled: bool = True,
 ) -> dict[str, bytes]:
     """Runs one batched Syntax session and returns only successful mp4 payloads by request key."""
     if not _syntax_fallback_env_enabled() or not requests:
@@ -991,6 +1193,8 @@ async def _attempt_syntax_video_fallback_batch(
                 timeout_sec=timeout_sec,
                 acquire_timeout_sec=lock_timeout_sec,
                 syntax_provider=syntax_provider,
+                aspect_ratio=aspect_ratio,
+                audio_enabled=audio_enabled,
             ),
             timeout=lock_timeout_sec + timeout_sec + SYNTAX_FALLBACK_TIMEOUT_GRACE_SEC,
         )
@@ -1082,7 +1286,9 @@ async def _generate_video_bytes_with_high_load_retry(
 ) -> bytes:
     """Generate video through the current policy: auto Syntax, manual Vertex fallback."""
 
-    prompt = enforce_video_prompt_visual_source_rule(prompt)
+    prompt = enforce_video_prompt_visual_source_rule(prompt).strip()
+    if not prompt:
+        raise RuntimeError("empty video prompt")
     syntax_enabled = _syntax_fallback_env_enabled() and not disable_syntax_fallback
     if not force_vertex_fallback and syntax_enabled and not skip_initial_syntax:
         if update.message is not None:
@@ -1099,6 +1305,8 @@ async def _generate_video_bytes_with_high_load_retry(
             timeout_sec=syntax_timeout_sec,
             acquire_timeout_sec=syntax_acquire_timeout_sec,
             syntax_provider=syntax_provider or SYNTAX_PROVIDER_VEO,
+            aspect_ratio=aspect_ratio,
+            audio_enabled=audio_enabled,
         )
         if syntax_bytes is not None:
             _LAST_VIDEO_PROVIDER.set("telegram")
@@ -1227,7 +1435,36 @@ async def _regenerate_video_prompt_from_error(scene: dict, error_text: str) -> s
     """
     Предлагает безопасный видео-промпт после policy-модерации.
     """
-    current = str(scene.get("video_prompt", "")).strip()
+    target_language = normalize_language_code(str(scene.get("video_prompt_current_language", "ru"))) or "ru"
+    prompt_map = scene.get("video_prompt_by_lang")
+    current = (
+        str(prompt_map.get(target_language) or "").strip()
+        if isinstance(prompt_map, dict)
+        else ""
+    ) or str(scene.get("video_prompt", "")).strip()
+    mode = str(scene.get("generation_mode") or scene.get("mode") or "").strip().lower()
+    model = str(scene.get("model") or "").strip().lower()
+    speechless_story = mode in {"story", "silence"} or model.startswith("kling")
+    if speechless_story:
+        meta = scene.get("prompt_meta_json") if isinstance(scene.get("prompt_meta_json"), dict) else {}
+        labels = scene.get("story_character_labels") or meta.get("story_character_labels") or {}
+        character_names = ", ".join(str(value) for value in labels.values() if str(value).strip())
+        action = str(scene.get("action") or meta.get("action") or "").strip()
+        prompt = (
+            "Rewrite the current silent image-to-video motion prompt so it is clear and safe for Kling.\n"
+            "Return only one finished English prompt, without explanations or headings.\n"
+            "Preserve the exact characters, identities, action, camera movement and object continuity from the current prompt "
+            "and approved start frame. Never replace them with a grandmother, cat, kitchen characters or characters from another project.\n"
+            "Describe only motion, reactions and camera movement. No dialogue, speech, voiceover, lip sync, audio, music, "
+            "ambient sound, on-screen text, subtitles, logos or watermark.\n"
+            "Do not duplicate duration/model/no-audio boilerplate; the application adds it once.\n"
+            f"Scene characters: {character_names or '(use only the characters already present)'}.\n"
+            f"Scene action: {action or '(preserve the current action)'}.\n\n"
+            f"PROVIDER ERROR:\n{error_text}\n\n"
+            f"CURRENT VIDEO PROMPT:\n{current}\n"
+        )
+        raw = await asyncio.to_thread(gemini_generate_sync, prompt, model_profile=GEMINI_MODEL_PROFILE_EDIT)
+        return str(raw or "").strip()
     speech = str(scene.get("text", "")).strip()
     speech_hint = (
         f"\nРЕПЛИКА СЦЕНЫ (поле text) — в итоговом prompt ОБЯЗАТЕЛЬНО одна подстрока вида "
@@ -1260,8 +1497,7 @@ async def _regenerate_video_prompt_from_error(scene: dict, error_text: str) -> s
         f"{speech_hint}\n"
         f"\nТЕКУЩИЙ VIDEO PROMPT:\n{current}\n"
     )
-    raw = await asyncio.to_thread(gemini_generate_sync, prompt)
-    target_language = normalize_language_code(str(scene.get("video_prompt_current_language", "ru"))) or "ru"
+    raw = await asyncio.to_thread(gemini_generate_sync, prompt, model_profile=GEMINI_MODEL_PROFILE_EDIT)
     return enforce_video_prompt_voice_requirements(raw.strip(), scene, target_language=target_language)
 
 
@@ -1321,7 +1557,7 @@ async def _regenerate_video_prompt_from_text(
     llm_prompt = _build_video_prompt_rewrite_llm_prompt(
         prompt_text, error_text, phrases=phrases
     )
-    raw = await asyncio.to_thread(gemini_generate_sync, llm_prompt)
+    raw = await asyncio.to_thread(gemini_generate_sync, llm_prompt, model_profile=GEMINI_MODEL_PROFILE_EDIT)
     return enforce_video_prompt_voice_requirements(raw.strip(), None)
 
 
@@ -1384,5 +1620,5 @@ async def _regenerate_image_prompt_from_video_error(scene: dict, error_text: str
         f"ТЕКУЩИЙ START PROMPT:\n{current}\n\n"
         f"ТЕКСТ ОШИБКИ VIDEO GENERATOR:\n{error_text}\n"
     )
-    raw = await asyncio.to_thread(gemini_generate_sync, prompt)
+    raw = await asyncio.to_thread(gemini_generate_sync, prompt, model_profile=GEMINI_MODEL_PROFILE_EDIT)
     return raw.strip()

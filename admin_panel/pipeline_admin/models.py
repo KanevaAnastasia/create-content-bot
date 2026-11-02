@@ -30,6 +30,33 @@ class LenientJSONField(models.JSONField):
         return super().formfield(**kwargs)
 
 
+class BotUser(models.Model):
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4)
+    telegram_id = models.BigIntegerField(blank=True, null=True, unique=True)
+    normalized_username = models.CharField(max_length=128, blank=True, null=True, unique=True)
+    display_name = models.TextField(blank=True, default="")
+    role = models.CharField(max_length=16, choices=(("admin", "admin"), ("guest", "guest")))
+    is_active = models.BooleanField(default=True)
+    quiet_mode_enabled = models.BooleanField(default=False)
+    quiet_mode_auto_enabled = models.BooleanField(default=False)
+    quiet_mode_auto_cycle_date = models.DateField(blank=True, null=True)
+    quiet_mode_auto_generation_count = models.IntegerField(default=0)
+    quiet_mode_auto_generation_target = models.IntegerField(blank=True, null=True)
+    created_at = models.DateTimeField()
+    updated_at = models.DateTimeField()
+
+    class Meta:
+        managed = False
+        db_table = "bot_users"
+        ordering = ("role", "normalized_username", "telegram_id")
+        verbose_name = "Bot user / пользователь бота"
+        verbose_name_plural = "Bot users / пользователи бота"
+
+    def __str__(self) -> str:
+        identity = self.normalized_username or self.telegram_id or self.id
+        return f"{self.display_name or identity} ({self.role})"
+
+
 class ChatSession(models.Model):
     id = models.UUIDField(primary_key=True, default=uuid.uuid4)
     chat_id = models.IntegerField(unique=True)
@@ -77,6 +104,8 @@ class PipelineStepCheckpoint(models.Model):
 
 class GenerationRun(models.Model):
     id = models.UUIDField(primary_key=True, default=uuid.uuid4)
+    project = models.ForeignKey("Project", db_column="project_id", blank=True, null=True, on_delete=models.DO_NOTHING)
+    workflow_type = models.CharField(max_length=16, blank=True, null=True)
     status = models.CharField(max_length=64)
     is_active = models.BooleanField(default=True)
     is_draft = models.BooleanField(default=False)
@@ -116,6 +145,7 @@ class ScheduledGenerationItem(models.Model):
     title = models.TextField()
     recipe = models.TextField()
     comment = models.TextField(blank=True, null=True)
+    overlay_subtitle = models.TextField(blank=True, null=True)
     title_color = models.CharField(max_length=32, default="#c72638")
     run_at = models.DateTimeField()
     is_draft = models.BooleanField(default=True)
@@ -242,6 +272,14 @@ class ContentSeries(models.Model):
 
 class Project(models.Model):
     id = models.UUIDField(primary_key=True, default=uuid.uuid4)
+    owner = models.ForeignKey(
+        BotUser,
+        db_column="owner_user_id",
+        blank=True,
+        null=True,
+        on_delete=models.DO_NOTHING,
+        related_name="projects",
+    )
     slug = models.CharField(max_length=128, unique=True)
     title = models.TextField()
     description = models.TextField(blank=True, null=True)
@@ -255,6 +293,9 @@ class Project(models.Model):
     allowed_video_models = LenientJSONField(blank=True, null=True)
     background_music_asset_uri = models.TextField(blank=True, null=True)
     background_music_volume = models.FloatField(blank=True, null=True)
+    elevenlabs_voice_id = models.CharField(max_length=128, blank=True, null=True)
+    default_generation_mode = models.CharField(max_length=32, blank=True, null=True)
+    style_source_project_slug = models.CharField(max_length=128, blank=True, null=True)
     created_at = models.DateTimeField()
     updated_at = models.DateTimeField()
 
@@ -447,8 +488,14 @@ class SceneVideoCandidate(models.Model):
     byte_size = models.IntegerField(blank=True, null=True)
     liked = models.BooleanField(default=False)
     approved_for_production = models.BooleanField(default=False)
-    speed_coef = models.FloatField(default=1.2)
+    speed_coef = models.FloatField(default=1.0)
     source_image_candidate_id = models.CharField(max_length=64, blank=True, null=True)
+    video_prompt_by_lang = LenientJSONField(default=dict, blank=True)
+    speech_by_lang = LenientJSONField(default=dict, blank=True)
+    speech_cues_by_lang = LenientJSONField(default=dict, blank=True)
+    speech_plan_by_lang = LenientJSONField(default=dict, blank=True)
+    video_speech_qa_by_lang = LenientJSONField(default=dict, blank=True)
+    generation_params_json = LenientJSONField(default=dict, blank=True)
     created_at = models.DateTimeField()
 
     class Meta:

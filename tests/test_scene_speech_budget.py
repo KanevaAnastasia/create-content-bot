@@ -20,13 +20,16 @@ def test_speech_chars_excluding_pauses_strips_token() -> None:
     assert speech_chars_excluding_pauses(f"{PAUSE_TOKEN}{PAUSE_TOKEN}xy") == 2
 
 
-def test_normalize_speech_phrase_for_voice_removes_dashes() -> None:
-    assert normalize_speech_phrase_for_voice("вот так — и готово") == "вот так и готово"
-    assert normalize_speech_phrase_for_voice("по-домашнему – мягко") == "по домашнему мягко"
+def test_normalize_speech_phrase_for_voice_preserves_punctuation_and_adds_period() -> None:
+    assert normalize_speech_phrase_for_voice("вот так — и готово") == "вот так и готово."
+    assert normalize_speech_phrase_for_voice("смотри, готово!") == "смотри, готово!"
+    assert normalize_speech_phrase_for_voice("по-домашнему – мягко") == "по домашнему мягко."
+    assert normalize_speech_phrase_for_voice("«всё готово»") == "«всё готово.»"
+    assert normalize_speech_phrase_for_voice("«всё готово!»") == "«всё готово!»"
 
 
 def test_normalize_speech_phrase_for_voice_does_not_rewrite_yo_letters() -> None:
-    assert normalize_speech_phrase_for_voice("все берёт ещё нежный") == "все берёт ещё нежный"
+    assert normalize_speech_phrase_for_voice("все берёт ещё нежный") == "все берёт ещё нежный."
 
 
 def test_max_speech_chars_for_duration() -> None:

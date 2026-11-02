@@ -13,18 +13,31 @@ class _CompatImageGenerationResult:
         self.request_id = request_id
 
 
-def generate_image_vertex_result(prompt, reference_image=None, *, reference_images=None, request_id=None, model=None):
+def generate_image_vertex_result(
+    prompt,
+    reference_image=None,
+    *,
+    reference_images=None,
+    request_id=None,
+    model=None,
+    aspect_ratio="9:16",
+):
     try:
+        kwargs = {
+            "reference_images": reference_images,
+            "request_id": request_id,
+            "model": model,
+        }
+        if str(aspect_ratio or "9:16").strip() != "9:16":
+            kwargs["aspect_ratio"] = aspect_ratio
         data = generate_image_vertex(
             prompt,
             reference_image,
-            reference_images=reference_images,
-            request_id=request_id,
-            model=model,
+            **kwargs,
         )
     except TypeError as e:
         msg = str(e)
-        if "model" not in msg and "request_id" not in msg:
+        if "model" not in msg and "request_id" not in msg and "aspect_ratio" not in msg:
             raise
         try:
             data = generate_image_vertex(
@@ -44,6 +57,7 @@ async def _generate_image_with_lenient_fallback(
     reference_image: bytes | None = None,
     *,
     reference_images: list[bytes] | None = None,
+    aspect_ratio: str = "9:16",
 ) -> bytes:
     """
     Compatibility wrapper used by tests/legacy imports.
@@ -57,6 +71,7 @@ async def _generate_image_with_lenient_fallback(
         prompt,
         reference_image=reference_image,
         reference_images=reference_images,
+        aspect_ratio=aspect_ratio,
     )
 
 

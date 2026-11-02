@@ -25,7 +25,7 @@ ADMIN_MANAGE="$ROOT_DIR/admin_panel/manage.py"
 LOCK_FILE="/tmp/content_fabric_bot.lock"
 
 usage() {
-  echo "Usage: $0 {start [-f|--follow]|stop|restart [-f|--follow]|status|logs [-f|--follow]|adopt <pid>|final-worker <run_id>|final-worker-foreground <run_id>|final-worker-status|scheduled-worker [limit]|scheduled-worker-status|celery-worker|celery-worker-foreground|celery-worker-status|celery-beat|celery-beat-foreground|celery-beat-status}"
+  echo "Usage: $0 {start [-f|--follow]|launchd-foreground|stop|restart [-f|--follow]|status|logs [-f|--follow]|adopt <pid>|final-worker <run_id>|final-worker-foreground <run_id>|final-worker-status|scheduled-worker [limit]|scheduled-worker-status|celery-worker|celery-worker-foreground|celery-worker-status|celery-beat|celery-beat-foreground|celery-beat-status}"
 }
 
 ensure_runtime() {
@@ -71,7 +71,7 @@ is_bot_pid() {
   local pid="${1:-}"
   local command open_files
   command="$(pid_command "$pid")"
-  if [[ "$command" == *"main.py"* ]]; then
+  if [[ "$command" == *"$MAIN_SCRIPT"* ]]; then
     return 0
   fi
   open_files="$(lsof -p "$pid" 2>/dev/null || true)"
@@ -80,7 +80,7 @@ is_bot_pid() {
 
 all_bot_pids() {
   local pids
-  pids="$(pgrep -f "main.py" 2>/dev/null || true)"
+  pids="$(pgrep -f "$MAIN_SCRIPT" 2>/dev/null || true)"
   if [[ -n "$pids" ]]; then
     echo "$pids"
     return 0
@@ -90,7 +90,7 @@ all_bot_pids() {
     echo "$pids"
     return 0
   fi
-  ps -axo pid=,command= 2>/dev/null | awk '/[m]ain\.py/ {print $1}' || true
+  ps -axo pid=,command= 2>/dev/null | awk -v main_script="$MAIN_SCRIPT" 'index($0, main_script) {print $1}' || true
 }
 
 unmanaged_bot_pids() {
@@ -192,6 +192,31 @@ start_bot() {
     tail -40 "$SUPERVISOR_LOG" >&2 || true
     exit 1
   fi
+}
+
+launchd_foreground_bot() {
+  ensure_runtime
+  local pid unmanaged
+  pid="$(current_pid || true)"
+  if pid_is_running "$pid"; then
+    echo "Bot is already running: pid=$pid"
+    write_status "running" "$pid"
+    return 0
+  fi
+
+  unmanaged="$(unmanaged_bot_pids || true)"
+  if [[ -n "$unmanaged" ]]; then
+    echo "Refusing to start: bot-like process already exists but is not managed by $PID_FILE." >&2
+    print_unmanaged_processes >&2
+    echo "If this is the intended process, run: $0 adopt <pid>" >&2
+    exit 1
+  fi
+
+  cd "$ROOT_DIR"
+  echo "$$" > "$PID_FILE"
+  write_status "running" "$$"
+  echo "Bot launchd foreground starting: pid=$$"
+  exec "$PYTHON_BIN" "$MAIN_SCRIPT"
 }
 
 stop_bot() {
@@ -507,6 +532,9 @@ case "${1:-}" in
     if follow_requested "${2:-}"; then
       show_logs --follow
     fi
+    ;;
+  launchd-foreground)
+    launchd_foreground_bot
     ;;
   stop)
     stop_bot

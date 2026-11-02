@@ -14,6 +14,7 @@ from .db import SessionLocal
 from .generation_store import ensure_generation_run_for_session
 from .models import ChatSession, GenerationArtifact, GenerationRun
 from .post_production import production_languages_for_scenes
+from .session_store import _chat_session_cache_payload, _serialize_value
 
 
 FINAL_VIDEO_VARIANT_LABELS = {
@@ -95,22 +96,21 @@ def _strip_inline_media_payloads(value: Any) -> Any:
 
 
 def _persist_queue_session_snapshot(chat_id: int, session: dict[str, Any], run_id: uuid.UUID) -> None:
-    snapshot = _strip_inline_media_payloads(session)
-    if isinstance(snapshot, dict):
-        snapshot["generation_run_id"] = str(run_id)
+    snapshot = _chat_session_cache_payload({**session, "generation_run_id": str(run_id)})
+    payload = _serialize_value(snapshot)
     with SessionLocal() as db:
         row = db.execute(select(ChatSession).where(ChatSession.chat_id == int(chat_id))).scalar_one_or_none()
         if row is None:
             row = ChatSession(
                 chat_id=int(chat_id),
                 state=str(session.get("state") or "").strip() or None,
-                session_json=snapshot if isinstance(snapshot, dict) else {"generation_run_id": str(run_id)},
+                session_json=payload,
                 generation_run_id=run_id,
             )
             db.add(row)
         else:
             row.state = str(session.get("state") or "").strip() or row.state
-            row.session_json = snapshot if isinstance(snapshot, dict) else dict(row.session_json or {})
+            row.session_json = payload
             row.generation_run_id = run_id
         run = db.get(GenerationRun, run_id)
         if run is not None:

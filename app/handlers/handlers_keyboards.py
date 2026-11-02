@@ -9,6 +9,8 @@ from typing import Any
 from telegram import ReplyKeyboardMarkup, ReplyKeyboardRemove
 from telegram.error import NetworkError, RetryAfter, TimedOut
 
+from ..quiet_mode import current_quiet_mode_menu_button
+
 logger = logging.getLogger("bot")
 
 _SEND_RETRY_ATTEMPTS = 6
@@ -29,14 +31,18 @@ DRAFT_BUTTON_LIST = "Черновики"
 
 def first_step_menu_markup() -> ReplyKeyboardMarkup:
     """Кнопки первого шага: выбор режима генерации."""
+    rows = [
+        [FIRST_STEP_BUTTON_GENERATE, FIRST_STEP_BUTTON_DESCRIPTION],
+        [FIRST_STEP_BUTTON_IMAGE, FIRST_STEP_BUTTON_PROJECT_IMAGE],
+        [FIRST_STEP_BUTTON_VIDEO, FIRST_STEP_BUTTON_SOUND],
+        [FIRST_STEP_BUTTON_PROJECT],
+        [DRAFT_BUTTON_SAVE, DRAFT_BUTTON_LIST],
+    ]
+    quiet_mode_button = current_quiet_mode_menu_button()
+    if quiet_mode_button:
+        rows.append([quiet_mode_button])
     return ReplyKeyboardMarkup(
-        keyboard=[
-            [FIRST_STEP_BUTTON_GENERATE, FIRST_STEP_BUTTON_DESCRIPTION],
-            [FIRST_STEP_BUTTON_IMAGE, FIRST_STEP_BUTTON_PROJECT_IMAGE],
-            [FIRST_STEP_BUTTON_VIDEO, FIRST_STEP_BUTTON_SOUND],
-            [FIRST_STEP_BUTTON_PROJECT],
-            [DRAFT_BUTTON_SAVE, DRAFT_BUTTON_LIST],
-        ],
+        keyboard=rows,
         resize_keyboard=True,
         one_time_keyboard=False,
     )

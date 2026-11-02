@@ -11,8 +11,10 @@ import uuid
 from dataclasses import dataclass
 from pathlib import Path
 
-from .llm_queue import _run_llm_call_with_deadline, resolve_llm_generate_timeout_sec
+from .constants import VERTEX_IMAGE_GENERATE_TIMEOUT_SEC_ENV_NAME
+from .llm_queue import _run_llm_call_with_deadline
 from .llm_logging import get_llm_io_logger
+from .media_file_store import image_mime_type
 
 logger = logging.getLogger("bot.image")
 _llm_io = get_llm_io_logger()
@@ -31,6 +33,9 @@ _PROFILE_MODELS: dict[str, list[str]] = {
     IMAGE_GENERATION_PROFILE_BEST: [LATEST_IMAGE_GENERATION_MODEL],
 }
 _DEFAULT_IMAGE_SIZE = "2K"
+_DEFAULT_IMAGE_GENERATE_TIMEOUT_SEC = 480.0
+_MIN_IMAGE_GENERATE_TIMEOUT_SEC = 60.0
+_MAX_IMAGE_GENERATE_TIMEOUT_SEC = 900.0
 
 
 @dataclass(frozen=True)
@@ -38,6 +43,18 @@ class ImageGenerationResult:
     data: bytes
     model: str
     request_id: str
+
+
+def resolve_image_generate_timeout_sec() -> float:
+    """Return the image-specific Vertex deadline without inheriting the shorter text deadline."""
+    raw = (os.getenv(VERTEX_IMAGE_GENERATE_TIMEOUT_SEC_ENV_NAME) or "").strip()
+    if not raw:
+        return _DEFAULT_IMAGE_GENERATE_TIMEOUT_SEC
+    try:
+        value = float(raw)
+    except ValueError:
+        return _DEFAULT_IMAGE_GENERATE_TIMEOUT_SEC
+    return max(_MIN_IMAGE_GENERATE_TIMEOUT_SEC, min(value, _MAX_IMAGE_GENERATE_TIMEOUT_SEC))
 
 
 def _required_env(name: str) -> str:
@@ -73,9 +90,35 @@ def _enforce_vertical_9_16_prompt(prompt: str) -> str:
     """
     p = (prompt or "").strip()
     suffix = " Vertical composition, portrait frame, aspect ratio 9:16."
+    upright_guard = (
+        " UPRIGHT PORTRAIT ORIENTATION IS MANDATORY: the top of the scene is at the top edge, "
+        "the floor and characters' feet are toward the bottom edge, heads are above bodies, and the horizon is level. "
+        "Compose all people and objects inside a tall portrait layout, using vertical stacking or depth when needed. "
+        "Never rotate or tilt the artwork 90 degrees, never place a sideways landscape composition inside the portrait canvas."
+    )
     russian_labels = "все надписи на русском"
     low = p.lower()
     base = p if ("9:16" in low or "aspect ratio" in low) else (f"{p}{suffix}" if p else "Vertical composition, portrait frame, aspect ratio 9:16.")
+    if "upright portrait orientation is mandatory" not in base.lower():
+        base = f"{base}{upright_guard}"
+    if russian_labels in base.lower():
+        return base
+    return f"{base} {russian_labels}".strip()
+
+
+def _enforce_aspect_ratio_prompt(prompt: str, aspect_ratio: str = "9:16") -> str:
+    ratio = str(aspect_ratio or "9:16").strip() or "9:16"
+    if ratio == "9:16":
+        return _enforce_vertical_9_16_prompt(prompt)
+    p = (prompt or "").strip()
+    suffix = (
+        " Horizontal composition, landscape frame, aspect ratio 16:9."
+        if ratio == "16:9"
+        else f" Composition aspect ratio {ratio}."
+    )
+    russian_labels = "все надписи на русском"
+    low = p.lower()
+    base = p if ratio in low else (f"{p}{suffix}" if p else suffix.strip())
     if russian_labels in base.lower():
         return base
     return f"{base} {russian_labels}".strip()
@@ -125,7 +168,7 @@ def _ref_images_summary(reference_images: list[bytes] | None) -> list[dict[str, 
         out.append(
             {
                 "index": i,
-                "mimeType": "image/png",
+                "mimeType": image_mime_type(ref),
                 "bytes": len(ref),
             }
         )
@@ -213,6 +256,7 @@ def _generate_image_vertex_sdk(
     *,
     model: str | None = None,
     request_id: str = "-",
+    aspect_ratio: str = "9:16",
 ) -> bytes:
     """Генерирует изображение через Vertex AI SDK `ImageGenerationModel.from_pretrained`."""
     project = (os.getenv("GOOGLE_CLOUD_PROJECT") or "").strip()
@@ -222,6 +266,7 @@ def _generate_image_vertex_sdk(
         or "us-central1"
     ).strip() or "us-central1"
     eff_model = (model or "").strip() or (os.getenv("VERTEX_IMAGE_MODEL") or LATEST_IMAGE_GENERATION_MODEL).strip()
+    eff_aspect_ratio = str(aspect_ratio or "9:16").strip() or "9:16"
     if not project:
         raise RuntimeError("Missing environment variable: GOOGLE_CLOUD_PROJECT")
     try:
@@ -261,9 +306,9 @@ def _generate_image_vertex_sdk(
         model_client = ImageGenerationModel.from_pretrained(eff_model)
         refs = [RawReferenceImage(reference_id=i, image=ref) for i, ref in enumerate(reference_images or [], start=1)]
         base_kwargs = {
-            "prompt": _enforce_vertical_9_16_prompt(prompt),
+            "prompt": _enforce_aspect_ratio_prompt(prompt, eff_aspect_ratio),
             "number_of_images": 1,
-            "aspect_ratio": "9:16",
+            "aspect_ratio": eff_aspect_ratio,
             "sample_image_size": _image_size(),
             "person_generation": "allow_all",
         }
@@ -294,14 +339,16 @@ def _generate_image_vertex_sdk(
             Part.from_text(
                 "Generate exactly one image from the following prompt. "
                 "Return an image, not a text-only description.\n\n"
-                f"{_enforce_vertical_9_16_prompt(prompt)}"
+                f"{_enforce_aspect_ratio_prompt(prompt, eff_aspect_ratio)}"
             )
         ]
         for ref in reference_images or []:
-            parts.append(Part.from_data(data=ref, mime_type="image/png"))
-        generation_config = GenerationConfig(
-            response_modalities=["IMAGE"],
-        )
+            parts.append(Part.from_data(data=ref, mime_type=image_mime_type(ref)))
+        # The SDK constructor omits image_config, but its wire schema supports it.
+        generation_config = GenerationConfig.from_dict({
+            "response_modalities": ["IMAGE"],
+            "image_config": {"aspect_ratio": eff_aspect_ratio},
+        })
         safety_settings = [
             SafetySetting(
                 category=HarmCategory.HARM_CATEGORY_HATE_SPEECH,
@@ -368,6 +415,7 @@ def generate_image_vertex_result(
     request_id: str | None = None,
     model: str | None = None,
     model_candidates: list[str] | None = None,
+    aspect_ratio: str = "9:16",
 ) -> ImageGenerationResult:
     """
     Главная точка генерации изображения через Vertex AI SDK.
@@ -389,6 +437,7 @@ def generate_image_vertex_result(
     """
     refs_list = _coerce_reference_images(reference_image, reference_images)
     rid = request_id or uuid.uuid4().hex[:12]
+    eff_aspect_ratio = str(aspect_ratio or "9:16").strip() or "9:16"
     explicit_model = str(model or "").strip()
     if explicit_model:
         selected_model = explicit_model
@@ -411,14 +460,22 @@ def generate_image_vertex_result(
                 _response_excerpt(_ref_images_summary(refs_list), max_len=1200),
             )
             try:
-                timeout_sec = resolve_llm_generate_timeout_sec()
-                data = _run_llm_call_with_deadline(
-                    lambda: _generate_image_vertex_sdk(
+                timeout_sec = resolve_image_generate_timeout_sec()
+                def _sdk_call() -> bytes:
+                    kwargs = {
+                        "model": model,
+                        "request_id": rid,
+                    }
+                    if eff_aspect_ratio != "9:16":
+                        kwargs["aspect_ratio"] = eff_aspect_ratio
+                    return _generate_image_vertex_sdk(
                         prompt,
                         refs_list or None,
-                        model=model,
-                        request_id=rid,
-                    ),
+                        **kwargs,
+                    )
+
+                data = _run_llm_call_with_deadline(
+                    _sdk_call,
                     timeout_sec,
                 )
                 return ImageGenerationResult(data=data, model=model, request_id=rid)
@@ -450,6 +507,7 @@ def generate_image_vertex(
     request_id: str | None = None,
     model: str | None = None,
     model_candidates: list[str] | None = None,
+    aspect_ratio: str = "9:16",
 ) -> bytes:
     """
     Главная точка генерации изображения через Vertex AI SDK.
@@ -464,6 +522,7 @@ def generate_image_vertex(
         request_id=request_id,
         model=model,
         model_candidates=model_candidates,
+        aspect_ratio=aspect_ratio,
     ).data
 
 

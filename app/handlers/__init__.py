@@ -83,8 +83,10 @@ from .handlers_state_flow import (
     generate_image_command,
     generate_video_command,
     on_message_reaction,
+    on_audio,
     on_photo,
     on_text,
+    on_video,
     quick_generate,
     start,
 )

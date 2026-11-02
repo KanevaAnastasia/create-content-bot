@@ -6,10 +6,19 @@ from types import SimpleNamespace
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 
-from app import db, session_store
+from app import db, final_video_delivery, session_store
 from app.drafts import clear_scene_db_approvals_for_repair
 from app.generation_store import _human_title_for_session
-from app.models import ChatSession, GenerationArtifact, GenerationDraft, GenerationRun, Scene, SceneImageCandidate, SceneVideoCandidate
+from app.models import (
+    ChatSession,
+    GenerationArtifact,
+    GenerationDraft,
+    GenerationRun,
+    Scene,
+    SceneImageCandidate,
+    SceneTextRevision,
+    SceneVideoCandidate,
+)
 from app.final_video_delivery import all_final_artifacts_delivered, deliver_final_artifact_to_telegram
 from app.handlers.handlers_media_core import SyntaxFallbackPendingConfirmation, VideoProviderChoiceRequired
 from app.handlers.handlers_state_commands import generate_video_command
@@ -238,6 +247,170 @@ def test_generation_title_prefers_russian_overlay_title():
     assert title == "Новый русский заголовок"
 
 
+def test_save_session_syncs_existing_run_scene_plan_revision(monkeypatch):
+    _install_sqlite(monkeypatch)
+
+    with db.SessionLocal() as check_db:
+        run = GenerationRun(status="media_in_progress", language="ru", script="recipe", human_title="Пастила")
+        check_db.add(run)
+        check_db.flush()
+        scene = Scene(run_id=run.id, scene_order=1, text="Старая первая фраза", duration_sec=6)
+        check_db.add(scene)
+        check_db.commit()
+        run_id = str(run.id)
+
+    session = {
+        "state": "waiting_scene_approval",
+        "generation_run_id": run_id,
+        "scene_db_ids_by_index": {0: str(scene.id)},
+        "scenes_plan": [
+            {
+                "scene": 1,
+                "text": "Не знаете куда девать яблоки? Присаживайтесь, будем делать пастилу!",
+                "duration_sec": 6,
+            }
+        ],
+    }
+
+    session_store.save_session(305928305, session)
+
+    with db.SessionLocal() as check_db:
+        saved_scene = check_db.query(Scene).filter_by(run_id=uuid.UUID(run_id), scene_order=1).one()
+        revisions = check_db.query(SceneTextRevision).filter_by(run_id=uuid.UUID(run_id)).all()
+
+    assert saved_scene.text == "Не знаете куда девать яблоки? Присаживайтесь, будем делать пастилу!"
+    assert revisions
+    assert revisions[0].old_text == "Старая первая фраза"
+    assert revisions[0].new_text == "Не знаете куда девать яблоки? Присаживайтесь, будем делать пастилу!"
+
+
+def test_load_session_restores_scene_refine_context_from_existing_run(monkeypatch):
+    _install_sqlite(monkeypatch)
+
+    with db.SessionLocal() as check_db:
+        run = GenerationRun(
+            status="media_in_progress",
+            language="ru",
+            script="Яблоки, вода, сахар.\nСварить пастилу.",
+            human_title="Яблочная пастила",
+        )
+        check_db.add(run)
+        check_db.flush()
+        scene = Scene(
+            run_id=run.id,
+            scene_order=1,
+            text="Старая первая фраза",
+            duration_sec=6,
+        )
+        check_db.add(scene)
+        check_db.add(
+            ChatSession(
+                chat_id=305928305,
+                state="waiting_scene_approval",
+                generation_run_id=run.id,
+                session_json={"state": "waiting_scene_approval", "generation_run_id": str(run.id)},
+            )
+        )
+        check_db.commit()
+
+    loaded = session_store.load_session(305928305)
+
+    assert loaded["recipe_full_text"] == "Яблоки, вода, сахар.\nСварить пастилу."
+    assert loaded["selected_concept"] == "Яблочная пастила"
+    assert loaded["selected_concept_name"] == "Яблочная пастила"
+    assert loaded["scenes_plan"][0]["text"] == "Старая первая фраза"
+    assert loaded["production"]["json_plan"][0]["text"] == "Старая первая фраза"
+
+
+def test_load_session_restores_overlay_title_by_lang_from_run_artifact(monkeypatch):
+    _install_sqlite(monkeypatch)
+
+    title_by_lang = {"ru": "Борщ с пампушками", "en": "Borscht with Pampushky"}
+    with db.SessionLocal() as check_db:
+        run = GenerationRun(
+            status="media_in_progress",
+            language="ru",
+            script="Свекла, капуста, пампушки.",
+            human_title="Борщ с пампушками",
+        )
+        check_db.add(run)
+        check_db.flush()
+        check_db.add(Scene(run_id=run.id, scene_order=1, text="Готовим борщ", duration_sec=6))
+        check_db.add(
+            GenerationArtifact(
+                run_id=run.id,
+                scene_id=None,
+                artifact_type="overlay_title_by_lang",
+                label="Overlay title by language",
+                uri=f"db://generation_runs/{run.id}/overlay_title_by_lang",
+                language=None,
+                mime_type="application/json",
+                payload_json={"overlay_title_by_lang": title_by_lang},
+            )
+        )
+        check_db.add(
+            ChatSession(
+                chat_id=305928306,
+                state="waiting_scene_media",
+                generation_run_id=run.id,
+                session_json={"state": "waiting_scene_media", "generation_run_id": str(run.id)},
+            )
+        )
+        check_db.commit()
+
+    loaded = session_store.load_session(305928306)
+
+    assert loaded["overlay_title_by_lang"] == title_by_lang
+    assert loaded["production"]["overlay_title_by_lang"] == title_by_lang
+
+
+def test_load_session_keeps_cached_overlay_title_over_stale_artifact(monkeypatch):
+    _install_sqlite(monkeypatch)
+
+    cached_title = {"ru": "Кабачковая икра", "en": "Zucchini Caviar"}
+    stale_title = {"ru": "Кабачковая икра", "en": "Kabachkovaya ikra"}
+    with db.SessionLocal() as check_db:
+        run = GenerationRun(
+            status="media_in_progress",
+            language="ru",
+            script="Кабачки, морковь, лук.",
+            human_title="Кабачковая икра",
+        )
+        check_db.add(run)
+        check_db.flush()
+        check_db.add(Scene(run_id=run.id, scene_order=1, text="Готовим икру", duration_sec=6))
+        check_db.add(
+            GenerationArtifact(
+                run_id=run.id,
+                scene_id=None,
+                artifact_type="overlay_title_by_lang",
+                label="Overlay title by language",
+                uri=f"db://generation_runs/{run.id}/overlay_title_by_lang",
+                language=None,
+                mime_type="application/json",
+                payload_json={"overlay_title_by_lang": stale_title},
+            )
+        )
+        check_db.add(
+            ChatSession(
+                chat_id=305928307,
+                state="waiting_scene_media",
+                generation_run_id=run.id,
+                session_json={
+                    "state": "waiting_scene_media",
+                    "generation_run_id": str(run.id),
+                    "overlay_title_by_lang": cached_title,
+                },
+            )
+        )
+        check_db.commit()
+
+    loaded = session_store.load_session(305928307)
+
+    assert loaded["overlay_title_by_lang"] == cached_title
+    assert loaded["production"]["overlay_title_by_lang"] == cached_title
+
+
 def test_save_and_load_session_restores_bytes_and_scene_candidates(monkeypatch):
     _install_sqlite(monkeypatch)
     SESSIONS.clear()
@@ -291,7 +464,7 @@ def test_save_and_load_session_restores_bytes_and_scene_candidates(monkeypatch):
     loaded = session_store.load_session(101)
 
     assert loaded is not None
-    assert loaded["first_step_custom_reference_images"] == [b"ref-image"]
+    assert "first_step_custom_reference_images" not in loaded
     restored_scene = loaded["production"]["json_plan"][0]
     assert restored_scene["image_candidates"][0]["liked"] is True
     selected = resolve_scene_video_for_production(restored_scene, "ru")
@@ -329,12 +502,311 @@ def test_video_candidate_persistence_drops_zero_duration_speech_cues(monkeypatch
     assert "speech_cues_by_lang" not in candidate
     with db.SessionLocal() as check_db:
         artifact = check_db.query(GenerationArtifact).filter_by(artifact_type="scene_video_candidate").one()
+        row = check_db.query(SceneVideoCandidate).filter_by(candidate_id=candidate["candidate_id"]).one()
         assert "speech_cues_by_lang" not in artifact.payload_json
+        assert row.speech_by_lang == {"ru": "Первая часть [пауза] Вторая часть"}
+        assert row.speech_cues_by_lang == {}
 
     rebuild_production_session(session, session.get("generation_run_id"))
     restored = session["production"]["json_plan"][0]["video_candidates_by_lang"]["ru"][0]
 
     assert "speech_cues_by_lang" not in restored
+
+
+def test_save_session_persists_video_prompts_as_scene_artifacts(monkeypatch):
+    _install_sqlite(monkeypatch)
+    SESSIONS.clear()
+
+    session = {
+        "state": "waiting_scene_media",
+        "target_languages": ["ru", "en"],
+        "production": {
+            "json_plan": [
+                {
+                    "scene": 1,
+                    "duration_sec": 6,
+                    "text": "Сцена 1",
+                    "video_prompt_by_lang": {"ru": "ru prompt 1", "en": "en prompt 1"},
+                },
+                {
+                    "scene": 2,
+                    "duration_sec": 6,
+                    "text": "Сцена 2",
+                    "video_prompt_by_lang": {"ru": "ru prompt 2"},
+                },
+            ]
+        },
+    }
+
+    session_store.save_session(313, session)
+
+    with db.SessionLocal() as check_db:
+        scenes = check_db.query(Scene).order_by(Scene.scene_order).all()
+        artifacts = (
+            check_db.query(GenerationArtifact)
+            .filter_by(artifact_type="scene_video_prompt")
+            .order_by(GenerationArtifact.language)
+            .all()
+        )
+
+    assert scenes[0].video_prompt_by_lang == {"ru": "ru prompt 1", "en": "en prompt 1"}
+    assert scenes[1].video_prompt_by_lang == {"ru": "ru prompt 2"}
+    with db.SessionLocal() as check_db:
+        saved = check_db.query(ChatSession).filter_by(chat_id=313).one()
+        assert "production" not in saved.session_json
+        assert "scenes_plan" not in saved.session_json
+    assert {(row.scene_id, row.language, row.payload_json["prompt"]) for row in artifacts} == {
+        (scenes[0].id, "en", "en prompt 1"),
+        (scenes[0].id, "ru", "ru prompt 1"),
+        (scenes[1].id, "ru", "ru prompt 2"),
+    }
+
+
+def test_rebuild_production_session_restores_video_prompt_from_scene_artifact(monkeypatch):
+    _install_sqlite(monkeypatch)
+
+    with db.SessionLocal() as check_db:
+        run = GenerationRun(status="ready", language="ru", script="recipe")
+        check_db.add(run)
+        check_db.flush()
+        scene = Scene(
+            run_id=run.id,
+            scene_order=1,
+            text="Сцена",
+            duration_sec=4,
+            video_prompt_by_lang={},
+        )
+        check_db.add(scene)
+        check_db.flush()
+        check_db.add(
+            GenerationArtifact(
+                run_id=run.id,
+                scene_id=scene.id,
+                artifact_type="scene_video_prompt",
+                label="Scene 1 video prompt (ru)",
+                uri=f"db://scenes/{scene.id}/video_prompt/ru",
+                language="ru",
+                mime_type="text/plain",
+                payload_json={"prompt": "artifact prompt", "video_prompt_by_lang": {"ru": "artifact prompt"}},
+            )
+        )
+        check_db.commit()
+        run_id = str(run.id)
+        scene_id = str(scene.id)
+
+    session = {
+        "generation_run_id": run_id,
+        "scene_db_ids_by_index": {0: scene_id},
+        "production": {"json_plan": [{"scene": 1, "duration_sec": 4, "text": "Сцена"}]},
+    }
+
+    rebuild_production_session(session, run_id, include_media_blobs=False)
+
+    assert session["production"]["json_plan"][0]["video_prompt_by_lang"] == {"ru": "artifact prompt"}
+
+
+def test_rebuild_production_session_restores_scene_metadata_from_prompt_meta(monkeypatch):
+    _install_sqlite(monkeypatch)
+
+    with db.SessionLocal() as check_db:
+        run = GenerationRun(status="ready", language="ru", script="recipe")
+        check_db.add(run)
+        check_db.flush()
+        scene = Scene(
+            run_id=run.id,
+            scene_order=1,
+            text="Сцена",
+            duration_sec=6,
+            video_prompt_by_lang={"ru": "video"},
+            prompt_meta_json={
+                "characters": ["grandma", "grandson"],
+                "dialogue_mode": "multi",
+                "dialogue": [
+                    {"speaker": "grandma", "text": "Угощайтесь"},
+                    {"speaker": "grandson", "text": "Очень вкусно, бабушка!"},
+                ],
+                "action": "Внук пробует ломтик.",
+            },
+        )
+        check_db.add(scene)
+        check_db.commit()
+        run_id = str(run.id)
+        scene_id = str(scene.id)
+
+    session = {
+        "generation_run_id": run_id,
+        "scene_db_ids_by_index": {0: scene_id},
+        "production": {"json_plan": [{"scene": 1, "duration_sec": 6, "text": "Сцена"}]},
+    }
+
+    rebuild_production_session(session, run_id, include_media_blobs=False)
+
+    scene = session["production"]["json_plan"][0]
+    assert scene["characters"] == ["grandma", "cat", "grandson"]
+    assert scene["dialogue"][1]["speaker"] == "grandson"
+    assert scene["action"] == "Внук пробует ломтик."
+
+
+def test_rebuild_production_session_infers_grandson_from_video_prompt_when_meta_missing(monkeypatch):
+    _install_sqlite(monkeypatch)
+    prompt = (
+        "6-second clip. Her внук, a cartoon boy, reaches for a slice. "
+        "CHARACTERS SPEAKS: Угощайтесь [пауза] Очень вкусно, бабушка!\n"
+        "speaker_dialogue_order: GRANDMA, GRANDSON\n"
+        "character_dialogue_script:\n"
+        "GRANDMA: Угощайтесь\n"
+        "GRANDSON: Очень вкусно, бабушка!\n"
+        "voice_lock_full_grandson: male child voice Russian language."
+    )
+
+    with db.SessionLocal() as check_db:
+        run = GenerationRun(status="ready", language="ru", script="recipe")
+        check_db.add(run)
+        check_db.flush()
+        scene = Scene(
+            run_id=run.id,
+            scene_order=1,
+            text="Угощайтесь [пауза] Очень вкусно, бабушка!",
+            duration_sec=6,
+            video_prompt_by_lang={"ru": prompt},
+        )
+        check_db.add(scene)
+        check_db.commit()
+        run_id = str(run.id)
+        scene_id = str(scene.id)
+
+    session = {
+        "generation_run_id": run_id,
+        "scene_db_ids_by_index": {0: scene_id},
+        "production": {"json_plan": [{"scene": 1, "duration_sec": 6, "text": "Угощайтесь"}]},
+    }
+
+    rebuild_production_session(session, run_id, include_media_blobs=False)
+
+    scene = session["production"]["json_plan"][0]
+    assert scene["characters"] == ["grandma", "cat", "grandson"]
+    assert scene["dialogue_mode"] == "multi"
+    assert scene["dialogue"] == [
+        {"speaker": "grandma", "text": "Угощайтесь"},
+        {"speaker": "grandson", "text": "Очень вкусно, бабушка!"},
+    ]
+
+
+def test_load_session_restores_pending_input_from_artifact_when_snapshot_lost(monkeypatch):
+    _install_sqlite(monkeypatch)
+    SESSIONS.clear()
+
+    pending = {"scene_idx": 0, "target": "start", "mode": "prompt_feedback"}
+    session = {
+        "state": "waiting_scene_media",
+        "production": {
+            "json_plan": [
+                {
+                    "scene": 1,
+                    "duration_sec": 6,
+                    "text": "Сцена",
+                    "video_prompt_by_lang": {"ru": "video prompt"},
+                }
+            ]
+        },
+        "image_scene_index": 0,
+        "scene_media_substep": "start_image_approval",
+        "scene_image_edit_pending": pending,
+    }
+
+    session_store.save_session(414, session)
+
+    with db.SessionLocal() as check_db:
+        artifact = check_db.query(GenerationArtifact).filter_by(artifact_type="scene_pending_input").one()
+        saved = check_db.query(ChatSession).filter_by(chat_id=414).one()
+        assert "scene_image_edit_pending" not in saved.session_json
+        check_db.commit()
+
+    loaded = session_store.load_session(414)
+
+    assert artifact.payload_json["session_key"] == "scene_image_edit_pending"
+    assert loaded["scene_image_edit_pending"] == pending
+
+
+def test_save_session_uses_chat_session_only_as_minimal_cache(monkeypatch):
+    _install_sqlite(monkeypatch)
+    SESSIONS.clear()
+
+    session = {
+        "state": "waiting_scene_media",
+        "recipe_full_text": "Не сохранять это в chat session",
+        "production": {
+            "json_plan": [
+                {
+                    "scene": 1,
+                    "duration_sec": 6,
+                    "text": "Сцена",
+                    "start_frame_prompt": "start prompt",
+                    "video_prompt_by_lang": {"ru": "video prompt"},
+                }
+            ]
+        },
+        "image_scene_index": 0,
+        "scene_media_substep": "video_prompt",
+        "scene_image_edit_pending": {"scene_idx": 0, "target": "start", "mode": "prompt_feedback"},
+    }
+
+    session_store.save_session(515, session)
+
+    with db.SessionLocal() as check_db:
+        saved = check_db.query(ChatSession).filter_by(chat_id=515).one()
+        scene = check_db.query(Scene).one()
+        pending = check_db.query(GenerationArtifact).filter_by(artifact_type="scene_pending_input").one()
+
+    assert saved.session_json == {
+        "state": "waiting_scene_media",
+        "generation_run_id": session["generation_run_id"],
+        "scene_db_ids_by_index": {"0": str(scene.id)},
+        "image_scene_index": 0,
+        "scene_media_substep": "video_prompt",
+    }
+    assert "production" not in saved.session_json
+    assert "recipe_full_text" not in saved.session_json
+    assert "scene_image_edit_pending" not in saved.session_json
+    assert scene.video_prompt_by_lang == {"ru": "video prompt"}
+    assert pending.payload_json["session_key"] == "scene_image_edit_pending"
+
+
+def test_final_build_queue_persists_only_minimal_chat_session_cache(monkeypatch):
+    _install_sqlite(monkeypatch)
+
+    from app.final_build_queue import _persist_queue_session_snapshot
+
+    with db.SessionLocal() as check_db:
+        run = GenerationRun(status="ready", language="ru", script="recipe")
+        check_db.add(run)
+        check_db.commit()
+        run_id = run.id
+
+    session = {
+        "state": "waiting_scene_media",
+        "generation_run_id": str(run_id),
+        "recipe_full_text": "Не класть в chat session",
+        "production": {"json_plan": [{"scene": 1, "video_prompt_by_lang": {"ru": "prompt"}}]},
+        "image_scene_index": 2,
+        "scene_media_substep": "final_build",
+        "scene_video_feedback_pending": {"scene_idx": 0, "language": "ru"},
+    }
+
+    _persist_queue_session_snapshot(616, session, run_id)
+
+    with db.SessionLocal() as check_db:
+        saved = check_db.query(ChatSession).filter_by(chat_id=616).one()
+
+    assert saved.session_json == {
+        "state": "waiting_scene_media",
+        "generation_run_id": str(run_id),
+        "image_scene_index": 2,
+        "scene_media_substep": "final_build",
+    }
+    assert "production" not in saved.session_json
+    assert "recipe_full_text" not in saved.session_json
+    assert "scene_video_feedback_pending" not in saved.session_json
 
 
 def test_session_persists_run_cursor_and_restores_scene_prompts_from_db(monkeypatch):
@@ -654,6 +1126,189 @@ def test_final_video_delivery_triggers_social_descriptions_once(monkeypatch, tmp
     assert "social_descriptions_pending" in restored
 
 
+def test_failed_final_build_does_not_block_social_descriptions(monkeypatch):
+    _install_sqlite(monkeypatch)
+    with db.SessionLocal() as check_db:
+        run = GenerationRun(status="final_render_failed", language="ru", script="recipe")
+        check_db.add(run)
+        check_db.flush()
+        check_db.add(
+            ChatSession(
+                chat_id=303,
+                state="ready_for_production",
+                session_json={
+                    "state": "ready_for_production",
+                    "recipe_full_text": "Ингредиенты: картофель.",
+                    "generation_run_id": str(run.id),
+                },
+                generation_run_id=run.id,
+            )
+        )
+        for variant, status in (("clean", "success"), ("titled_subtitled_music", "failed")):
+            check_db.add(
+                GenerationArtifact(
+                    run_id=run.id,
+                    artifact_type="final_build_status",
+                    label=f"Final build {variant}",
+                    uri=f"admin://final-build/{run.id}/ru/{variant}",
+                    language="ru",
+                    mime_type="application/json",
+                    payload_json={"language": "ru", "variant": variant, "status": status},
+                )
+            )
+        check_db.commit()
+        run_id = str(run.id)
+
+    calls: list[int] = []
+
+    async def _fake_social_descriptions(update, session):
+        calls.append(update.effective_chat.id)
+        session["social_descriptions_pending"] = {"recipe": session["recipe_full_text"]}
+        return True
+
+    monkeypatch.setenv("TELEGRAM_BOT_TOKEN", "token")
+    monkeypatch.setattr(
+        "app.handlers.handlers_state_media._send_final_social_descriptions",
+        _fake_social_descriptions,
+    )
+
+    final_video_delivery.trigger_final_completion_followup(run_id)
+
+    assert calls == [303]
+    restored = session_store.load_session(303)
+    assert restored is not None
+    assert restored["social_descriptions_pending"]["recipe"] == "Ингредиенты: картофель."
+
+
+def test_final_followup_does_not_relabel_unrelated_admin_session(monkeypatch):
+    _install_sqlite(monkeypatch)
+    with db.SessionLocal() as check_db:
+        completed_run = GenerationRun(status="final_videos_delivered", language="ru", script="old story")
+        active_run = GenerationRun(status="media_in_progress", language="ru", script="active story")
+        check_db.add_all([completed_run, active_run])
+        check_db.flush()
+        check_db.add(
+            ChatSession(
+                chat_id=303,
+                state="waiting_scene_media",
+                session_json={
+                    "state": "waiting_scene_media",
+                    "generation_run_id": str(active_run.id),
+                    "recipe_full_text": "active story",
+                },
+                generation_run_id=active_run.id,
+            )
+        )
+        check_db.add(
+            GenerationArtifact(
+                run_id=completed_run.id,
+                artifact_type="final_build_status",
+                label="Final build titled",
+                uri=f"admin://final-build/{completed_run.id}/ru/titled_subtitled_music",
+                language="ru",
+                mime_type="application/json",
+                payload_json={
+                    "language": "ru",
+                    "variant": "titled_subtitled_music",
+                    "status": "success",
+                },
+            )
+        )
+        check_db.commit()
+        completed_run_id = str(completed_run.id)
+        active_run_id = str(active_run.id)
+
+    calls: list[int] = []
+
+    async def _unexpected_social_descriptions(update, session):
+        calls.append(update.effective_chat.id)
+        return True
+
+    monkeypatch.setenv("TELEGRAM_BOT_TOKEN", "token")
+    monkeypatch.setenv("SCHEDULED_GENERATION_ADMIN_CHAT_ID", "303")
+    monkeypatch.setattr(
+        "app.handlers.handlers_state_media._send_final_social_descriptions",
+        _unexpected_social_descriptions,
+    )
+
+    final_video_delivery.trigger_final_completion_followup(completed_run_id)
+
+    assert calls == []
+    restored = session_store.load_session(303)
+    assert restored is not None
+    assert restored["generation_run_id"] == active_run_id
+    assert restored["recipe_full_text"] == "active story"
+
+
+def test_guest_final_delivery_opens_cartoon_review_once(monkeypatch):
+    _install_sqlite(monkeypatch)
+    with db.SessionLocal() as check_db:
+        run = GenerationRun(status="final_render_running", language="ru", script="cartoon", workflow_type="cartoon")
+        check_db.add(run)
+        check_db.flush()
+        check_db.add(
+            ChatSession(
+                chat_id=404,
+                state="guest_menu",
+                session_json={
+                    "state": "guest_menu",
+                    "guest_mode": True,
+                    "guest_data": {"approved_scenes": [{"scene": 1}]},
+                    "generation_run_id": str(run.id),
+                },
+                generation_run_id=run.id,
+            )
+        )
+        artifacts = []
+        for variant in ("clean", "upscaled_4k"):
+            artifact = GenerationArtifact(
+                run_id=run.id,
+                artifact_type=f"final_{variant}",
+                label=variant,
+                uri=f"file:///tmp/{variant}.mp4",
+                language="ru",
+                mime_type="video/mp4",
+                payload_json={"telegram_delivery": {"status": "sent", "telegram_message_id": 10}},
+            )
+            check_db.add(artifact)
+            check_db.flush()
+            artifacts.append(artifact)
+            check_db.add(
+                GenerationArtifact(
+                    run_id=run.id,
+                    artifact_type="final_build_status",
+                    label=f"status {variant}",
+                    uri=f"admin://final-build/{run.id}/ru/{variant}",
+                    language="ru",
+                    mime_type="application/json",
+                    payload_json={
+                        "status": "success",
+                        "language": "ru",
+                        "variant": variant,
+                        "artifact_id": str(artifact.id),
+                    },
+                )
+            )
+        check_db.commit()
+        run_id = str(run.id)
+
+    sent = []
+
+    async def fake_reply(self, text, **kwargs):
+        sent.append((text, kwargs))
+
+    monkeypatch.setenv("TELEGRAM_BOT_TOKEN", "token")
+    monkeypatch.setattr(final_video_delivery._FinalDeliveryMessage, "reply_text", fake_reply)
+
+    assert final_video_delivery._trigger_guest_final_review_if_ready(run_id, 404) is True
+    assert final_video_delivery._trigger_guest_final_review_if_ready(run_id, 404) is True
+    assert len(sent) == 1
+    restored = session_store.load_session(404)
+    assert restored is not None
+    assert restored["state"] == "guest_cartoon_final_review"
+    assert restored["guest_data"]["final_review_prompted_run_id"] == run_id
+
+
 def test_final_artifacts_delivered_waits_for_all_queued_final_statuses(monkeypatch, tmp_path):
     _install_sqlite(monkeypatch)
     ru_path = tmp_path / "final-ru.mp4"
@@ -709,6 +1364,75 @@ def test_final_artifacts_delivered_waits_for_all_queued_final_statuses(monkeypat
         run_id = str(run.id)
 
     assert all_final_artifacts_delivered(run_id) is False
+
+
+def test_final_artifacts_delivered_accepts_sent_artifact_with_stale_failed_status(monkeypatch, tmp_path):
+    _install_sqlite(monkeypatch)
+    clean_path = tmp_path / "clean-en.mp4"
+    titled_path = tmp_path / "titled-en.mp4"
+    clean_path.write_bytes(b"clean")
+    titled_path.write_bytes(b"titled")
+
+    with db.SessionLocal() as check_db:
+        run = GenerationRun(status="final_render_running", language="en", script="recipe")
+        check_db.add(run)
+        check_db.flush()
+        clean_artifact = GenerationArtifact(
+            run_id=run.id,
+            artifact_type="final_clean",
+            label="Final EN clean",
+            uri=f"file://{clean_path}",
+            language="en",
+            mime_type="video/mp4",
+            payload_json={"telegram_delivery": {"status": "sent", "telegram_message_id": 10}},
+        )
+        titled_artifact = GenerationArtifact(
+            run_id=run.id,
+            artifact_type="final_titled_subtitled_music",
+            label="Final EN titled",
+            uri=f"file://{titled_path}",
+            language="en",
+            mime_type="video/mp4",
+            payload_json={"telegram_delivery": {"status": "sent", "telegram_message_id": 11}},
+        )
+        check_db.add_all([clean_artifact, titled_artifact])
+        check_db.flush()
+        check_db.add_all(
+            [
+                GenerationArtifact(
+                    run_id=run.id,
+                    artifact_type="final_build_status",
+                    label="Final build status clean (en)",
+                    uri=f"admin://final-build/{run.id}/en/clean",
+                    language="en",
+                    mime_type="application/json",
+                    payload_json={
+                        "status": "failed",
+                        "language": "en",
+                        "variant": "clean",
+                        "message": "stale failure after a later delivery",
+                    },
+                ),
+                GenerationArtifact(
+                    run_id=run.id,
+                    artifact_type="final_build_status",
+                    label="Final build status title/subtitled/music (en)",
+                    uri=f"admin://final-build/{run.id}/en/titled_subtitled_music",
+                    language="en",
+                    mime_type="application/json",
+                    payload_json={
+                        "status": "success",
+                        "language": "en",
+                        "variant": "titled_subtitled_music",
+                        "artifact_id": str(titled_artifact.id),
+                    },
+                ),
+            ]
+        )
+        check_db.commit()
+        run_id = str(run.id)
+
+    assert all_final_artifacts_delivered(run_id) is True
 
 
 def test_final_video_delivery_triggers_social_descriptions_from_draft_when_session_moved(monkeypatch, tmp_path):
@@ -958,6 +1682,126 @@ def test_rebuild_production_session_restores_message_index(monkeypatch):
 
     assert rebuilt is not None
     assert restored["scene_media_message_index"]["909"]["candidate_id"] == candidate["candidate_id"]
+
+
+def test_rebuild_production_session_hydrates_missing_scene_prompt_from_approved_candidate(monkeypatch):
+    _install_sqlite(monkeypatch)
+
+    with db.SessionLocal() as check_db:
+        run = GenerationRun(status="ready", language="ru", script="recipe")
+        check_db.add(run)
+        check_db.flush()
+        scene = Scene(
+            run_id=run.id,
+            scene_order=1,
+            text="Сцена",
+            duration_sec=4,
+            video_prompt_by_lang={},
+            speech_by_lang={},
+        )
+        check_db.add(scene)
+        check_db.flush()
+        check_db.add(
+            SceneVideoCandidate(
+                candidate_id="vid-approved",
+                scene_id=scene.id,
+                language="ru",
+                approved_for_production=True,
+                speed_coef=1.0,
+                video_prompt_by_lang={"ru": "candidate prompt from row"},
+                speech_by_lang={"ru": "candidate speech from row"},
+            )
+        )
+        check_db.add(
+            GenerationArtifact(
+                run_id=run.id,
+                scene_id=scene.id,
+                artifact_type="scene_video_candidate",
+                label="video",
+                uri="db://scene_video_candidates/vid-approved",
+                language="ru",
+                mime_type="video/mp4",
+                payload_json={
+                    "candidate_id": "vid-approved",
+                    "video_prompt_by_lang": {"ru": "stale artifact prompt"},
+                    "speech_by_lang": {"ru": "stale artifact speech"},
+                },
+            )
+        )
+        check_db.commit()
+        run_id = str(run.id)
+        scene_id = str(scene.id)
+
+    session = {
+        "generation_run_id": run_id,
+        "scene_db_ids_by_index": {0: scene_id},
+        "production": {"json_plan": [{"scene": 1, "duration_sec": 4, "text": "Сцена"}]},
+    }
+
+    rebuild_production_session(session, run_id, include_media_blobs=False)
+    restored_scene = session["production"]["json_plan"][0]
+
+    assert restored_scene["video_prompt_by_lang"] == {"ru": "candidate prompt from row"}
+    assert restored_scene["speech_by_lang"] == {"ru": "candidate speech from row"}
+
+
+def test_rebuild_production_session_falls_back_to_legacy_candidate_artifact_snapshot(monkeypatch):
+    _install_sqlite(monkeypatch)
+
+    with db.SessionLocal() as check_db:
+        run = GenerationRun(status="ready", language="ru", script="recipe")
+        check_db.add(run)
+        check_db.flush()
+        scene = Scene(
+            run_id=run.id,
+            scene_order=1,
+            text="Сцена",
+            duration_sec=4,
+            video_prompt_by_lang={},
+            speech_by_lang={},
+        )
+        check_db.add(scene)
+        check_db.flush()
+        check_db.add(
+            SceneVideoCandidate(
+                candidate_id="vid-legacy",
+                scene_id=scene.id,
+                language="ru",
+                approved_for_production=True,
+                speed_coef=1.0,
+            )
+        )
+        check_db.add(
+            GenerationArtifact(
+                run_id=run.id,
+                scene_id=scene.id,
+                artifact_type="scene_video_candidate",
+                label="video",
+                uri="db://scene_video_candidates/vid-legacy",
+                language="ru",
+                mime_type="video/mp4",
+                payload_json={
+                    "candidate_id": "vid-legacy",
+                    "video_prompt_by_lang": {"ru": "legacy prompt"},
+                    "speech_by_lang": {"ru": "legacy speech"},
+                },
+            )
+        )
+        check_db.commit()
+        run_id = str(run.id)
+        scene_id = str(scene.id)
+
+    session = {
+        "generation_run_id": run_id,
+        "scene_db_ids_by_index": {0: scene_id},
+        "production": {"json_plan": [{"scene": 1, "duration_sec": 4, "text": "Сцена"}]},
+    }
+
+    rebuild_production_session(session, run_id, include_media_blobs=False)
+    restored_scene = session["production"]["json_plan"][0]
+
+    assert restored_scene["video_prompt_by_lang"] == {"ru": "legacy prompt"}
+    assert restored_scene["speech_by_lang"] == {"ru": "legacy speech"}
 
 
 def test_on_text_persists_in_place_session_transition(monkeypatch):

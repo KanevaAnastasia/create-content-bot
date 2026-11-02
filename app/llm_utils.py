@@ -26,6 +26,8 @@ from typing import Any, Callable, TypeVar
 
 from .constants import (
     DEFAULT_GEMINI_MODEL,
+    GEMINI_CREATIVE_MODEL_FALLBACKS_ENV_NAME,
+    GEMINI_EDIT_MODEL_FALLBACKS_ENV_NAME,
     GEMINI_KEY_ENV_NAME,
     GEMINI_KEYS_ENV_NAME,
     GEMINI_MODEL_FALLBACKS_ENV_NAME,
@@ -211,6 +213,10 @@ LLM_TRANSPORT_MAX_ATTEMPTS = 3
 LLM_TRANSPORT_BACKOFF_INITIAL_SEC = 2.0
 LLM_TRANSPORT_BACKOFF_MAX_SEC = 20.0
 _MAX_USER_VISIBLE_LLM_ERROR_LEN = 1200
+GEMINI_MODEL_PROFILE_CREATIVE = "creative"
+GEMINI_MODEL_PROFILE_EDIT = "edit"
+_DEFAULT_CREATIVE_MODEL_FALLBACKS = ("gemini-2.5-pro", "gemini-2.5-flash-lite")
+_DEFAULT_EDIT_MODEL_FALLBACKS = ("gemini-2.5-flash-lite", "gemini-2.5-pro")
 
 
 def _backoff_delay_before_retry(
@@ -517,6 +523,31 @@ def _truncate_error_text(text: str, *, max_len: int = _MAX_USER_VISIBLE_LLM_ERRO
     return compact[:max_len] + "…"
 
 
+def _split_model_list(raw: str | None) -> list[str]:
+    return [item.strip() for item in str(raw or "").split(",") if item.strip()]
+
+
+def _model_ids_for_profile(profile: str | None) -> list[str]:
+    primary_model = (os.getenv(GEMINI_MODEL_ENV_NAME) or "").strip() or DEFAULT_GEMINI_MODEL
+    normalized_profile = str(profile or "").strip().lower()
+    if normalized_profile == GEMINI_MODEL_PROFILE_CREATIVE:
+        fallbacks = _split_model_list(os.getenv(GEMINI_CREATIVE_MODEL_FALLBACKS_ENV_NAME))
+        if not fallbacks:
+            fallbacks = list(_DEFAULT_CREATIVE_MODEL_FALLBACKS)
+    elif normalized_profile == GEMINI_MODEL_PROFILE_EDIT:
+        fallbacks = _split_model_list(os.getenv(GEMINI_EDIT_MODEL_FALLBACKS_ENV_NAME))
+        if not fallbacks:
+            fallbacks = list(_DEFAULT_EDIT_MODEL_FALLBACKS)
+    else:
+        fallbacks = _split_model_list(os.getenv(GEMINI_MODEL_FALLBACKS_ENV_NAME))
+
+    model_ids: list[str] = []
+    for model in [primary_model, *fallbacks]:
+        if model and model not in model_ids:
+            model_ids.append(model)
+    return model_ids
+
+
 def _guess_image_mime_type(data: bytes) -> str:
     if data.startswith(b"\x89PNG\r\n\x1a\n"):
         return "image/png"
@@ -635,12 +666,21 @@ def vertex_part_from_data(project: str, location: str, data: bytes) -> Any:
     return Part.from_data(data=data, mime_type=_guess_media_mime_type(data))
 
 
-def gemini_generate_sync(prompt: str, *, images: list[bytes] | None = None) -> str:
+def gemini_generate_sync(
+    prompt: str,
+    *,
+    images: list[bytes] | None = None,
+    rate_limit_max_attempts: int | None = None,
+    model_profile: str | None = None,
+) -> str:
     """
     Синхронный вызов Gemini (исполняется из async-кода через ``asyncio.to_thread``).
 
     Параметры:
         prompt: полный текст инструкции для модели.
+        rate_limit_max_attempts: override for 429/rate-limit retry attempts.
+        model_profile: optional routing profile. ``creative`` uses flash -> pro -> lite;
+            ``edit`` uses flash -> lite -> pro. Empty uses the legacy global fallback list.
 
     Возвращает:
         Строку ответа модели (обычно текст или JSON как текст).
@@ -661,13 +701,7 @@ def gemini_generate_sync(prompt: str, *, images: list[bytes] | None = None) -> s
     if not project:
         raise RuntimeError("Missing environment variable: GOOGLE_CLOUD_PROJECT")
     _load_vertex_generative_sdk()
-    primary_model = (os.getenv(GEMINI_MODEL_ENV_NAME) or "").strip() or DEFAULT_GEMINI_MODEL
-    fallback_models_raw = (os.getenv(GEMINI_MODEL_FALLBACKS_ENV_NAME) or "").strip()
-    fallback_models = [m.strip() for m in fallback_models_raw.split(",") if m.strip()] if fallback_models_raw else []
-    model_ids: list[str] = []
-    for m in [primary_model, *fallback_models]:
-        if m and m not in model_ids:
-            model_ids.append(m)
+    model_ids = _model_ids_for_profile(model_profile)
     transports: list[tuple[str, Any]] = [("vertexai_sdk", None)]
     prompt_snapshot = str(prompt)
     image_payloads = _dedupe_binary_payloads(images)
@@ -718,15 +752,16 @@ def gemini_generate_sync(prompt: str, *, images: list[bytes] | None = None) -> s
                 return text
 
             try:
-                return safe_llm_call(_call)
+                kwargs = {}
+                if rate_limit_max_attempts is not None:
+                    kwargs["max_attempts"] = max(1, int(rate_limit_max_attempts))
+                return safe_llm_call(_call, **kwargs)
             except GeminiQuotaError as e:
-                if str(e) == GEMINI_QUOTA_EXHAUSTED_USER_MESSAGE:
-                    line = f"transport={transport_note} model={model_id}: quota exhausted"
-                    logger.warning("Gemini %s", line)
-                    attempt_notes.append(line)
-                    last_quota_error = e
-                    continue
-                raise
+                line = f"transport={transport_note} model={model_id}: quota/rate limit exhausted"
+                logger.warning("Gemini %s", line)
+                attempt_notes.append(line)
+                last_quota_error = e
+                continue
             except Exception as e:
                 err_text = str(e).lower()
                 last_non_quota_error = e

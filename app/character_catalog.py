@@ -288,40 +288,20 @@ def maybe_choose_romantic_subplot(
     *,
     random_fn: Callable[[], float] | None = None,
 ) -> dict[str, Any]:
-    """Choose the episode-level white-cat/black-and-white-cat background drama at code level."""
-    draw = random_fn or random.random
+    """Return the default episode-level neighbor-cat drama decision.
+
+    The neighbor-cat subplot stays available for explicit user requests/refines,
+    but normal generations must not auto-inject the white cat.
+    """
+    _ = random_fn or random.random
     series_rule = (
         "Grandma Kitchen keeps stable relationship canon across the series: the orange cat and the white cat are a pair; "
         "the black-and-white cat is the white cat's admirer only in episodes where he is selected."
     )
-    if draw() >= 0.40:
-        return {
-            "enabled": False,
-            "characters": [],
-            "brief": "",
-            "decision_scope": "episode",
-            "series_rule": series_rule,
-        }
-    include_markiz = draw() < 0.40
-    characters = ["zaya", "markiz"] if include_markiz else ["zaya"]
     return {
-        "enabled": True,
-        "characters": characters,
-        "decision_scope": "episode",
+        "enabled": False,
+        "characters": [],
         "brief": "",
-        "zaya_timosha_arc": "",
-        "markiz_arc": "",
+        "decision_scope": "episode",
         "series_rule": series_rule,
-        "llm_should_create_drama_case": True,
-        "episode_rule": (
-            "If enabled, the LLM must invent one recipe-aware drama case for the whole episode. It must be visible "
-            "as a subtle background beat in every scene, while grandma's recipe remains the main story. The subplot "
-            "may be romantic, emotional, situational, or comedic-dramatic, but it must have a clear happy ending in "
-            "the final scene that viewers can understand from the visible action."
-        ),
-        "rules": (
-            "This is a subtle background subplot, not the main recipe. Keep food and grandma's cooking action primary. "
-            "Include selected subplot characters by canonical keys in every scene.characters and keep them on model. "
-            "Avoid defaulting the white cat to a fixed position outside the window unless the specific beat calls for it."
-        ),
     }

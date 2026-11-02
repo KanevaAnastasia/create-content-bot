@@ -124,6 +124,7 @@ def persist_post_production_artifacts(session: dict[str, Any], post: dict[str, A
                 "source_variant": payload.get("source_variant"),
                 "source_video_path": payload.get("source_video_path"),
                 "subtitle_fingerprint": payload.get("subtitle_fingerprint"),
+                "scene_video_fingerprint": payload.get("scene_video_fingerprint"),
             }
             artifact_payload = {key: value for key, value in artifact_payload.items() if value is not None}
             try:
@@ -293,6 +294,7 @@ def backfill_generation_artifacts() -> int:
                             "width": payload.get("width"),
                             "height": payload.get("height"),
                             "artifact_bundle_key": post.get("artifact_bundle_key"),
+                            "scene_video_fingerprint": payload.get("scene_video_fingerprint"),
                         },
                     )
                     count += 1

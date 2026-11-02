@@ -27,6 +27,7 @@ from .drafts import save_generation_draft
 from .formatting import build_human_readable_plan, format_production_bundle_for_approval, format_viral_concept_brief
 from .generation_store import ensure_generation_run_for_session, update_generation_run_cursor_from_session
 from .generation_modes import (
+    GENERATION_MODE_LONG,
     GENERATION_MODE_NORMAL,
     GENERATION_MODE_SESSION_KEY,
     GENERATION_MODE_SILENCE,
@@ -59,6 +60,7 @@ SCHEDULED_EXCEL_COLUMNS = (
     "title",
     "recipe",
     "comment",
+    "overlay_subtitle",
     "title_color",
     "run_at",
     "is_draft",
@@ -383,6 +385,7 @@ def build_scheduled_generation_template_bytes() -> bytes:
                 "Банановое мороженое",
                 "https://example.com/recipe-or-full-recipe-text",
                 "Сделай упор на быстрый летний хук и домашнюю подачу.",
+                "КБЖУ на 100 гр: 126/10/4/24",
                 DEFAULT_TITLE_COLOR,
                 "2026-06-30",
                 True,
@@ -402,6 +405,7 @@ def export_scheduled_generation_items_to_xlsx(queryset) -> bytes:
                 item.title,
                 item.recipe,
                 item.comment or "",
+                item.overlay_subtitle or "",
                 item.title_color,
                 item.run_at.isoformat() if item.run_at else "",
                 bool(item.is_draft),
@@ -463,6 +467,7 @@ def import_scheduled_generation_xlsx(file_obj, *, original_name: str = "schedule
             item.title = title
             item.recipe = recipe
             item.comment = _cell_text(values.get("comment")) or None
+            item.overlay_subtitle = _cell_text(values.get("overlay_subtitle")) or None
             item.title_color = _normalize_title_color(values.get("title_color"))
             item.run_at = run_at
             item.is_draft = _bool_cell(values.get("is_draft"), default=True)
@@ -473,8 +478,8 @@ def import_scheduled_generation_xlsx(file_obj, *, original_name: str = "schedule
             item.error_text = None
             payload = dict(item.payload_json or {})
             generation_mode = normalize_generation_mode(values.get("generation_mode"))
-            if generation_mode == GENERATION_MODE_SILENCE:
-                payload[GENERATION_MODE_SESSION_KEY] = GENERATION_MODE_SILENCE
+            if generation_mode in {GENERATION_MODE_SILENCE, GENERATION_MODE_LONG}:
+                payload[GENERATION_MODE_SESSION_KEY] = generation_mode
             else:
                 payload.pop(GENERATION_MODE_SESSION_KEY, None)
             payload["last_imported_at"] = datetime.now(timezone.utc).isoformat()
@@ -1066,6 +1071,12 @@ def _scheduled_session_for_item(
     target_languages = target_languages_for_generation_mode(generation_mode, ["ru", "en"])
     generation_comment = normalize_scheduled_generation_comment(item.comment)
     every_start_prompt_comment = scheduled_generation_every_start_prompt_comment(item.comment)
+    overlay_subtitle = " ".join(str(getattr(item, "overlay_subtitle", "") or "").split())
+    overlay_subtitle_by_lang = {"ru": overlay_subtitle} if overlay_subtitle else {}
+    if overlay_subtitle_by_lang:
+        production["overlay_subtitle_by_lang"] = overlay_subtitle_by_lang
+    else:
+        production.pop("overlay_subtitle_by_lang", None)
     return {
         "state": "waiting_scene_media",
         "scheduled_generation_mode": True,
@@ -1086,6 +1097,7 @@ def _scheduled_session_for_item(
         "scenes_plan": scenes_plan,
         "production": production,
         "overlay_title_by_lang": {"ru": item.title},
+        "overlay_subtitle_by_lang": overlay_subtitle_by_lang,
         "overlay_title_style": {"title_color": item.title_color or DEFAULT_TITLE_COLOR},
         "image_scene_index": 0,
         "scene_media_substep": "start_prompt",
@@ -1291,6 +1303,7 @@ async def _run_scheduled_media_pipeline(item_id: uuid.UUID, session: dict[str, A
     from .handlers.handlers_state_deps import SESSIONS
     from .handlers.handlers_state_media import (
         SCENE_MEDIA_AI_TECHNICAL_FAILURE_SESSION_KEY,
+        _set_scene_media_manual_approval,
         _run_scene_media_ai_approve,
     )
 
@@ -1341,18 +1354,36 @@ async def _run_scheduled_media_pipeline(item_id: uuid.UUID, session: dict[str, A
             raise ScheduledGenerationRetryLater(message)
         human_review = session.get("scene_media_ai_human_review")
         if isinstance(human_review, dict) and human_review:
-            session.pop("scene_media_ai_human_review", None)
+            message = (
+                "Ночной режим остановлен на текущем media-шаге: ИИ апрув запросил ручную проверку. "
+                "Сохраняю cursor и перевожу задачу в ручной режим без отката к первому кадру.\n"
+                f"stage={human_review.get('stage') or '-'}\n"
+                f"reason={human_review.get('reason') or '-'}"
+            )
+            _set_scene_media_manual_approval(session)
+            update_generation_run_cursor_from_session(session)
+            save_session_if_possible(resolved_chat_id or chat_id, session)
+            _set_scheduled_step_state(
+                item_id,
+                SCHEDULED_STEP_SCENE_MEDIA,
+                status="failed_needs_review",
+                cursor=_scheduled_session_cursor(session),
+                data={
+                    "summary": _scheduled_media_summary(session),
+                    "human_review": human_review,
+                    "manual_mode": True,
+                },
+                error_text=message,
+            )
             await record_scheduled_generation_event_async(
                 item_id,
-                event_type="notice",
+                event_type="failed_needs_review",
                 stage="scene_media",
-                status="human_review_ignored",
-                message=(
-                    "Ночной режим: HUMAN_REVIEW отключен, ручную проверку не запрашиваю. "
-                    "Проверяю фактическую полноту media result."
-                ),
+                status=SCHEDULED_STATUS_FAILED_NEEDS_REVIEW,
+                message=message,
                 payload={"human_review": human_review},
             )
+            raise ScheduledGenerationNeedsReview(message)
         production = session.get("production") if isinstance(session.get("production"), dict) else {}
         post_production = production.get("post_production") if isinstance(production, dict) else None
         if isinstance(post_production, dict) and post_production.get("error"):

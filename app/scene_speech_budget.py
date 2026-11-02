@@ -10,7 +10,8 @@ import re
 
 PAUSE_TOKEN = "[пауза]"
 PROMPT_TIMING_MARKER = "speech_timing_plan:"
-SPEECH_DASH_CHARS_RE = re.compile(r"\s*[-–—]\s*")
+SPEECH_TERMINAL_PUNCTUATION = ".!?…"
+SPEECH_DASH_CHARS_RE = re.compile(r"\s*[\-\u2010-\u2015\u2212]+\s*")
 DEFAULT_SPEECH_CHARS_PER_SECOND = 14
 SPEECH_CHARS_PER_SECOND_BY_LANG = {
     "ru": 14,
@@ -22,12 +23,20 @@ SPEECH_MAX_CHARS_BY_LANG_DURATION = {
 
 
 def normalize_speech_phrase_for_voice(text: str) -> str:
-    """Remove dash characters from spoken phrases before TTS/video prompt sync."""
+    """Normalize spoken phrases while preserving punctuation."""
     raw = str(text or "").strip()
     if not raw:
         return ""
-    no_dashes = SPEECH_DASH_CHARS_RE.sub(" ", raw)
-    return re.sub(r"\s+", " ", no_dashes).strip()
+    raw = SPEECH_DASH_CHARS_RE.sub(" ", raw)
+    normalized = re.sub(r"\s+", " ", raw).strip()
+    if not normalized:
+        return ""
+    closing_chars = "\"'»”)]}"
+    tail = normalized.rstrip(f" \t\r\n{closing_chars}")
+    if tail and tail[-1] not in SPEECH_TERMINAL_PUNCTUATION:
+        closing_suffix = normalized[len(tail) :]
+        normalized = f"{tail}.{closing_suffix}"
+    return normalized
 
 
 def speech_chars_excluding_pauses(text: str) -> int:
@@ -79,7 +88,8 @@ def build_default_speech_plan(text: str, language: str = "ru") -> list[dict[str,
     raw = str(text or "").strip()
     if not raw:
         return []
-    normalized = re.sub(r"\[\s*пауза\s*\]", f" {PAUSE_TOKEN} ", raw, flags=re.IGNORECASE)
+    normalized = SPEECH_DASH_CHARS_RE.sub(" ", raw)
+    normalized = re.sub(r"\[\s*пауза\s*\]", f" {PAUSE_TOKEN} ", normalized, flags=re.IGNORECASE)
     parts = [chunk.strip(" ,;:!?-.") for chunk in normalized.split(PAUSE_TOKEN)]
     chunks = [part for part in parts if part]
     if not chunks:

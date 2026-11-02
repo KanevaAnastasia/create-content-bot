@@ -13,7 +13,7 @@ from typing import Any
 
 from .assets import ASSETS
 from .character_catalog import character_prompt_catalog, maybe_choose_romantic_subplot
-from .llm_utils import gemini_generate_sync
+from .llm_utils import GEMINI_MODEL_PROFILE_CREATIVE, gemini_generate_sync
 
 
 FINAL_SCENE_SUBSCRIBE_CTA = "Подписывайтесь на бабушку, тут много вкусных и простых рецептов"
@@ -37,7 +37,14 @@ FRUIT_ONLY_FIRST_MOMENT_RULE = (
 
 async def gemini_text(prompt: str) -> str:
     """Вызывает синхронный Gemini в thread pool, чтобы не блокировать event loop бота."""
-    return (await asyncio.to_thread(gemini_generate_sync, prompt) or "").strip()
+    return (
+        await asyncio.to_thread(
+            gemini_generate_sync,
+            prompt,
+            model_profile=GEMINI_MODEL_PROFILE_CREATIVE,
+        )
+        or ""
+    ).strip()
 
 
 def allowed_locations_strict() -> list[str]:
@@ -313,7 +320,7 @@ def scenes_plan_requirements() -> dict[str, Any]:
         "scene1_hook": True,
         "scene1_ready_dish_no_cooking": True,
         "last_scene_result": True,
-        "cat_active_every_scene_new_emotion": True,
+        "core_cast_rule": "grandmother and exactly one orange cat are present in every ordinary scene",
         "all_scenes_with_speech": True,
         "recipe_stages_progression": True,
         "no_generic_simple_action_text": True,
@@ -342,6 +349,13 @@ def scenes_plan_requirements() -> dict[str, Any]:
             "brand_context, or an explicit user reference. Do not add extra garnish, side dishes, eggs, herbs, potatoes, "
             "sauces, cheese, berries, nuts, or other ingredients just because they are common in some variants."
         ),
+        "mandatory_recipe_coverage_rule": (
+            "Все обязательные операции из рецепта должны быть видимо покрыты в ролике: готовка/варка, жарка/обжарка, "
+            "духовка/запекание и другие ключевые технологические шаги нельзя пропускать или заменять общей фразой. "
+            "Все важные ингредиенты из рецепта должны появляться в соответствующих сценах в правильном состоянии обработки; "
+            "если ингредиент важен для вкуса, начинки, соуса, теста или финальной подачи, он должен быть явно виден или "
+            "явно использован в кадре."
+        ),
         "forbidden_shot_type": "never use low-angle / from-below camera",
         "scene_transition_rule": (
             "each next scene should progress recipe action and vary shot_type or continuity focus, "
@@ -351,7 +365,8 @@ def scenes_plan_requirements() -> dict[str, Any]:
             "EVERY scene, for start/end frame generation: composition is always close-up only, not medium or medium-close, on grandma, "
             "cat, and the hands-on food action (faces, paws, ingredients, utensils readable). "
             f"Exception: {FRUIT_ONLY_FIRST_MOMENT_RULE} "
-            "Grandmother's full figure must remain visible (at least head through torso), never a face-only crop; "
+            "Grandmother's full figure must remain visible with face and head fully inside the frame "
+            "(at least head through torso, never a face-only crop); "
             "every other character listed for the scene must also stay fully visible in frame. "
             "No wide/establishing shots where characters are small. "
             "Even if shot_type suggests top/overhead, the frame must still show grandma+cat+action large "
@@ -383,6 +398,10 @@ def scenes_plan_requirements() -> dict[str, Any]:
         "speech_first_person_pov": (
             "Поле `text` — прямая реплика бабушки зрителю; пиши от первого лица (я/мы), НЕ повествование "
             "от третьего лица («бабушка говорит», «бабушка режет»). "
+            "Не используй клише от лица зрителя или автора: «моя бабушка», «у моей бабушки», "
+            "«как у моей бабушки», «бабушка научила», «рецепт моей бабушки», если такой факт явно не дан "
+            "в full_recipe_text, feedback или generation_comment. Бабушка говорит сама, поэтому естественно: "
+            "«я готовлю», «мы добавляем», «смотрите», а не «моя бабушка готовит». "
             "Сцена 1: хук + явно что готовим; в самом `text` первой сцены обязательно назови блюдо из concept "
             "или full_recipe_text (например смотрите / сегодня мы или я готовим сырники). Нельзя говорить "
             "служебные формулировки вроде «рецепт пользователя», «это блюдо», «вкусное блюдо» вместо названия. "
@@ -465,7 +484,12 @@ def build_scenes_plan_prompt(payload: dict[str, Any]) -> str:
         "должны быть взяты из full_recipe_text, явного feedback, brand_context или пользовательских референсов. "
         "Не добавляй продукты «для красоты» или потому что они встречаются в отдельных вариантах блюда, если их нет "
         "в исходном рецепте/запросе. Это правило особенно важно для scene 1 ready dish и финальной подачи.\n"
-        "В КАЖДОЙ сцене: конкретное действие с едой; понятное объяснение шага; реакция бабушки; кот в кадре по смыслу.\n"
+        "MANDATORY RECIPE COVERAGE: все обязательные операции из рецепта должны быть видимо покрыты в ролике: "
+        "готовка/варка, жарка/обжарка, духовка/запекание и другие ключевые технологические шаги нельзя пропускать "
+        "или заменять общей фразой. Все важные ингредиенты должны появляться в соответствующих сценах в правильном "
+        "состоянии обработки.\n"
+        "В КАЖДОЙ сцене: конкретное действие с едой; понятное объяснение шага; реакция бабушки и рыжего кота. "
+        "Рыжий кот является постоянным персонажем проекта и должен быть в characters каждой обычной сцены.\n"
         "В КАЖДОЙ сцене обязательно непустое поле text — готовая реплика озвучки на этом этапе.\n"
         "Для каждой сцены верни dialogue_mode и dialogue.\n"
         "- dialogue_mode: single или multi\n"
@@ -473,6 +497,9 @@ def build_scenes_plan_prompt(payload: dict[str, Any]) -> str:
         "- Для single можно вернуть пустой dialogue или один объект с бабушкой.\n"
         "- Для multi dialogue обязателен, а text должен быть агрегированной spoken-версией этих реплик в порядке произнесения.\n"
         "Реплика text: по умолчанию от первого лица бабушки (я/мы) к зрителю; запрет на третье лицо («бабушка …» как рассказчик). "
+        "Запрещены неподтвержденные ностальгические клише от лица автора/зрителя: «моя бабушка», «у моей бабушки», "
+        "«как у моей бабушки», «бабушка научила», «рецепт моей бабушки», если это прямо не написано в исходном рецепте, "
+        "feedback или generation_comment. "
         f"{RUSSIAN_YO_RULE} "
         "В реплике озвучки text не используй дефис и тире: запрещены символы -, – и —; паузы обозначай только [пауза]. "
         "Первая сцена — хук + что именно готовим; в поле text первой сцены обязательно произнеси название блюда "
@@ -483,7 +510,8 @@ def build_scenes_plan_prompt(payload: dict[str, Any]) -> str:
         "Пиши реплики максимально живыми: как настоящая бабушка в кадре, тёпло и разговорно; без сухих формул "
         "«выполняет следующий шаг», «добавляем ингредиенты», «готовое блюдо» там, где можно сказать естественно.\n"
         "Код не правит лицо и формулировки реплик — всё сразу в ответе модели (см. requirements.speech_first_person_pov).\n"
-        "В КАЖДОЙ сцене явно укажи characters (всегда grandma и cat), но НЕ добавляй поле location.\n"
+        "В КАЖДОЙ обычной сцене явно укажи characters с `grandma` и `cat`: бабушка и ровно один рыжий кот всегда видны в кадре. "
+        "Исключение только если пользователь явно просит первый кадр без бабушки/кота, например только говорящие фрукты. Поле location НЕ добавляй.\n"
         "FAMILY CAST RULE: смотри payload.viral_concept_brief.dish_audience_type и family_cast_plan.\n"
         "- Если dish_audience_type=child, в сцене 1 и в последней сцене добавь ровно одного из персонажей grandchild: `grandson` ИЛИ `granddaughter`; "
         "выбери одного и держи его консистентно в обеих сценах. В промежуточных сценах этого персонажа не добавляй, если пользователь прямо не просил.\n"
@@ -563,7 +591,7 @@ def build_scenes_plan_prompt(payload: dict[str, Any]) -> str:
         "Финал обязан иметь сильный visual payoff: разрез, ложка, хруст, тянущийся сыр, бабушка пробует и улыбается, "
         "кот смотрит на блюдо, финальная сервировка, семейный стол или «сохрани, чтобы не потерять». "
         "После основной фразы про блюдо ОБЯЗАТЕЛЬНО закончи text подписочной фразой: "
-        f"{FINAL_SCENE_SUBSCRIBE_CTA}. Для veo3/veo3_fast в самом конце text используй TTS-форму без пунктуации: "
+        f"{FINAL_SCENE_SUBSCRIBE_CTA}. Для veo3/veo3_fast в самом конце text используй TTS-форму с финальной точкой: "
         f"{FINAL_SCENE_SUBSCRIBE_CTA_VEO3}.\n"
         "RETENTION LAYER: у каждой сцены добавь retention_function — одно из hook, visual_proof, recipe_progress, "
         "grandma_secret, cat_humor, texture_shot, transformation, suspense, payoff, cta_save_reason, brand_integration. "

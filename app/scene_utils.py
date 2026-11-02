@@ -4,11 +4,13 @@
 Сцены приходят из LLM как JSON; здесь мы:
 - дополняем обязательных персонажей и пути к ассетам;
     - приводим длительность и сценовые поля к допустимым значениям;
-- проверяем соответствие сцен шагам рецепта и эвристики «еда / кот / конфликт».
+- проверяем соответствие сцен шагам рецепта и эвристики «еда / конфликт».
 """
 
 import re
 from typing import Any
+
+from .scene_speech_budget import normalize_speech_phrase_for_voice
 
 from .assets import ASSETS
 
@@ -35,7 +37,9 @@ def pick_model(scene: dict[str, Any]) -> str:
     Текущий прод-режим: всегда ``veo3_fast`` (Vertex AI).
     Другие модели для сцен отключены.
     """
-    _ = scene
+    raw = str(scene.get("model") or "").strip().lower() if isinstance(scene, dict) else ""
+    if raw in {"veo3_fast", "kling_3_0"}:
+        return raw
     return "veo3_fast"
 
 
@@ -155,9 +159,8 @@ def apply_veo3_lowercase_format(scenes: list[dict[str, Any]]) -> list[dict[str, 
             txt = re.sub(r"\[\s*пауза\s*\]", " [пауза] ", txt, flags=re.IGNORECASE)
             txt = re.sub(r"\bпауза\b", " [пауза] ", txt, flags=re.IGNORECASE)
             txt = txt.lower()
-            txt = re.sub(r"[.,!?;:]", " ", txt)
             txt = re.sub(r"\s+", " ", txt).strip()
-            item["text"] = txt or "сейчас готовим вкусное блюдо"
+            item["text"] = normalize_speech_phrase_for_voice(txt or "сейчас готовим вкусное блюдо")
         out.append(item)
     return out
 
@@ -190,7 +193,7 @@ def _default_continuity_anchors(scene: dict[str, Any]) -> list[str]:
     for fallback in (
         "одна и та же деревянная рабочая поверхность",
         "одинаковая палитра посуды и ингредиентов",
-        "бабушка и кот в том же мультяшном дизайне",
+        "бабушка в том же мультяшном дизайне",
     ):
         if len(anchors) >= 3:
             break
@@ -216,10 +219,9 @@ def _sanitize_scene(scene: dict[str, Any], idx: int, allowed_locations: set[str]
     """
     Приводит одну сцену к инвариантам пайплайна: номер, длительность, персонажи, ``references``.
 
-    - Принудительно добавляет ``grandma`` и ``cat`` в ``characters``.
+    - Принудительно добавляет ``grandma`` в ``characters``.
     - Заполняет character ``references`` путями из ``ASSETS``.
     - Добавляет предметные ``continuity_anchors`` вместо location-контракта.
-    - Гарантирует упоминание кота в ``action`` (минимальная защита от «пустых» сцен).
     """
     out = dict(scene)
     out["scene"] = idx
@@ -227,9 +229,6 @@ def _sanitize_scene(scene: dict[str, Any], idx: int, allowed_locations: set[str]
     chars = out.get("characters")
     if not isinstance(chars, list):
         chars = []
-    for required in ("grandma", "cat"):
-        if required not in chars:
-            chars.append(required)
     prompt_blob = " ".join(
         _as_text(out.get(k))
         for k in (
@@ -243,6 +242,11 @@ def _sanitize_scene(scene: dict[str, Any], idx: int, allowed_locations: set[str]
             "text",
         )
     ).lower()
+    if "grandma" not in chars:
+        chars.insert(0, "grandma")
+    cat_requested = any(alias in prompt_blob for alias in ("кот", "кошка", "cat", "рыжий", "рыжего"))
+    if cat_requested and "cat" not in chars:
+        chars.append("cat")
     mentioned_character_aliases = {
         "zaya": ("zaya", "зая", "заю", "заи", "зайка", "белая кошка", "белая кошечка"),
         "markiz": ("markiz", "маркиз", "маркиза", "черно-белый кот", "чёрно-белый кот"),
@@ -253,9 +257,7 @@ def _sanitize_scene(scene: dict[str, Any], idx: int, allowed_locations: set[str]
     out["characters"] = chars
     action = _as_text(out.get("action")).strip()
     if not action:
-        action = "Бабушка выполняет следующий кулинарный шаг, кот активно взаимодействует с едой."
-    if "кот" not in action.lower():
-        action += " Кот активно взаимодействует с едой."
+        action = "Бабушка выполняет следующий кулинарный шаг."
     cooking_on_stove = any(x in action.lower() for x in ("плит", "конфорк", "сковород", "жарит", "обжар"))
     if cooking_on_stove:
         burner = _normalized_stove_burner(out.get("stove_burner"), idx)
@@ -263,7 +265,8 @@ def _sanitize_scene(scene: dict[str, Any], idx: int, allowed_locations: set[str]
         if burner not in action.lower() and "конфорк" not in action.lower():
             action += f" Использует {_stove_burner_ru(burner)} конфорку из четырёх."
     out["action"] = action
-    out.setdefault("cat_emotion", f"эмоция_{idx}")
+    if "cat" in chars:
+        out.setdefault("cat_emotion", f"эмоция_{idx}")
     existing_refs_raw = out.get("references")
     existing_refs: dict[str, str] = {}
     if isinstance(existing_refs_raw, dict):
@@ -289,19 +292,26 @@ def _sanitize_scene(scene: dict[str, Any], idx: int, allowed_locations: set[str]
     return out
 
 
-def normalize_scenes_for_pipeline(scenes: list[dict[str, Any]]) -> list[dict[str, Any]]:
+def normalize_scenes_for_pipeline(
+    scenes: list[dict[str, Any]],
+    *,
+    min_scenes: int = 3,
+    max_scenes: int = 6,
+) -> list[dict[str, Any]]:
     """
     Нормализует список сцен после ответа LLM.
 
     Действия:
-    - обрезает до 6 сцен, при нехватке дублирует последнюю (временный костыль для модели);
+    - обрезает до ``max_scenes``, при нехватке дублирует последнюю (временный костыль для модели);
     - требует минимум 3 сцены (дополняет копиями);
     - первая сцена помечается ``goal=хук``, последняя — ``результат``;
     - **во всех сценах** — короткая реплика ``text``, ``voice_needed``, ``has_lipsync``.
 
     Важно: длина списка потом может быть урезана до ``len(recipe_steps)`` в ``pipeline.generate_scenes_plan``.
     """
-    scenes = scenes[:6]
+    safe_min = max(1, int(min_scenes or 3))
+    safe_max = max(safe_min, int(max_scenes or 6))
+    scenes = scenes[:safe_max]
     invalid_items = [
         f"#{idx}: {type(scene).__name__}"
         for idx, scene in enumerate(scenes, start=1)
@@ -312,8 +322,8 @@ def normalize_scenes_for_pipeline(scenes: list[dict[str, Any]]) -> list[dict[str
             "Model output scene array must contain JSON objects, got "
             + ", ".join(invalid_items[:5])
         )
-    if len(scenes) < 3:
-        while len(scenes) < 3:
+    if len(scenes) < safe_min:
+        while len(scenes) < safe_min:
             scenes.append(dict(scenes[-1] if scenes else {}))
     normalized = [_sanitize_scene(scene, idx) for idx, scene in enumerate(scenes, start=1)]
     normalized[0]["goal"] = "хук"
@@ -330,15 +340,19 @@ def normalize_scenes_for_pipeline(scenes: list[dict[str, Any]]) -> list[dict[str
             "Готовое блюдо аккуратно подано на тарелке, хорошо видны ключевые ингредиенты и текстура."
         )
     speech_fallbacks = (
-        "Смотри внимательно, сейчас будет вкусно.",
-        "Ну куда ты лезешь!",
-        "Береги плиту!",
+        "Показываю этот шаг подробно.",
+        "Сейчас покажу главное.",
+        "Вот так получается вкуснее.",
     )
     fi = 0
     for s in normalized:
         if not _as_text(s.get("text")).strip():
-            s["text"] = speech_fallbacks[fi % len(speech_fallbacks)]
-            fi += 1
+            scene_speech = _as_text(s.get("recipe_step")).strip() or _as_text(s.get("action")).strip()
+            if scene_speech:
+                s["text"] = scene_speech
+            else:
+                s["text"] = speech_fallbacks[fi % len(speech_fallbacks)]
+                fi += 1
     for s in normalized:
         s["voice_needed"] = True
         s["has_lipsync"] = True
@@ -624,8 +638,6 @@ def scenes_quality_errors(
         if not _as_text(scene.get("action")).strip():
             errors.append(f"scene_{i}: no_step_explanation")
         chars = [str(c).lower() for c in (scene.get("characters") or [])]
-        if "cat" not in chars:
-            errors.append(f"scene_{i}: no_cat")
         if "простое действие" in blob or "что-то делает" in blob:
             errors.append(f"scene_{i}: banned_abstraction")
 
@@ -645,8 +657,8 @@ def scenes_quality_errors(
             if duration not in {6, 8}:
                 errors.append(f"scene_{i}: invalid_duration_for_veo3")
             txt = _as_text(scene.get("text")).strip()
-            if re.search(r"[.,!?;:]", txt):
-                errors.append(f"scene_{i}: veo3_text_has_punctuation")
+            if txt and not re.search(r"[.!?…]\s*$", txt):
+                errors.append(f"scene_{i}: veo3_text_missing_terminal_punctuation")
             if not re.search(r"[АЕЁИОУЫЭЮЯ]", txt):
                 errors.append(f"scene_{i}: veo3_text_no_stress_marks")
             if len(txt.split()) >= 6 and "[пауза]" not in txt:

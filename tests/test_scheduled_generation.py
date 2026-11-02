@@ -9,12 +9,13 @@ from datetime import datetime, timezone
 from pathlib import Path
 from types import SimpleNamespace
 
+import pytest
 from sqlalchemy import create_engine, select
 from sqlalchemy.orm import sessionmaker
 import httpx
 
 from app import db
-from app.drafts import hide_generation_draft, list_generation_drafts, save_generation_draft
+from app.drafts import hide_generation_draft, list_generation_drafts, load_generation_draft, save_generation_draft
 from app.models import ChatSession, ContentSeries, GenerationDraft, GenerationRun, ScheduledGenerationItem
 import app.scheduled_generation as scheduled_generation
 from app.scheduled_generation import (
@@ -55,6 +56,7 @@ def test_scheduled_generation_template_imports_to_db(monkeypatch, tmp_path):
         row = session.execute(select(ScheduledGenerationItem)).scalar_one()
         assert row.title == "Банановое мороженое"
         assert row.comment == "Сделай упор на быстрый летний хук и домашнюю подачу."
+        assert row.overlay_subtitle == "КБЖУ на 100 гр: 126/10/4/24"
         assert row.status == "pending"
         assert row.series_id is None
         assert row.source_row_key == "banana-icecream-001"
@@ -72,6 +74,7 @@ def test_scheduled_generation_import_sets_silence_mode(monkeypatch, tmp_path):
             [
                 "Тихий пирог",
                 "Рецепт: яблоки и тесто.",
+                "",
                 "",
                 "#c72638",
                 "2026-06-30",
@@ -134,8 +137,17 @@ def test_save_generation_draft_marks_run_as_draft(monkeypatch):
         "is_draft": True,
         "recipe_full_text": "Рецепт",
         "production": {
-            "overlay_title_by_lang": {"ru": "Черновой ролик"},
-            "json_plan": [{"scene": 1, "text": "Сцена", "duration_sec": 6}],
+            "overlay_title_by_lang": {"ru": "Черновой ролик", "en": "Draft Video"},
+            "json_plan": [
+                {
+                    "scene": 1,
+                    "text": "Сцена",
+                    "duration_sec": 6,
+                    "start_frame_prompt": "Полный стартовый промпт",
+                    "speech_by_lang": {"ru": "Точная реплика"},
+                    "image_candidates": [{"candidate_id": "img-1", "image_b64": "large-inline-media"}],
+                }
+            ],
         },
         "image_scene_index": 0,
         "scene_media_substep": "video_prompt",
@@ -150,6 +162,87 @@ def test_save_generation_draft_marks_run_as_draft(monkeypatch):
         assert stored is not None
         assert stored.scene_index == 0
         assert stored.substep == "video_prompt"
+        stored_snapshot = stored.session_snapshot_json
+        assert stored_snapshot["recipe_full_text"] == "Рецепт"
+        assert stored_snapshot["production"]["json_plan"][0]["text"] == "Сцена"
+        assert stored_snapshot["production"]["json_plan"][0]["start_frame_prompt"] == "Полный стартовый промпт"
+        assert stored_snapshot["production"]["json_plan"][0]["speech_by_lang"] == {"ru": "Точная реплика"}
+        assert "image_b64" not in stored_snapshot["production"]["json_plan"][0]["image_candidates"][0]
+        assert stored_snapshot["production"]["overlay_title_by_lang"] == {
+            "ru": "Черновой ролик",
+            "en": "Draft Video",
+        }
+
+    loaded = load_generation_draft(str(draft.id))
+    assert loaded is not None
+    _row, snapshot = loaded
+    assert snapshot["production"]["json_plan"][0]["text"] == "Сцена"
+    assert snapshot["production"]["json_plan"][0]["duration_sec"] == 6
+    assert snapshot["production"]["json_plan"][0]["start_frame_prompt"] == "Полный стартовый промпт"
+    assert snapshot["production"]["json_plan"][0]["speech_by_lang"] == {"ru": "Точная реплика"}
+    assert snapshot["production"]["overlay_title_by_lang"] == {"ru": "Черновой ролик", "en": "Draft Video"}
+
+
+def test_save_generation_draft_reuses_existing_run_draft(monkeypatch):
+    _install_sqlite(monkeypatch)
+    session = {
+        "state": "waiting_scene_media",
+        "recipe_full_text": "Рецепт",
+        "production": {
+            "overlay_title_by_lang": {"ru": "Первый заголовок"},
+            "json_plan": [{"scene": 1, "text": "Сцена", "duration_sec": 6}],
+        },
+        "image_scene_index": 0,
+        "scene_media_substep": "image",
+    }
+
+    first = save_generation_draft(123, session)
+    session["production"]["overlay_title_by_lang"]["ru"] = "Второй заголовок"
+    session["image_scene_index"] = 2
+    session["scene_media_substep"] = "video_prompt"
+
+    second = save_generation_draft(123, session)
+
+    assert second.id == first.id
+    with db.SessionLocal() as dbs:
+        drafts = dbs.execute(select(GenerationDraft)).scalars().all()
+        assert [row.id for row in drafts] == [first.id]
+        stored = drafts[0]
+        assert stored.title == "Второй заголовок"
+        assert stored.scene_index == 2
+        assert stored.substep == "video_prompt"
+        run = dbs.get(GenerationRun, stored.run_id)
+        assert run is not None
+        assert run.is_draft is True
+
+
+def test_list_generation_drafts_collapses_duplicate_run_rows(monkeypatch):
+    _install_sqlite(monkeypatch)
+    with db.SessionLocal() as dbs:
+        run = GenerationRun(status="media_in_progress", is_draft=True, language="ru", script="recipe")
+        dbs.add(run)
+        dbs.flush()
+        older = GenerationDraft(
+            chat_id=123,
+            run_id=run.id,
+            title="Старый индекс",
+            session_snapshot_json={},
+            payload_json={},
+            created_at=datetime(2026, 1, 1, tzinfo=timezone.utc),
+        )
+        newer = GenerationDraft(
+            chat_id=123,
+            run_id=run.id,
+            title="Новый индекс",
+            session_snapshot_json={},
+            payload_json={},
+            created_at=datetime(2026, 1, 2, tzinfo=timezone.utc),
+        )
+        dbs.add_all([older, newer])
+        dbs.commit()
+        newer_id = newer.id
+
+    assert [row.id for row in list_generation_drafts(123, limit=5)] == [newer_id]
 
 
 def test_hide_generation_draft_clears_linked_run_from_telegram_list(monkeypatch):
@@ -226,6 +319,66 @@ def test_scheduled_media_pipeline_persists_chat_session_for_final_delivery(monke
     with db.SessionLocal() as session_db:
         row = session_db.query(ChatSession).filter(ChatSession.chat_id == 909).one()
         assert str(row.generation_run_id) == generation_session["generation_run_id"]
+
+
+def test_scheduled_media_pipeline_stops_for_manual_review_without_cursor_reset(monkeypatch):
+    _install_sqlite(monkeypatch)
+    monkeypatch.setenv("SCHEDULED_GENERATION_ADMIN_CHAT_ID", "909")
+    item_id = uuid.uuid4()
+    with db.SessionLocal() as session_db:
+        session_db.add(
+            ScheduledGenerationItem(
+                id=item_id,
+                title="Курица",
+                recipe="Филе, сливки.",
+                run_at=datetime.now(timezone.utc),
+                status="pending",
+            )
+        )
+        session_db.commit()
+
+    async def fake_record(*_args, **_kwargs):
+        return None
+
+    async def fake_ai_approve(_update, *, context, chat_id, session):
+        assert chat_id == 909
+        _ = context
+        session["scene_media_ai_human_review"] = {"stage": "video", "reason": "needs manual check"}
+
+    monkeypatch.setattr(scheduled_generation, "record_scheduled_generation_event_async", fake_record)
+    monkeypatch.setattr("app.handlers.handlers_state_media._run_scene_media_ai_approve", fake_ai_approve)
+
+    generation_session = {
+        "state": "waiting_scene_media",
+        "target_languages": ["ru"],
+        "selected_concept": "Курица",
+        "recipe_full_text": "Филе, сливки.",
+        "image_scene_index": 2,
+        "scene_media_substep": "video_prompt",
+        "scene_media_language_index": 0,
+        "production": {
+            "json_plan": [
+                {"scene": 1, "duration_sec": 6, "text": "Первая", "video_prompt_by_lang": {"ru": "prompt 1"}},
+                {"scene": 2, "duration_sec": 6, "text": "Вторая", "video_prompt_by_lang": {"ru": "prompt 2"}},
+                {"scene": 3, "duration_sec": 6, "text": "Третья", "video_prompt_by_lang": {"ru": "prompt 3"}},
+            ]
+        },
+    }
+
+    with pytest.raises(scheduled_generation.ScheduledGenerationNeedsReview):
+        asyncio.run(scheduled_generation._run_scheduled_media_pipeline(item_id, generation_session))
+
+    assert generation_session["scene_media_approve_mode"] == "manual"
+    assert "scene_media_ai_human_review" not in generation_session
+    assert generation_session["image_scene_index"] == 2
+    assert generation_session["scene_media_substep"] == "video_prompt"
+    with db.SessionLocal() as session_db:
+        item = session_db.get(ScheduledGenerationItem, item_id)
+        media_step = (item.payload_json or {})["step_state"]["scene_media"]
+        assert media_step["status"] == "failed_needs_review"
+        assert media_step["cursor"]["scene_index"] == 2
+        assert media_step["cursor"]["substep"] == "video_prompt"
+        assert media_step["data"]["human_review"] == {"stage": "video", "reason": "needs manual check"}
 
 
 def _scheduled_media_scene(scene_no: int, *, start: bool = True, videos: tuple[str, ...] = ("ru", "en")) -> dict:
@@ -424,6 +577,7 @@ def test_scheduled_generation_comment_is_used_for_viral_plan(monkeypatch):
                 title="Летний пирог",
                 recipe="Рецепт: яблоки и тесто.",
                 comment="После рецепта: больше семейной интриги в первом кадре.",
+                overlay_subtitle="КБЖУ на 100 гр: 126/10/4/24",
                 title_color="#c72638",
                 run_at=datetime.now(timezone.utc),
                 is_draft=True,
@@ -433,6 +587,7 @@ def test_scheduled_generation_comment_is_used_for_viral_plan(monkeypatch):
         session.commit()
 
     calls: dict[str, object] = {}
+    captured_session: dict[str, object] = {}
 
     async def fake_viral(concept, *, full_recipe_text, **_kwargs):
         calls["viral"] = (concept, full_recipe_text)
@@ -450,6 +605,7 @@ def test_scheduled_generation_comment_is_used_for_viral_plan(monkeypatch):
         return None
 
     async def fake_media(item_id_arg, session):
+        captured_session.update(session)
         session["state"] = "ready_for_production"
         return {"scene_count": 1, "video_count": 1, "generation_run_id": session.get("generation_run_id")}
 
@@ -478,6 +634,8 @@ def test_scheduled_generation_comment_is_used_for_viral_plan(monkeypatch):
     assert calls["production"][2] == "После рецепта: больше семейной интриги в первом кадре."
     assert "Летний пирог" in calls["production"][3]
     assert "canonical real-world appearance" in calls["production"][3]
+    assert captured_session["overlay_subtitle_by_lang"] == {"ru": "КБЖУ на 100 гр: 126/10/4/24"}
+    assert captured_session["production"]["overlay_subtitle_by_lang"] == {"ru": "КБЖУ на 100 гр: 126/10/4/24"}
 
 
 def test_scheduled_generation_every_comment_is_persistent_start_prompt_instruction(monkeypatch):

@@ -70,6 +70,7 @@ def test_django_admin_session_form_updates_scene_json():
             "scenes_plan_json": "[]",
             "production_plan_json": '[{"scene": 1, "start_frame_prompt": "old start", "end_frame_prompt": "old end"}]',
             "overlay_title_by_lang_json": '{"ru": "Новый заголовок", "en": "New title"}',
+            "overlay_subtitle_by_lang_json": '{"ru": "КБЖУ на 100 гр: 126/10/4/24"}',
             "overlay_title_style_json": '{"title_color": "#c72638"}',
             "scene_index": "0",
             "start_frame_prompt": "new start",
@@ -92,6 +93,7 @@ def test_django_admin_session_form_updates_scene_json():
     assert scene["video_prompt_by_lang"]["ru"] == "new"
     assert saved.session_json["viral_concept_brief"] == {"dish_name": "Пирог"}
     assert saved.session_json["overlay_title_by_lang"] == {"ru": "Новый заголовок", "en": "New title"}
+    assert saved.session_json["overlay_subtitle_by_lang"] == {"ru": "КБЖУ на 100 гр: 126/10/4/24"}
     assert saved.session_json["production"]["overlay_title_style"] == {"title_color": "#c72638"}
 
 
@@ -173,6 +175,8 @@ def test_django_generation_admin_title_color_field_is_after_created_at():
 
     assert "overlay_title_ru" in fields
     assert "overlay_title_en" in fields
+    assert "overlay_subtitle_ru" in fields
+    assert "overlay_subtitle_en" in fields
     assert "human_title" not in fields
     assert fields[fields.index("created_at") + 1] == "overlay_title_color"
     assert "overlay_title_color" in admin_module.GenerationRunAdmin.readonly_fields
@@ -343,6 +347,87 @@ def test_django_generation_admin_syncs_changed_name_to_overlay_title():
     assert rendered["ru"] == "Манты"
 
 
+def test_django_generation_admin_draft_flag_creates_draft_row(monkeypatch):
+    admin_dir = Path(__file__).resolve().parents[1] / "admin_panel"
+    sys.path.insert(0, str(admin_dir))
+    os.environ.setdefault("DJANGO_SETTINGS_MODULE", "cf_admin.settings")
+
+    import django
+
+    django.setup()
+
+    import pipeline_admin.admin as admin_module
+    from pipeline_admin.models import GenerationRun
+
+    created = []
+
+    class QuerySetStub:
+        def order_by(self, *_args):
+            return self
+
+        def first(self):
+            return None
+
+    class DraftManagerStub:
+        def filter(self, **kwargs):
+            assert kwargs["run_id"] == run.id
+            return QuerySetStub()
+
+        def create(self, **kwargs):
+            created.append(kwargs)
+            return SimpleNamespace(**kwargs)
+
+    run = GenerationRun(
+        id=uuid.uuid4(),
+        human_title="Котлеты",
+        status="final_videos_delivered",
+        is_draft=True,
+        language="ru",
+        script="recipe",
+    )
+    monkeypatch.setattr(admin_module.GenerationDraft, "objects", DraftManagerStub())
+    monkeypatch.setattr(
+        admin_module,
+        "_run_session_for_admin_render",
+        lambda _run: (
+            None,
+            {
+                "state": "waiting_scene_media",
+                "image_scene_index": 2,
+                "video_b64": "large-video",
+                "production": {
+                    "json_plan": [
+                        {
+                            "scene": 1,
+                            "image_b64": "large-image",
+                            "video_candidates_by_lang": {
+                                "ru": [
+                                    {
+                                        "candidate_id": "approved",
+                                        "approved_for_production": True,
+                                        "video_prompt_by_lang": {"ru": "candidate prompt"},
+                                    }
+                                ]
+                            },
+                        }
+                    ]
+                },
+            },
+            {},
+        ),
+    )
+
+    draft = admin_module._ensure_generation_draft_for_admin_run(run)
+
+    assert draft is not None
+    assert created[0]["run"] is run
+    assert created[0]["title"] == "Котлеты"
+    assert created[0]["stage"] == "waiting_scene_media"
+    assert created[0]["scene_index"] == 2
+    assert created[0]["language"] == "ru"
+    assert created[0]["session_snapshot_json"] == {}
+
+
 def test_django_generation_admin_form_saves_ru_and_en_overlay_titles(monkeypatch):
     admin_dir = Path(__file__).resolve().parents[1] / "admin_panel"
     sys.path.insert(0, str(admin_dir))
@@ -379,6 +464,8 @@ def test_django_generation_admin_form_saves_ru_and_en_overlay_titles(monkeypatch
         data={
             "overlay_title_ru": " Бешбармак ",
             "overlay_title_en": " Beshbarmak Feast ",
+            "overlay_subtitle_ru": " КБЖУ на 100 гр: 126/10/4/24 ",
+            "overlay_subtitle_en": " per 100g: 126/10/4/24 ",
             "status": run.status,
             "is_active": "on",
             "id": str(run.id),
@@ -403,6 +490,61 @@ def test_django_generation_admin_form_saves_ru_and_en_overlay_titles(monkeypatch
 
     assert saved.human_title == "Бешбармак"
     assert form.overlay_title_by_lang() == {"ru": "Бешбармак", "en": "Beshbarmak Feast"}
+    assert form.overlay_subtitle_by_lang() == {
+        "ru": "КБЖУ на 100 гр: 126/10/4/24",
+        "en": "per 100g: 126/10/4/24",
+    }
+
+
+def test_django_generation_admin_title_subtitle_override_survives_without_chat_session(monkeypatch):
+    admin_dir = Path(__file__).resolve().parents[1] / "admin_panel"
+    sys.path.insert(0, str(admin_dir))
+    os.environ.setdefault("DJANGO_SETTINGS_MODULE", "cf_admin.settings")
+
+    import django
+
+    django.setup()
+
+    import pipeline_admin.admin as admin_module
+
+    run_id = uuid.uuid4()
+    saved_subtitle = {"ru": "КБЖУ на 100 гр: 126/10/4/24", "en": "per 100g: 126/10/4/24"}
+    artifact = SimpleNamespace(payload_json={"status": "active", "overlay_subtitle_by_lang": saved_subtitle})
+
+    class EmptyChatQuerySet:
+        def order_by(self, *_args):
+            return self
+
+        def first(self):
+            return None
+
+    class ChatManagerStub:
+        def filter(self, **kwargs):
+            assert kwargs == {"generation_run_id": run_id}
+            return EmptyChatQuerySet()
+
+    class ArtifactQuerySet(list):
+        def order_by(self, *_args):
+            return self
+
+    class ArtifactManagerStub:
+        def filter(self, **kwargs):
+            if kwargs.get("artifact_type") == admin_module.TITLE_SUBTITLE_OVERRIDE_ARTIFACT_TYPE:
+                assert kwargs == {
+                    "run_id": run_id,
+                    "artifact_type": admin_module.TITLE_SUBTITLE_OVERRIDE_ARTIFACT_TYPE,
+                    "uri": admin_module._title_subtitle_override_uri(run_id),
+                }
+                return ArtifactQuerySet([artifact])
+            raise AssertionError(kwargs)
+
+    monkeypatch.setattr(admin_module.ChatSession, "objects", ChatManagerStub())
+    monkeypatch.setattr(admin_module.GenerationArtifact, "objects", ArtifactManagerStub())
+
+    run = SimpleNamespace(id=run_id, human_title="Бешбармак")
+
+    assert admin_module._overlay_subtitle_for_admin_edit(run) == saved_subtitle
+    assert admin_module._overlay_subtitle_for_admin_render(run, {}, {}) == saved_subtitle
 
 
 def test_django_generation_admin_title_override_survives_without_chat_session(monkeypatch):
@@ -438,17 +580,75 @@ def test_django_generation_admin_title_override_survives_without_chat_session(mo
 
     class ArtifactManagerStub:
         def filter(self, **kwargs):
-            assert kwargs == {
-                "run_id": run_id,
-                "artifact_type": admin_module.TITLE_OVERRIDE_ARTIFACT_TYPE,
-                "uri": admin_module._title_override_uri(run_id),
-            }
-            return ArtifactQuerySet([artifact])
+            if kwargs.get("artifact_type") == admin_module.TITLE_OVERRIDE_ARTIFACT_TYPE:
+                assert kwargs == {
+                    "run_id": run_id,
+                    "artifact_type": admin_module.TITLE_OVERRIDE_ARTIFACT_TYPE,
+                    "uri": admin_module._title_override_uri(run_id),
+                }
+                return ArtifactQuerySet([artifact])
+            if kwargs.get("artifact_type") == admin_module.OVERLAY_TITLE_BY_LANG_ARTIFACT_TYPE:
+                return ArtifactQuerySet([])
+            raise AssertionError(kwargs)
 
     monkeypatch.setattr(admin_module.ChatSession, "objects", ChatManagerStub())
     monkeypatch.setattr(admin_module.GenerationArtifact, "objects", ArtifactManagerStub())
 
     run = SimpleNamespace(id=run_id, human_title="Бешбармак")
+
+    assert admin_module._overlay_title_for_admin_edit(run) == saved_title
+    assert admin_module._overlay_title_for_admin_render(run, {}, {}) == saved_title
+
+
+def test_django_generation_admin_uses_stored_overlay_title_artifact(monkeypatch):
+    admin_dir = Path(__file__).resolve().parents[1] / "admin_panel"
+    sys.path.insert(0, str(admin_dir))
+    os.environ.setdefault("DJANGO_SETTINGS_MODULE", "cf_admin.settings")
+
+    import django
+
+    django.setup()
+
+    import pipeline_admin.admin as admin_module
+
+    run_id = uuid.uuid4()
+    saved_title = {"ru": "Кабачковая икра", "en": "Zucchini Caviar"}
+    artifact = SimpleNamespace(payload_json={"overlay_title_by_lang": saved_title})
+
+    class EmptyChatQuerySet:
+        def order_by(self, *_args):
+            return self
+
+        def first(self):
+            return None
+
+    class ChatManagerStub:
+        def filter(self, **kwargs):
+            assert kwargs == {"generation_run_id": run_id}
+            return EmptyChatQuerySet()
+
+    class ArtifactQuerySet(list):
+        def order_by(self, *_args):
+            return self
+
+    class ArtifactManagerStub:
+        def filter(self, **kwargs):
+            if kwargs.get("artifact_type") == admin_module.OVERLAY_TITLE_BY_LANG_ARTIFACT_TYPE:
+                assert kwargs == {
+                    "run_id": run_id,
+                    "artifact_type": admin_module.OVERLAY_TITLE_BY_LANG_ARTIFACT_TYPE,
+                    "uri": admin_module._overlay_title_by_lang_artifact_uri(run_id),
+                    "language__isnull": True,
+                }
+                return ArtifactQuerySet([artifact])
+            if kwargs.get("artifact_type") == admin_module.TITLE_OVERRIDE_ARTIFACT_TYPE:
+                return ArtifactQuerySet([])
+            raise AssertionError(kwargs)
+
+    monkeypatch.setattr(admin_module.ChatSession, "objects", ChatManagerStub())
+    monkeypatch.setattr(admin_module.GenerationArtifact, "objects", ArtifactManagerStub())
+
+    run = SimpleNamespace(id=run_id, human_title="Кабачковая икра")
 
     assert admin_module._overlay_title_for_admin_edit(run) == saved_title
     assert admin_module._overlay_title_for_admin_render(run, {}, {}) == saved_title
@@ -516,6 +716,29 @@ def test_django_admin_series_overlay_counter_uses_current_series_day():
     )
 
     assert counter == {"ru": "день 6 из 10", "en": "day 6 of 10"}
+
+
+def test_django_admin_series_overlay_counter_supports_story_label():
+    admin_dir = Path(__file__).resolve().parents[1] / "admin_panel"
+    sys.path.insert(0, str(admin_dir))
+    os.environ.setdefault("DJANGO_SETTINGS_MODULE", "cf_admin.settings")
+
+    import django
+
+    django.setup()
+
+    import pipeline_admin.admin as admin_module
+
+    series = SimpleNamespace(
+        current_video_index=8,
+        total_videos=10,
+        meta_json={"counter_label_ru": "история", "counter_label_en": "story"},
+    )
+
+    assert admin_module._series_counter_by_lang_from_series(series) == {
+        "ru": "история 8 из 10",
+        "en": "story 8 of 10",
+    }
 
 
 def test_django_admin_series_context_sync_uses_current_series_day():
@@ -809,6 +1032,75 @@ def test_django_admin_final_build_scenes_prefer_page_speech_over_candidate_snaps
     assert "video_prompt_by_lang" not in candidate
 
 
+def test_django_admin_final_build_scenes_restore_missing_language_subtitles_from_candidate(monkeypatch):
+    admin_dir = Path(__file__).resolve().parents[1] / "admin_panel"
+    sys.path.insert(0, str(admin_dir))
+    os.environ.setdefault("DJANGO_SETTINGS_MODULE", "cf_admin.settings")
+
+    import django
+
+    django.setup()
+
+    import pipeline_admin.admin as admin_module
+
+    scene_row = SimpleNamespace(
+        scene_order=1,
+        text="Русский текст",
+        duration_sec=6.0,
+        start_frame_prompt=None,
+        start_frame_prompt_effective=None,
+        end_frame_prompt=None,
+        video_prompt_by_lang={},
+        speech_by_lang={},
+        syntax_prompt_by_lang={},
+        prompt_meta_json={},
+    )
+
+    class _Rows:
+        def order_by(self, *_args):
+            return [scene_row]
+
+    monkeypatch.setattr(admin_module.Scene.objects, "filter", lambda **_kwargs: _Rows())
+
+    scenes = [
+        {
+            "scene": 1,
+            "text": "Старый текст плана",
+            "duration_sec": 5.0,
+            "video_candidates_by_lang": {
+                "en": [
+                    {
+                        "candidate_id": "old",
+                        "approved_for_production": False,
+                        "speech_by_lang": {"en": "Old English speech"},
+                    },
+                    {
+                        "candidate_id": "approved",
+                        "approved_for_production": True,
+                        "speech_by_lang": {"en": "Current English speech"},
+                        "speech_cues_by_lang": {
+                            "en": [{"text": "Current English speech", "start_sec": 0.0, "end_sec": 6.0}]
+                        },
+                        "video_prompt_by_lang": {"en": "CHARACTERS SPEAKS: Current English speech"},
+                    },
+                ]
+            },
+        }
+    ]
+
+    out = admin_module._admin_final_build_scenes_from_page(SimpleNamespace(id=uuid.uuid4()), scenes)
+
+    assert out[0]["speech_by_lang"] == {"en": "Current English speech"}
+    assert out[0]["speech_cues_by_lang"] == {
+        "en": [{"text": "Current English speech", "start_sec": 0.0, "end_sec": 6.0}]
+    }
+    assert out[0]["video_prompt_by_lang"] == {"en": "CHARACTERS SPEAKS: Current English speech"}
+    approved = out[0]["video_candidates_by_lang"]["en"][1]
+    assert "speech_by_lang" not in approved
+    assert "speech_cues_by_lang" not in approved
+    assert "video_prompt_by_lang" not in approved
+
+
 def test_django_generation_run_scene_inline_shows_ru_text_fallback_and_saves_en(monkeypatch):
     admin_dir = Path(__file__).resolve().parents[1] / "admin_panel"
     sys.path.insert(0, str(admin_dir))
@@ -871,6 +1163,84 @@ def test_django_generation_run_scene_inline_shows_ru_text_fallback_and_saves_en(
             "new_text": "New English speech",
         },
     ]
+
+
+def test_django_admin_scene_sync_updates_chat_session_payload(monkeypatch):
+    admin_dir = Path(__file__).resolve().parents[1] / "admin_panel"
+    sys.path.insert(0, str(admin_dir))
+    os.environ.setdefault("DJANGO_SETTINGS_MODULE", "cf_admin.settings")
+
+    import django
+
+    django.setup()
+
+    import pipeline_admin.admin as admin_module
+
+    run_id = uuid.uuid4()
+    scene_id = uuid.uuid4()
+    scene = SimpleNamespace(
+        id=scene_id,
+        run_id=run_id,
+        scene_order=1,
+        text="Новый текст",
+        duration_sec=7.0,
+        start_frame_prompt="new start",
+        start_frame_prompt_effective="new effective",
+        end_frame_prompt="new end",
+        video_prompt_by_lang={"ru": "new video prompt"},
+        speech_by_lang={"ru": "new speech"},
+        syntax_prompt_by_lang={"ru": "syntax"},
+        prompt_meta_json={"source": "admin"},
+    )
+    chat_session = SimpleNamespace(
+        session_json={
+            "production": {
+                "json_plan": [
+                    {
+                        "scene": 1,
+                        "text": "Старый текст",
+                        "video_candidates_by_lang": {
+                            "ru": [{"candidate_id": "vid", "approved_for_production": True}]
+                        },
+                    }
+                ]
+            },
+            "scene_db_ids_by_index": {0: str(scene_id)},
+            "image_scene_index": 0,
+        },
+        generation_run_id=run_id,
+        updated_at=None,
+    )
+    saved = []
+
+    def save(**kwargs):
+        saved.append(kwargs)
+
+    chat_session.save = save
+
+    class SceneRows:
+        def order_by(self, *_args):
+            return [scene]
+
+    class ChatRows:
+        def order_by(self, *_args):
+            return [chat_session]
+
+    monkeypatch.setattr(admin_module.Scene.objects, "filter", lambda **_kwargs: SceneRows())
+    monkeypatch.setattr(admin_module.ChatSession.objects, "filter", lambda **_kwargs: ChatRows())
+
+    updated = admin_module._sync_chat_sessions_for_run_scenes(run_id)
+
+    assert updated == 1
+    synced_scene = chat_session.session_json["production"]["json_plan"][0]
+    assert synced_scene["text"] == "Новый текст"
+    assert synced_scene["duration_sec"] == 7.0
+    assert synced_scene["start_frame_prompt"] == "new start"
+    assert synced_scene["video_prompt_by_lang"] == {"ru": "new video prompt"}
+    assert synced_scene["speech_by_lang"] == {"ru": "new speech"}
+    assert synced_scene["video_candidates_by_lang"]["ru"][0]["candidate_id"] == "vid"
+    assert chat_session.session_json["scene_db_ids_by_index"] == {"0": str(scene_id)}
+    assert saved and saved[0]["update_fields"] == ["session_json", "generation_run_id", "updated_at"]
 
 
 def test_django_generation_admin_shows_final_videos_panel(monkeypatch):
@@ -1263,6 +1633,7 @@ def test_django_admin_titled_only_build_uses_subtitled_source_fast_path(monkeypa
     production = {
         "json_plan": [{"duration_sec": 8, "text": "scene"}],
         "overlay_title_by_lang": {"ru": "Борщ"},
+        "overlay_subtitle_by_lang": {"ru": "КБЖУ на 100 гр: 126/10/4/24"},
         "overlay_title_style": {"title_color": "#c72638", "top_margin_ratio": 0.05},
         "pending_overlay_title_style": {"title_color": "#1a2b3c"},
     }
@@ -1302,6 +1673,7 @@ def test_django_admin_titled_only_build_uses_subtitled_source_fast_path(monkeypa
     assert calls[0]["subtitled_video_path"] == Path("/tmp/source_subtitled.mp4")
     assert calls[0]["language"] == "ru"
     assert calls[0]["use_candidate_subtitle_snapshot"] is False
+    assert calls[0]["overlay_subtitle_by_lang"] == {"ru": "КБЖУ на 100 гр: 126/10/4/24"}
     assert calls[0]["overlay_title_style"]["title_color"] == "#1a2b3c"
     assert session["overlay_title_style"]["title_color"] == "#1a2b3c"
     assert production["overlay_title_style"]["title_color"] == "#1a2b3c"
@@ -1309,7 +1681,48 @@ def test_django_admin_titled_only_build_uses_subtitled_source_fast_path(monkeypa
     assert "pending_overlay_title_style" not in production
 
 
-def test_django_admin_default_overlay_title_latinizes_english_fallback():
+def test_django_admin_subtitled_reuse_rejects_stale_scene_video_fingerprint(monkeypatch, tmp_path):
+    admin_dir = Path(__file__).resolve().parents[1] / "admin_panel"
+    sys.path.insert(0, str(admin_dir))
+    os.environ.setdefault("DJANGO_SETTINGS_MODULE", "cf_admin.settings")
+
+    import django
+
+    django.setup()
+
+    import pipeline_admin.admin as admin_module
+
+    source = tmp_path / "subtitled.mp4"
+    source.write_bytes(b"video")
+    run = SimpleNamespace(id=uuid.uuid4())
+    scenes = [
+        {
+            "scene": 1,
+            "duration_sec": 4,
+            "speech_by_lang": {"ru": "текст"},
+            "video_candidates_by_lang": {
+                "ru": [{"candidate_id": "new", "approved_for_production": True, "speed_coef": 1.0}]
+            },
+        }
+    ]
+    artifact = SimpleNamespace(
+        payload_json={
+            "subtitle_fingerprint": admin_module.subtitle_fingerprint_for_language(
+                scenes,
+                "ru",
+                use_candidate_subtitle_snapshot=False,
+            ),
+            "scene_video_fingerprint": "old-fingerprint",
+        }
+    )
+
+    monkeypatch.setattr(admin_module, "_latest_final_artifact", lambda *_args: artifact)
+    monkeypatch.setattr(admin_module, "_artifact_local_path", lambda _artifact: source)
+
+    assert admin_module._subtitled_artifact_matches_current_subtitles(run, scenes, "ru", source) is False
+
+
+def test_django_admin_default_overlay_title_requires_explicit_english():
     admin_dir = Path(__file__).resolve().parents[1] / "admin_panel"
     sys.path.insert(0, str(admin_dir))
     os.environ.setdefault("DJANGO_SETTINGS_MODULE", "cf_admin.settings")
@@ -1322,7 +1735,40 @@ def test_django_admin_default_overlay_title_latinizes_english_fallback():
 
     run = SimpleNamespace(human_title="Лагман")
 
-    assert admin_module._default_overlay_title(run) == {"ru": "Лагман", "en": "Lagman"}
+    assert admin_module._default_overlay_title(run) == {"ru": "Лагман"}
+
+
+def test_django_admin_english_titled_build_requires_explicit_english_title(monkeypatch):
+    admin_dir = Path(__file__).resolve().parents[1] / "admin_panel"
+    sys.path.insert(0, str(admin_dir))
+    os.environ.setdefault("DJANGO_SETTINGS_MODULE", "cf_admin.settings")
+
+    import django
+
+    django.setup()
+
+    import pipeline_admin.admin as admin_module
+
+    production = {
+        "json_plan": [{"duration_sec": 8, "text": "scene"}],
+        "overlay_title_by_lang": {"ru": "Лагман"},
+    }
+    session = {"production": production}
+
+    class RunStub(SimpleNamespace):
+        def save(self, **_kwargs):
+            pass
+
+    monkeypatch.setattr(admin_module, "_run_session_for_admin_render", lambda _run: (None, session, production))
+
+    run = RunStub(id=uuid.uuid4(), human_title="Лагман", series=None)
+    with pytest.raises(RuntimeError, match="explicit Title EN"):
+        admin_module._build_final_videos_for_run(
+            run,
+            target_language="en",
+            target_variants=["titled_subtitled_music"],
+            source_subtitled_video_path=Path("/tmp/source_subtitled.mp4"),
+        )
 
 
 def test_django_admin_titled_build_prefers_current_series_titles_over_snapshot(monkeypatch):

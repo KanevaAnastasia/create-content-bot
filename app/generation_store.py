@@ -8,9 +8,10 @@ import uuid
 from typing import Any
 
 import sqlalchemy as sa
+from sqlalchemy import select
 
 from .db import SessionLocal
-from .models import GenerationRun, Scene, SceneTextRevision, VideoResult
+from .models import GenerationArtifact, GenerationRun, Scene, SceneTextRevision, VideoResult
 
 MEDIA_CURSOR_STATE = "waiting_scene_media"
 SCENE_PROMPT_TEXT_KEYS = (
@@ -24,8 +25,194 @@ SCENE_PROMPT_JSON_KEYS = (
     "syntax_prompt_by_lang",
     "prompt_meta_json",
 )
+SCENE_META_SNAPSHOT_KEYS = (
+    "characters",
+    "dialogue_mode",
+    "dialogue",
+    "dialogue_by_lang",
+    "speech_plan",
+    "speech_plan_by_lang",
+    "speech_cues_by_lang",
+    "speech_budget_by_lang",
+    "action",
+    "visual_description",
+    "retention_function",
+    "micro_events",
+    "continuity_anchors",
+    "continuity_state",
+    "dish_description",
+    "recipe_step",
+    "shot_type",
+    "location",
+    "lighting",
+    "color_palette",
+    "location_segment",
+    "location_transition",
+    "model",
+    "generation_mode",
+    "aspect_ratio",
+    "voice_provider",
+    "voice_needed",
+    "has_lipsync",
+    "advertising_product_required",
+    "advertising_product_lock_ru",
+    "advertising_product_lock_en",
+    "narration_excerpt",
+    "start_sec",
+    "end_sec",
+    "timeline_duration_sec",
+    "timeline_duration_by_lang",
+    "generation_duration_sec",
+    "semantic_beat",
+    "semantic_clip_index",
+    "semantic_clip_count",
+    "end_title_by_lang",
+    "end_title_style",
+    "end_title_duration_sec",
+    "visualization_output_policy",
+    "era_style",
+    "time_period",
+    "grandma_age",
+    "cat_present",
+    "story_character_descriptions",
+    "story_character_labels",
+    "style_reference_paths",
+    "story_visual_style_key",
+    "story_visual_style_label",
+    "references",
+    "start_frame_ref_count",
+    "start_frame_image_model",
+    "end_frame_image_model",
+    "start_image_generation_attempts",
+    "transition_note",
+    "sound_design",
+    "silence_base_rules",
+)
+PROMPT_CHARACTER_PATTERNS = {
+    "grandma": (r"\bgrandma\b", r"\bGRANDMA\b", r"\bбабушк\w*", r"\bvoice_lock_full_grandma\b"),
+    "cat": (r"\borange\s+cartoon\s+cat\b", r"\bрыж\w*\s+кот\w*"),
+    "grandson": (r"\bgrandson\b", r"\bGRANDSON\b", r"\bвнук\w*", r"\bvoice_lock_full_grandson\b"),
+    "granddaughter": (r"\bgranddaughter\b", r"\bGRANDDAUGHTER\b", r"\bвнучк\w*", r"\bvoice_lock_full_granddaughter\b"),
+    "grandfather": (r"\bgrandfather\b", r"\bGRANDFATHER\b", r"\bдедушк\w*", r"\bvoice_lock_full_grandfather\b"),
+    "daughter": (r"\bdaughter\b", r"\bDAUGHTER\b", r"\bдоч(?:ка|ку|ке|кой|ери|ерью)\b", r"\bvoice_lock_full_daughter\b"),
+    "dog": (r"\bdog\b", r"\bп(?:ё|е)с\b", r"\bсобак\w*"),
+    "zaya": (r"\bzaya\b", r"\bбел\w*\s+кош\w*", r"\bwhite\s+cartoon\s+cat\b"),
+    "markiz": (r"\bmarkiz\b", r"\bчерно-бел\w*\s+кот\w*", r"\bч[её]рно-бел\w*\s+кот\w*"),
+}
+PROMPT_CHARACTER_ORDER = ("grandma", "cat", "grandson", "granddaughter", "grandfather", "daughter", "dog", "zaya", "markiz")
+PROMPT_DIALOGUE_LABELS = {
+    "GRANDMA": "grandma",
+    "GRANDSON": "grandson",
+    "GRANDDAUGHTER": "granddaughter",
+    "GRANDFATHER": "grandfather",
+    "DAUGHTER": "daughter",
+}
+CORE_CAST_EXCEPTION_RE = re.compile(
+    r"\b(?:only|without)\b.*\b(?:banana|strawberry|grandma|cat)\b|"
+    r"\b(?:banana|strawberry)\b.*\bwithout\b.*\b(?:grandma|cat)\b|"
+    r"\bтолько\b.*\b(?:банан|клубник)\w*\b|"
+    r"\bбез\b.*\b(?:бабушк|кот)\w*\b",
+    re.IGNORECASE,
+)
 DEFAULT_GENERATION_TITLE_COLOR = "#c72638"
 HEX_TITLE_COLOR_RE = re.compile(r"^#?[0-9a-fA-F]{6}$")
+PLACEHOLDER_GENERATION_TITLES = {"Рецепт пользователя"}
+OVERLAY_TITLE_BY_LANG_ARTIFACT_TYPE = "overlay_title_by_lang"
+OVERLAY_TITLE_BY_LANG_URI_TEMPLATE = "db://generation_runs/{run_id}/overlay_title_by_lang"
+
+
+def _is_placeholder_generation_title(value: Any) -> bool:
+    return " ".join(str(value or "").split()) in PLACEHOLDER_GENERATION_TITLES
+
+
+def _clean_overlay_title_by_lang_for_session(value: Any) -> dict[str, str]:
+    if not isinstance(value, dict):
+        return {}
+    out: dict[str, str] = {}
+    for key, item in value.items():
+        lang = str(key or "").strip().lower()
+        title = " ".join(str(item or "").split())
+        if lang and title:
+            out[lang] = title[:180]
+    return out
+
+
+def _overlay_title_by_lang_for_session(session: dict[str, Any]) -> dict[str, str]:
+    out: dict[str, str] = {}
+    production = session.get("production")
+    for value in (
+        session.get("overlay_title_by_lang"),
+        production.get("overlay_title_by_lang") if isinstance(production, dict) else None,
+    ):
+        out.update(_clean_overlay_title_by_lang_for_session(value))
+    return out
+
+
+def _overlay_title_by_lang_uri(run_id: uuid.UUID | str) -> str:
+    return OVERLAY_TITLE_BY_LANG_URI_TEMPLATE.format(run_id=run_id)
+
+
+def _sync_overlay_title_by_lang_artifact(db, run_id: uuid.UUID, session: dict[str, Any]) -> bool:
+    title_by_lang = _overlay_title_by_lang_for_session(session)
+    if not title_by_lang:
+        return False
+    uri = _overlay_title_by_lang_uri(run_id)
+    row = (
+        db.execute(
+            select(GenerationArtifact).where(
+                GenerationArtifact.run_id == run_id,
+                GenerationArtifact.artifact_type == OVERLAY_TITLE_BY_LANG_ARTIFACT_TYPE,
+                GenerationArtifact.uri == uri,
+                GenerationArtifact.language.is_(None),
+            )
+        )
+        .scalars()
+        .first()
+    )
+    payload = {"overlay_title_by_lang": title_by_lang, "source": "generation_store_session_sync"}
+    if row is None:
+        db.add(
+            GenerationArtifact(
+                run_id=run_id,
+                scene_id=None,
+                artifact_type=OVERLAY_TITLE_BY_LANG_ARTIFACT_TYPE,
+                label="Overlay title by language",
+                uri=uri,
+                language=None,
+                mime_type="application/json",
+                payload_json=payload,
+            )
+        )
+        return True
+    if row.payload_json != payload or row.label != "Overlay title by language" or row.mime_type != "application/json":
+        row.label = "Overlay title by language"
+        row.mime_type = "application/json"
+        row.payload_json = payload
+        return True
+    return False
+
+
+def overlay_title_by_lang_for_run(run_id: uuid.UUID | str | None) -> dict[str, str]:
+    try:
+        run_uuid = uuid.UUID(str(run_id))
+    except (TypeError, ValueError, AttributeError):
+        return {}
+    with SessionLocal() as db:
+        row = (
+            db.execute(
+                select(GenerationArtifact)
+                .where(
+                    GenerationArtifact.run_id == run_uuid,
+                    GenerationArtifact.artifact_type == OVERLAY_TITLE_BY_LANG_ARTIFACT_TYPE,
+                    GenerationArtifact.uri == _overlay_title_by_lang_uri(run_uuid),
+                )
+                .order_by(GenerationArtifact.created_at.desc(), GenerationArtifact.id.desc())
+            )
+            .scalars()
+            .first()
+        )
+    payload = row.payload_json if row is not None and isinstance(row.payload_json, dict) else {}
+    return _clean_overlay_title_by_lang_for_session(payload.get("overlay_title_by_lang"))
 
 
 def _normalize_generation_title_color(value: Any) -> str:
@@ -61,31 +248,118 @@ def _safe_int_or_none(value: Any) -> int | None:
 
 
 def _scene_prompt_payload(scene: dict[str, Any]) -> dict[str, Any]:
+    _ensure_core_grandma_cat_characters(scene)
     payload: dict[str, Any] = {}
     for key in SCENE_PROMPT_TEXT_KEYS:
         value = scene.get(key)
         if isinstance(value, str) and value.strip():
             payload[key] = value
     for key in SCENE_PROMPT_JSON_KEYS:
+        if key == "prompt_meta_json":
+            continue
         value = scene.get(key)
         if isinstance(value, dict):
             payload[key] = value
+    meta = dict(scene.get("prompt_meta_json") or {}) if isinstance(scene.get("prompt_meta_json"), dict) else {}
+    for key in SCENE_META_SNAPSHOT_KEYS:
+        if key not in scene:
+            continue
+        value = scene.get(key)
+        if value in (None, ""):
+            continue
+        # A revised scene plan must replace its previous structured snapshot.
+        # Keep old values only when the incoming payload omits that field;
+        # otherwise stale cast/timing metadata can leak into the new plan. An
+        # explicit empty list/dict is meaningful (for example, a prop-only
+        # story shot with no characters) and must clear the old value.
+        meta[key] = value
+    if meta:
+        payload["prompt_meta_json"] = meta
     return payload
 
 
+def _scene_prompt_text_blob(scene: dict[str, Any]) -> str:
+    parts: list[str] = []
+    for key in ("text", "action", "visual_description", "recipe_step", "start_frame_prompt", "end_frame_prompt"):
+        value = scene.get(key)
+        if isinstance(value, str) and value.strip():
+            parts.append(value)
+    for key in ("video_prompt_by_lang", "speech_by_lang", "syntax_prompt_by_lang"):
+        value = scene.get(key)
+        if isinstance(value, dict):
+            parts.extend(str(item) for item in value.values() if str(item or "").strip())
+    return "\n".join(parts)
+
+
+def _infer_characters_from_scene_prompt(scene: dict[str, Any]) -> list[str]:
+    blob = _scene_prompt_text_blob(scene)
+    if not blob.strip():
+        return []
+    out: list[str] = []
+    for key in PROMPT_CHARACTER_ORDER:
+        if any(re.search(pattern, blob, flags=re.IGNORECASE) for pattern in PROMPT_CHARACTER_PATTERNS.get(key, ())):
+            out.append(key)
+    if not out and blob.strip():
+        out.append("grandma")
+    elif "grandma" not in out:
+        out.insert(0, "grandma")
+    return out
+
+
+def _infer_dialogue_from_scene_prompt(scene: dict[str, Any]) -> list[dict[str, str]]:
+    blob = _scene_prompt_text_blob(scene)
+    if "character_dialogue_script" not in blob.lower():
+        return []
+    out: list[dict[str, str]] = []
+    for match in re.finditer(r"(?m)^\s*([A-Z_]+)\s*:\s*(.+?)\s*$", blob):
+        speaker = PROMPT_DIALOGUE_LABELS.get(match.group(1).strip().upper())
+        text = match.group(2).strip()
+        if speaker and text:
+            out.append({"speaker": speaker, "text": text})
+    return out
+
+
+def _allows_missing_core_grandma_cat(scene: dict[str, Any]) -> bool:
+    if str(scene.get("generation_mode") or "").strip().lower() == "story":
+        return True
+    chars = scene.get("characters")
+    normalized = {str(ch).strip().lower() for ch in chars if str(ch).strip()} if isinstance(chars, list) else set()
+    if normalized and not normalized.issubset({"banana", "strawberry"}):
+        return False
+    return bool(CORE_CAST_EXCEPTION_RE.search(_scene_prompt_text_blob(scene)))
+
+
+def _ensure_core_grandma_cat_characters(scene: dict[str, Any]) -> None:
+    if _allows_missing_core_grandma_cat(scene):
+        return
+    chars = scene.get("characters")
+    normalized = [str(ch).strip().lower() for ch in chars if str(ch).strip()] if isinstance(chars, list) else []
+    if not normalized and not _scene_prompt_text_blob(scene).strip():
+        return
+    if "grandma" not in normalized:
+        normalized.insert(0, "grandma")
+    if "cat" not in normalized:
+        insert_at = normalized.index("grandma") + 1 if "grandma" in normalized else len(normalized)
+        normalized.insert(insert_at, "cat")
+    scene["characters"] = list(dict.fromkeys(ch for ch in normalized if ch))
+
+
 def _apply_prompt_payload_to_scene_row(row: Scene, scene: dict[str, Any]) -> bool:
+    payload = _scene_prompt_payload(scene)
     changed = False
     for key in SCENE_PROMPT_TEXT_KEYS:
-        value = scene.get(key)
-        text_value = str(value) if isinstance(value, str) and value else None
+        value = payload.get(key)
+        if not isinstance(value, str) or not value.strip():
+            continue
+        text_value = value
         if getattr(row, key) != text_value:
             setattr(row, key, text_value)
             changed = True
     for key in SCENE_PROMPT_JSON_KEYS:
-        value = scene.get(key)
-        if key == "speech_by_lang" and not isinstance(value, dict) and isinstance(row.speech_by_lang, dict) and row.speech_by_lang:
+        value = payload.get(key)
+        if not isinstance(value, dict) or not value:
             continue
-        json_value = value if isinstance(value, dict) else {}
+        json_value = value
         if getattr(row, key) != json_value:
             setattr(row, key, json_value)
             changed = True
@@ -169,6 +443,41 @@ def merge_scene_prompt_payload(scene: dict[str, Any], payload: dict[str, Any]) -
         value = payload.get(key)
         if isinstance(value, dict) and value:
             scene[key] = value
+    meta = scene.get("prompt_meta_json")
+    if isinstance(meta, dict):
+        for key in SCENE_META_SNAPSHOT_KEYS:
+            if key in scene:
+                continue
+            if key not in meta:
+                continue
+            value = meta.get(key)
+            if value not in (None, ""):
+                scene[key] = value
+    speech_by_lang = scene.get("speech_by_lang")
+    speech = dict(speech_by_lang) if isinstance(speech_by_lang, dict) else {}
+    scene_text = str(scene.get("text") or scene.get("recipe_step") or "").strip()
+    if not scene_text and str(speech.get("ru") or "").strip():
+        scene_text = str(speech["ru"]).strip()
+        scene["text"] = scene_text
+    if scene_text and not str(speech.get("ru") or "").strip():
+        speech["ru"] = scene_text
+        scene["speech_by_lang"] = speech
+    explicit_empty_story_cast = (
+        str(scene.get("generation_mode") or "").strip().lower() == "story"
+        and isinstance(scene.get("characters"), list)
+    )
+    if not explicit_empty_story_cast and (
+        not isinstance(scene.get("characters"), list) or not scene.get("characters")
+    ):
+        inferred_characters = _infer_characters_from_scene_prompt(scene)
+        if inferred_characters:
+            scene["characters"] = inferred_characters
+    if not isinstance(scene.get("dialogue"), list) or not scene.get("dialogue"):
+        inferred_dialogue = _infer_dialogue_from_scene_prompt(scene)
+        if inferred_dialogue:
+            scene["dialogue"] = inferred_dialogue
+            scene["dialogue_mode"] = "multi" if len(inferred_dialogue) > 1 else "single"
+    _ensure_core_grandma_cat_characters(scene)
 
 
 def _run_cursor_from_session(session: dict[str, Any]) -> dict[str, Any]:
@@ -276,7 +585,7 @@ def _human_title_for_session(session: dict[str, Any], scenes_plan: list[dict[str
     for key in ("selected_concept", "recipe_title", "recipe_name"):
         raw = session.get(key)
         value = raw.strip() if isinstance(raw, str) else ""
-        if value:
+        if value and not _is_placeholder_generation_title(value):
             return value[:180]
     viral_brief = session.get("viral_concept_brief")
     if isinstance(viral_brief, dict):
@@ -336,18 +645,29 @@ def ensure_generation_run_for_session(session: dict[str, Any]) -> tuple[str | No
         try:
             with SessionLocal() as db:
                 run = db.get(GenerationRun, uuid.UUID(existing))
-                if run is not None and not str(run.human_title or "").strip():
+                overlay_title = _russian_overlay_title_for_session(session)
+                if run is not None and (
+                    (overlay_title and str(run.human_title or "").strip() != overlay_title)
+                    or not str(run.human_title or "").strip()
+                    or (_is_placeholder_generation_title(run.human_title) and not _is_placeholder_generation_title(title))
+                ):
                     run.human_title = title
                     changed = True
                 else:
                     changed = False
                 if run is not None:
+                    if run.project_id is None:
+                        from .project_profiles import resolve_project_id
+
+                        run.project_id = resolve_project_id(session.get("selected_project_key"))
+                        changed = run.project_id is not None or changed
                     changed = _apply_run_cursor(run, session) or changed
                     scene_map = _update_scene_prompt_rows(db, run.id, scenes_plan) if scenes_plan else {}
                     if scene_map:
                         session["scene_db_ids_by_index"] = scene_map
                         raw_map = scene_map
                         changed = True
+                    changed = _sync_overlay_title_by_lang_artifact(db, run.id, session) or changed
                 if run is not None and series_fields["series_id"] and not run.series_id:
                     run.series_id = series_fields["series_id"]
                     run.series_video_index = series_fields["series_video_index"]
@@ -381,8 +701,11 @@ def ensure_generation_run_for_session(session: dict[str, Any]) -> tuple[str | No
             script = "content_fabric_generation"
 
     with SessionLocal() as db:
+        from .project_profiles import resolve_project_id
+
         series_fields = _series_fields_for_session(session)
         run = GenerationRun(
+            project_id=resolve_project_id(session.get("selected_project_key")),
             status="media_in_progress",
             **_run_cursor_from_session(session),
             is_draft=bool(session.get("is_draft") or session.get("scheduled_generation_mode")),
@@ -409,6 +732,7 @@ def ensure_generation_run_for_session(session: dict[str, Any]) -> tuple[str | No
             db.flush()
             _apply_prompt_payload_to_scene_row(row, scene)
             scene_map[idx] = str(row.id)
+        _sync_overlay_title_by_lang_artifact(db, run.id, session)
         db.commit()
         session["generation_run_id"] = str(run.id)
         session["scene_db_ids_by_index"] = scene_map

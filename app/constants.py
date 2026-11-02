@@ -21,8 +21,14 @@ GEMINI_KEYS_ENV_NAME: Final[str] = "GEMINI_API_KEYS"
 GEMINI_MODEL_ENV_NAME: Final[str] = "GEMINI_MODEL"
 # Опционально: fallback-модели через запятую (используются при quota exhausted).
 GEMINI_MODEL_FALLBACKS_ENV_NAME: Final[str] = "GEMINI_MODEL_FALLBACKS"
+# Опционально: fallback-модели для креативных генераций (сценарии, viral plan, описания).
+GEMINI_CREATIVE_MODEL_FALLBACKS_ENV_NAME: Final[str] = "GEMINI_CREATIVE_MODEL_FALLBACKS"
+# Опционально: fallback-модели для коротких правок (фразы, переводы, сокращения).
+GEMINI_EDIT_MODEL_FALLBACKS_ENV_NAME: Final[str] = "GEMINI_EDIT_MODEL_FALLBACKS"
 # Макс. секунд ожидания ответа Vertex `generate_content` (см. ``app.llm_queue``).
 GEMINI_GENERATE_TIMEOUT_SEC_ENV_NAME: Final[str] = "GEMINI_GENERATE_TIMEOUT_SEC"
+# Image generation is materially slower than text generation and needs its own deadline.
+VERTEX_IMAGE_GENERATE_TIMEOUT_SEC_ENV_NAME: Final[str] = "VERTEX_IMAGE_GENERATE_TIMEOUT_SEC"
 DEFAULT_GEMINI_MODEL: Final[str] = "gemini-2.5-flash"
 # Опционально: ID вашего кастомного голоса в ElevenLabs.
 ELEVENLABS_API_KEY_ENV_NAME: Final[str] = "ELEVENLABS_API_KEY"

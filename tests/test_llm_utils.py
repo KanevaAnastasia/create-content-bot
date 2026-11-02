@@ -3,6 +3,28 @@ import pytest
 from app import llm_utils
 
 
+def test_model_profile_creative_defaults_to_flash_pro_lite(monkeypatch):
+    monkeypatch.setenv("GEMINI_MODEL", "gemini-2.5-flash")
+    monkeypatch.delenv("GEMINI_CREATIVE_MODEL_FALLBACKS", raising=False)
+
+    assert llm_utils._model_ids_for_profile(llm_utils.GEMINI_MODEL_PROFILE_CREATIVE) == [
+        "gemini-2.5-flash",
+        "gemini-2.5-pro",
+        "gemini-2.5-flash-lite",
+    ]
+
+
+def test_model_profile_edit_defaults_to_flash_lite_pro(monkeypatch):
+    monkeypatch.setenv("GEMINI_MODEL", "gemini-2.5-flash")
+    monkeypatch.delenv("GEMINI_EDIT_MODEL_FALLBACKS", raising=False)
+
+    assert llm_utils._model_ids_for_profile(llm_utils.GEMINI_MODEL_PROFILE_EDIT) == [
+        "gemini-2.5-flash",
+        "gemini-2.5-flash-lite",
+        "gemini-2.5-pro",
+    ]
+
+
 def test_gemini_generate_sync_uses_vertexai_sdk(monkeypatch):
     calls = {"init": 0, "model": 0}
 

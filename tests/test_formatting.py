@@ -297,6 +297,27 @@ def test_format_production_bundle_uses_language_maps_and_skips_bad_items():
     assert "СЦЕНА 2" in out
 
 
+def test_format_production_bundle_keeps_silence_display_clean():
+    scenes = [
+        {
+            "scene": 1,
+            "generation_mode": "silence",
+            "action": "Grandma slices onion. Ностальгическая деревенская кухня у бабушки, экстремально крупный план еды.",
+            "display_action": "Grandma slices onion.",
+            "speech_by_lang": {"ru": ""},
+            "video_prompt_by_lang": {"ru": "4-second Kling 3.0 image-to-video shot. No dialogue."},
+        }
+    ]
+
+    out = format_production_bundle_for_approval(scenes)
+
+    assert "Что происходит: Grandma slices onion." in out
+    assert "Ностальгическая деревенская кухня" not in out
+    assert "Фраза: —" in out
+    assert "[ru] 4-second Kling" not in out
+    assert "VIDEO PROMPT (EN):\n4-second Kling" in out
+
+
 def test_format_production_cards_shows_speaker_profiles():
     out = format_production_cards(
         [

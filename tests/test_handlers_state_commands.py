@@ -205,7 +205,7 @@ def test_pending_video_provider_choice_vertex_runs_vertex(monkeypatch):
 def test_regenerate_image_prompt_from_feedback_uses_gemini(monkeypatch):
     captured: list[str] = []
 
-    def _fake_gemini(prompt: str) -> str:
+    def _fake_gemini(prompt: str, **_kwargs) -> str:
         captured.append(prompt)
         return "Новый промпт"
 
@@ -215,7 +215,8 @@ def test_regenerate_image_prompt_from_feedback_uses_gemini(monkeypatch):
     )
     scene = {"location": "kitchen", "shot_type": "medium", "start_frame_prompt": "старый"}
     out = asyncio.run(_regenerate_image_prompt_from_feedback(scene, "добавь пар от еды"))
-    assert out == "Новый промпт"
+    assert out.startswith("Новый промпт\n\nОБЯЗАТЕЛЬНАЯ ПРАВКА ПОЛЬЗОВАТЕЛЯ:")
+    assert "добавь пар от еды" in out
     assert captured
 
 
