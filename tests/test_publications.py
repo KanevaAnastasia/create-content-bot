@@ -29,12 +29,10 @@ def _session_factory():
     return engine, Session
 
 
-def test_build_publication_targets_includes_rutube_and_dual_locale_mapping() -> None:
+def test_build_publication_targets_includes_supported_dual_locale_mapping() -> None:
     copy = {
         "youtube_ru_title": "RU title",
         "youtube_ru_description": "RU youtube #one",
-        "rutube_ru_title": "RuTube title",
-        "rutube_ru_description": "RuTube desc #two",
         "instagram_ru": "Instagram ru #three",
         "vk_ru": "VK ru #four",
         "tiktok_ru": "TikTok ru #five",
@@ -47,23 +45,19 @@ def test_build_publication_targets_includes_rutube_and_dual_locale_mapping() -> 
 
     assert [(item.platform, item.language) for item in targets] == [
         ("youtube", "ru"),
-        ("rutube", "ru"),
         ("instagram", "ru"),
         ("vk", "ru"),
         ("tiktok", "ru"),
         ("instagram", "en"),
         ("youtube", "en"),
     ]
-    assert targets[1].title == "RuTube title"
-    assert targets[5].video_label == "EN video / final master"
+    assert targets[4].video_label == "EN video / final master"
 
 
 def test_build_publication_targets_can_filter_selected_destinations() -> None:
     copy = {
         "youtube_ru_title": "RU title",
         "youtube_ru_description": "RU youtube",
-        "rutube_ru_title": "RuTube title",
-        "rutube_ru_description": "RuTube desc",
         "instagram_ru": "Instagram ru",
         "vk_ru": "VK ru",
         "tiktok_ru": "TikTok ru",
@@ -177,7 +171,9 @@ def test_queue_publication_bundle_sets_scheduled_status(monkeypatch, tmp_path: P
             project = Project(slug="default-project", title="Default", is_default=True)
             session.add(project)
             session.commit()
-            monkeypatch.setenv("YOUTUBE_CHANNEL_ID_RU", "channel-ru")
+            for key in ("YOUTUBE_CLIENT_ID", "YOUTUBE_CLIENT_SECRET", "YOUTUBE_REFRESH_TOKEN"):
+                monkeypatch.setenv(f"PUBLISH_DEFAULT_PROJECT_{key}", "configured")
+            monkeypatch.setenv("PUBLISH_DEFAULT_PROJECT_YOUTUBE_CHANNEL_ID_RU", "channel-ru")
             post_production = {
                 "renders_by_language": {
                     "ru": {"clean": {"video_b64": base64.b64encode(b"clean").decode("ascii")}},
@@ -208,6 +204,37 @@ def test_queue_publication_bundle_sets_scheduled_status(monkeypatch, tmp_path: P
         engine.dispose()
 
 
+def test_queue_publication_bundle_keeps_explicit_source_label(monkeypatch, tmp_path: Path) -> None:
+    engine, Session = _session_factory()
+    try:
+        with Session() as session:
+            project = Project(slug="grandma_kitchen", title="Grandma", is_default=True)
+            session.add(project)
+            session.commit()
+            monkeypatch.setenv("PUBLISH_GRANDMA_KITCHEN_YOUTUBE_CHANNEL_ID_RU", "grandma-channel")
+            monkeypatch.setenv("PUBLICATION_ARTIFACTS_DIR", str(tmp_path))
+
+            jobs = queue_publication_bundle(
+                session,
+                project_slug="grandma_kitchen",
+                recipe="recipe",
+                copy={"youtube_ru_title": "Title", "youtube_ru_description": "Description"},
+                post_production={
+                    "renders_by_language": {
+                        "ru": {"clean": {"video_b64": base64.b64encode(b"custom").decode("ascii")}},
+                    }
+                },
+                selected_target_keys=["youtube:ru"],
+                video_variant="clean",
+                video_source_labels={"ru": "RU · custom upload · my-video.mp4"},
+            )
+
+            assert jobs[0].video_label == "RU · custom upload · my-video.mp4"
+            assert jobs[0].payload_json["video_source_label"] == "RU · custom upload · my-video.mp4"
+    finally:
+        engine.dispose()
+
+
 def test_resolve_project_for_publications_rejects_unknown_slug() -> None:
     engine, Session = _session_factory()
     try:
@@ -233,7 +260,7 @@ def test_upsert_project_publish_accounts_disables_mapping_when_env_is_removed(mo
             session.add(project)
             session.commit()
 
-            monkeypatch.setenv("YOUTUBE_CHANNEL_ID_RU", "channel-1")
+            monkeypatch.setenv("PUBLISH_DEFAULT_PROJECT_YOUTUBE_CHANNEL_ID_RU", "channel-1")
             rows = upsert_project_publish_accounts_from_env(session, project)
             session.commit()
 
@@ -241,7 +268,7 @@ def test_upsert_project_publish_accounts_disables_mapping_when_env_is_removed(mo
             assert rows[0].external_account_id == "channel-1"
             assert rows[0].is_active is True
 
-            monkeypatch.delenv("YOUTUBE_CHANNEL_ID_RU", raising=False)
+            monkeypatch.delenv("PUBLISH_DEFAULT_PROJECT_YOUTUBE_CHANNEL_ID_RU", raising=False)
             rows = upsert_project_publish_accounts_from_env(session, project)
             session.commit()
 
@@ -252,12 +279,12 @@ def test_upsert_project_publish_accounts_disables_mapping_when_env_is_removed(mo
         engine.dispose()
 
 
-def test_publication_jobs_summary_counts_scheduled_as_n8n_ready() -> None:
+def test_publication_jobs_summary_counts_scheduled_as_direct_api_ready() -> None:
     jobs = [
         type("Job", (), {"status": PUBLICATION_STATUS_SCHEDULED, "platform": "youtube", "language": "ru", "video_path": "/tmp/ru.mp4"})(),
     ]
 
     summary = publication_jobs_summary(jobs)
 
-    assert "Автоготовы для n8n: 1." in summary
+    assert "Готовы к отправке через официальные API: 1." in summary
     assert "Запланированы: 1." in summary

@@ -311,32 +311,28 @@ async def check_env(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         "AI_APPROVAL_EXTRACT_VIDEO_FRAMES",
         "AI_APPROVAL_FRAME_COUNT",
         "AI_APPROVAL_AUDIO_TRANSCRIPTION_ENABLED",
-        "N8N_PUBLISH_WEBHOOK_URL",
-        "N8N_PUBLISH_WEBHOOK_TOKEN",
         "CONTENT_FABRIC_PUBLIC_BASE_URL",
         "PUBLICATION_ARTIFACTS_DIR",
-        "YOUTUBE_CLIENT_ID",
-        "YOUTUBE_CLIENT_SECRET",
-        "YOUTUBE_REFRESH_TOKEN",
-        "YOUTUBE_CHANNEL_ID_RU",
-        "YOUTUBE_CHANNEL_ID_EN",
-        "INSTAGRAM_APP_ID",
-        "INSTAGRAM_APP_SECRET",
-        "INSTAGRAM_ACCESS_TOKEN",
-        "INSTAGRAM_BUSINESS_ACCOUNT_ID_RU",
-        "INSTAGRAM_BUSINESS_ACCOUNT_ID_EN",
-        "INSTAGRAM_PAGE_ID_RU",
-        "INSTAGRAM_PAGE_ID_EN",
-        "TIKTOK_CLIENT_KEY",
-        "TIKTOK_CLIENT_SECRET",
-        "TIKTOK_ACCESS_TOKEN",
-        "TIKTOK_OPEN_ID",
-        "VK_CLIENT_ID",
-        "VK_CLIENT_SECRET",
-        "VK_ACCESS_TOKEN",
-        "VK_GROUP_ID_RU",
-        "RUTUBE_CHANNEL_ID_RU",
+        "PUBLICATION_MEDIA_SIGNING_KEY",
     ]
+    for project_prefix in ("PUBLISH_GRANDMA_KITCHEN_", "PUBLISH_DISCIPLINE_"):
+        optional.extend(
+            project_prefix + suffix
+            for suffix in (
+                "YOUTUBE_CLIENT_ID",
+                "YOUTUBE_CLIENT_SECRET",
+                "YOUTUBE_REFRESH_TOKEN",
+                "YOUTUBE_CHANNEL_ID_RU",
+                "YOUTUBE_CHANNEL_ID_EN",
+                "INSTAGRAM_ACCESS_TOKEN",
+                "INSTAGRAM_BUSINESS_ACCOUNT_ID_RU",
+                "INSTAGRAM_BUSINESS_ACCOUNT_ID_EN",
+                "TIKTOK_ACCESS_TOKEN",
+                "TIKTOK_OPEN_ID",
+                "VK_ACCESS_TOKEN",
+                "VK_GROUP_ID_RU",
+            )
+        )
     lines = ["Проверка окружения:"]
     for key in required:
         val = (os.getenv(key) or "").strip()

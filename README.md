@@ -196,7 +196,11 @@ HSTS subdomains/preload включайте только если весь дом
 В прокси направьте `https://admin.example.com` на `http://127.0.0.1:8000` и отдавайте
 `/static/` из `DJANGO_STATIC_ROOT`. Не открывайте порт `8000` напрямую в интернет.
 
-Для будущего автопостинга через `n8n` и соцсети список секретов, рекомендуемое место хранения и способ получения описаны в [docs/autoposting_secrets.md](/opt/content_fabric/docs/autoposting_secrets.md). Пошаговый локальный запуск `n8n` и wiring publish queue описаны в [docs/n8n_autoposting_setup.md](/opt/content_fabric/docs/n8n_autoposting_setup.md).
+Публикация видео работает напрямую через официальные API YouTube, Instagram, TikTok и VK, без `n8n`.
+В админке можно выбрать любую историческую финальную версию или загрузить свой MP4, явно выбрать проект,
+отредактировать текст каждой площадки и отправить отмеченные цели. Настройка описана в
+[docs/direct_social_publishing.md](/opt/content_fabric/docs/direct_social_publishing.md), перечень ключей — в
+[docs/autoposting_secrets.md](/opt/content_fabric/docs/autoposting_secrets.md).
 
 Для video generation используется прямой вызов Python-функции `tools.gen_video.generate_video_via_vertex`
 (без внешней shell-команды и без `VIDEO_GEN_CMD_TEMPLATE`).

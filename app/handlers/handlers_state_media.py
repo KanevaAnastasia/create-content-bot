@@ -256,7 +256,6 @@ SOCIAL_FIXED_HASHTAGS_RU = ["#убабушкивкуснее", "#бабушки�
 SOCIAL_FIXED_HASHTAGS_EN = ["#grandmatastesbetter", "#grandmasrecipes", "#recipes"]
 SOCIAL_COPY_RU_KEYS = {
     "youtube_ru_description",
-    "rutube_ru_description",
     "instagram_ru",
     "vk_ru",
     "tiktok_ru",
@@ -2875,10 +2874,6 @@ def _fallback_social_copy(
             "youtube_ru_description": _with_social_hashtags(
                 ru_description, recipe=recipe_text, language="ru", project_slug=project_slug
             ),
-            "rutube_ru_title": "Начать важнее, чем сделать всё сразу",
-            "rutube_ru_description": _with_social_hashtags(
-                ru_description, recipe=recipe_text, language="ru", project_slug=project_slug
-            ),
             "instagram_ru": _with_social_hashtags(
                 ru_description, recipe=recipe_text, language="ru", project_slug=project_slug
             ),
@@ -2902,8 +2897,6 @@ def _fallback_social_copy(
         return {
             "youtube_ru_title": "Товар в деле, понятный результат",
             "youtube_ru_description": _with_social_hashtags(ru_description, recipe=recipe, language="ru", advertising=True),
-            "rutube_ru_title": "Товар в деле, понятный результат",
-            "rutube_ru_description": _with_social_hashtags(ru_description, recipe=recipe, language="ru", advertising=True),
             "instagram_ru": _with_social_hashtags(ru_description, recipe=recipe, language="ru", advertising=True),
             "vk_ru": _with_social_hashtags(ru_description, recipe=recipe, language="ru", advertising=True),
             "tiktok_ru": _with_social_hashtags(ru_description, recipe=recipe, language="ru", advertising=True),
@@ -2922,8 +2915,6 @@ def _fallback_social_copy(
     return {
         "youtube_ru_title": "Домашний рецепт как у бабушки",
         "youtube_ru_description": _with_social_hashtags(ru_description, recipe=recipe, language="ru"),
-        "rutube_ru_title": "Домашний рецепт как у бабушки",
-        "rutube_ru_description": _with_social_hashtags(ru_description, recipe=recipe, language="ru"),
         "instagram_ru": _with_social_hashtags(ru_description, recipe=recipe, language="ru"),
         "vk_ru": _with_social_hashtags(ru_description, recipe=recipe, language="ru"),
         "tiktok_ru": _with_social_hashtags(ru_description, recipe=recipe, language="ru"),
@@ -2969,7 +2960,7 @@ def _social_copy_prompt(
     )
     if _is_discipline_social_project(project_slug):
         return (
-            "Ты редактор коротких видео проекта «Дисциплина» для Reels, YouTube Shorts, RuTube, VK и TikTok.\n\n"
+            "Ты редактор коротких видео проекта «Дисциплина» для Reels, YouTube Shorts, VK и TikTok.\n\n"
             "Из утверждённой истории или метода подготовь публикационные тексты. Это НЕ кулинарный проект.\n\n"
             "ТРЕБОВАНИЯ:\n"
             "- русские тексты раскрывают проблему героя, применённый метод, первый выполнимый шаг и завершённый результат\n"
@@ -2981,7 +2972,7 @@ def _social_copy_prompt(
             "- не добавляй кулинарные или бабушкины хэштеги\n"
             "- без markdown, кавычек и тире; не выдумывай факты, которых нет в исходнике\n\n"
             "Верни строго JSON объект без markdown с ключами:\n"
-            "youtube_ru_title, youtube_ru_description, rutube_ru_title, rutube_ru_description, instagram_ru, vk_ru, "
+            "youtube_ru_title, youtube_ru_description, instagram_ru, vk_ru, "
             "tiktok_ru, instagram_en, youtube_en_title, youtube_en_description.\n\n"
             f"{comment_block}"
             "УТВЕРЖДЁННАЯ ИСТОРИЯ ИЛИ МЕТОД:\n"
@@ -2993,14 +2984,14 @@ def _social_copy_prompt(
             "На основе утверждённой идеи/рецепта/истории и карточки товара подготовь публикационные тексты.\n"
             "Не превращай бытовую инструкцию или историю в рецепт. Не выдумывай свойства, эффективность, состав, скидки, "
             "медицинские обещания или факты о товаре. Ясно обозначь рекламный характер публикации.\n"
-            "Сделай отдельные RU title/description для YouTube Shorts и RuTube, RU-тексты для Instagram, VK, TikTok, "
+            "Сделай отдельные RU title/description для YouTube Shorts, RU-тексты для Instagram, VK, TikTok, "
             "а также EN Instagram и EN YouTube title/description. Тексты человечные, конкретные, легко копируются. "
             "Если источник recipe, сохрани ингредиенты и шаги; если how-to, сохрани проблему, действия и результат; если story, "
             "сохрани хук и вывод. В каждом тексте естественно назови товар и его роль. Без markdown, кавычек и тире.\n"
             "Русские тексты: #реклама #товар #полезныйсовет плюс 1-2 тематических хэштега. "
             "Английские: #ad #product #howto плюс 1-2 тематических.\n"
-            "Верни строго JSON без markdown с ключами: youtube_ru_title, youtube_ru_description, rutube_ru_title, "
-            "rutube_ru_description, instagram_ru, vk_ru, tiktok_ru, instagram_en, youtube_en_title, youtube_en_description.\n\n"
+            "Верни строго JSON без markdown с ключами: youtube_ru_title, youtube_ru_description, "
+            "instagram_ru, vk_ru, tiktok_ru, instagram_en, youtube_en_title, youtube_en_description.\n\n"
             f"{comment_block}"
             f"КАРТОЧКА ТОВАРА:\n{str(product_context or '').strip()}\n\n"
             f"УТВЕРЖДЁННЫЙ ИСХОДНИК:\n{recipe.strip()}"
@@ -3009,9 +3000,8 @@ def _social_copy_prompt(
         "Ты эксперт по Reels, YouTube Shorts и продвижению в соцсетях.\n\n"
         "Из утвержденного рецепта ниже сделай публикационные тексты.\n\n"
         "ТРЕБОВАНИЯ:\n"
-        "- сделай 5 максимально вирусных русских описаний для YouTube Shorts, RuTube, Instagram, VK и TikTok\n"
+        "- сделай 4 максимально вирусных русских описания для YouTube Shorts, Instagram, VK и TikTok\n"
         "- для YouTube Shorts отдельно верни заголовок и отдельно описание\n"
-        "- для RuTube отдельно верни заголовок и отдельно описание\n"
         "- дополнительно сделай 2 английских текста для иностранного Instagram и YouTube Shorts\n"
         "- для английского YouTube Shorts отдельно верни title и отдельно description\n"
         "- тексты должны быть человечные, теплые и легко копируемые\n"
@@ -3033,7 +3023,7 @@ def _social_copy_prompt(
         "- комментарий не заменяет рецепт\n"
         "- не добавляй ингредиенты, шаги и факты, которых нет в утвержденном рецепте\n\n"
         "Верни строго JSON объект без markdown с ключами:\n"
-        "youtube_ru_title, youtube_ru_description, rutube_ru_title, rutube_ru_description, instagram_ru, vk_ru, tiktok_ru, instagram_en, youtube_en_title, youtube_en_description.\n\n"
+        "youtube_ru_title, youtube_ru_description, instagram_ru, vk_ru, tiktok_ru, instagram_en, youtube_en_title, youtube_en_description.\n\n"
         f"{comment_block}"
         "УТВЕРЖДЕННЫЙ РЕЦЕПТ:\n"
         f"{recipe.strip()}"
@@ -3214,8 +3204,6 @@ def _social_copy_messages(copy: dict[str, str]) -> list[tuple[str, str]]:
     return [
         ("YouTube Shorts RU заголовок, скопировать отдельно", copy["youtube_ru_title"]),
         ("YouTube Shorts RU описание, скопировать отдельно", copy["youtube_ru_description"]),
-        ("RuTube RU заголовок, скопировать отдельно", copy["rutube_ru_title"]),
-        ("RuTube RU описание, скопировать отдельно", copy["rutube_ru_description"]),
         ("Instagram RU описание, скопировать отдельно", copy["instagram_ru"]),
         ("VK RU описание, скопировать отдельно", copy["vk_ru"]),
         ("TikTok RU описание, скопировать отдельно", copy["tiktok_ru"]),
@@ -3293,8 +3281,8 @@ async def _refine_social_copy_from_feedback(
             "Нигде не упоминай бабушку, grandma, бабушкины рецепты или семейную кухню. "
             "Русские описания: #тихаядисциплина + 1-2 русских тематических хэштега. "
             "Английские описания: #quietdiscipline + 1-2 английских тематических хэштега. "
-            "Верни строго JSON объект без markdown с ключами: youtube_ru_title, youtube_ru_description, rutube_ru_title, "
-            "rutube_ru_description, instagram_ru, vk_ru, tiktok_ru, instagram_en, youtube_en_title, youtube_en_description.\n\n"
+            "Верни строго JSON объект без markdown с ключами: youtube_ru_title, youtube_ru_description, "
+            "instagram_ru, vk_ru, tiktok_ru, instagram_en, youtube_en_title, youtube_en_description.\n\n"
             f"ИСТОРИЯ ИЛИ МЕТОД:\n{recipe.strip()}\n\n"
             f"ПРЕДЫДУЩИЕ ОПИСАНИЯ JSON:\n{previous_copy}\n\n"
             f"ФИДБЭК ПОЛЬЗОВАТЕЛЯ:\n{feedback.strip()}\n"
@@ -3306,8 +3294,8 @@ async def _refine_social_copy_from_feedback(
             "Сохрани JSON-структуру. Учти фидбэк, не выдумывай свойства, обещания или факты о товаре. "
             "Не превращай нерецептурную инструкцию/историю в рецепт. Русские хэштеги: #реклама #товар #полезныйсовет. "
             "Английские: #ad #product #howto.\n"
-            "Верни строго JSON объект без markdown с ключами: youtube_ru_title, youtube_ru_description, rutube_ru_title, "
-            "rutube_ru_description, instagram_ru, vk_ru, tiktok_ru, instagram_en, youtube_en_title, youtube_en_description.\n\n"
+            "Верни строго JSON объект без markdown с ключами: youtube_ru_title, youtube_ru_description, "
+            "instagram_ru, vk_ru, tiktok_ru, instagram_en, youtube_en_title, youtube_en_description.\n\n"
             f"КАРТОЧКА ТОВАРА:\n{product_context}\n\n"
             f"ИСХОДНИК:\n{recipe.strip()}\n\n"
             f"ПРЕДЫДУЩИЕ ОПИСАНИЯ JSON:\n{previous_copy}\n\n"
@@ -3323,7 +3311,7 @@ async def _refine_social_copy_from_feedback(
         "Не используй «моя бабушка», «у моей бабушки», «как у моей бабушки», «бабушка научила», "
         "«рецепт моей бабушки» и похожую личную семейную легенду, если это явно не дано в рецепте или фидбэке.\n"
         "Верни строго JSON объект без markdown с ключами:\n"
-        "youtube_ru_title, youtube_ru_description, rutube_ru_title, rutube_ru_description, instagram_ru, vk_ru, tiktok_ru, "
+        "youtube_ru_title, youtube_ru_description, instagram_ru, vk_ru, tiktok_ru, "
         "instagram_en, youtube_en_title, youtube_en_description.\n\n"
         f"РЕЦЕПТ:\n{recipe.strip()}\n\n"
         f"ПРЕДЫДУЩИЕ ОПИСАНИЯ JSON:\n{previous_copy}\n\n"
@@ -3471,7 +3459,7 @@ async def _send_final_social_descriptions(update: Update, session: dict) -> bool
             {
                 "language": "ru",
                 "video_label": "RU видео / финальный master",
-                "platforms": "YouTube Shorts RU, RuTube RU, Instagram RU, VK RU, TikTok RU",
+                "platforms": "YouTube Shorts RU, Instagram RU, VK RU, TikTok RU",
             },
             {
                 "language": "en",

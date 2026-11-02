@@ -166,5 +166,10 @@ else:
             "task": "pipeline_admin.process_due_scheduled_generations",
             "schedule": crontab(hour=1, minute=0),
             "kwargs": {"limit": int(os.getenv("SCHEDULED_GENERATION_NIGHTLY_LIMIT", "0") or 0)},
-        }
+        },
+        "publish-due-social-videos": {
+            "task": "pipeline_admin.publish_due_publication_jobs",
+            "schedule": 60.0,
+            "kwargs": {"limit": int(os.getenv("PUBLICATION_WORKER_BATCH_SIZE", "20") or 20)},
+        },
     }

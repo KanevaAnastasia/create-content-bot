@@ -9,6 +9,7 @@ from pathlib import Path
 import subprocess
 import sys
 import threading
+import uuid
 from typing import Any
 from urllib.parse import quote, unquote, urlparse
 
@@ -55,10 +56,12 @@ from app.publications import (
     DEFAULT_PUBLICATION_VIDEO_VARIANT,
     PUBLICATION_VIDEO_VARIANT_LABELS,
     build_publication_targets,
+    publication_artifacts_dir,
     publication_jobs_summary,
     publication_target_label,
     queue_publication_bundle,
 )
+from app.social_publishers import platform_readiness
 from app.scheduled_generation import (
     DEFAULT_TITLE_COLOR as SCHEDULED_DEFAULT_TITLE_COLOR,
     build_scheduled_generation_template_bytes,
@@ -164,8 +167,6 @@ _FINAL_BUILD_WORKER_KICKED_AT_BY_RUN: dict[str, Any] = {}
 SOCIAL_COPY_FIELD_LABELS = (
     ("youtube_ru_title", "YouTube Shorts RU title"),
     ("youtube_ru_description", "YouTube Shorts RU description"),
-    ("rutube_ru_title", "RuTube RU title"),
-    ("rutube_ru_description", "RuTube RU description"),
     ("instagram_ru", "Instagram RU description"),
     ("vk_ru", "VK RU description"),
     ("tiktok_ru", "TikTok RU description"),
@@ -173,6 +174,14 @@ SOCIAL_COPY_FIELD_LABELS = (
     ("youtube_en_title", "YouTube Shorts EN title"),
     ("youtube_en_description", "YouTube Shorts EN description"),
 )
+SOCIAL_COPY_FIELDS_BY_TARGET = {
+    "youtube:ru": ("youtube_ru_title", "youtube_ru_description"),
+    "instagram:ru": ("instagram_ru",),
+    "vk:ru": ("vk_ru",),
+    "tiktok:ru": ("tiktok_ru",),
+    "instagram:en": ("instagram_en",),
+    "youtube:en": ("youtube_en_title", "youtube_en_description"),
+}
 
 
 def _short(value: str | None, limit: int = 120) -> str:
@@ -2353,6 +2362,7 @@ def _rendered_variants_summary(post: dict[str, Any]) -> str:
 
 
 class PublicationQueueAdminForm(django_forms.Form):
+    project_slug = django_forms.ChoiceField(required=True, label="Project / account set")
     target_keys = django_forms.MultipleChoiceField(
         required=True,
         widget=django_forms.CheckboxSelectMultiple,
@@ -2371,11 +2381,33 @@ class PublicationQueueAdminForm(django_forms.Form):
         help_text="Leave empty to publish as soon as the job is approved by the delivery flow.",
     )
 
-    def __init__(self, *args, copy: dict[str, str], **kwargs):
+    def __init__(
+        self,
+        *args,
+        copy: dict[str, str],
+        project_choices: tuple[tuple[str, str], ...] = (),
+        video_source_choices: dict[str, tuple[tuple[str, str], ...]] | None = None,
+        **kwargs,
+    ):
         super().__init__(*args, **kwargs)
+        self._video_source_choices = video_source_choices
+        self.fields["project_slug"].choices = project_choices
         targets = build_publication_targets(copy)
         self.fields["target_keys"].choices = tuple((target.key, publication_target_label(target)) for target in targets)
         self.fields["target_keys"].initial = [target.key for target in targets if target.description]
+        for language, language_label in (("ru", "RU"), ("en", "EN")):
+            choices = list((video_source_choices or {}).get(language, ()))
+            choices.append(("upload", f"Upload my own {language_label} MP4"))
+            self.fields[f"video_source_{language}"] = django_forms.ChoiceField(
+                required=False,
+                choices=tuple(choices),
+                label=f"{language_label} video source",
+            )
+            self.fields[f"custom_video_{language}"] = django_forms.FileField(
+                required=False,
+                label=f"Own {language_label} MP4",
+                widget=django_forms.ClearableFileInput(attrs={"accept": "video/mp4,.mp4"}),
+            )
         for key, label in SOCIAL_COPY_FIELD_LABELS:
             is_title = key.endswith("_title")
             self.fields[key] = django_forms.CharField(
@@ -2387,12 +2419,127 @@ class PublicationQueueAdminForm(django_forms.Form):
 
     def clean(self):
         cleaned = super().clean()
-        if not cleaned.get("target_keys"):
+        selected_targets = cleaned.get("target_keys") or []
+        if not selected_targets:
             self.add_error("target_keys", "Choose at least one publish target.")
+        if self._video_source_choices is not None:
+            selected_languages = {str(key).split(":", 1)[1] for key in selected_targets if ":" in str(key)}
+            for language in selected_languages:
+                source_key = str(cleaned.get(f"video_source_{language}") or "")
+                upload = cleaned.get(f"custom_video_{language}")
+                if not source_key:
+                    self.add_error(f"video_source_{language}", f"Choose a {language.upper()} video.")
+                elif source_key == "upload" and upload is None:
+                    self.add_error(f"custom_video_{language}", f"Choose an MP4 file for {language.upper()} targets.")
+                if upload is not None:
+                    name = str(getattr(upload, "name", "") or "").lower()
+                    if not name.endswith(".mp4"):
+                        self.add_error(f"custom_video_{language}", "Only .mp4 files are accepted.")
         return cleaned
 
     def copy_payload(self) -> dict[str, str]:
         return {key: str(self.cleaned_data.get(key) or "") for key, _label in SOCIAL_COPY_FIELD_LABELS}
+
+
+def _publication_project_choices() -> tuple[tuple[str, str], ...]:
+    try:
+        projects = Project.objects.filter(is_active=True).exclude(slug__startswith="guest-").order_by("title", "slug")
+        return tuple((project.slug, f"{project.title} ({project.slug})") for project in projects)
+    except Exception:
+        return ()
+
+
+def _publication_all_final_artifacts(run: GenerationRun) -> list[GenerationArtifact]:
+    try:
+        return list(
+            GenerationArtifact.objects.filter(run_id=run.id, artifact_type__in=FINAL_VIDEO_ARTIFACT_TYPES)
+            .order_by("language", "-created_at", "artifact_type")
+        )
+    except Exception:
+        return []
+
+
+def _publication_artifact_video_payload(artifact: GenerationArtifact) -> dict[str, str]:
+    raw = str(artifact.uri or "").strip()
+    if raw.startswith("file://"):
+        parsed = urlparse(raw)
+        path = Path(unquote(parsed.path))
+        return {"video_path": str(path)} if path.is_file() else {}
+    path = Path(raw) if raw and not raw.startswith(("http://", "https://")) else None
+    if path is not None and path.is_file():
+        return {"video_path": str(path)}
+    return {}
+
+
+def _publication_video_source_choices(run: GenerationRun) -> dict[str, tuple[tuple[str, str], ...]]:
+    choices: dict[str, list[tuple[str, str]]] = {"ru": [], "en": []}
+    for artifact in _publication_all_final_artifacts(run):
+        language = str(artifact.language or "").strip().lower()
+        if language not in choices or not _publication_artifact_video_payload(artifact):
+            continue
+        variant = str(artifact.artifact_type or "").removeprefix("final_")
+        label = PUBLICATION_VIDEO_VARIANT_LABELS.get(variant, variant)
+        created = artifact.created_at.strftime("%Y-%m-%d %H:%M:%S") if artifact.created_at else "unknown time"
+        choices[language].append((f"artifact:{artifact.id}", f"{created} · {label} · {artifact.label}"))
+    return {language: tuple(rows) for language, rows in choices.items()}
+
+
+def _publication_video_source_initials(
+    choices: dict[str, tuple[tuple[str, str], ...]],
+) -> dict[str, str]:
+    out: dict[str, str] = {}
+    preferred_label = PUBLICATION_VIDEO_VARIANT_LABELS[DEFAULT_PUBLICATION_VIDEO_VARIANT].lower()
+    for language, rows in choices.items():
+        selected = next((value for value, label in rows if preferred_label in label.lower()), None)
+        out[f"video_source_{language}"] = selected or (rows[0][0] if rows else "upload")
+    return out
+
+
+def _store_publication_custom_upload(upload, *, run_id: Any, language: str) -> Path:
+    target_dir = publication_artifacts_dir() / "admin_uploads" / str(run_id)
+    target_dir.mkdir(parents=True, exist_ok=True)
+    target = target_dir / f"{uuid.uuid4().hex}_{language}.mp4"
+    with target.open("wb") as handle:
+        for chunk in upload.chunks():
+            handle.write(chunk)
+    return target
+
+
+def _publication_post_production_from_form(
+    run: GenerationRun,
+    form: PublicationQueueAdminForm,
+) -> tuple[dict[str, Any], dict[str, str], list[Path]]:
+    artifacts = {f"artifact:{row.id}": row for row in _publication_all_final_artifacts(run)}
+    selected_languages = {
+        str(key).split(":", 1)[1]
+        for key in form.cleaned_data.get("target_keys", [])
+        if ":" in str(key)
+    }
+    renders: dict[str, dict[str, dict[str, str]]] = {}
+    labels: dict[str, str] = {}
+    staging_paths: list[Path] = []
+    for language in selected_languages:
+        source_key = str(form.cleaned_data.get(f"video_source_{language}") or "")
+        if source_key == "upload":
+            path = _store_publication_custom_upload(
+                form.cleaned_data[f"custom_video_{language}"],
+                run_id=run.id,
+                language=language,
+            )
+            staging_paths.append(path)
+            payload = {"video_path": str(path)}
+            labels[language] = f"{language.upper()} · custom upload · {path.name}"
+        else:
+            artifact = artifacts.get(source_key)
+            if artifact is None:
+                raise ValueError(f"Selected {language.upper()} artifact is no longer available.")
+            payload = _publication_artifact_video_payload(artifact)
+            if not payload:
+                raise ValueError(f"Selected {language.upper()} artifact file is unavailable.")
+            created = artifact.created_at.strftime("%Y-%m-%d %H:%M:%S") if artifact.created_at else "unknown time"
+            labels[language] = f"{language.upper()} · {artifact.label} · {created}"
+        renders[language] = {"clean": payload}
+    return {"renders_by_language": renders}, labels, staging_paths
 
 
 def _latest_chat_session_for_run(run: GenerationRun) -> tuple[ChatSession | None, dict[str, Any]]:
@@ -2424,9 +2571,6 @@ def _publication_copy_from_latest_jobs(run: GenerationRun) -> dict[str, str]:
         if platform == "youtube" and language == "ru":
             copy_payload["youtube_ru_title"] = title
             copy_payload["youtube_ru_description"] = description
-        elif platform == "rutube" and language == "ru":
-            copy_payload["rutube_ru_title"] = title
-            copy_payload["rutube_ru_description"] = description
         elif platform == "instagram" and language == "ru":
             copy_payload["instagram_ru"] = description
         elif platform == "vk" and language == "ru":
@@ -2527,8 +2671,6 @@ def _publication_copy_from_run(run: GenerationRun) -> dict[str, str]:
     return {
         "youtube_ru_title": title,
         "youtube_ru_description": description,
-        "rutube_ru_title": title,
-        "rutube_ru_description": description,
         "instagram_ru": description,
         "vk_ru": description,
         "tiktok_ru": description,
@@ -2639,7 +2781,17 @@ def _generate_publication_copy_for_admin(
 
 
 def _project_slug_for_publication_run(run: GenerationRun) -> str | None:
-    _row, session = _latest_chat_session_for_run(run)
+    try:
+        if run.project_id and run.project:
+            slug = str(run.project.slug or "").strip()
+            if slug:
+                return slug
+    except Exception:
+        pass
+    try:
+        _row, session = _latest_chat_session_for_run(run)
+    except Exception:
+        session = {}
     slug = str(session.get("selected_project_key") or "").strip()
     return slug or None
 
@@ -2684,8 +2836,11 @@ def _publication_project_for_run(run: GenerationRun) -> Project | None:
     return Project.objects.filter(is_default=True).first()
 
 
-def _publication_account_index(run: GenerationRun) -> dict[tuple[str, str], ProjectPublishAccount]:
-    project = _publication_project_for_run(run)
+def _publication_account_index(
+    run: GenerationRun,
+    project_slug: str | None = None,
+) -> dict[tuple[str, str], ProjectPublishAccount]:
+    project = Project.objects.filter(slug=project_slug).first() if project_slug else _publication_project_for_run(run)
     if project is None:
         return {}
     rows = ProjectPublishAccount.objects.filter(project_id=project.id, is_active=True)
@@ -2703,18 +2858,18 @@ def _publication_queue_form_html(
     targets = build_publication_targets(copy_payload)
     selected_raw = form["target_keys"].value() or []
     selected = set(selected_raw if isinstance(selected_raw, list) else [selected_raw])
-    variant = str(form["video_variant"].value() or DEFAULT_PUBLICATION_VIDEO_VARIANT)
-    post = _publication_post_production_from_final_artifacts(run)
-    renders = post.get("renders_by_language") if isinstance(post, dict) else {}
-    accounts = _publication_account_index(run)
+    project_slug = str(form["project_slug"].value() or _project_slug_for_publication_run(run) or "")
+    accounts = _publication_account_index(run, project_slug) if project_slug else _publication_account_index(run)
     css = """
     <style>
       .cf-pub-grid{display:grid;grid-template-columns:minmax(360px,1.2fr) minmax(320px,.8fr);gap:18px;align-items:start}
       .cf-pub-card{border:1px solid var(--border-color);border-radius:6px;padding:14px;background:var(--body-bg)}
       .cf-pub-card h2{margin:0 0 10px;font-size:16px}
-      .cf-pub-target{display:grid;grid-template-columns:28px 1fr auto;gap:10px;padding:10px 0;border-top:1px solid var(--border-color)}
+      .cf-pub-target{display:grid;grid-template-columns:28px 1fr;gap:10px;padding:14px 0;border-top:1px solid var(--border-color)}
       .cf-pub-target:first-of-type{border-top:0}
-      .cf-pub-target input{width:18px;height:18px}
+      .cf-pub-target>input{width:18px;height:18px}
+      .cf-pub-target-head{display:flex;justify-content:space-between;gap:12px;align-items:start}
+      .cf-pub-target-copy p{margin:10px 0 0}
       .cf-pub-muted{color:var(--body-quiet-color)}
       .cf-pub-badge{display:inline-block;padding:2px 7px;border-radius:10px;font-weight:600;font-size:12px}
       .cf-pub-ok{background:#dcfce7;color:#166534}
@@ -2728,38 +2883,64 @@ def _publication_queue_form_html(
     target_rows = []
     for target in targets:
         account = accounts.get((target.platform, target.language))
-        video_ready = bool(isinstance(renders, dict) and isinstance(renders.get(target.language), dict) and renders[target.language].get(variant))
+        selected_source = str(form[f"video_source_{target.language}"].value() or "")
+        video_ready = bool(selected_source)
         desc_ready = bool(target.description)
         account_ready = bool(account and account.external_account_id)
+        api_ready = platform_readiness(project_slug, target.platform, target.language) if project_slug else None
         badges = [
             ('<span class="cf-pub-badge cf-pub-ok">description</span>' if desc_ready else '<span class="cf-pub-badge cf-pub-bad">no description</span>'),
             ('<span class="cf-pub-badge cf-pub-ok">video</span>' if video_ready else '<span class="cf-pub-badge cf-pub-bad">no video</span>'),
             ('<span class="cf-pub-badge cf-pub-ok">account</span>' if account_ready else '<span class="cf-pub-badge cf-pub-warn">manual account</span>'),
+            ('<span class="cf-pub-badge cf-pub-ok">direct API</span>' if api_ready and api_ready.ready else '<span class="cf-pub-badge cf-pub-warn">API setup needed</span>'),
         ]
         title_line = escape(target.title or "No separate title")
         account_line = escape(account.external_account_id if account and account.external_account_id else "no active account mapping")
+        readiness_line = ""
+        if api_ready and not api_ready.ready:
+            readiness_line = escape(
+                ("Missing: " + ", ".join(api_ready.missing))
+                if api_ready.missing
+                else (api_ready.note or "Direct API is not available")
+            )
         checked = " checked" if target.key in selected else ""
-        target_rows.append(
-            f'<label class="cf-pub-target">'
-            f'<input type="checkbox" name="target_keys" value="{escape(target.key)}"{checked}>'
-            f'<span><strong>{escape(publication_target_label(target))}</strong><br>'
-            f'<span class="cf-pub-muted">{escape(target.language.upper())} · {title_line}<br>{account_line}</span></span>'
-            f'<span>{" ".join(badges)}</span></label>'
+        copy_fields = "".join(
+            f"<p>{form[key].label_tag()}{form[key]}</p>"
+            for key in SOCIAL_COPY_FIELDS_BY_TARGET.get(target.key, ())
         )
-    text_fields = []
-    for key, _label in SOCIAL_COPY_FIELD_LABELS:
-        text_fields.append(f"<p>{form[key].label_tag()}{form[key]}</p>")
+        target_rows.append(
+            f'<div class="cf-pub-target">'
+            f'<input type="checkbox" name="target_keys" value="{escape(target.key)}"{checked}>'
+            f'<div><div class="cf-pub-target-head"><span><strong>{escape(publication_target_label(target))}</strong><br>'
+            f'<span class="cf-pub-muted">{escape(target.language.upper())} · {title_line}<br>{account_line}'
+            f'{"<br>" + readiness_line if readiness_line else ""}</span></span>'
+            f'<span>{" ".join(badges)}</span></div>'
+            f'<div class="cf-pub-target-copy">{copy_fields}</div></div></div>'
+        )
+    video_fields = []
+    for language in ("ru", "en"):
+        video_fields.append(
+            f'<div class="cf-pub-card"><h2>{language.upper()} video</h2>'
+            f'<p>{form[f"video_source_{language}"].label_tag()}{form[f"video_source_{language}"]}</p>'
+            f'<p>{form[f"custom_video_{language}"].label_tag()}{form[f"custom_video_{language}"]}</p>'
+            '<p class="cf-pub-muted">Every historical final build is listed. Choose “Upload my own” for an external MP4.</p></div>'
+        )
     error_html = f'<div class="errornote">{escape(form.errors.as_text())}</div>' if form.errors else ""
     return mark_safe(
         css
         + error_html
+        + '<section class="cf-pub-card"><h2>Project and its accounts</h2>'
+        + f'<p>{form["project_slug"].label_tag()}{form["project_slug"]}</p>'
+        + '<p class="cf-pub-muted">Required for generated and custom videos. Tokens and channel IDs are isolated by project.</p></section>'
+        + '<div class="cf-pub-grid" style="margin-top:18px;">'
+        + "".join(video_fields)
+        + '</div>'
         + '<div class="cf-pub-grid">'
-        + '<section class="cf-pub-card"><h2>Targets</h2>'
+        + '<section class="cf-pub-card cf-pub-fields" style="margin-top:18px;"><h2>Where each description goes</h2>'
         + "".join(target_rows)
-        + '</section><section class="cf-pub-card"><h2>Delivery</h2>'
-        + f'<p>{form["video_variant"].label_tag()}{form["video_variant"]}</p>'
+        + '</section><section class="cf-pub-card" style="margin-top:18px;"><h2>Delivery</h2>'
         + f'<p>{form["scheduled_at"].label_tag()}{form["scheduled_at"]}<br><span class="cf-pub-muted">{escape(form.fields["scheduled_at"].help_text)}</span></p>'
-        + '<p class="cf-pub-muted">Jobs with ready account + publication time become scheduled; missing account stays manual but keeps the chosen time.</p>'
+        + '<p class="cf-pub-muted">Ready official APIs start immediately after this form is submitted. A future time stays scheduled. Missing credentials remain visible as manual action.</p>'
         + '</section></div>'
         + '<section class="cf-pub-card" style="margin-top:18px;"><h2>Recipe</h2>'
         + f'<textarea name="publication_recipe" rows="8" style="width:100%;">{escape(recipe)}</textarea>'
@@ -2771,9 +2952,7 @@ def _publication_queue_form_html(
         + '<p><button type="submit" class="button" name="generate_descriptions" value="1">Generate descriptions</button></p>'
         + '<p class="cf-pub-muted">Leave feedback empty to generate descriptions from the recipe using the same flow as the bot.</p>'
         + '</section>'
-        + '<section class="cf-pub-card cf-pub-fields" style="margin-top:18px;"><h2>Copy</h2>'
-        + "".join(text_fields)
-        + "</section>"
+        + '<input type="hidden" name="video_variant" value="clean">'
     )
 
 
@@ -2792,7 +2971,7 @@ def _publication_prep_panel(run: GenerationRun) -> str:
     parts = ['<div class="cf-publication-prep">']
     parts.append(
         format_html(
-            '<p style="margin:0 0 12px;"><a class="button" href="{}">Queue publications</a></p>',
+            '<p style="margin:0 0 12px;"><a class="button" href="{}">Queue publications / publish or upload video</a></p>',
             reverse("admin:pipeline_admin_generationrun_queue_publications", args=[run.pk]),
         )
     )
@@ -3934,6 +4113,10 @@ class GenerationRunAdmin(admin.ModelAdmin):
         run = self.get_object(request, object_id)
         if run is None:
             raise Http404("Generation run not found.")
+        project_choices = _publication_project_choices()
+        default_project_slug = _project_slug_for_publication_run(run) or (project_choices[0][0] if project_choices else "")
+        video_source_choices = _publication_video_source_choices(run)
+        video_source_initials = _publication_video_source_initials(video_source_choices)
         post_production = _publication_post_production_from_final_artifacts(run)
         has_publication_video = _publication_post_production_has_video(post_production)
         if not has_publication_video:
@@ -3989,20 +4172,31 @@ class GenerationRunAdmin(admin.ModelAdmin):
             form = PublicationQueueAdminForm(
                 None,
                 copy=initial_copy,
+                project_choices=project_choices,
+                video_source_choices=video_source_choices,
                 initial={
+                    "project_slug": str(request.POST.get("project_slug") or default_project_slug),
                     "target_keys": [target.key for target in build_publication_targets(initial_copy) if target.description],
                     "video_variant": str(request.POST.get("video_variant") or DEFAULT_PUBLICATION_VIDEO_VARIANT),
                     "scheduled_at": request.POST.get("scheduled_at") or None,
+                    **video_source_initials,
+                    "video_source_ru": str(request.POST.get("video_source_ru") or video_source_initials.get("video_source_ru") or "upload"),
+                    "video_source_en": str(request.POST.get("video_source_en") or video_source_initials.get("video_source_en") or "upload"),
                     **initial_copy,
                 },
             )
         else:
             form = PublicationQueueAdminForm(
                 request.POST or None,
+                request.FILES or None,
                 copy=initial_copy,
+                project_choices=project_choices,
+                video_source_choices=video_source_choices,
                 initial={
+                    "project_slug": default_project_slug,
                     "target_keys": [target.key for target in build_publication_targets(initial_copy) if target.description],
                     "video_variant": DEFAULT_PUBLICATION_VIDEO_VARIANT,
+                    **video_source_initials,
                     **initial_copy,
                 },
             )
@@ -4016,34 +4210,53 @@ class GenerationRunAdmin(admin.ModelAdmin):
                 )
             except Exception as exc:
                 self.message_user(request, f"{run}: descriptions were not saved as draft: {exc}", level=messages.WARNING)
-            if not has_publication_video:
+            staging_paths: list[Path] = []
+            try:
+                selected_post_production, source_labels, staging_paths = _publication_post_production_from_form(run, form)
+                with SessionLocal() as db:
+                    jobs = queue_publication_bundle(
+                        db,
+                        project_slug=str(form.cleaned_data["project_slug"]),
+                        recipe=f"{run.id}\n\n{recipe_text}",
+                        copy=form.copy_payload(),
+                        post_production=selected_post_production,
+                        origin="admin_generation_run",
+                        selected_target_keys=form.cleaned_data["target_keys"],
+                        video_variant="clean",
+                        video_source_labels=source_labels,
+                        scheduled_at=form.cleaned_data.get("scheduled_at"),
+                    )
+                    for job in jobs:
+                        job.payload_json = {**(job.payload_json or {}), "run_id": str(run.id)}
+                    db.commit()
+            except Exception as exc:
+                self.message_user(request, f"{run}: publication jobs were not queued: {exc}", level=messages.ERROR)
+            else:
+                dispatch_error = ""
+                ready_job_ids = [
+                    str(job.id)
+                    for job in jobs
+                    if job.status == "approved" and job.scheduled_at is None
+                ]
+                if ready_job_ids:
+                    try:
+                        from .tasks import publish_publication_jobs_task
+
+                        publish_publication_jobs_task.delay(ready_job_ids)
+                    except Exception as exc:
+                        dispatch_error = f" Direct API worker was not queued: {exc}"
                 self.message_user(
                     request,
-                    f"{run}: publication jobs were not queued because no final video artifacts are available yet.",
-                    level=messages.ERROR,
+                    publication_jobs_summary(jobs) + dispatch_error,
+                    level=messages.SUCCESS if jobs and not dispatch_error else messages.WARNING,
                 )
-            else:
-                try:
-                    with SessionLocal() as db:
-                        jobs = queue_publication_bundle(
-                            db,
-                            project_slug=_project_slug_for_publication_run(run),
-                            recipe=f"{run.id}\n\n{recipe_text}",
-                            copy=form.copy_payload(),
-                            post_production=post_production,
-                            origin="admin_generation_run",
-                            selected_target_keys=form.cleaned_data["target_keys"],
-                            video_variant=str(form.cleaned_data["video_variant"]),
-                            scheduled_at=form.cleaned_data.get("scheduled_at"),
-                        )
-                        for job in jobs:
-                            job.payload_json = {**(job.payload_json or {}), "run_id": str(run.id)}
-                        db.commit()
-                except Exception as exc:
-                    self.message_user(request, f"{run}: publication jobs were not queued: {exc}", level=messages.ERROR)
-                else:
-                    self.message_user(request, publication_jobs_summary(jobs), level=messages.SUCCESS if jobs else messages.WARNING)
-                    return HttpResponseRedirect(reverse("admin:pipeline_admin_generationrun_change", args=[run.pk]))
+                return HttpResponseRedirect(reverse("admin:pipeline_admin_publicationjob_changelist"))
+            finally:
+                for path in staging_paths:
+                    try:
+                        path.unlink(missing_ok=True)
+                    except OSError:
+                        pass
         csrf = get_token(request)
         back_url = reverse("admin:pipeline_admin_generationrun_change", args=[run.pk])
         display_copy = {
@@ -4056,9 +4269,9 @@ class GenerationRunAdmin(admin.ModelAdmin):
             '<div id="container"><div id="content" class="colM">'
             '<h1>Queue publications for {}</h1>'
             '<p><a href="{}">Back to video</a></p>'
-            '<form method="post"><input type="hidden" name="csrfmiddlewaretoken" value="{}">'
+            '<form method="post" enctype="multipart/form-data"><input type="hidden" name="csrfmiddlewaretoken" value="{}">'
             '{}'
-            '<div class="submit-row"><input type="submit" value="Queue publication jobs" class="default"></div>'
+            '<div class="submit-row"><input type="submit" value="Publish selected targets / Queue publication jobs" class="default"></div>'
             '</form></div></div></body></html>',
             run.human_title or run.id,
             back_url,
@@ -4517,6 +4730,7 @@ class ProjectPublishAccountAdmin(admin.ModelAdmin):
         "account_key",
         "external_account_id",
         "publish_policy",
+        "direct_api_status",
         "is_active",
         "updated_at",
     )
@@ -4526,9 +4740,33 @@ class ProjectPublishAccountAdmin(admin.ModelAdmin):
     raw_id_fields = ("project",)
     readonly_fields = ("id", "created_at", "updated_at")
 
+    @admin.display(description="Direct API")
+    def direct_api_status(self, obj: ProjectPublishAccount) -> str:
+        readiness = platform_readiness(obj.project.slug, obj.platform, obj.language)
+        if readiness.ready:
+            return "ready"
+        return readiness.note or f"missing {len(readiness.missing)} setting(s)"
+
+
+@admin.action(description="Publish selected jobs now through official APIs")
+def publish_selected_publication_jobs(modeladmin, request, queryset):
+    job_ids = [str(job_id) for job_id in queryset.values_list("id", flat=True)]
+    if not job_ids:
+        modeladmin.message_user(request, "No publication jobs selected.", level=messages.WARNING)
+        return
+    try:
+        from .tasks import publish_publication_jobs_task
+
+        publish_publication_jobs_task.delay(job_ids)
+    except Exception as exc:
+        modeladmin.message_user(request, f"Direct API worker was not queued: {exc}", level=messages.ERROR)
+        return
+    modeladmin.message_user(request, f"Queued {len(job_ids)} publication job(s) for direct API delivery.", level=messages.SUCCESS)
+
 
 @admin.register(PublicationJob)
 class PublicationJobAdmin(admin.ModelAdmin):
+    change_list_template = "admin/pipeline_admin/publicationjob/change_list.html"
     list_display = (
         "created_at",
         "platform",
@@ -4544,6 +4782,7 @@ class PublicationJobAdmin(admin.ModelAdmin):
     search_fields = ("bundle_key", "title", "description", "video_path", "external_post_id", "publish_error")
     raw_id_fields = ("project",)
     readonly_fields = ("id", "created_at", "updated_at", "payload_json")
+    actions = (publish_selected_publication_jobs,)
     fields = (
         "id",
         "project",
@@ -4575,6 +4814,60 @@ class PublicationJobAdmin(admin.ModelAdmin):
     @admin.display(description="Title")
     def title_short(self, obj: PublicationJob) -> str:
         return _short(obj.title or obj.description, 80)
+
+    def get_urls(self):
+        urls = super().get_urls()
+        custom = [
+            path(
+                "prepare/",
+                self.admin_site.admin_view(self.prepare_view),
+                name="pipeline_admin_publicationjob_prepare",
+            ),
+        ]
+        return custom + urls
+
+    def changelist_view(self, request, extra_context=None):
+        extra = dict(extra_context or {})
+        extra["prepare_publication_url"] = reverse("admin:pipeline_admin_publicationjob_prepare")
+        return super().changelist_view(request, extra_context=extra)
+
+    def prepare_view(self, request):
+        run_id = str(request.GET.get("run_id") or "").strip()
+        if run_id:
+            run = GenerationRun.objects.filter(id=run_id).first()
+            if run is None:
+                raise Http404("Generation run not found.")
+            return HttpResponseRedirect(reverse("admin:pipeline_admin_generationrun_queue_publications", args=[run.id]))
+        runs = (
+            GenerationRun.objects.filter(project__is_active=True)
+            .exclude(project__slug__startswith="guest-")
+            .select_related("project")
+            .order_by("-created_at")[:100]
+        )
+        rows = []
+        for run in runs:
+            url = reverse("admin:pipeline_admin_publicationjob_prepare") + f"?run_id={run.id}"
+            rows.append(
+                format_html(
+                    '<tr><td>{}</td><td>{}</td><td>{:%Y-%m-%d %H:%M}</td><td><a class="button" href="{}">Choose video / upload own MP4</a></td></tr>',
+                    run.project.title if run.project else "No project",
+                    run.human_title or _short(run.script, 100),
+                    run.created_at,
+                    url,
+                )
+            )
+        back_url = reverse("admin:pipeline_admin_publicationjob_changelist")
+        html = format_html(
+            '<!doctype html><html><head><title>Prepare publication</title></head><body class="app-pipeline_admin">'
+            '<div id="container"><div id="content" class="colM"><h1>Prepare video publication</h1>'
+            '<p>Choose a generation as the description context. On the next page you can use any historical build or upload your own MP4, and must choose the target project.</p>'
+            '<p><a href="{}">Back to publication jobs</a></p>'
+            '<table><thead><tr><th>Project</th><th>Generation</th><th>Created</th><th></th></tr></thead><tbody>{}</tbody></table>'
+            '</div></div></body></html>',
+            back_url,
+            mark_safe("".join(str(row) for row in rows)),
+        )
+        return HttpResponse(html)
 
 
 @admin.register(VideoOverview)

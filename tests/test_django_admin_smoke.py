@@ -1887,8 +1887,6 @@ def test_django_generation_admin_shows_publication_prep_panel(monkeypatch):
         lambda _run: {
             "youtube_ru_title": "RU title",
             "youtube_ru_description": "RU desc",
-            "rutube_ru_title": "RT title",
-            "rutube_ru_description": "RT desc",
             "instagram_ru": "IG ru",
             "vk_ru": "VK ru",
             "tiktok_ru": "TT ru",
@@ -1928,8 +1926,6 @@ def test_django_publication_queue_form_renders_rich_preflight(monkeypatch):
     copy_payload = {
         "youtube_ru_title": "RU title",
         "youtube_ru_description": "RU desc",
-        "rutube_ru_title": "RT title",
-        "rutube_ru_description": "RT desc",
         "instagram_ru": "IG ru",
         "vk_ru": "VK ru",
         "tiktok_ru": "TT ru",
@@ -1954,6 +1950,70 @@ def test_django_publication_queue_form_renders_rich_preflight(monkeypatch):
     assert "no video" in html
 
 
+def test_django_publication_form_requires_project_and_accepts_custom_mp4():
+    admin_dir = Path(__file__).resolve().parents[1] / "admin_panel"
+    sys.path.insert(0, str(admin_dir))
+    os.environ.setdefault("DJANGO_SETTINGS_MODULE", "cf_admin.settings")
+
+    import django
+
+    django.setup()
+
+    from django.core.files.uploadedfile import SimpleUploadedFile
+    import pipeline_admin.admin as admin_module
+
+    copy_payload = {key: "" for key, _label in admin_module.SOCIAL_COPY_FIELD_LABELS}
+    copy_payload["youtube_ru_title"] = "Title"
+    copy_payload["youtube_ru_description"] = "Description"
+    form = admin_module.PublicationQueueAdminForm(
+        data={
+            "project_slug": "grandma_kitchen",
+            "target_keys": ["youtube:ru"],
+            "video_variant": "clean",
+            "video_source_ru": "upload",
+            "youtube_ru_title": "Title",
+            "youtube_ru_description": "Description",
+        },
+        files={"custom_video_ru": SimpleUploadedFile("own.mp4", b"video", content_type="video/mp4")},
+        copy=copy_payload,
+        project_choices=(("grandma_kitchen", "Grandma Kitchen"), ("discipline", "Discipline")),
+        video_source_choices={"ru": (), "en": ()},
+    )
+
+    assert form.is_valid(), form.errors
+    assert form.cleaned_data["project_slug"] == "grandma_kitchen"
+    assert form.cleaned_data["custom_video_ru"].name == "own.mp4"
+
+
+def test_django_publication_form_rejects_custom_video_without_project():
+    admin_dir = Path(__file__).resolve().parents[1] / "admin_panel"
+    sys.path.insert(0, str(admin_dir))
+    os.environ.setdefault("DJANGO_SETTINGS_MODULE", "cf_admin.settings")
+
+    import django
+
+    django.setup()
+
+    import pipeline_admin.admin as admin_module
+
+    copy_payload = {key: "" for key, _label in admin_module.SOCIAL_COPY_FIELD_LABELS}
+    form = admin_module.PublicationQueueAdminForm(
+        data={
+            "project_slug": "",
+            "target_keys": ["youtube:ru"],
+            "video_variant": "clean",
+            "video_source_ru": "upload",
+        },
+        copy=copy_payload,
+        project_choices=(("grandma_kitchen", "Grandma Kitchen"), ("discipline", "Discipline")),
+        video_source_choices={"ru": (), "en": ()},
+    )
+
+    assert form.is_valid() is False
+    assert "project_slug" in form.errors
+    assert "custom_video_ru" in form.errors
+
+
 def test_django_publication_queue_view_allows_undelivered_final_artifacts(monkeypatch):
     admin_dir = Path(__file__).resolve().parents[1] / "admin_panel"
     sys.path.insert(0, str(admin_dir))
@@ -1970,8 +2030,6 @@ def test_django_publication_queue_view_allows_undelivered_final_artifacts(monkey
     copy_payload = {
         "youtube_ru_title": "RU title",
         "youtube_ru_description": "RU desc",
-        "rutube_ru_title": "RT title",
-        "rutube_ru_description": "RT desc",
         "instagram_ru": "IG ru",
         "vk_ru": "VK ru",
         "tiktok_ru": "TT ru",

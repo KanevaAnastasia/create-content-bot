@@ -1,10 +1,11 @@
-"""Publication bundle assembly and queue persistence for n8n/social delivery."""
+"""Publication bundle assembly and queue persistence for direct social delivery."""
 
 from __future__ import annotations
 
 import base64
 import os
 import re
+import shutil
 import uuid
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -15,6 +16,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from .models import Project, ProjectPublishAccount, PublicationJob
+from .publication_config import project_env, project_env_name
 
 
 PUBLICATION_STATUS_DRAFT = "draft"
@@ -36,7 +38,6 @@ _ENV_ACCOUNT_SPECS = (
     ("instagram", "en", "default", "INSTAGRAM_BUSINESS_ACCOUNT_ID_EN"),
     ("tiktok", "ru", "default", "TIKTOK_OPEN_ID"),
     ("vk", "ru", "default", "VK_GROUP_ID_RU"),
-    ("rutube", "ru", "default", "RUTUBE_CHANNEL_ID_RU"),
 )
 
 
@@ -63,7 +64,6 @@ DEFAULT_PUBLICATION_VIDEO_VARIANT = "titled_subtitled_music"
 
 PUBLICATION_TARGET_LABELS = {
     "youtube:ru": "YouTube Shorts RU",
-    "rutube:ru": "RuTube RU",
     "instagram:ru": "Instagram RU",
     "vk:ru": "VK RU",
     "tiktok:ru": "TikTok RU",
@@ -166,13 +166,6 @@ def build_publication_targets(
             video_label="RU video / final master",
         ),
         PublicationTarget(
-            platform="rutube",
-            language="ru",
-            title=str(copy.get("rutube_ru_title") or "").strip() or None,
-            description=str(copy.get("rutube_ru_description") or "").strip(),
-            video_label="RU video / final master",
-        ),
-        PublicationTarget(
             platform="instagram",
             language="ru",
             title=None,
@@ -235,13 +228,13 @@ def upsert_project_publish_accounts_from_env(session: Session, project: Project)
     for platform, language, account_key, env_name in _ENV_ACCOUNT_SPECS:
         key = (platform, language, account_key)
         seen_keys.add(key)
-        external_account_id = (os.getenv(env_name) or "").strip()
+        external_account_id = project_env(project.slug, env_name)
         if not external_account_id:
             row = index.get(key)
             if row is not None:
                 row.external_account_id = None
                 row.is_active = False
-                row.meta_json = {**(row.meta_json or {}), "source_env": env_name}
+                row.meta_json = {**(row.meta_json or {}), "source_env": project_env_name(project.slug, env_name)}
             continue
         row = index.get(key)
         if row is None:
@@ -251,7 +244,7 @@ def upsert_project_publish_accounts_from_env(session: Session, project: Project)
                 language=language,
                 account_key=account_key,
                 external_account_id=external_account_id,
-                meta_json={"source_env": env_name},
+                meta_json={"source_env": project_env_name(project.slug, env_name)},
             )
             session.add(row)
             out.append(row)
@@ -259,7 +252,7 @@ def upsert_project_publish_accounts_from_env(session: Session, project: Project)
         else:
             row.external_account_id = external_account_id
             row.is_active = True
-            row.meta_json = {**(row.meta_json or {}), "source_env": env_name}
+            row.meta_json = {**(row.meta_json or {}), "source_env": project_env_name(project.slug, env_name)}
     for key, row in index.items():
         if key in seen_keys:
             continue
@@ -308,7 +301,7 @@ def export_publication_video_assets(
         path = target_dir / filename
         video_path = str((source or {}).get("video_path") or "").strip()
         if video_path and Path(video_path).exists():
-            path.write_bytes(Path(video_path).read_bytes())
+            shutil.copyfile(video_path, path)
             out[str(language)] = str(path.resolve())
             continue
         video_b64 = str((source or {}).get("video_b64") or "").strip()
@@ -333,8 +326,11 @@ def queue_publication_bundle(
     origin: str = "production_final",
     selected_target_keys: Any = None,
     video_variant: str | None = None,
+    video_source_labels: dict[str, str] | None = None,
     scheduled_at: Any = None,
 ) -> list[PublicationJob]:
+    from .social_publishers import platform_readiness
+
     project = resolve_project_for_publications(session, project_slug)
     accounts = upsert_project_publish_accounts_from_env(session, project)
     account_index = {
@@ -357,12 +353,18 @@ def queue_publication_bundle(
         if not video_path or not target.description:
             continue
         account = account_index.get((target.platform, target.language))
-        status = PUBLICATION_STATUS_APPROVED if account and account.external_account_id else PUBLICATION_STATUS_NEEDS_MANUAL_ACTION
+        readiness = platform_readiness(project.slug, target.platform, target.language)
+        status = (
+            PUBLICATION_STATUS_APPROVED
+            if readiness.ready and account and account.external_account_id
+            else PUBLICATION_STATUS_NEEDS_MANUAL_ACTION
+        )
         if normalized_scheduled_at is not None and status == PUBLICATION_STATUS_APPROVED:
             status = PUBLICATION_STATUS_SCHEDULED
         account_key = account.account_key if account else "default"
         external_account_id = account.external_account_id if account else None
         publish_policy = account.publish_policy if account else "manual_review_required"
+        source_label = str((video_source_labels or {}).get(target.language) or "").strip()
         job = PublicationJob(
             project_id=project.id,
             bundle_key=bundle_key,
@@ -373,7 +375,7 @@ def queue_publication_bundle(
             external_account_id=external_account_id,
             status=status,
             video_path=video_path,
-            video_label=f"{target.language.upper()} video / {PUBLICATION_VIDEO_VARIANT_LABELS[normalized_variant]}",
+            video_label=source_label or f"{target.language.upper()} video / {PUBLICATION_VIDEO_VARIANT_LABELS[normalized_variant]}",
             title=target.title,
             description=target.description,
             hashtags_json=extract_hashtags(target.description),
@@ -392,9 +394,14 @@ def queue_publication_bundle(
                 "target_key": target.key,
                 "target_label": publication_target_label(target),
                 "video_variant": normalized_variant,
+                "video_source_label": source_label or None,
                 "scheduled_at": normalized_scheduled_at.isoformat() if normalized_scheduled_at else None,
+                "direct_api_ready": readiness.ready,
+                "missing_configuration": list(readiness.missing),
             },
         )
+        if not readiness.ready:
+            job.publish_error = readiness.note or f"Missing configuration: {', '.join(readiness.missing)}"
         session.add(job)
         jobs.append(job)
     session.flush()
@@ -409,7 +416,7 @@ def publication_jobs_summary(jobs: list[PublicationJob]) -> str:
     manual = [job for job in jobs if job.status == PUBLICATION_STATUS_NEEDS_MANUAL_ACTION]
     lines = [
         f"Создано публикационных jobs: {len(jobs)}.",
-        f"Автоготовы для n8n: {len(approved) + len(scheduled)}.",
+        f"Готовы к отправке через официальные API: {len(approved) + len(scheduled)}.",
         f"Запланированы: {len(scheduled)}.",
         f"Требуют ручной/полуручной ветки: {len(manual)}.",
     ]
