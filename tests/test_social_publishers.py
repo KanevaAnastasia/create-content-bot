@@ -1,5 +1,8 @@
+import base64
+import json
 from pathlib import Path
 from unittest.mock import Mock, call
+from urllib.parse import parse_qs, urlparse
 
 import pytest
 
@@ -155,8 +158,18 @@ def test_vk_oauth_pkce_and_code_exchange(monkeypatch) -> None:
         code_challenge=challenge,
     )
     assert url.startswith("https://id.vk.ru/authorize?")
-    assert "client_id=54871992" in url
-    assert "scope=video+groups+wall" in url
+    query = parse_qs(urlparse(url).query)
+    assert query["client_id"] == ["54871992"]
+    assert query["app_id"] == ["54871992"]
+    assert query["redirect_uri"] == ["http://127.0.0.1/callback"]
+    assert query["scope"] == ["video groups wall"]
+    assert query["sdk_type"] == ["vkid"]
+    assert query["v"] == ['"2.6.1"']
+    stats_info = json.loads(base64.b64decode(query["stats_info"][0]))
+    assert stats_info == {
+        "flow_source": "from_custom_auth",
+        "session_id": "expected-state",
+    }
 
     response = Mock(ok=True, status_code=200)
     response.json.return_value = {

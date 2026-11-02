@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import base64
 import hashlib
+import json
 import secrets
 from dataclasses import dataclass
 from typing import Any
@@ -14,6 +15,7 @@ import requests
 
 VK_ID_AUTHORIZE_URL = "https://id.vk.ru/authorize"
 VK_ID_TOKEN_URL = "https://id.vk.ru/oauth2/auth"
+VK_ID_WEB_SDK_VERSION = '"2.6.1"'
 VK_PUBLISH_SCOPES = ("video", "groups", "wall")
 DEFAULT_REQUEST_TIMEOUT = (20, 300)
 
@@ -40,16 +42,26 @@ def new_pkce_pair() -> tuple[str, str]:
 def build_authorize_url(
     *, client_id: str, redirect_uri: str, state: str, code_challenge: str
 ) -> str:
+    stats_info = base64.b64encode(
+        json.dumps(
+            {"flow_source": "from_custom_auth", "session_id": state},
+            separators=(",", ":"),
+        ).encode("utf-8")
+    ).decode("ascii")
     query = urlencode(
         {
-            "response_type": "code",
-            "client_id": str(client_id),
-            "redirect_uri": redirect_uri,
             "code_challenge": code_challenge,
             "code_challenge_method": "s256",
+            "client_id": str(client_id),
+            "response_type": "code",
             "scope": " ".join(VK_PUBLISH_SCOPES),
             "state": state,
             "prompt": "consent",
+            "stats_info": stats_info,
+            "v": VK_ID_WEB_SDK_VERSION,
+            "sdk_type": "vkid",
+            "app_id": str(client_id),
+            "redirect_uri": redirect_uri,
         }
     )
     return f"{VK_ID_AUTHORIZE_URL}?{query}"

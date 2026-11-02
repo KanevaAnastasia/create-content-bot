@@ -4919,7 +4919,10 @@ class PublicationJobAdmin(admin.ModelAdmin):
         html = format_html(
             '<!doctype html><html><head><title>Connect VK publishing</title></head><body>'
             '<div id="container"><div id="content" class="colM"><h1>Connect VK publishing API</h1>'
-            '<p>First add this exact redirect URL to the Web platform settings of the selected VK ID App:</p>'
+            '<p><strong>Use a VK ID application with the Web platform.</strong> A VK Mini App ID will not work. '
+            'Create it in the <a href="https://id.vk.com/about/business/go" target="_blank" rel="noopener">VK ID application cabinet</a>. '
+            'Protected and service keys are not used here.</p>'
+            '<p>Add this exact redirect URL to the trusted redirect URLs of that VK ID Web application:</p>'
             '<p><code>{}</code></p>'
             '<p>The authorization requests only <code>video</code>, <code>groups</code>, and <code>wall</code>. '
             'The returned user and managed community are checked against the selected project settings before any token is saved.</p>'
