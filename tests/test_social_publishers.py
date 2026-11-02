@@ -10,6 +10,8 @@ from app.publication_config import project_env, project_env_name
 from app.publication_media import publication_media_token, publication_media_token_is_valid
 from app.social_publishers import (
     PublicationDeliveryError,
+    _tiktok_access_token,
+    _youtube_env,
     _vk_access_token,
     _verify_vk_identity,
     platform_readiness,
@@ -50,7 +52,7 @@ def test_platform_readiness_reports_project_scoped_missing_keys(monkeypatch) -> 
     readiness = platform_readiness("discipline", "youtube", "ru")
 
     assert readiness.ready is False
-    assert "PUBLISH_DISCIPLINE_YOUTUBE_REFRESH_TOKEN" in readiness.missing
+    assert "PUBLISH_DISCIPLINE_YOUTUBE_REFRESH_TOKEN_RU" in readiness.missing
 
 
 def test_platform_readiness_accepts_complete_project_credentials(monkeypatch) -> None:
@@ -66,6 +68,15 @@ def test_platform_readiness_accepts_complete_project_credentials(monkeypatch) ->
 
     assert readiness.ready is True
     assert readiness.missing == ()
+
+
+def test_youtube_language_credentials_override_legacy(monkeypatch) -> None:
+    monkeypatch.setenv("PUBLISH_GRANDMA_KITCHEN_YOUTUBE_REFRESH_TOKEN", "legacy")
+    monkeypatch.setenv("PUBLISH_GRANDMA_KITCHEN_YOUTUBE_REFRESH_TOKEN_RU", "russian")
+    monkeypatch.setenv("PUBLISH_GRANDMA_KITCHEN_YOUTUBE_REFRESH_TOKEN_EN", "english")
+
+    assert _youtube_env("grandma_kitchen", "YOUTUBE_REFRESH_TOKEN", "ru") == "russian"
+    assert _youtube_env("grandma_kitchen", "YOUTUBE_REFRESH_TOKEN", "en") == "english"
 
 
 def test_instagram_readiness_uses_shared_https_and_project_credentials(monkeypatch) -> None:
@@ -150,6 +161,46 @@ def test_vk_access_token_refreshes_and_persists_rotated_values(monkeypatch) -> N
             "VK_ACCESS_TOKEN": "new-access",
             "VK_REFRESH_TOKEN": "new-refresh",
             "VK_DEVICE_ID": "new-device",
+        },
+    )
+
+
+def test_tiktok_access_token_refreshes_and_persists_rotated_values(monkeypatch) -> None:
+    for key, value in {
+        "TIKTOK_CLIENT_KEY": "client-key",
+        "TIKTOK_CLIENT_SECRET": "client-secret",
+        "TIKTOK_REFRESH_TOKEN": "old-refresh",
+        "TIKTOK_OPEN_ID": "open-1",
+    }.items():
+        monkeypatch.setenv(f"PUBLISH_GRANDMA_KITCHEN_{key}", value)
+    response = Mock(ok=True, status_code=200)
+    response.json.return_value = {
+        "access_token": "new-access",
+        "refresh_token": "new-refresh",
+        "open_id": "open-1",
+    }
+    post = Mock(return_value=response)
+    store = Mock()
+    monkeypatch.setattr("app.social_publishers.requests.post", post)
+    monkeypatch.setattr("app.social_publishers.set_project_secrets", store)
+
+    assert _tiktok_access_token("grandma_kitchen") == "new-access"
+    post.assert_called_once_with(
+        "https://open.tiktokapis.com/v2/oauth/token/",
+        data={
+            "client_key": "client-key",
+            "client_secret": "client-secret",
+            "grant_type": "refresh_token",
+            "refresh_token": "old-refresh",
+        },
+        timeout=(20, 300),
+    )
+    store.assert_called_once_with(
+        "grandma_kitchen",
+        {
+            "TIKTOK_ACCESS_TOKEN": "new-access",
+            "TIKTOK_REFRESH_TOKEN": "new-refresh",
+            "TIKTOK_OPEN_ID": "open-1",
         },
     )
 

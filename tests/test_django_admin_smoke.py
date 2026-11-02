@@ -839,6 +839,8 @@ def test_django_admin_allows_series_binding_and_day_editing():
         PublicationJobAdmin,
         VideoOverviewAdmin,
     )
+    from pipeline_admin.models import PublicationJob
+    from django.contrib.admin.sites import AdminSite
 
     assert "series" in GenerationRunAdmin.list_editable
     assert "series_video_index" in GenerationRunAdmin.list_editable
@@ -854,6 +856,12 @@ def test_django_admin_allows_series_binding_and_day_editing():
     assert "publication_prep" in GenerationRunAdmin.fields
     assert "status" in PublicationJobAdmin.list_editable
     assert "is_active" in ProjectPublishAccountAdmin.list_editable
+    publication_admin = PublicationJobAdmin(PublicationJob, AdminSite())
+    custom_url_names = {url.name for url in publication_admin.get_urls() if url.name}
+    assert "pipeline_admin_publicationjob_youtube_oauth" in custom_url_names
+    assert "pipeline_admin_publicationjob_youtube_oauth_callback" in custom_url_names
+    assert "pipeline_admin_publicationjob_tiktok_oauth" in custom_url_names
+    assert "pipeline_admin_publicationjob_tiktok_oauth_callback" in custom_url_names
 
 
 def test_django_content_series_admin_accepts_empty_meta_json():

@@ -65,6 +65,15 @@ from app.publications import (
 from app.publication_config import project_env
 from app.publish_secret_store import set_project_secrets
 from app.social_publishers import _verify_vk_identity, platform_readiness
+from app.social_oauth import (
+    build_tiktok_authorize_url,
+    build_youtube_authorize_url,
+    exchange_tiktok_code,
+    exchange_youtube_code,
+    new_tiktok_pkce_pair,
+    tiktok_user,
+    youtube_channels,
+)
 from app.vk_oauth import build_authorize_url, exchange_authorization_code, new_pkce_pair
 from app.scheduled_generation import (
     DEFAULT_TITLE_COLOR as SCHEDULED_DEFAULT_TITLE_COLOR,
@@ -2473,6 +2482,41 @@ class VKOAuthSetupAdminForm(django_forms.Form):
         self.fields["project_slug"].choices = project_choices
 
 
+class YouTubeOAuthSetupAdminForm(django_forms.Form):
+    project_slug = django_forms.ChoiceField(required=True, label="Project / account set")
+    language = django_forms.ChoiceField(
+        required=True,
+        choices=(("ru", "Russian channel"), ("en", "English channel")),
+        label="Destination",
+    )
+    client_id = django_forms.CharField(required=True, label="Google OAuth Client ID", max_length=256)
+    client_secret = django_forms.CharField(
+        required=True,
+        label="Google OAuth Client secret",
+        max_length=256,
+        widget=django_forms.PasswordInput,
+    )
+
+    def __init__(self, *args, project_choices=(), **kwargs):
+        super().__init__(*args, **kwargs)
+        self.fields["project_slug"].choices = project_choices
+
+
+class TikTokOAuthSetupAdminForm(django_forms.Form):
+    project_slug = django_forms.ChoiceField(required=True, label="Project / account set")
+    client_key = django_forms.CharField(required=True, label="TikTok Client key", max_length=256)
+    client_secret = django_forms.CharField(
+        required=True,
+        label="TikTok Client secret",
+        max_length=256,
+        widget=django_forms.PasswordInput,
+    )
+
+    def __init__(self, *args, project_choices=(), **kwargs):
+        super().__init__(*args, **kwargs)
+        self.fields["project_slug"].choices = project_choices
+
+
 def _publication_project_choices() -> tuple[tuple[str, str], ...]:
     try:
         projects = Project.objects.filter(is_active=True).exclude(slug__startswith="guest-").order_by("title", "slug")
@@ -4865,6 +4909,26 @@ class PublicationJobAdmin(admin.ModelAdmin):
                 self.admin_site.admin_view(self.vk_oauth_callback_view),
                 name="pipeline_admin_publicationjob_vk_oauth_callback",
             ),
+            path(
+                "youtube-oauth/",
+                self.admin_site.admin_view(self.youtube_oauth_view),
+                name="pipeline_admin_publicationjob_youtube_oauth",
+            ),
+            path(
+                "youtube-oauth/callback/",
+                self.admin_site.admin_view(self.youtube_oauth_callback_view),
+                name="pipeline_admin_publicationjob_youtube_oauth_callback",
+            ),
+            path(
+                "tiktok-oauth/",
+                self.admin_site.admin_view(self.tiktok_oauth_view),
+                name="pipeline_admin_publicationjob_tiktok_oauth",
+            ),
+            path(
+                "tiktok-oauth/callback/",
+                self.admin_site.admin_view(self.tiktok_oauth_callback_view),
+                name="pipeline_admin_publicationjob_tiktok_oauth_callback",
+            ),
         ]
         return custom + urls
 
@@ -4872,7 +4936,246 @@ class PublicationJobAdmin(admin.ModelAdmin):
         extra = dict(extra_context or {})
         extra["prepare_publication_url"] = reverse("admin:pipeline_admin_publicationjob_prepare")
         extra["vk_oauth_url"] = reverse("admin:pipeline_admin_publicationjob_vk_oauth")
+        extra["youtube_oauth_url"] = reverse("admin:pipeline_admin_publicationjob_youtube_oauth")
+        extra["tiktok_oauth_url"] = reverse("admin:pipeline_admin_publicationjob_tiktok_oauth")
         return super().changelist_view(request, extra_context=extra)
+
+    def youtube_oauth_view(self, request):
+        project_choices = _publication_project_choices()
+        initial_project = "grandma_kitchen" if any(key == "grandma_kitchen" for key, _ in project_choices) else (
+            project_choices[0][0] if project_choices else ""
+        )
+        initial_language = "ru"
+        initial_client_id = (
+            project_env(initial_project, "YOUTUBE_CLIENT_ID_RU")
+            or project_env(initial_project, "YOUTUBE_CLIENT_ID")
+            if initial_project
+            else ""
+        )
+        form = YouTubeOAuthSetupAdminForm(
+            request.POST or None,
+            project_choices=project_choices,
+            initial={
+                "project_slug": initial_project,
+                "language": initial_language,
+                "client_id": initial_client_id,
+            },
+        )
+        callback_url = request.build_absolute_uri(
+            reverse("admin:pipeline_admin_publicationjob_youtube_oauth_callback")
+        )
+        if request.method == "POST" and form.is_valid():
+            project_slug = str(form.cleaned_data["project_slug"])
+            language = str(form.cleaned_data["language"]).lower()
+            suffix = language.upper()
+            client_id = str(form.cleaned_data["client_id"]).strip()
+            client_secret = str(form.cleaned_data["client_secret"]).strip()
+            state = uuid.uuid4().hex + uuid.uuid4().hex
+            request.session[f"youtube_oauth:{state}"] = {
+                "project_slug": project_slug,
+                "language": language,
+                "client_id": client_id,
+                "redirect_uri": callback_url,
+                "created_at": int(time.time()),
+            }
+            request.session.modified = True
+            set_project_secrets(
+                project_slug,
+                {
+                    f"YOUTUBE_CLIENT_ID_{suffix}": client_id,
+                    f"YOUTUBE_CLIENT_SECRET_{suffix}": client_secret,
+                    f"YOUTUBE_REDIRECT_URI_{suffix}": callback_url,
+                },
+            )
+            return HttpResponseRedirect(
+                build_youtube_authorize_url(
+                    client_id=client_id,
+                    redirect_uri=callback_url,
+                    state=state,
+                )
+            )
+        csrf_token = get_token(request)
+        html = format_html(
+            '<!doctype html><html><head><title>Connect YouTube publishing</title></head><body>'
+            '<div id="container"><div id="content" class="colM"><h1>Connect YouTube publishing API</h1>'
+            '<p>Create a Google OAuth client of type <strong>Web application</strong>, enable YouTube Data API v3, '
+            'and add this exact authorized redirect URI:</p><p><code>{}</code></p>'
+            '<p>The connection requests only <code>youtube.upload</code> and <code>youtube.readonly</code>. '
+            'The returned channel ID is checked and stored separately for RU and EN.</p>'
+            '<form method="post"><input type="hidden" name="csrfmiddlewaretoken" value="{}">{}'
+            '<button type="submit" class="default">Continue to Google</button></form>'
+            '<p><a href="{}">Back to publication jobs</a></p></div></div></body></html>',
+            callback_url,
+            csrf_token,
+            mark_safe(form.as_p()),
+            reverse("admin:pipeline_admin_publicationjob_changelist"),
+        )
+        return HttpResponse(html)
+
+    def youtube_oauth_callback_view(self, request):
+        state = str(request.GET.get("state") or "")
+        flow = request.session.pop(f"youtube_oauth:{state}", None) if state else None
+        request.session.modified = True
+        if not isinstance(flow, dict) or int(time.time()) - int(flow.get("created_at") or 0) > 900:
+            return HttpResponse("YouTube authorization session is missing or expired.", status=400)
+        error = str(request.GET.get("error_description") or request.GET.get("error") or "").strip()
+        if error:
+            return HttpResponse(f"YouTube authorization was not completed: {escape(error)}", status=400)
+        code = str(request.GET.get("code") or "").strip()
+        if not code:
+            return HttpResponse("Google did not return an authorization code.", status=400)
+        project_slug = str(flow["project_slug"])
+        language = str(flow["language"]).lower()
+        suffix = language.upper()
+        try:
+            tokens = exchange_youtube_code(
+                client_id=str(flow["client_id"]),
+                client_secret=(
+                    project_env(project_slug, f"YOUTUBE_CLIENT_SECRET_{suffix}")
+                    or project_env(project_slug, "YOUTUBE_CLIENT_SECRET")
+                ),
+                redirect_uri=str(flow["redirect_uri"]),
+                code=code,
+            )
+            channels = youtube_channels(tokens.access_token)
+            expected_channel_id = project_env(project_slug, f"YOUTUBE_CHANNEL_ID_{suffix}")
+            channel_ids = {row["id"] for row in channels}
+            if expected_channel_id and expected_channel_id not in channel_ids:
+                raise ValueError(
+                    f"Google OAuth returned channels {sorted(channel_ids) or ['none']}, expected {expected_channel_id}."
+                )
+            if not expected_channel_id:
+                if len(channels) != 1:
+                    raise ValueError(
+                        f"Expected exactly one YouTube channel, got {[(row['id'], row['title']) for row in channels]}."
+                    )
+                expected_channel_id = channels[0]["id"]
+            set_project_secrets(
+                project_slug,
+                {
+                    f"YOUTUBE_REFRESH_TOKEN_{suffix}": tokens.refresh_token,
+                    f"YOUTUBE_CHANNEL_ID_{suffix}": expected_channel_id,
+                },
+            )
+        except Exception as exc:
+            return HttpResponse(f"YouTube connection failed: {escape(str(exc))}", status=400)
+        channel_title = next(
+            (row["title"] for row in channels if row["id"] == expected_channel_id),
+            expected_channel_id,
+        )
+        messages.success(
+            request,
+            f"YouTube {language.upper()} connected for {project_slug}: {channel_title} ({expected_channel_id}).",
+        )
+        return HttpResponseRedirect(reverse("admin:pipeline_admin_publicationjob_changelist"))
+
+    def tiktok_oauth_view(self, request):
+        project_choices = _publication_project_choices()
+        initial_project = "grandma_kitchen" if any(key == "grandma_kitchen" for key, _ in project_choices) else (
+            project_choices[0][0] if project_choices else ""
+        )
+        form = TikTokOAuthSetupAdminForm(
+            request.POST or None,
+            project_choices=project_choices,
+            initial={
+                "project_slug": initial_project,
+                "client_key": project_env(initial_project, "TIKTOK_CLIENT_KEY") if initial_project else "",
+            },
+        )
+        callback_path = reverse("admin:pipeline_admin_publicationjob_tiktok_oauth_callback")
+        callback_url = f"http://localhost:8000{callback_path}"
+        if request.method == "POST" and form.is_valid():
+            project_slug = str(form.cleaned_data["project_slug"])
+            client_key = str(form.cleaned_data["client_key"]).strip()
+            client_secret = str(form.cleaned_data["client_secret"]).strip()
+            verifier, challenge = new_tiktok_pkce_pair()
+            state = uuid.uuid4().hex + uuid.uuid4().hex
+            request.session[f"tiktok_oauth:{state}"] = {
+                "project_slug": project_slug,
+                "client_key": client_key,
+                "redirect_uri": callback_url,
+                "code_verifier": verifier,
+                "created_at": int(time.time()),
+            }
+            request.session.modified = True
+            set_project_secrets(
+                project_slug,
+                {
+                    "TIKTOK_CLIENT_KEY": client_key,
+                    "TIKTOK_CLIENT_SECRET": client_secret,
+                    "TIKTOK_REDIRECT_URI": callback_url,
+                },
+            )
+            return HttpResponseRedirect(
+                build_tiktok_authorize_url(
+                    client_key=client_key,
+                    redirect_uri=callback_url,
+                    state=state,
+                    code_challenge=challenge,
+                )
+            )
+        csrf_token = get_token(request)
+        html = format_html(
+            '<!doctype html><html><head><title>Connect TikTok publishing</title></head><body>'
+            '<div id="container"><div id="content" class="colM"><h1>Connect TikTok publishing API</h1>'
+            '<p>Use a TikTok Developer app with the <strong>Desktop</strong> platform, Login Kit, and Content Posting API. '
+            'Add this exact redirect URI:</p><p><code>{}</code></p>'
+            '<p>Request approval for <code>video.publish</code>. Until the app passes TikTok audit, direct posts are restricted '
+            'to <code>SELF_ONLY</code>.</p>'
+            '<form method="post"><input type="hidden" name="csrfmiddlewaretoken" value="{}">{}'
+            '<button type="submit" class="default">Continue to TikTok</button></form>'
+            '<p><a href="{}">Back to publication jobs</a></p></div></div></body></html>',
+            callback_url,
+            csrf_token,
+            mark_safe(form.as_p()),
+            reverse("admin:pipeline_admin_publicationjob_changelist"),
+        )
+        return HttpResponse(html)
+
+    def tiktok_oauth_callback_view(self, request):
+        state = str(request.GET.get("state") or "")
+        flow = request.session.pop(f"tiktok_oauth:{state}", None) if state else None
+        request.session.modified = True
+        if not isinstance(flow, dict) or int(time.time()) - int(flow.get("created_at") or 0) > 900:
+            return HttpResponse("TikTok authorization session is missing or expired.", status=400)
+        error = str(request.GET.get("error_description") or request.GET.get("error") or "").strip()
+        if error:
+            return HttpResponse(f"TikTok authorization was not completed: {escape(error)}", status=400)
+        code = str(request.GET.get("code") or "").strip()
+        if not code:
+            return HttpResponse("TikTok did not return an authorization code.", status=400)
+        project_slug = str(flow["project_slug"])
+        try:
+            tokens = exchange_tiktok_code(
+                client_key=str(flow["client_key"]),
+                client_secret=project_env(project_slug, "TIKTOK_CLIENT_SECRET"),
+                redirect_uri=str(flow["redirect_uri"]),
+                code=code,
+                code_verifier=str(flow["code_verifier"]),
+            )
+            expected_open_id = project_env(project_slug, "TIKTOK_OPEN_ID")
+            if expected_open_id and tokens.open_id != expected_open_id:
+                raise ValueError(
+                    f"TikTok token belongs to {tokens.open_id}, expected {expected_open_id}."
+                )
+            user = tiktok_user(tokens.access_token)
+            if user.get("open_id") and user["open_id"] != tokens.open_id:
+                raise ValueError("TikTok user lookup returned a different open_id.")
+            set_project_secrets(
+                project_slug,
+                {
+                    "TIKTOK_ACCESS_TOKEN": tokens.access_token,
+                    "TIKTOK_REFRESH_TOKEN": tokens.refresh_token,
+                    "TIKTOK_OPEN_ID": tokens.open_id,
+                },
+            )
+        except Exception as exc:
+            return HttpResponse(f"TikTok connection failed: {escape(str(exc))}", status=400)
+        messages.success(
+            request,
+            f"TikTok publishing connected for {project_slug}: {user.get('display_name') or tokens.open_id}.",
+        )
+        return HttpResponseRedirect(reverse("admin:pipeline_admin_publicationjob_changelist"))
 
     def vk_oauth_view(self, request):
         project_choices = _publication_project_choices()

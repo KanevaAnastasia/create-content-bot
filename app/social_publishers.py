@@ -56,16 +56,13 @@ def _required_keys(platform: str, language: str) -> tuple[str, ...]:
     lang = str(language or "ru").strip().upper()
     return {
         "youtube": (
-            "YOUTUBE_CLIENT_ID",
-            "YOUTUBE_CLIENT_SECRET",
-            "YOUTUBE_REFRESH_TOKEN",
             f"YOUTUBE_CHANNEL_ID_{lang}",
         ),
         "instagram": (
             "INSTAGRAM_ACCESS_TOKEN",
             f"INSTAGRAM_BUSINESS_ACCOUNT_ID_{lang}",
         ),
-        "tiktok": ("TIKTOK_ACCESS_TOKEN", "TIKTOK_OPEN_ID"),
+        "tiktok": ("TIKTOK_OPEN_ID",),
         "vk": (f"VK_GROUP_ID_{lang}",),
     }.get(str(platform or "").strip().lower(), ())
 
@@ -75,6 +72,18 @@ def platform_readiness(project_slug: str, platform: str, language: str) -> Platf
     normalized_language = str(language or "").strip().lower()
     required = _required_keys(normalized_platform, normalized_language)
     missing = [project_env_name(project_slug, key) for key in required if not project_env(project_slug, key)]
+    if normalized_platform == "youtube":
+        lang = normalized_language.upper()
+        for key in ("YOUTUBE_CLIENT_ID", "YOUTUBE_CLIENT_SECRET", "YOUTUBE_REFRESH_TOKEN"):
+            if not (
+                project_env(project_slug, f"{key}_{lang}")
+                or project_env(project_slug, key)
+            ):
+                missing.append(project_env_name(project_slug, f"{key}_{lang}"))
+    if normalized_platform == "tiktok" and not project_env(project_slug, "TIKTOK_ACCESS_TOKEN"):
+        for key in ("TIKTOK_CLIENT_KEY", "TIKTOK_CLIENT_SECRET", "TIKTOK_REFRESH_TOKEN"):
+            if not project_env(project_slug, key):
+                missing.append(project_env_name(project_slug, key))
     if normalized_platform == "vk":
         if not (
             project_env(project_slug, "VK_USER_ID")
@@ -113,13 +122,18 @@ def _response_json(response: requests.Response, context: str) -> dict[str, Any]:
     return payload if isinstance(payload, dict) else {}
 
 
-def _youtube_access_token(project_slug: str) -> str:
+def _youtube_env(project_slug: str, key: str, language: str) -> str:
+    lang = str(language or "ru").strip().upper()
+    return project_env(project_slug, f"{key}_{lang}") or project_env(project_slug, key)
+
+
+def _youtube_access_token(project_slug: str, language: str) -> str:
     response = requests.post(
         "https://oauth2.googleapis.com/token",
         data={
-            "client_id": project_env(project_slug, "YOUTUBE_CLIENT_ID"),
-            "client_secret": project_env(project_slug, "YOUTUBE_CLIENT_SECRET"),
-            "refresh_token": project_env(project_slug, "YOUTUBE_REFRESH_TOKEN"),
+            "client_id": _youtube_env(project_slug, "YOUTUBE_CLIENT_ID", language),
+            "client_secret": _youtube_env(project_slug, "YOUTUBE_CLIENT_SECRET", language),
+            "refresh_token": _youtube_env(project_slug, "YOUTUBE_REFRESH_TOKEN", language),
             "grant_type": "refresh_token",
         },
         timeout=DEFAULT_REQUEST_TIMEOUT,
@@ -132,7 +146,7 @@ def _youtube_access_token(project_slug: str) -> str:
 
 
 def _publish_youtube(job: PublicationJob, project_slug: str) -> str:
-    token = _youtube_access_token(project_slug)
+    token = _youtube_access_token(project_slug, str(job.language or "ru"))
     headers = {"Authorization": f"Bearer {token}"}
     channel_response = requests.get(
         "https://www.googleapis.com/youtube/v3/channels",
@@ -248,8 +262,52 @@ def _publish_instagram(job: PublicationJob, project_slug: str) -> str:
     return media_id
 
 
+def _tiktok_access_token(project_slug: str) -> str:
+    client_key = project_env(project_slug, "TIKTOK_CLIENT_KEY")
+    client_secret = project_env(project_slug, "TIKTOK_CLIENT_SECRET")
+    refresh_token = project_env(project_slug, "TIKTOK_REFRESH_TOKEN")
+    if not all((client_key, client_secret, refresh_token)):
+        token = project_env(project_slug, "TIKTOK_ACCESS_TOKEN")
+        if not token:
+            raise PublicationDeliveryError("TikTok OAuth credentials are not configured.")
+        return token
+    response = requests.post(
+        "https://open.tiktokapis.com/v2/oauth/token/",
+        data={
+            "client_key": client_key,
+            "client_secret": client_secret,
+            "grant_type": "refresh_token",
+            "refresh_token": refresh_token,
+        },
+        timeout=DEFAULT_REQUEST_TIMEOUT,
+    )
+    payload = _response_json(response, "TikTok OAuth refresh")
+    if payload.get("error"):
+        raise PublicationDeliveryError(
+            f"TikTok OAuth refresh: {payload.get('error_description') or payload.get('error')}"
+        )
+    access_token = str(payload.get("access_token") or "").strip()
+    rotated_refresh_token = str(payload.get("refresh_token") or "").strip()
+    open_id = str(payload.get("open_id") or "").strip()
+    expected_open_id = project_env(project_slug, "TIKTOK_OPEN_ID")
+    if expected_open_id and open_id and open_id != expected_open_id:
+        raise PublicationDeliveryError(
+            f"TikTok token belongs to {open_id}, expected {expected_open_id}."
+        )
+    if not access_token or not rotated_refresh_token:
+        raise PublicationDeliveryError("TikTok OAuth refresh returned incomplete credentials.")
+    values = {
+        "TIKTOK_ACCESS_TOKEN": access_token,
+        "TIKTOK_REFRESH_TOKEN": rotated_refresh_token,
+    }
+    if open_id:
+        values["TIKTOK_OPEN_ID"] = open_id
+    set_project_secrets(project_slug, values)
+    return access_token
+
+
 def _publish_tiktok(job: PublicationJob, project_slug: str) -> str:
-    access_token = project_env(project_slug, "TIKTOK_ACCESS_TOKEN")
+    access_token = _tiktok_access_token(project_slug)
     headers = {"Authorization": f"Bearer {access_token}", "Content-Type": "application/json; charset=UTF-8"}
     creator_response = requests.post(
         "https://open.tiktokapis.com/v2/post/publish/creator_info/query/",

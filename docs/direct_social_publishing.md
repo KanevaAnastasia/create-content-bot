@@ -15,9 +15,9 @@ RuTube из проекта исключён. Поддерживаются YouTub
 
 ## Исполнение
 
-- YouTube: OAuth refresh, проверка ожидаемого channel ID, resumable upload.
+- YouTube: отдельный OAuth refresh для RU/EN, проверка ожидаемого channel ID, resumable upload.
 - Instagram: Reels container по подписанному HTTPS URL, ожидание обработки, `media_publish`.
-- TikTok: creator info, Direct Post init и chunked `FILE_UPLOAD`.
+- TikTok: автоматический OAuth refresh, creator info, Direct Post init и chunked `FILE_UPLOAD`.
 - VK: `video.save` и загрузка MP4 на выданный URL.
 
 Celery Beat раз в минуту подбирает запланированные задания. Состояние, внешний ID и ошибка сохраняются

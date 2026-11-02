@@ -11,13 +11,15 @@
 
 ## YouTube
 
-- `YOUTUBE_CLIENT_ID`
-- `YOUTUBE_CLIENT_SECRET`
-- `YOUTUBE_REFRESH_TOKEN`
+- `YOUTUBE_CLIENT_ID_RU`, `YOUTUBE_CLIENT_SECRET_RU`, `YOUTUBE_REFRESH_TOKEN_RU`
+- `YOUTUBE_CLIENT_ID_EN`, `YOUTUBE_CLIENT_SECRET_EN`, `YOUTUBE_REFRESH_TOKEN_EN` for a separate English channel
 - `YOUTUBE_CHANNEL_ID_RU` и при необходимости `YOUTUBE_CHANNEL_ID_EN`
 
 Нужен OAuth-клиент Google с YouTube Data API v3 и scope `youtube.upload`. Перед загрузкой код получает
-канал текущего OAuth-пользователя и сравнивает его с настроенным channel ID.
+канал текущего OAuth-пользователя и сравнивает его с настроенным channel ID. Подключение выполняется
+кнопкой **Connect YouTube publishing API** в списке публикаций. RU и EN хранят отдельные refresh token,
+поэтому каналы могут принадлежать разным Google-пользователям. Старые ключи без языкового суффикса
+поддерживаются как резервная совместимость.
 
 ## Instagram
 
@@ -35,11 +37,18 @@ MP4 по публичному HTTPS URL, поэтому также обязат�
 ## TikTok
 
 - `TIKTOK_ACCESS_TOKEN`
+- `TIKTOK_REFRESH_TOKEN`
+- `TIKTOK_CLIENT_KEY`
+- `TIKTOK_CLIENT_SECRET`
+- `TIKTOK_REDIRECT_URI`
 - `TIKTOK_OPEN_ID`
 
 Приложению TikTok нужен Content Posting API и scope `video.publish`. По умолчанию используется
 `SELF_ONLY`, а ролик маркируется как AI-generated. Эти общие параметры можно изменить через
-`TIKTOK_PRIVACY_LEVEL` и `TIKTOK_IS_AIGC`.
+`TIKTOK_PRIVACY_LEVEL` и `TIKTOK_IS_AIGC`. Кнопка **Connect TikTok publishing API** использует
+официальный Desktop OAuth + PKCE и локальный callback `http://localhost:8000/...`; access token
+обновляется и ротированный refresh token сохраняется автоматически. До прохождения аудита TikTok
+прямые публикации доступны только с приватностью `SELF_ONLY`.
 
 ## VK
 
@@ -52,9 +61,9 @@ MP4 по публичному HTTPS URL, поэтому также обязат�
 - `VK_USER_SCREEN_NAME` (резервная проверка для старой конфигурации)
 - `VK_GROUP_ID_RU`
 
-`video.save` принимает пользовательский токен администратора, а `VK_GROUP_ID_RU` задаёт сообщество,
+`video.save` принимает пользовательский токен, а `VK_GROUP_ID_RU` задаёт сообщество,
 куда сохраняется и публикуется видео. Перед каждой загрузкой приложение сверяет неизменяемый числовой
-ID владельца токена и проверяет, что он администрирует именно указанное сообщество. Токену нужны права `video`,
+ID владельца токена и точный ID настроенного сообщества; фактические права на загрузку проверяет VK. Токену нужны права `video`,
 `groups`, `wall` и серверный доступ. Для новых приложений VK ID выдаёт access token на один час вместе
 с refresh token; перед включением фоновой публикации оба должны быть настроены и проверены.
 
