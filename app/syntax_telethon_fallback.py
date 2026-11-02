@@ -304,6 +304,7 @@ async def _wait_for_latest_syntax_configure_button(
     reply_anchor: int,
     poll: float,
     attempts: int = 6,
+    require_prompt_saved: bool = False,
 ) -> tuple[Any | None, Any | None]:
     """Probe the newest bot replies without consuming legacy video iterators.
 
@@ -328,6 +329,18 @@ async def _wait_for_latest_syntax_configure_button(
             mid = int(getattr(message, "id", 0) or 0)
             if mid <= reply_anchor:
                 continue
+            if require_prompt_saved:
+                message_text = str(
+                    getattr(message, "raw_text", "")
+                    or getattr(message, "text", "")
+                    or ""
+                ).lower()
+                if not re.search(r"промпт\s+сохран|prompt\s+saved", message_text):
+                    # Veo posts identical WebView buttons for the uploaded
+                    # file and for the prompt.  The file reply can arrive
+                    # first; opening it races the prompt save and launches a
+                    # stale draft.  Wait for the prompt acknowledgement.
+                    continue
             button = _syntax_find_configure_button(message)
             if button is not None:
                 return message, button
@@ -956,7 +969,12 @@ def _wait_for_syntax_kling_form_ready_sync(page: Any, *, timeout_ms: int | None 
     )
 
 
-def _click_syntax_kling_generate_sync(page: Any, *, timeout_ms: int = 10_000) -> str:
+def _click_syntax_kling_generate_sync(
+    page: Any,
+    *,
+    timeout_ms: int = 10_000,
+    wait_for_form_ready: bool = True,
+) -> str:
     generate_re = re.compile("Сгенерировать|Generate", re.IGNORECASE)
     before = _syntax_kling_submit_snapshot_sync(page)
     before_text = str(before.get("text") or "")
@@ -978,7 +996,8 @@ def _click_syntax_kling_generate_sync(page: Any, *, timeout_ms: int = 10_000) ->
 
     with contextlib.suppress(Exception):
         page.wait_for_load_state("networkidle", timeout=min(timeout_ms, 5000))
-    _wait_for_syntax_kling_form_ready_sync(page)
+    if wait_for_form_ready:
+        _wait_for_syntax_kling_form_ready_sync(page)
     with contextlib.suppress(Exception):
         page.on("response", _record_response)
 
@@ -1418,11 +1437,19 @@ def _submit_syntax_veo_generate_sync(page: Any, *, timeout_ms: int) -> str:
     """
 
     try:
-        return _click_syntax_kling_generate_sync(page, timeout_ms=15_000)
+        return _click_syntax_kling_generate_sync(
+            page,
+            timeout_ms=15_000,
+            wait_for_form_ready=False,
+        )
     except SyntaxVeoQueueFullError:
         logger.info("syntax.veo.submit_queue_rejected waiting_for_slot=true")
         _wait_for_syntax_veo_queue_slot_sync(page, timeout_ms=timeout_ms)
-        return _click_syntax_kling_generate_sync(page, timeout_ms=15_000)
+        return _click_syntax_kling_generate_sync(
+            page,
+            timeout_ms=15_000,
+            wait_for_form_ready=False,
+        )
 
 
 def _fill_syntax_veo_webapp_sync(
@@ -1740,17 +1767,6 @@ def _syntax_bot_requires_tool_selection(text: str) -> bool:
     )
 
 
-def _syntax_bot_requires_settings_webview(text: str) -> bool:
-    low = re.sub(r"\s+", " ", str(text or "")).strip().lower()
-    return (
-        "чтобы начать генерацию, откройте «настройки»" in low
-        or (
-            "чтобы выбрать параметры и запустить генерацию" in low
-            and "настройк" in low
-        )
-    )
-
-
 def _syntax_bot_message_is_hard_reject(text: str, _urls: list[str]) -> bool:
     """
     Syntax иногда отвечает финальным сообщением об ошибке / фильтрах (без видео).
@@ -1759,7 +1775,7 @@ def _syntax_bot_message_is_hard_reject(text: str, _urls: list[str]) -> bool:
     """
     raw = text or ""
     low = raw.lower()
-    if _syntax_bot_requires_tool_selection(raw) or _syntax_bot_requires_settings_webview(raw):
+    if _syntax_bot_requires_tool_selection(raw):
         return True
     if re.search(r"veo(?:\s*3)?\W{0,12}на\s+обнов", low, flags=re.IGNORECASE):
         return True
@@ -2539,6 +2555,7 @@ async def _run_fallback_async(
                         target,
                         reply_anchor=reply_anchor,
                         poll=0.5,
+                        require_prompt_saved=True,
                     )
                     if configure_message is not None and configure_button is not None:
                         return await _run_syntax_veo_configure_flow(

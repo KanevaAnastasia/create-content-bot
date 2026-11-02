@@ -637,6 +637,7 @@ def test_try_generate_via_syntax_veo_uses_mandatory_settings_webview(monkeypatch
     class _ConfigureMessage:
         id = 200
         out = False
+        raw_text = "Промпт сохранён ✅"
         buttons = [[_ConfigureButton()]]
 
     events: list[tuple[str, str | None, int | None]] = []
@@ -719,6 +720,49 @@ def test_try_generate_via_syntax_veo_uses_mandatory_settings_webview(monkeypatch
     ]
 
 
+def test_veo_waits_for_prompt_saved_configure_button_instead_of_file_button(monkeypatch):
+    import app.syntax_telethon_fallback as telethon_fallback
+
+    class _Button:
+        text = "Настроить и запустить"
+
+    class _Message:
+        out = False
+        buttons = [[_Button()]]
+
+        def __init__(self, msg_id: int, text: str):
+            self.id = msg_id
+            self.raw_text = text
+
+    file_message = _Message(201, "Файл сохранён ✅")
+    prompt_message = _Message(202, "Промпт сохранён ✅")
+
+    class _Client:
+        calls = 0
+
+        async def get_messages(self, _target, limit=None):
+            assert limit == 5
+            self.calls += 1
+            return [file_message] if self.calls == 1 else [prompt_message, file_message]
+
+    async def _no_sleep(_seconds: float) -> None:
+        return None
+
+    monkeypatch.setattr(telethon_fallback.asyncio, "sleep", _no_sleep)
+    message, button = asyncio.run(
+        telethon_fallback._wait_for_latest_syntax_configure_button(
+            _Client(),
+            object(),
+            reply_anchor=200,
+            poll=0.5,
+            require_prompt_saved=True,
+        )
+    )
+
+    assert message is prompt_message
+    assert button is prompt_message.buttons[0][0]
+
+
 def test_syntax_veo_webview_helpers_read_uploaded_count_and_queue_limit():
     import app.syntax_telethon_fallback as telethon_fallback
 
@@ -741,9 +785,9 @@ def test_syntax_veo_submit_clicks_before_waiting_and_retries_real_queue_rejectio
 
     calls: list[str] = []
 
-    def click(_page, *, timeout_ms):
-        calls.append(f"click:{timeout_ms}")
-        if calls.count("click:15000") == 1:
+    def click(_page, *, timeout_ms, wait_for_form_ready):
+        calls.append(f"click:{timeout_ms}:ready={wait_for_form_ready}")
+        if len([call for call in calls if call.startswith("click:")]) == 1:
             raise telethon_fallback.SyntaxVeoQueueFullError("queue full")
         return "started"
 
@@ -757,7 +801,11 @@ def test_syntax_veo_submit_clicks_before_waiting_and_retries_real_queue_rejectio
     result = telethon_fallback._submit_syntax_veo_generate_sync(object(), timeout_ms=120_000)
 
     assert result == "started"
-    assert calls == ["click:15000", "wait:120000", "click:15000"]
+    assert calls == [
+        "click:15000:ready=False",
+        "wait:120000",
+        "click:15000:ready=False",
+    ]
 
 
 def test_syntax_veo_submit_does_not_wait_when_form_was_already_sent(monkeypatch):
@@ -767,7 +815,9 @@ def test_syntax_veo_submit_does_not_wait_when_form_was_already_sent(monkeypatch)
     monkeypatch.setattr(
         telethon_fallback,
         "_click_syntax_kling_generate_sync",
-        lambda _page, *, timeout_ms: "started",
+        lambda _page, *, timeout_ms, wait_for_form_ready: (
+            "started" if timeout_ms == 15_000 and wait_for_form_ready is False else "unexpected"
+        ),
     )
     monkeypatch.setattr(
         telethon_fallback,
@@ -1404,7 +1454,7 @@ def test_syntax_hard_reject_detects_missing_tool_selection():
     assert telethon_fallback._syntax_bot_message_is_hard_reject(text, []) is True
 
 
-def test_syntax_hard_reject_detects_required_settings_webview():
+def test_syntax_settings_webview_message_is_not_a_hard_reject_after_submit():
     import app.syntax_telethon_fallback as telethon_fallback
 
     text = (
@@ -1412,7 +1462,7 @@ def test_syntax_hard_reject_detects_required_settings_webview():
         "Чтобы выбрать параметры и запустить генерацию, перейдите в «Настройки» 👇"
     )
 
-    assert telethon_fallback._syntax_bot_message_is_hard_reject(text, []) is True
+    assert telethon_fallback._syntax_bot_message_is_hard_reject(text, []) is False
 
 
 def test_syntax_configure_button_matches_combined_configure_and_launch_action():
