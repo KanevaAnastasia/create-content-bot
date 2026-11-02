@@ -406,23 +406,29 @@ def _verify_vk_identity(project_slug: str, *, token: str, group_id: str, api_ver
             f"VK token belongs to @{actual_screen_name or 'unknown'}, expected @{expected_screen_name or 'unconfigured'}."
         )
 
-    groups_response = requests.post(
-        "https://api.vk.ru/method/groups.get",
+    group_response = requests.post(
+        "https://api.vk.ru/method/groups.getById",
         data={
             "access_token": token,
             "v": api_version,
-            "filter": "admin",
-            "extended": 1,
-            "count": 1000,
+            "group_id": group_id,
+            "fields": "is_admin,admin_level,can_post,can_upload_video,can_upload_clip",
         },
         timeout=DEFAULT_REQUEST_TIMEOUT,
     )
-    groups_payload = _response_json(groups_response, "VK groups.get")
-    _vk_error_message(groups_payload, "VK groups.get")
-    response = groups_payload.get("response") if isinstance(groups_payload.get("response"), dict) else {}
-    items = response.get("items") if isinstance(response.get("items"), list) else []
-    managed_group_ids = {str(item.get("id")) for item in items if isinstance(item, dict)}
-    if str(group_id) not in managed_group_ids:
+    group_payload = _response_json(group_response, "VK groups.getById")
+    _vk_error_message(group_payload, "VK groups.getById")
+    response = group_payload.get("response") if isinstance(group_payload.get("response"), dict) else {}
+    groups = response.get("groups") if isinstance(response.get("groups"), list) else []
+    group = next(
+        (
+            item
+            for item in groups
+            if isinstance(item, dict) and str(item.get("id") or "") == str(group_id)
+        ),
+        None,
+    )
+    if not isinstance(group, dict) or not bool(group.get("is_admin")):
         identity = (
             f"user {actual_user_id}"
             if actual_user_id
@@ -430,6 +436,16 @@ def _verify_vk_identity(project_slug: str, *, token: str, group_id: str, api_ver
         )
         raise PublicationDeliveryError(
             f"VK {identity} is not an administrator of configured group {group_id}."
+        )
+    if group.get("can_upload_video") is not None and not bool(group.get("can_upload_video")):
+        raise PublicationDeliveryError(
+            f"VK user {actual_user_id or actual_screen_name or 'unknown'} cannot upload videos "
+            f"to configured group {group_id}."
+        )
+    if group.get("can_post") is not None and not bool(group.get("can_post")):
+        raise PublicationDeliveryError(
+            f"VK user {actual_user_id or actual_screen_name or 'unknown'} cannot publish posts "
+            f"in configured group {group_id}."
         )
 
 
