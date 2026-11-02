@@ -439,7 +439,7 @@ def test_try_generate_via_syntax_telethon_happy_path(monkeypatch):
         async def send_message(self, _target, _text, reply_to=None):
             call_order.append(f"send_message:{_text}")
             assert len(_text) <= 2000
-            if _text in {"/video", "⭕ Veo"}:
+            if _text in {"/start", "/video", "Veo", "Сгенерировать"}:
                 assert reply_to is None
                 return _SentMessage(90 + len(call_order))
             assert reply_to is not None
@@ -495,9 +495,11 @@ def test_try_generate_via_syntax_telethon_happy_path(monkeypatch):
     assert result.video_bytes == b"mp4-content"
     assert result.video_uri is None
     assert result.attempt_id == "fixed-attempt"
-    assert call_order[:5] == [
+    assert call_order[:7] == [
+        "send_message:/start",
         "send_message:/video",
-        "send_message:⭕ Veo",
+        "send_message:Veo",
+        "send_message:Сгенерировать",
         "send_file",
         "send_file",
         "send_message:video prompt",
@@ -581,8 +583,9 @@ def test_try_generate_via_syntax_kling_uses_configure_ui_flow(monkeypatch):
     assert result.success is True
     assert result.video_bytes == b"kling-mp4"
     assert events == [
+        ("send_message", "/start", None),
         ("send_message", "/video", None),
-        ("send_message", "📼 Kling", None),
+        ("send_message", "Kling", None),
         ("send_file", "start_frame.png", None),
     ]
     assert captured["prompt"] == "video prompt"
@@ -1108,7 +1111,7 @@ def test_try_generate_via_syntax_stops_when_veo_is_updating(monkeypatch):
             return _SentMessage(101)
 
         async def send_message(self, _target, _text, reply_to=None):
-            if _text in {"/video", "⭕ Veo"}:
+            if _text in {"/start", "/video", "Veo", "Сгенерировать"}:
                 assert reply_to is None
                 return _SentMessage(90)
             assert reply_to == 101
@@ -1156,6 +1159,40 @@ def test_syntax_hard_reject_detects_veo_update_message_with_decorations():
     assert telethon_fallback._syntax_bot_message_is_hard_reject(text, []) is True
 
 
+def test_syntax_hard_reject_detects_missing_tool_selection():
+    import app.syntax_telethon_fallback as telethon_fallback
+
+    text = (
+        "⚠️ Не выбран инструмент для работы с чат-ботом.\n\n"
+        "Пожалуйста, воспользуйтесь навигацией для активации нужной функции."
+    )
+
+    assert telethon_fallback._syntax_bot_message_is_hard_reject(text, []) is True
+
+
+def test_syntax_hard_reject_detects_required_settings_webview():
+    import app.syntax_telethon_fallback as telethon_fallback
+
+    text = (
+        "Файл сохранён ✅\n"
+        "Чтобы выбрать параметры и запустить генерацию, перейдите в «Настройки» 👇"
+    )
+
+    assert telethon_fallback._syntax_bot_message_is_hard_reject(text, []) is True
+
+
+def test_syntax_configure_button_matches_combined_configure_and_launch_action():
+    import app.syntax_telethon_fallback as telethon_fallback
+
+    class _Button:
+        text = "Настроить и запустить"
+
+    class _Message:
+        buttons = [[_Button()]]
+
+    assert telethon_fallback._syntax_find_configure_button(_Message()) is not None
+
+
 def test_try_generate_via_syntax_caps_long_prompt_to_2000(monkeypatch):
     import app.syntax_telethon_fallback as telethon_fallback
 
@@ -1198,7 +1235,7 @@ def test_try_generate_via_syntax_caps_long_prompt_to_2000(monkeypatch):
             return _Entity()
 
         async def send_message(self, _target, text, reply_to=None):
-            if text in {"/video", "⭕ Veo"}:
+            if text in {"/start", "/video", "Veo", "Сгенерировать"}:
                 assert reply_to is None
                 return _SentMessage(90)
             assert text == "short Gemini prompt"
@@ -1439,7 +1476,7 @@ def test_try_generate_via_syntax_parallel_uses_distinct_sessions(monkeypatch):
             return _Entity()
 
         async def send_message(self, _target, _text, reply_to=None):
-            if _text in {"/video", "⭕ Veo"}:
+            if _text in {"/start", "/video", "Veo", "Сгенерировать"}:
                 assert reply_to is None
                 return _SentMessage(90)
             assert reply_to is not None
@@ -1487,7 +1524,7 @@ def test_try_generate_via_syntax_parallel_uses_distinct_sessions(monkeypatch):
     for thread in threads:
         thread.start()
     for thread in threads:
-        thread.join(timeout=2)
+        thread.join(timeout=8)
 
     assert all(result is not None and result.success for result in results)
     assert set(seen_sessions) == {"session-a", "session-b"}
@@ -1543,7 +1580,7 @@ def test_try_generate_via_syntax_batch_sends_all_requests_before_waiting(monkeyp
 
         async def send_message(self, _target, text, reply_to=None):
             events.append(f"send_message:{text}")
-            if text in {"/video", "⭕ Veo"}:
+            if text in {"/start", "/video", "Veo", "Сгенерировать"}:
                 assert reply_to is None
                 return _SentMessage(90 + len(events))
             return _SentMessage(102 if "lang:ru" in text else 104)
@@ -1581,9 +1618,11 @@ def test_try_generate_via_syntax_batch_sends_all_requests_before_waiting(monkeyp
 
     assert results["ru"].success is True
     assert results["en"].success is True
-    assert events[:6] == [
+    assert events[:8] == [
+        "send_message:/start",
         "send_message:/video",
-        "send_message:⭕ Veo",
+        "send_message:Veo",
+        "send_message:Сгенерировать",
         "send_file:start_frame.png",
         "send_message:lang:ru prompt",
         "send_file:start_frame.png",
@@ -1748,7 +1787,7 @@ def test_batch_routes_edited_hard_reject_to_the_right_language(monkeypatch):
             return _SentMessage(101 if self._sent_count == 1 else 103)
 
         async def send_message(self, _target, text, reply_to=None):
-            if text in {"/video", "⭕ Veo"}:
+            if text in {"/start", "/video", "Veo", "Сгенерировать"}:
                 assert reply_to is None
                 return _SentMessage(90)
             self._sent_count += 1
@@ -1854,7 +1893,7 @@ def test_try_generate_via_syntax_batch_times_out_each_pending_request(monkeypatc
             return _SentMessage(101 if self._sent_count == 1 else 103)
 
         async def send_message(self, _target, text, reply_to=None):
-            if text in {"/video", "⭕ Veo"}:
+            if text in {"/start", "/video", "Veo", "Сгенерировать"}:
                 assert reply_to is None
                 return _SentMessage(90)
             self._sent_count += 1

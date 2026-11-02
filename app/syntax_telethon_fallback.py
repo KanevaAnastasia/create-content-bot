@@ -1375,12 +1375,45 @@ async def _run_syntax_kling_configure_flow(
 
 
 async def _send_syntax_video_preflight(client: Any, target: Any, *, provider: str | None, model: str) -> int:
-    command = SYNTAX_PROVIDER_COMMANDS[_normalize_syntax_provider(provider, model)]
+    # Syntax occasionally loses its selected tool after the Telegram menu is
+    # hidden/reloaded.  In that state it accepts our photo at the transport
+    # level, but answers with "Не выбран инструмент" and the caller used to
+    # wait for the full generation timeout.  Syntax itself documents /start as
+    # the recovery action, so reset its navigation before every isolated
+    # dispatch.  A Telethon session is leased exclusively while this runs,
+    # therefore the reset cannot interrupt another request on the same chat.
+    await client.send_message(target, "/start")
+    await asyncio.sleep(1.5)
+    provider_kind = _normalize_syntax_provider(provider, model)
+    command = SYNTAX_PROVIDER_COMMANDS[provider_kind]
     await client.send_message(target, "/video")
-    await asyncio.sleep(0.8)
+    await asyncio.sleep(1.5)
     command_message = await client.send_message(target, command)
-    await asyncio.sleep(0.8)
+    await asyncio.sleep(1.5)
+    if provider_kind == SYNTAX_PROVIDER_VEO:
+        generate_message = await client.send_message(target, "Сгенерировать")
+        await asyncio.sleep(1.5)
+        return int(getattr(generate_message, "id", 0) or 0)
     return int(getattr(command_message, "id", 0) or 0)
+
+
+def _syntax_bot_requires_tool_selection(text: str) -> bool:
+    low = re.sub(r"\s+", " ", str(text or "")).strip().lower()
+    return (
+        "не выбран инструмент" in low
+        or "инструмент для работы с чат-ботом не выбран" in low
+    )
+
+
+def _syntax_bot_requires_settings_webview(text: str) -> bool:
+    low = re.sub(r"\s+", " ", str(text or "")).strip().lower()
+    return (
+        "чтобы начать генерацию, откройте «настройки»" in low
+        or (
+            "чтобы выбрать параметры и запустить генерацию" in low
+            and "настройк" in low
+        )
+    )
 
 
 def _syntax_bot_message_is_hard_reject(text: str, _urls: list[str]) -> bool:
@@ -1391,6 +1424,8 @@ def _syntax_bot_message_is_hard_reject(text: str, _urls: list[str]) -> bool:
     """
     raw = text or ""
     low = raw.lower()
+    if _syntax_bot_requires_tool_selection(raw) or _syntax_bot_requires_settings_webview(raw):
+        return True
     if re.search(r"veo(?:\s*3)?\W{0,12}на\s+обнов", low, flags=re.IGNORECASE):
         return True
     veo_update_markers = (
