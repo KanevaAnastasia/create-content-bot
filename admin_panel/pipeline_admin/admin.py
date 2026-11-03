@@ -120,6 +120,16 @@ from .models import (
 )
 
 
+def _local_oauth_callback_url(request, callback_path: str) -> str:
+    """Return a loopback callback on the same reachable host as the admin page."""
+
+    candidate = request.build_absolute_uri(callback_path)
+    parsed = urlparse(candidate)
+    if parsed.hostname not in {"127.0.0.1", "localhost", "::1"} or parsed.port != 8000:
+        return f"http://127.0.0.1:8000{callback_path}"
+    return parsed._replace(scheme="http", params="", query="", fragment="").geturl()
+
+
 @admin.register(BotUser)
 class BotUserAdmin(admin.ModelAdmin):
     list_display = (
@@ -5116,7 +5126,7 @@ class PublicationJobAdmin(admin.ModelAdmin):
             },
         )
         callback_path = reverse("admin:pipeline_admin_publicationjob_tiktok_oauth_callback")
-        callback_url = f"http://localhost:8000{callback_path}"
+        callback_url = _local_oauth_callback_url(request, callback_path)
         if request.method == "POST" and form.is_valid():
             project_slug = str(form.cleaned_data["project_slug"])
             client_key = str(form.cleaned_data["client_key"]).strip()

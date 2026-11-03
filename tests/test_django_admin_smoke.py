@@ -870,6 +870,29 @@ def test_django_admin_allows_series_binding_and_day_editing():
     assert "pipeline_admin_publicationjob_tiktok_oauth_callback" in custom_url_names
 
 
+def test_tiktok_oauth_callback_uses_reachable_loopback_admin_host():
+    admin_dir = Path(__file__).resolve().parents[1] / "admin_panel"
+    sys.path.insert(0, str(admin_dir))
+    os.environ.setdefault("DJANGO_SETTINGS_MODULE", "cf_admin.settings")
+
+    import django
+
+    django.setup()
+
+    from django.test import RequestFactory
+    from pipeline_admin.admin import _local_oauth_callback_url
+
+    callback_path = "/admin/pipeline_admin/publicationjob/tiktok-oauth/callback/"
+    request = RequestFactory().get("/", HTTP_HOST="127.0.0.1:8000")
+    assert _local_oauth_callback_url(request, callback_path) == f"http://127.0.0.1:8000{callback_path}"
+
+    request = RequestFactory().get("/", HTTP_HOST="localhost:8000")
+    assert _local_oauth_callback_url(request, callback_path) == f"http://localhost:8000{callback_path}"
+
+    request = RequestFactory().get("/", HTTP_HOST="localhost:9000")
+    assert _local_oauth_callback_url(request, callback_path) == f"http://127.0.0.1:8000{callback_path}"
+
+
 def test_generation_run_admin_artifact_count_uses_queryset_annotation():
     admin_dir = Path(__file__).resolve().parents[1] / "admin_panel"
     sys.path.insert(0, str(admin_dir))
