@@ -878,6 +878,69 @@ def test_syntax_veo_clears_all_stale_uploaded_references():
     assert page.uploaded == 0
 
 
+def test_syntax_veo_reloads_and_retries_stale_remove_counter(monkeypatch):
+    import app.syntax_telethon_fallback as telethon_fallback
+
+    wait_calls: list[int] = []
+
+    def _flaky_wait(_page, expected, *, timeout_ms):
+        del timeout_ms
+        wait_calls.append(expected)
+        if len(wait_calls) == 1:
+            raise RuntimeError("stale Livewire counter")
+
+    class _Body:
+        def __init__(self, page):
+            self.page = page
+
+        def inner_text(self):
+            return f"Загружено ({self.page.uploaded}/2)"
+
+    class _Button:
+        def is_visible(self):
+            return True
+
+        def click(self, timeout=None):
+            del timeout
+
+    class _Buttons:
+        def count(self):
+            return 1
+
+        def nth(self, index):
+            assert index == 0
+            return _Button()
+
+    class _Page:
+        uploaded = 1
+        reloads = 0
+
+        def locator(self, selector):
+            if selector == "body":
+                return _Body(self)
+            assert selector == "button[aria-label='Remove file']"
+            return _Buttons()
+
+        def reload(self, *, wait_until, timeout):
+            assert wait_until == "commit"
+            assert timeout >= 30_000
+            self.reloads += 1
+            self.uploaded = 0
+
+        def wait_for_load_state(self, state, *, timeout):
+            assert state == "networkidle"
+            assert timeout >= 15_000
+
+    monkeypatch.setattr(telethon_fallback, "_wait_for_syntax_veo_uploaded_count_sync", _flaky_wait)
+
+    page = _Page()
+    telethon_fallback._clear_syntax_veo_uploaded_references_sync(page)
+
+    assert wait_calls == [0]
+    assert page.reloads == 1
+    assert page.uploaded == 0
+
+
 def test_try_generate_via_syntax_kling_passes_horizontal_aspect_ratio(monkeypatch):
     import app.syntax_telethon_fallback as telethon_fallback
 

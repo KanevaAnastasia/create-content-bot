@@ -1405,11 +1405,25 @@ def _clear_syntax_veo_uploaded_references_sync(page: Any, *, timeout_ms: int = 1
         visible_button.click(timeout=timeout_ms)
         # Removing one Telegram picker item triggers several Livewire updates
         # and can take around ten seconds even after the click is accepted.
-        _wait_for_syntax_veo_uploaded_count_sync(
-            page,
-            count_before - 1,
-            timeout_ms=max(timeout_ms, 15_000),
-        )
+        try:
+            _wait_for_syntax_veo_uploaded_count_sync(
+                page,
+                count_before - 1,
+                timeout_ms=max(timeout_ms, 15_000),
+            )
+        except RuntimeError:
+            # Livewire can accept the remove request while leaving the current
+            # page on the old upload counter. Reload the same authenticated
+            # WebView and retry from its authoritative server-side state.
+            logger.warning(
+                "syntax.veo.remove_reference_stale_counter attempt=%s count_before=%s",
+                _attempt + 1,
+                count_before,
+            )
+            with contextlib.suppress(Exception):
+                page.reload(wait_until="commit", timeout=max(timeout_ms, 30_000))
+                page.wait_for_load_state("networkidle", timeout=max(timeout_ms, 15_000))
+            continue
     if _syntax_veo_uploaded_reference_count_sync(page) != 0:
         raise RuntimeError("Syntax Veo still contains stale uploaded references.")
 
