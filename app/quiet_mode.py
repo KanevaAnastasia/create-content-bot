@@ -22,8 +22,8 @@ BUTTON_CLOSE_QUIET_MODE = "Закрыть тихий режим"
 
 _MENU_BUTTON: ContextVar[str | None] = ContextVar("admin_quiet_mode_menu_button", default=None)
 QUIET_MODE_TIMEZONE = ZoneInfo("Europe/Moscow")
-QUIET_MODE_GENERATION_MIN = 18
-QUIET_MODE_GENERATION_MAX = 22
+QUIET_MODE_GENERATION_MIN = 11
+QUIET_MODE_GENERATION_MAX = 16
 
 logger = logging.getLogger("bot.quiet_mode")
 
