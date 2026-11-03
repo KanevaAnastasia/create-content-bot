@@ -123,6 +123,36 @@ def test_story_word_synced_subtitles_uses_voiceover_when_visual_clips_duplicate_
     assert all(cue["story_timing_source"] == "estimated_legacy_voiceover" for cue in cues)
 
 
+def test_all_modes_word_synced_subtitles_follow_transcribed_audio_timestamps():
+    cues = post_production.build_word_synced_subtitle_cues(
+        [
+            {"word": "Готовим", "start_sec": 0.42, "end_sec": 0.91},
+            {"word": "крем.", "start_sec": 1.08, "end_sec": 1.55},
+        ],
+        timing_source="video_audio_transcription",
+    )
+    scene = {
+        "scene": 1,
+        "generation_mode": "normal",
+        "speech_cues_by_lang": {"ru": cues},
+    }
+
+    entries = post_production._scene_subtitle_entries(
+        scene,
+        "ru",
+        start_offset=3.0,
+        fallback_duration=6.0,
+        speed_coef=1.0,
+    )
+
+    assert [entry["text"] for entry in entries] == ["Готовим", "Готовим крем."]
+    assert entries[0]["start_sec"] == 3.42
+    assert entries[0]["end_sec"] == 4.08
+    assert entries[1]["start_sec"] == 4.08
+    assert entries[1]["end_sec"] == 4.55
+    assert all(entry["word_synced"] is True for entry in entries)
+
+
 def test_word_synced_ass_uses_spoken_case_and_cream_colour(tmp_path):
     target = tmp_path / "subtitles.ass"
 
@@ -960,20 +990,11 @@ def test_build_subtitled_post_production_reuses_existing_upscaled_master(tmp_pat
     payload = out["renders_by_language"]["ru"]["subtitled_music"]
     assert payload["source_variant"] == "upscaled_4k"
     assert payload["source_video_path"] == str(source)
-    assert [
-        {key: value for key, value in item.items() if key != "candidate_id"}
-        for item in out["subtitle_entries"]
-    ] == [
-        {
-            "scene": 1,
-            "language": "ru",
-            "text": "Первая сцена",
-            "start_sec": 0.0,
-            "end_sec": 4.0,
-            "speed_coef": 2.0,
-            "timing_scale": 1.0,
-        }
-    ]
+    assert [item["text"] for item in out["subtitle_entries"]] == ["Первая", "Первая сцена"]
+    assert out["subtitle_entries"][0]["start_sec"] == 0.0
+    assert out["subtitle_entries"][-1]["end_sec"] == 4.0
+    assert all(item["word_synced"] is True for item in out["subtitle_entries"])
+    assert all(item["speed_coef"] == 2.0 for item in out["subtitle_entries"])
     assert [item["stage"] for item in progress_events] == ["reuse_upscaled", "subtitles_building", "subtitles_ready", "persisting"]
 
 
@@ -1319,8 +1340,13 @@ def test_build_post_production_prefers_language_specific_speech_cues(monkeypatch
 
     out = post_production.build_post_production(scenes)
 
-    assert [item["text"] for item in out["subtitle_entries_by_language"]["en"]] == ["Long english", "full line"]
-    assert out["subtitle_entries_by_language"]["en"][1]["start_sec"] == 1.25
+    assert [item["text"] for item in out["subtitle_entries_by_language"]["en"]] == [
+        "Long",
+        "Long english",
+        "full",
+        "full line",
+    ]
+    assert out["subtitle_entries_by_language"]["en"][2]["start_sec"] == 1.25
     assert out["speech_budget_by_language"]["en"] == []
     assert out["original_audio_preserved_by_language"]["en"] is True
 
@@ -1452,7 +1478,8 @@ def test_build_post_production_rejects_english_candidate_snapshot_for_ru_subtitl
         speed_coef=1.0,
     )
 
-    assert entries[0]["text"] == "Русский cue сцены"
+    assert entries[-1]["text"] == "Русский cue сцены"
+    assert all(entry["word_synced"] is True for entry in entries)
 
 
 def test_build_post_production_can_prefer_scene_speech_over_candidate_snapshot(monkeypatch):
@@ -1586,9 +1613,9 @@ def test_build_post_production_scales_speech_cues_with_video_speed(monkeypatch):
 
     subtitles = out["subtitle_entries_by_language"]["ru"]
     assert subtitles[0]["start_sec"] == 0.0
-    assert subtitles[0]["end_sec"] == 2.0
-    assert subtitles[1]["start_sec"] == 2.0
-    assert subtitles[1]["end_sec"] == 4.0
+    assert subtitles[1]["end_sec"] == 2.0
+    assert subtitles[2]["start_sec"] == 2.0
+    assert subtitles[-1]["end_sec"] == 4.0
 
 
 def test_build_post_production_scales_subtitles_to_actual_normalized_duration(monkeypatch):
@@ -1622,9 +1649,9 @@ def test_build_post_production_scales_subtitles_to_actual_normalized_duration(mo
 
     subtitles = out["subtitle_entries_by_language"]["ru"]
     assert subtitles[0]["start_sec"] == 0.0
-    assert subtitles[0]["end_sec"] == 2.2
-    assert subtitles[1]["start_sec"] == 2.2
-    assert subtitles[1]["end_sec"] == 4.4
+    assert subtitles[1]["end_sec"] == 2.2
+    assert subtitles[2]["start_sec"] == 2.2
+    assert subtitles[-1]["end_sec"] == 4.4
 
 
 def test_subtitle_text_removes_veo_stress_markers():

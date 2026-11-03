@@ -2234,6 +2234,79 @@ def _story_caption_word_blocks(
     return blocks
 
 
+def build_word_synced_subtitle_cues(
+    word_timings: list[dict[str, Any]] | list[tuple[str, float, float]],
+    *,
+    window_end_sec: float | None = None,
+    timing_source: str = "audio_transcription",
+) -> list[dict[str, Any]]:
+    """Build the same progressive fixed-block captions used by Story mode."""
+    words: list[tuple[str, float, float]] = []
+    for item in word_timings or []:
+        if isinstance(item, dict):
+            word = " ".join(str(item.get("word") or item.get("text") or "").split())
+            raw_start = item.get("start_sec")
+            raw_end = item.get("end_sec")
+        elif isinstance(item, (list, tuple)) and len(item) >= 3:
+            word = " ".join(str(item[0] or "").split())
+            raw_start = item[1]
+            raw_end = item[2]
+        else:
+            continue
+        try:
+            start_sec = max(0.0, float(raw_start or 0.0))
+            end_sec = float(raw_end or start_sec)
+        except (TypeError, ValueError):
+            continue
+        if word and " " not in word and end_sec > start_sec:
+            words.append((word, start_sec, end_sec))
+    if not words:
+        return []
+    words.sort(key=lambda row: (row[1], row[2]))
+    hard_end = max(float(window_end_sec or 0.0), words[-1][2])
+    cues: list[dict[str, Any]] = []
+    blocks = _story_caption_word_blocks(words)
+    for block_index, block in enumerate(blocks):
+        block_tokens = [word for word, _start, _end in block]
+        next_block_start = blocks[block_index + 1][0][1] if block_index + 1 < len(blocks) else hard_end
+        for word_index, (_word, word_start, word_end) in enumerate(block):
+            next_start = block[word_index + 1][1] if word_index + 1 < len(block) else next_block_start
+            cue_end = next_start if next_start > word_start else word_end
+            if cue_end <= word_start:
+                continue
+            cues.append(
+                {
+                    "text": " ".join(block_tokens[: word_index + 1]),
+                    "start_sec": word_start,
+                    "end_sec": cue_end,
+                    "word_synced": True,
+                    "preserve_case": True,
+                    "fixed_block_words": block_tokens,
+                    "visible_word_count": word_index + 1,
+                    "story_style_version": STORY_WORD_SYNC_STYLE_VERSION,
+                    "story_timing_source": timing_source,
+                }
+            )
+    return cues
+
+
+def _estimated_word_timings_for_cue(text: str, *, start_sec: float, end_sec: float) -> list[dict[str, Any]]:
+    """Backwards-compatible fallback for clips saved before audio word timestamps."""
+    tokens = str(text or "").split()
+    duration = max(0.0, float(end_sec) - float(start_sec))
+    if not tokens or duration <= 0:
+        return []
+    weights = [max(1, len(re.sub(r"[^\w]+", "", token, flags=re.UNICODE))) for token in tokens]
+    total_weight = sum(weights)
+    cursor = float(start_sec)
+    rows: list[dict[str, Any]] = []
+    for index, (token, weight) in enumerate(zip(tokens, weights, strict=True)):
+        next_cursor = float(end_sec) if index == len(tokens) - 1 else cursor + (duration * weight / total_weight)
+        rows.append({"word": token, "start_sec": cursor, "end_sec": next_cursor})
+        cursor = next_cursor
+    return rows
+
+
 def _story_scene_intervals(
     scenes: list[dict[str, Any]],
     *,
@@ -2587,7 +2660,30 @@ def _scene_subtitle_entries(
     safe_scale = max(0.01, float(timing_scale or 1.0))
     safe_duration = max(0.0, float(fallback_duration or 0.0))
     if isinstance(raw_cues, list):
+        normalized_cues: list[dict[str, Any]] = []
         for cue in raw_cues:
+            if not isinstance(cue, dict):
+                continue
+            if cue.get("word_synced"):
+                normalized_cues.append(cue)
+                continue
+            try:
+                cue_start = float(cue.get("start_sec") or 0.0)
+                cue_end = float(cue.get("end_sec") or cue_start)
+            except (TypeError, ValueError):
+                continue
+            normalized_cues.extend(
+                build_word_synced_subtitle_cues(
+                    _estimated_word_timings_for_cue(
+                        str(cue.get("text") or ""),
+                        start_sec=cue_start,
+                        end_sec=cue_end,
+                    ),
+                    window_end_sec=cue_end,
+                    timing_source="estimated_legacy_scene_cue",
+                )
+            )
+        for cue in normalized_cues:
             if not isinstance(cue, dict):
                 continue
             text = _normalize_subtitle_text(str(cue.get("text") or ""))

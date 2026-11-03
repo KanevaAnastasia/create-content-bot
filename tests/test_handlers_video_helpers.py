@@ -922,6 +922,11 @@ def test_ai_video_speech_qa_recognized_text_becomes_candidate_subtitle_source(mo
         stage="video",
         speech_completion_score=0.4,
         speech_recognized_text="Фактически сказанный текст",
+        speech_word_timings=[
+            {"word": "Фактически", "start_sec": 0.4, "end_sec": 1.0},
+            {"word": "сказанный", "start_sec": 1.1, "end_sec": 1.7},
+            {"word": "текст", "start_sec": 1.8, "end_sec": 2.2},
+        ],
         speech_missing_words=["ожидаемый"],
         speech_extra_words=["фактически"],
     )
@@ -929,6 +934,13 @@ def test_ai_video_speech_qa_recognized_text_becomes_candidate_subtitle_source(mo
 
     assert candidate["speech_by_lang"]["ru"] == "Фактически сказанный текст"
     assert candidate["video_speech_qa_by_lang"]["ru"]["status"] == AI_APPROVAL_STATUS_REGENERATE_VIDEO
+    assert [cue["text"] for cue in candidate["speech_cues_by_lang"]["ru"]] == [
+        "Фактически",
+        "Фактически сказанный",
+        "Фактически сказанный текст",
+    ]
+    assert candidate["speech_cues_by_lang"]["ru"][0]["start_sec"] == 0.4
+    assert candidate["speech_cues_by_lang"]["ru"][-1]["end_sec"] == 2.2
     assert persisted[-1]["speech_by_lang"]["ru"] == "Фактически сказанный текст"
 
 

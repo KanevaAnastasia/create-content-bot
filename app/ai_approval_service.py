@@ -82,7 +82,7 @@ class AIApprovalConfig:
     human_review_threshold: float = 0.70
     extract_video_frames: bool = True
     frame_count: int = 5
-    audio_transcription_enabled: bool = False
+    audio_transcription_enabled: bool = True
 
 
 @dataclass(slots=True)
@@ -97,6 +97,7 @@ class AIApprovalResult:
     style_consistency_score: float = 0.0
     speech_completion_score: float | None = None
     speech_recognized_text: str = ""
+    speech_word_timings: list[dict[str, Any]] = field(default_factory=list)
     speech_missing_words: list[str] = field(default_factory=list)
     speech_extra_words: list[str] = field(default_factory=list)
     speech_wrong_stress_words: list[str] = field(default_factory=list)
@@ -122,6 +123,7 @@ class SpeechTranscriptionResult:
     long_pauses_detected: bool = False
     speech_speed: str = "unknown"
     recognized_text: str = ""
+    word_timings: list[dict[str, Any]] = field(default_factory=list)
     pronunciation_issues: list[str] = field(default_factory=list)
     wrong_stress_words: list[str] = field(default_factory=list)
     rising_intonation_detected: bool = False
@@ -185,7 +187,7 @@ def get_ai_approval_config() -> AIApprovalConfig:
         human_review_threshold=_float_env(AI_APPROVAL_HUMAN_REVIEW_THRESHOLD_ENV_NAME, human_default),
         extract_video_frames=_bool_env(AI_APPROVAL_EXTRACT_VIDEO_FRAMES_ENV_NAME, True),
         frame_count=max(1, _int_env(AI_APPROVAL_FRAME_COUNT_ENV_NAME, 5)),
-        audio_transcription_enabled=_bool_env(AI_APPROVAL_AUDIO_TRANSCRIPTION_ENABLED_ENV_NAME, False),
+        audio_transcription_enabled=_bool_env(AI_APPROVAL_AUDIO_TRANSCRIPTION_ENABLED_ENV_NAME, True),
     )
 
 
@@ -230,6 +232,57 @@ def _string_list(value: Any) -> list[str]:
     if isinstance(value, str) and value.strip():
         return [value.strip()]
     return []
+
+
+def _speech_word_timings(
+    value: Any,
+    *,
+    duration: int | float | None = None,
+    recognized_text: str | None = None,
+) -> list[dict[str, Any]]:
+    """Normalize model-produced timestamps without inventing spoken words."""
+    if not isinstance(value, list):
+        return []
+    try:
+        duration_limit = max(0.0, float(duration or 0.0))
+    except (TypeError, ValueError):
+        duration_limit = 0.0
+    out: list[dict[str, Any]] = []
+    previous_start = 0.0
+    for item in value:
+        if not isinstance(item, dict):
+            continue
+        word = " ".join(str(item.get("word") or item.get("text") or "").split())
+        if not word or " " in word:
+            continue
+        try:
+            start_sec = max(previous_start, float(item.get("start_sec") or 0.0))
+            end_sec = float(item.get("end_sec") or start_sec)
+        except (TypeError, ValueError):
+            continue
+        if duration_limit > 0:
+            start_sec = min(start_sec, duration_limit)
+            end_sec = min(end_sec, duration_limit)
+        if end_sec <= start_sec:
+            continue
+        out.append(
+            {
+                "word": word,
+                "start_sec": round(start_sec, 3),
+                "end_sec": round(end_sec, 3),
+            }
+        )
+        previous_start = start_sec
+    if recognized_text is not None:
+        recognized_tokens = re.findall(r"\w+", str(recognized_text).casefold(), flags=re.UNICODE)
+        timed_tokens = re.findall(
+            r"\w+",
+            " ".join(str(item["word"]) for item in out).casefold(),
+            flags=re.UNICODE,
+        )
+        if not recognized_tokens or timed_tokens != recognized_tokens:
+            return []
+    return out
 
 
 def _bool_value(value: Any, default: bool = False) -> bool:
@@ -856,6 +909,10 @@ def normalize_ai_approval_result(
             None if data.get("speech_completion_score") is None else _clamp01(data.get("speech_completion_score"), 0.0)
         ),
         speech_recognized_text=str(data.get("speech_recognized_text") or "").strip(),
+        speech_word_timings=_speech_word_timings(
+            data.get("speech_word_timings"),
+            recognized_text=str(data.get("speech_recognized_text") or "").strip(),
+        ),
         speech_missing_words=_string_list(data.get("speech_missing_words")),
         speech_extra_words=_string_list(data.get("speech_extra_words")),
         speech_wrong_stress_words=_string_list(data.get("speech_wrong_stress_words")),
@@ -1601,6 +1658,9 @@ def transcribe_video_audio(
         "You are a speech recognition QA agent for short AI-generated cooking videos.\n\n"
         "Listen to the attached MP4 and transcribe the spoken speech. Ignore background noise and do not "
         "describe visuals. If no intelligible speech is present, return an empty recognized_text.\n\n"
+        "Return word_timings for every actually spoken word in chronological order. Each word must be copied "
+        "verbatim from recognized_text, with punctuation attached to that word, and start_sec/end_sec must mark "
+        "when that exact word is audible. Do not use EXPECTED SPEECH to invent words or timestamps.\n\n"
         "Compare the recognized speech to EXPECTED SPEECH. Treat [пауза] as a pause marker. The recognized_text should be "
         "plain text without stress capitalization unless the audio clearly spells letters.\n\n"
         "Evaluate:\n"
@@ -1628,6 +1688,7 @@ def transcribe_video_audio(
         '  "long_pauses_detected": false,\n'
         '  "speech_speed": "unknown",\n'
         '  "recognized_text": "",\n'
+        '  "word_timings": [{"word": "", "start_sec": 0.0, "end_sec": 0.0}],\n'
         '  "pronunciation_issues": [],\n'
         '  "wrong_stress_words": [],\n'
         '  "rising_intonation_detected": false,\n'
@@ -1701,6 +1762,11 @@ def transcribe_video_audio(
         long_pauses_detected=long_pauses,
         speech_speed=str(data.get("speech_speed") or "unknown").strip() or "unknown",
         recognized_text=str(data.get("recognized_text") or "").strip(),
+        word_timings=_speech_word_timings(
+            data.get("word_timings"),
+            duration=duration,
+            recognized_text=str(data.get("recognized_text") or "").strip(),
+        ),
         pronunciation_issues=pronunciation_issues,
         wrong_stress_words=wrong_stress_words,
         rising_intonation_detected=rising_intonation,
@@ -1925,6 +1991,7 @@ def check_video(
         if cfg.audio_transcription_enabled:
             data["speech_completion_score"] = speech.match_score
             data["speech_recognized_text"] = speech.recognized_text
+            data["speech_word_timings"] = list(speech.word_timings)
             data["speech_missing_words"] = list(speech.missing_words)
             data["speech_extra_words"] = list(speech.extra_words)
             data["speech_wrong_stress_words"] = list(speech.wrong_stress_words)
@@ -2055,6 +2122,7 @@ def ai_approval_history_entry(
         "prompt_variant": result.prompt_variant,
         "recognized_text": result.speech_recognized_text,
         "speech_recognized_text": result.speech_recognized_text,
+        "speech_word_timings": list(result.speech_word_timings),
         "wrong_stress_words": list(result.speech_wrong_stress_words),
         "speech_missing_words": list(result.speech_missing_words),
         "speech_extra_words": list(result.speech_extra_words),

@@ -141,7 +141,11 @@ from .handlers_state_commands import _regenerate_image_prompt_from_feedback
 from .handlers_keyboards import first_step_menu_markup, reply_text_without_keyboard, safe_send_message
 from ..llm_utils import extract_json_object
 from ..multilingual import normalize_language_code
-from ..post_production import build_post_production, probe_video_bytes_dimensions
+from ..post_production import (
+    build_post_production,
+    build_word_synced_subtitle_cues,
+    probe_video_bytes_dimensions,
+)
 from ..project_profiles import (
     DISCIPLINE_HASHTAGS_FIXED_EN,
     DISCIPLINE_HASHTAGS_FIXED_RU,
@@ -1546,6 +1550,7 @@ def _store_ai_video_speech_qa(scene: dict, language: str, result: AIApprovalResu
         "status": result.status,
         "speech_completion_score": result.speech_completion_score,
         "recognized_text": result.speech_recognized_text,
+        "word_timings": list(result.speech_word_timings),
         "missing_words": list(result.speech_missing_words),
         "extra_words": list(result.speech_extra_words),
     }
@@ -1558,6 +1563,18 @@ def _store_ai_video_speech_qa(scene: dict, language: str, result: AIApprovalResu
         )
         speech_map[lang] = result.speech_recognized_text.strip()
         candidate["speech_by_lang"] = speech_map
+    timed_cues = build_word_synced_subtitle_cues(
+        result.speech_word_timings,
+        timing_source="video_audio_transcription",
+    )
+    if timed_cues:
+        cues_map = (
+            dict(candidate.get("speech_cues_by_lang") or {})
+            if isinstance(candidate.get("speech_cues_by_lang"), dict)
+            else {}
+        )
+        cues_map[lang] = timed_cues
+        candidate["speech_cues_by_lang"] = cues_map
     _persist_video_state_best_effort(candidate)
 
 

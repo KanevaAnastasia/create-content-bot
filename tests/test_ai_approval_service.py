@@ -777,6 +777,11 @@ def test_transcribe_video_audio_recognizes_russian_speech_with_model(monkeypatch
             "long_pauses_detected": False,
             "speech_speed": "normal",
             "recognized_text": "теперь приготовим крем",
+            "word_timings": [
+                {"word": "теперь", "start_sec": 0.3, "end_sec": 0.8},
+                {"word": "приготовим", "start_sec": 0.9, "end_sec": 1.7},
+                {"word": "крем", "start_sec": 1.8, "end_sec": 2.2},
+            ],
             "status": "APPROVE",
         }
 
@@ -793,7 +798,37 @@ def test_transcribe_video_audio_recognizes_russian_speech_with_model(monkeypatch
     assert result.phrase_completed is True
     assert result.match_score == 0.93
     assert result.recognized_text == "теперь приготовим крем"
+    assert result.word_timings[-1] == {"word": "крем", "start_sec": 1.8, "end_sec": 2.2}
     assert result.speech_speed == "normal"
+
+
+def test_transcribe_video_audio_drops_timestamps_that_do_not_match_recognized_text(monkeypatch) -> None:
+    import app.ai_approval_service as svc
+
+    monkeypatch.setattr(
+        svc,
+        "call_ai_approval_model",
+        lambda *_args, **_kwargs: {
+            "phrase_completed": True,
+            "match_score": 1.0,
+            "recognized_text": "Фактически сказано",
+            "word_timings": [
+                {"word": "Ожидаемый", "start_sec": 0.1, "end_sec": 0.5},
+                {"word": "текст", "start_sec": 0.6, "end_sec": 0.9},
+            ],
+            "status": "APPROVE",
+        },
+    )
+
+    result = transcribe_video_audio(
+        video_bytes=b"\x00\x00\x00\x18ftypmp42fake-video",
+        expected_speech_text="Ожидаемый текст",
+        duration=3,
+        config=AIApprovalConfig(audio_transcription_enabled=True, model="test-model"),
+    )
+
+    assert result.recognized_text == "Фактически сказано"
+    assert result.word_timings == []
 
 
 def test_transcribe_video_audio_rejects_wrong_russian_stress(monkeypatch) -> None:
