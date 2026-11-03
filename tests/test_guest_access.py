@@ -1144,6 +1144,74 @@ def test_real_guest_video_runs_in_deduplicated_background_task(monkeypatch):
     ]
 
 
+def test_cancelled_guest_syntax_task_becomes_retryable(monkeypatch):
+    session = {
+        "state": guest_handlers.STATE_VIDEO_DESCRIPTION,
+        "generation_run_id": "run-cancelled",
+        "guest_data": {"scene_id": "scene-cancelled"},
+    }
+    message = _Message()
+    update = SimpleNamespace(message=message, effective_chat=SimpleNamespace(id=12346))
+
+    async def scenario():
+        started = asyncio.Event()
+
+        async def fake_generate_now(_update, _session, **_kwargs):
+            started.set()
+            await asyncio.Event().wait()
+
+        async def quiet_allowed(_update, _session):
+            return False
+
+        monkeypatch.setattr(guest_handlers, "_generate_video_now", fake_generate_now)
+        monkeypatch.setattr(guest_handlers, "_reject_generation_in_quiet_mode", quiet_allowed)
+        monkeypatch.setattr(guest_handlers, "save_loaded_session_if_possible", lambda _chat_id: None)
+        guest_handlers._GUEST_SYNTAX_TASKS.clear()
+
+        await guest_handlers._generate_video(update, session, target="video")
+        await started.wait()
+        task = next(iter(guest_handlers._GUEST_SYNTAX_TASKS.values()))
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+        assert session["state"] == guest_handlers.STATE_SYNTAX_ERROR
+        assert guest_handlers._GUEST_SYNTAX_TASKS == {}
+
+    asyncio.run(scenario())
+
+
+def test_stale_guest_syntax_pending_state_becomes_retryable_on_next_message(guest_db, monkeypatch):
+    session, project_id = _guest_session_with_project(guest_db)
+    chat_id = 12347
+    session.update(
+        state=guest_handlers.STATE_SYNTAX_PENDING,
+        generation_run_id="run-stale",
+        guest_data={"scene_id": "scene-stale", "syntax_retry_target": "video"},
+    )
+    dict.__setitem__(guest_handlers.SESSIONS, chat_id, session)
+    identity = guest_access.BotIdentity(
+        user_id=uuid.UUID(session["bot_user_id"]),
+        telegram_id=chat_id,
+        normalized_username="guest606",
+        display_name="Гость",
+        role="guest",
+        is_active=True,
+        project_id=project_id,
+    )
+    monkeypatch.setattr(guest_handlers, "save_loaded_session_if_possible", lambda _chat_id: None)
+    guest_handlers._GUEST_SYNTAX_TASKS.clear()
+    message = _Message()
+    message.text = "Что с видео?"
+    update = SimpleNamespace(message=message, effective_chat=SimpleNamespace(id=chat_id))
+
+    asyncio.run(guest_handlers.guest_on_text(update, SimpleNamespace(), identity))
+
+    assert session["state"] == guest_handlers.STATE_SYNTAX_ERROR
+    assert "Нажмите «Повторить»" in message.sent[-1][1]
+    dict.pop(guest_handlers.SESSIONS, chat_id, None)
+
+
 def test_late_syntax_failure_does_not_overwrite_newer_guest_scene(guest_db, monkeypatch, tmp_path):
     session, _project_id = _guest_session_with_project(guest_db)
     start_path = tmp_path / "scene-1.png"

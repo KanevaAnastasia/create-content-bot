@@ -1831,7 +1831,6 @@ async def _generate_video(update: Update, session: dict[str, Any], *, target: st
     )
 
     async def run() -> None:
-        cancelled = False
         try:
             await _generate_video_now(
                 update,
@@ -1841,7 +1840,6 @@ async def _generate_video(update: Update, session: dict[str, Any], *, target: st
                 announce=False,
             )
         except asyncio.CancelledError:
-            cancelled = True
             raise
         except Exception:
             logger.exception("guest.syntax_background_generation_failed target=%s", target)
@@ -1854,8 +1852,7 @@ async def _generate_video(update: Update, session: dict[str, Any], *, target: st
             )
         finally:
             if (
-                not cancelled
-                and session.get("state") == STATE_SYNTAX_PENDING
+                session.get("state") == STATE_SYNTAX_PENDING
                 and _guest_video_job_is_current(session, job_context)
             ):
                 data["syntax_retry_target"] = target
@@ -2630,11 +2627,23 @@ async def guest_on_text(update: Update, context: ContextTypes.DEFAULT_TYPE, iden
     data = _guest_data(session)
     try:
         if state == STATE_SYNTAX_PENDING:
-            await _reply(
-                update,
-                "Генерация через Syntax → Veo уже выполняется. Очередь дождусь и пришлю видео автоматически.",
-                markup=guest_keyboard_for_session(session),
-            )
+            target = str(data.get("syntax_retry_target") or "video")
+            key = _guest_syntax_task_key(chat_id, session, target)
+            running = _GUEST_SYNTAX_TASKS.get(key)
+            if running is not None and not running.done():
+                await _reply(
+                    update,
+                    "Генерация через Syntax → Veo уже выполняется. Очередь дождусь и пришлю видео автоматически.",
+                    markup=guest_keyboard_for_session(session),
+                )
+            else:
+                session["state"] = STATE_SYNTAX_ERROR
+                save_loaded_session_if_possible(chat_id)
+                await _reply(
+                    update,
+                    "Предыдущая генерация была прервана. Нажмите «Повторить», чтобы запустить её снова.",
+                    markup=guest_keyboard_for_session(session),
+                )
             return
 
         if text == BUTTON_MENU:

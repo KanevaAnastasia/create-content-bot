@@ -55,6 +55,7 @@ from .quiet_mode import (
     set_quiet_mode_enabled,
 )
 from .state import SESSIONS
+from .session_store import recover_interrupted_guest_syntax_sessions
 
 logger = logging.getLogger("bot")
 _QUIET_MODE_MIDNIGHT_TASK_KEY = "quiet_mode_midnight_task"
@@ -358,6 +359,10 @@ async def _post_init(application: Application) -> None:
         await asyncio.to_thread(ensure_automatic_quiet_mode_cycle)
     except Exception:
         logger.exception("quiet_mode.startup_cycle_check_failed")
+    try:
+        await asyncio.to_thread(recover_interrupted_guest_syntax_sessions)
+    except Exception:
+        logger.exception("guest.syntax_startup_recovery_failed")
     application.bot_data[_QUIET_MODE_MIDNIGHT_TASK_KEY] = asyncio.create_task(
         _quiet_mode_midnight_loop(),
         name="quiet-mode-midnight-moscow",

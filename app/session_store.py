@@ -17,6 +17,8 @@ from .scene_media_store import persist_scene_video_prompts, rebuild_production_s
 logger = logging.getLogger("bot.session")
 
 GUEST_RUN_SNAPSHOT_ARTIFACT_TYPE = "guest_run_session_snapshot"
+GUEST_SYNTAX_PENDING_STATE = "guest_syntax_pending"
+GUEST_SYNTAX_RETRY_STATE = "guest_syntax_error"
 
 _BYTES_MARKER = "__cf_bytes_b64__"
 _PENDING_SESSION_KEYS = (
@@ -533,6 +535,59 @@ def delete_session(chat_id: int) -> None:
             return
         db.delete(row)
         db.commit()
+
+
+def recover_interrupted_guest_syntax_sessions(*, session_factory=None) -> int:
+    """Make persisted guest Syntax jobs retryable after a process restart.
+
+    Syntax jobs live in asyncio tasks and cannot survive process termination. A
+    persisted ``guest_syntax_pending`` state therefore has no live worker when a
+    new bot process starts. Reconcile both the active chat snapshot and the
+    guest-run history snapshot without sending any Telegram messages.
+    """
+    factory = session_factory or SessionLocal
+    recovered = 0
+    with factory() as db:
+        rows = (
+            db.execute(
+                select(ChatSession)
+                .where(ChatSession.state == GUEST_SYNTAX_PENDING_STATE)
+                .with_for_update()
+            )
+            .scalars()
+            .all()
+        )
+        for row in rows:
+            session_payload = dict(row.session_json or {})
+            session_payload["state"] = GUEST_SYNTAX_RETRY_STATE
+            row.state = GUEST_SYNTAX_RETRY_STATE
+            row.session_json = session_payload
+
+            if row.generation_run_id is not None:
+                snapshot = (
+                    db.execute(
+                        select(GenerationArtifact)
+                        .where(
+                            GenerationArtifact.run_id == row.generation_run_id,
+                            GenerationArtifact.artifact_type == GUEST_RUN_SNAPSHOT_ARTIFACT_TYPE,
+                        )
+                        .order_by(GenerationArtifact.created_at.desc())
+                    )
+                    .scalars()
+                    .first()
+                )
+                if snapshot is not None:
+                    snapshot_payload = dict(snapshot.payload_json or {})
+                    snapshot_session = dict(snapshot_payload.get("session") or {})
+                    snapshot_session["state"] = GUEST_SYNTAX_RETRY_STATE
+                    snapshot_payload["session"] = snapshot_session
+                    snapshot.payload_json = snapshot_payload
+            recovered += 1
+        if recovered:
+            db.commit()
+    if recovered:
+        logger.warning("session_store.recovered_interrupted_guest_syntax count=%s", recovered)
+    return recovered
 
 
 def save_session_if_possible(chat_id: int | None, session: dict[str, Any] | None) -> None:

@@ -3,7 +3,7 @@ import uuid
 from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 
-from sqlalchemy import create_engine
+from sqlalchemy import create_engine, select
 from sqlalchemy.orm import sessionmaker
 
 from app import db, final_video_delivery, session_store
@@ -409,6 +409,66 @@ def test_load_session_keeps_cached_overlay_title_over_stale_artifact(monkeypatch
 
     assert loaded["overlay_title_by_lang"] == cached_title
     assert loaded["production"]["overlay_title_by_lang"] == cached_title
+
+
+def test_recover_interrupted_guest_syntax_sessions_updates_chat_and_run_snapshot(monkeypatch):
+    _install_sqlite(monkeypatch)
+
+    with db.SessionLocal() as check_db:
+        run = GenerationRun(status="guest_in_progress", language="ru", script="Гостевая сцена")
+        check_db.add(run)
+        check_db.flush()
+        check_db.add_all(
+            [
+                ChatSession(
+                    chat_id=606,
+                    state=session_store.GUEST_SYNTAX_PENDING_STATE,
+                    generation_run_id=run.id,
+                    session_json={
+                        "state": session_store.GUEST_SYNTAX_PENDING_STATE,
+                        "guest_mode": True,
+                        "guest_data": {"syntax_retry_target": "video"},
+                    },
+                ),
+                GenerationArtifact(
+                    run_id=run.id,
+                    artifact_type=session_store.GUEST_RUN_SNAPSHOT_ARTIFACT_TYPE,
+                    label="Состояние гостевой генерации",
+                    uri=f"db://generation_runs/{run.id}/guest_session",
+                    mime_type="application/json",
+                    payload_json={
+                        "session": {
+                            "state": session_store.GUEST_SYNTAX_PENDING_STATE,
+                            "guest_mode": True,
+                        }
+                    },
+                ),
+                ChatSession(
+                    chat_id=607,
+                    state="guest_video_approval",
+                    session_json={"state": "guest_video_approval", "guest_mode": True},
+                ),
+            ]
+        )
+        check_db.commit()
+
+    assert session_store.recover_interrupted_guest_syntax_sessions() == 1
+
+    with db.SessionLocal() as check_db:
+        recovered = check_db.execute(select(ChatSession).where(ChatSession.chat_id == 606)).scalar_one()
+        unaffected = check_db.execute(select(ChatSession).where(ChatSession.chat_id == 607)).scalar_one()
+        snapshot = check_db.execute(
+            select(GenerationArtifact).where(
+                GenerationArtifact.run_id == run.id,
+                GenerationArtifact.artifact_type == session_store.GUEST_RUN_SNAPSHOT_ARTIFACT_TYPE,
+            )
+        ).scalar_one()
+
+    assert recovered.state == session_store.GUEST_SYNTAX_RETRY_STATE
+    assert recovered.session_json["state"] == session_store.GUEST_SYNTAX_RETRY_STATE
+    assert recovered.session_json["guest_data"] == {"syntax_retry_target": "video"}
+    assert snapshot.payload_json["session"]["state"] == session_store.GUEST_SYNTAX_RETRY_STATE
+    assert unaffected.state == "guest_video_approval"
 
 
 def test_save_and_load_session_restores_bytes_and_scene_candidates(monkeypatch):
