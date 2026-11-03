@@ -837,6 +837,7 @@ def test_django_admin_allows_series_binding_and_day_editing():
         GenerationRunAdmin,
         ProjectPublishAccountAdmin,
         PublicationJobAdmin,
+        SceneInline,
         VideoOverviewAdmin,
     )
     from pipeline_admin.models import PublicationJob
@@ -849,6 +850,8 @@ def test_django_admin_allows_series_binding_and_day_editing():
     assert GenerationRunAdmin.list_select_related == ("project", "series")
     assert GenerationRunAdmin.list_per_page == 50
     assert GenerationRunAdmin.show_full_result_count is False
+    assert GenerationRunAdmin.inlines == (SceneInline,)
+    assert "artifacts_link" in GenerationRunAdmin.readonly_fields
     assert "current_video_index" in ContentSeriesAdmin.list_editable
     assert "total_videos" in ContentSeriesAdmin.list_editable
     assert "is_active" in ContentSeriesAdmin.list_editable
@@ -886,6 +889,32 @@ def test_generation_run_admin_artifact_count_uses_queryset_annotation():
 
     assert "_artifact_count" in queryset.query.annotations
     assert model_admin.artifact_count(run) == 7
+
+
+def test_generation_run_admin_display_session_skips_blobs_and_is_cached(monkeypatch):
+    admin_dir = Path(__file__).resolve().parents[1] / "admin_panel"
+    sys.path.insert(0, str(admin_dir))
+    os.environ.setdefault("DJANGO_SETTINGS_MODULE", "cf_admin.settings")
+
+    import django
+
+    django.setup()
+
+    import pipeline_admin.admin as admin_module
+
+    calls = []
+    expected = (None, {"production": {}}, {})
+
+    def fake_render(run, *, include_media_blobs=True):
+        calls.append((run.id, include_media_blobs))
+        return expected
+
+    monkeypatch.setattr(admin_module, "_run_session_for_admin_render", fake_render)
+    run = SimpleNamespace(id=uuid.uuid4())
+
+    assert admin_module._run_session_for_admin_display(run) is expected
+    assert admin_module._run_session_for_admin_display(run) is expected
+    assert calls == [(run.id, False)]
 
 
 def test_django_content_series_admin_accepts_empty_meta_json():

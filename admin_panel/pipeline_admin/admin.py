@@ -785,7 +785,11 @@ def _checkpoint_session_for_admin_render(run: GenerationRun) -> dict[str, Any]:
     return {}
 
 
-def _run_session_for_admin_render(run: GenerationRun) -> tuple[ChatSession | None, dict[str, Any], dict[str, Any]]:
+def _run_session_for_admin_render(
+    run: GenerationRun,
+    *,
+    include_media_blobs: bool = True,
+) -> tuple[ChatSession | None, dict[str, Any], dict[str, Any]]:
     chat_session = ChatSession.objects.filter(generation_run_id=run.id).order_by("-updated_at").first()
     if chat_session is not None:
         session = copy.deepcopy(chat_session.session_json or {})
@@ -804,11 +808,19 @@ def _run_session_for_admin_render(run: GenerationRun) -> tuple[ChatSession | Non
     if not isinstance(production.get("json_plan"), list) or not production["json_plan"]:
         production["json_plan"] = _production_scenes_from_db(run)
     session["production"] = production
-    rebuild_production_session(session, str(run.id), include_media_blobs=True)
+    rebuild_production_session(session, str(run.id), include_media_blobs=include_media_blobs)
     production = session.get("production") if isinstance(session.get("production"), dict) else production
     if bool(session.get("guest_mode")) and str(run.workflow_type or "") == "cartoon":
         production["json_plan"] = approved_guest_cartoon_scenes(production.get("json_plan"))
     return chat_session, session, production
+
+
+def _run_session_for_admin_display(run: GenerationRun) -> tuple[ChatSession | None, dict[str, Any], dict[str, Any]]:
+    cached = getattr(run, "_admin_display_session_cache", None)
+    if cached is None:
+        cached = _run_session_for_admin_render(run, include_media_blobs=False)
+        run._admin_display_session_cache = cached
+    return cached
 
 
 def _ensure_generation_draft_for_admin_run(run: GenerationRun) -> GenerationDraft | None:
@@ -1344,7 +1356,7 @@ def _title_color_swatch(color: str, label: str) -> str:
 
 def _title_color_picker_html(run: GenerationRun) -> str:
     try:
-        _chat_session, session, production = _run_session_for_admin_render(run)
+        _chat_session, session, production = _run_session_for_admin_display(run)
     except Exception:
         session, production = {}, {}
     active_style = _overlay_title_style_for_admin_render(session, production, run=run)
@@ -2621,9 +2633,13 @@ def _publication_post_production_from_form(
 
 
 def _latest_chat_session_for_run(run: GenerationRun) -> tuple[ChatSession | None, dict[str, Any]]:
-    row = ChatSession.objects.filter(generation_run_id=run.id).order_by("-updated_at").first()
-    session = row.session_json if row is not None and isinstance(row.session_json, dict) else {}
-    return row, session
+    cached = getattr(run, "_admin_latest_chat_session_cache", None)
+    if cached is None:
+        row = ChatSession.objects.filter(generation_run_id=run.id).order_by("-updated_at").first()
+        session = row.session_json if row is not None and isinstance(row.session_json, dict) else {}
+        cached = (row, session)
+        run._admin_latest_chat_session_cache = cached
+    return cached
 
 
 def _publication_copy_from_latest_jobs(run: GenerationRun) -> dict[str, str]:
@@ -3266,8 +3282,7 @@ def _final_target_languages_for_run(
         if str(artifact.language or "").strip()
     }
     languages.update(language for language, _variant in statuses)
-    chat_session = ChatSession.objects.filter(generation_run_id=run.id).order_by("-updated_at").first()
-    session = chat_session.session_json if chat_session is not None and isinstance(chat_session.session_json, dict) else {}
+    _chat_session, session = _latest_chat_session_for_run(run)
     targets = session.get("target_languages")
     if isinstance(targets, list):
         languages.update(str(item).strip().lower() for item in targets if str(item).strip())
@@ -3379,7 +3394,7 @@ def _final_videos_panel(run: GenerationRun) -> str:
     languages = _final_target_languages_for_run(run, artifacts, statuses)
     parts = ['<div class="cf-final-videos">']
     try:
-        _chat_session, session, production = _run_session_for_admin_render(run)
+        _chat_session, session, production = _run_session_for_admin_display(run)
         parts.append(_title_color_status_html(session, production, run=run))
     except Exception:
         pass
@@ -3836,10 +3851,8 @@ class GenerationArtifactInline(admin.TabularInline):
 
 
 def _overlay_title_for_admin_edit(run: GenerationRun) -> dict[str, str]:
-    session: dict[str, Any] = {}
-    chat_session = ChatSession.objects.filter(generation_run_id=run.id).order_by("-updated_at").first()
-    if chat_session is not None and isinstance(chat_session.session_json, dict):
-        session = copy.deepcopy(chat_session.session_json or {})
+    _chat_session, latest_session = _latest_chat_session_for_run(run)
+    session = copy.deepcopy(latest_session)
     production = session.get("production") if isinstance(session.get("production"), dict) else {}
     title_by_lang: dict[str, str] = _stored_overlay_title_by_lang_for_run(run)
     for source in (production, session):
@@ -3855,10 +3868,8 @@ def _overlay_title_for_admin_edit(run: GenerationRun) -> dict[str, str]:
 
 
 def _overlay_subtitle_for_admin_edit(run: GenerationRun) -> dict[str, str]:
-    session: dict[str, Any] = {}
-    chat_session = ChatSession.objects.filter(generation_run_id=run.id).order_by("-updated_at").first()
-    if chat_session is not None and isinstance(chat_session.session_json, dict):
-        session = copy.deepcopy(chat_session.session_json or {})
+    _chat_session, latest_session = _latest_chat_session_for_run(run)
+    session = copy.deepcopy(latest_session)
     production = session.get("production") if isinstance(session.get("production"), dict) else {}
     return _overlay_subtitle_for_admin_render(run, session, production)
 
@@ -3968,6 +3979,7 @@ class GenerationRunAdmin(admin.ModelAdmin):
     readonly_fields = (
         "id",
         "created_at",
+        "artifacts_link",
         "overlay_title_color",
         "script",
         "final_videos",
@@ -3997,6 +4009,7 @@ class GenerationRunAdmin(admin.ModelAdmin):
         "scheduled_item",
         "created_at",
         "overlay_title_color",
+        "artifacts_link",
         "final_videos",
         "publication_prep",
         "prompt_overview",
@@ -4004,7 +4017,7 @@ class GenerationRunAdmin(admin.ModelAdmin):
         "scene_text_history",
         "script",
     )
-    inlines = (SceneInline, GenerationArtifactInline)
+    inlines = (SceneInline,)
 
     def save_model(self, request, obj: GenerationRun, form, change):
         changed_fields = set(getattr(form, "changed_data", []) or [])
@@ -4384,6 +4397,11 @@ class GenerationRunAdmin(admin.ModelAdmin):
     @admin.display(description="Artifacts")
     def artifact_count(self, obj: GenerationRun) -> int:
         return int(obj._artifact_count)
+
+    @admin.display(description="Artifacts")
+    def artifacts_link(self, obj: GenerationRun) -> str:
+        url = reverse("admin:pipeline_admin_generationartifact_changelist") + f"?q={quote(str(obj.id))}"
+        return format_html('<a class="button" href="{}">Open {} artifacts</a>', url, int(obj._artifact_count))
 
     @admin.display(description="Approved media by scene")
     def media_approval_overview(self, obj: GenerationRun) -> str:
