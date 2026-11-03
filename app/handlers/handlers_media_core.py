@@ -1184,44 +1184,6 @@ async def _attempt_syntax_video_fallback_batch(
     timeout_sec = int(timeout_sec or _positive_int_env("SYNTAX_FALLBACK_TIMEOUT_SEC", SYNTAX_FALLBACK_DEFAULT_TIMEOUT_SEC))
     lock_timeout_sec = int(acquire_timeout_sec or _positive_int_env("SYNTAX_FALLBACK_LOCK_TIMEOUT_SEC", timeout_sec))
 
-    # Veo requires an individual WebView configure/submit flow after every
-    # uploaded prompt. The legacy multi-request transport only uploaded all
-    # prompts and then polled the chat, so it skipped that mandatory submit
-    # step and could not reliably associate bare video replies with a language.
-    # Reuse the proven single-request path for each language instead.
-    if str(syntax_provider or "").strip().lower() == SYNTAX_PROVIDER_VEO:
-        output: dict[str, bytes] = {}
-        payload_hashes: dict[str, str] = {}
-        for request in requests:
-            key = str(request.key)
-            payload = await _attempt_syntax_video_fallback_bytes(
-                prompt=str(request.prompt or ""),
-                model=model,
-                duration_sec=duration_sec,
-                start_image=request.start_image,
-                end_image=request.end_image,
-                timeout_sec=timeout_sec,
-                acquire_timeout_sec=lock_timeout_sec,
-                syntax_provider=SYNTAX_PROVIDER_VEO,
-                aspect_ratio=aspect_ratio,
-                audio_enabled=audio_enabled,
-            )
-            if payload is None:
-                continue
-            digest = hashlib.sha256(payload).hexdigest()
-            duplicate_key = payload_hashes.get(digest)
-            if duplicate_key is not None:
-                logger.warning(
-                    "video.syntax_batch duplicate_payload_discarded key=%s first_key=%s sha256=%s",
-                    key,
-                    duplicate_key,
-                    digest[:16],
-                )
-                continue
-            payload_hashes[digest] = key
-            output[key] = payload
-        return output
-
     try:
         results = await asyncio.wait_for(
             asyncio.to_thread(

@@ -8301,19 +8301,28 @@ def test_attempt_syntax_video_fallback_batch_discards_duplicate_language_payload
     assert captured["aspect_ratio"] == "16:9"
 
 
-def test_attempt_syntax_video_fallback_batch_runs_veo_languages_through_single_flow(monkeypatch):
-    calls: list[dict[str, object]] = []
+def test_attempt_syntax_video_fallback_batch_uses_pipelined_veo_batch_transport(monkeypatch):
+    captured: dict[str, object] = {}
 
-    async def _fake_single(**kwargs):
-        calls.append(dict(kwargs))
-        return f"video-{kwargs['prompt']}".encode()
+    def _fake_batch(**kwargs):
+        captured.update(kwargs)
+        return {
+            request.key: FallbackResult(
+                success=True,
+                video_bytes=f"video-{request.prompt}".encode(),
+                video_uri=None,
+                provider_message="ok",
+                attempt_id=f"{request.key}-attempt",
+            )
+            for request in kwargs["requests"]
+        }
 
-    def _unexpected_legacy_batch(**_kwargs):
-        raise AssertionError("Veo must not use the legacy multi-request transport")
+    async def _unexpected_single(**_kwargs):
+        raise AssertionError("Multilingual Veo must use the pipelined batch transport")
 
     monkeypatch.setattr(handlers_media_core, "_syntax_fallback_env_enabled", lambda: True)
-    monkeypatch.setattr(handlers_media_core, "_attempt_syntax_video_fallback_bytes", _fake_single)
-    monkeypatch.setattr(handlers_media_core, "try_generate_via_syntax_batch", _unexpected_legacy_batch)
+    monkeypatch.setattr(handlers_media_core, "_attempt_syntax_video_fallback_bytes", _unexpected_single)
+    monkeypatch.setattr(handlers_media_core, "try_generate_via_syntax_batch", _fake_batch)
 
     out = asyncio.run(
         handlers_media_core._attempt_syntax_video_fallback_batch(
@@ -8343,11 +8352,12 @@ def test_attempt_syntax_video_fallback_batch_runs_veo_languages_through_single_f
         "ru": "video-русский промпт".encode(),
         "en": b"video-english prompt",
     }
-    assert [call["prompt"] for call in calls] == ["русский промпт", "english prompt"]
-    assert all(call["syntax_provider"] == "veo" for call in calls)
-    assert all(call["aspect_ratio"] == "16:9" for call in calls)
-    assert calls[0]["end_image"] is None
-    assert calls[1]["end_image"] == b"end-en"
+    requests = captured["requests"]
+    assert [request.prompt for request in requests] == ["русский промпт", "english prompt"]
+    assert captured["syntax_provider"] == "veo"
+    assert captured["aspect_ratio"] == "16:9"
+    assert requests[0].end_image is None
+    assert requests[1].end_image == b"end-en"
 
 
 def test_provider_choice_pending_yields_to_ok_when_video_already_exists():

@@ -522,8 +522,7 @@ def test_try_generate_via_syntax_telethon_happy_path(monkeypatch):
     assert result.video_bytes == b"mp4-content"
     assert result.video_uri is None
     assert result.attempt_id == "fixed-attempt"
-    assert call_order[:7] == [
-        "send_message:/start",
+    assert call_order[:6] == [
         "send_message:/video",
         "send_message:Veo",
         "send_message:Сгенерировать",
@@ -610,7 +609,6 @@ def test_try_generate_via_syntax_kling_uses_configure_ui_flow(monkeypatch):
     assert result.success is True
     assert result.video_bytes == b"kling-mp4"
     assert events == [
-        ("send_message", "/start", None),
         ("send_message", "/video", None),
         ("send_message", "Kling", None),
         ("send_file", "start_frame.png", None),
@@ -711,7 +709,6 @@ def test_try_generate_via_syntax_veo_uses_mandatory_settings_webview(monkeypatch
     assert captured["aspect_ratio"] == "16:9"
     assert captured["configure_message"].id == 200
     assert events == [
-        ("send_message", "/start", None),
         ("send_message", "/video", None),
         ("send_message", "Veo", None),
         ("send_message", "Сгенерировать", None),
@@ -1870,8 +1867,8 @@ def test_try_generate_via_syntax_parallel_uses_distinct_sessions(monkeypatch):
     threads = [threading.Thread(target=_run, args=(idx,)) for idx in range(2)]
     for thread in threads:
         thread.start()
-    # The current Syntax navigation deliberately pauses after /start, /video,
-    # Veo and Generate so the bot can install each reply keyboard before the
+    # The current Syntax navigation deliberately pauses after /video, Veo and
+    # Generate so the bot can install each reply keyboard before the
     # next selection. Give both parallel flows enough wall time to complete
     # that real preflight while still bounding the test.
     for thread in threads:
@@ -1906,11 +1903,19 @@ def test_try_generate_via_syntax_batch_sends_all_requests_before_waiting(monkeyp
     class _Entity:
         id = 999
 
+    class _ConfigureButton:
+        text = "Настроить и запустить"
+
+    class _ConfigureMessage:
+        def __init__(self, msg_id: int):
+            self.id = msg_id
+
     events: list[str] = []
+    configure_count = {"value": 0}
 
     class _FakeClient:
         def __init__(self, *_args, **_kwargs):
-            pass
+            self._file_count = 0
 
         async def connect(self):
             return None
@@ -1926,8 +1931,9 @@ def test_try_generate_via_syntax_batch_sends_all_requests_before_waiting(monkeyp
 
         async def send_file(self, _target, file, caption=None, force_document=False):
             del caption, force_document
+            self._file_count += 1
             events.append(f"send_file:{getattr(file, 'name', '')}")
-            return _SentMessage(101 if len(events) == 1 else 103)
+            return _SentMessage(101 if self._file_count == 1 else 103)
 
         async def send_message(self, _target, text, reply_to=None):
             events.append(f"send_message:{text}")
@@ -1950,8 +1956,18 @@ def test_try_generate_via_syntax_batch_sends_all_requests_before_waiting(monkeyp
             assert file is bytes
             return b"mp4-content"
 
+    async def _fake_wait_for_configure(*_args, **_kwargs):
+        configure_count["value"] += 1
+        return _ConfigureMessage(150 + configure_count["value"]), _ConfigureButton()
+
+    async def _fake_submit_webview(*_args, **kwargs):
+        events.append(f"submit:{kwargs['prompt']}")
+        return None
+
     monkeypatch.setattr(telethon_fallback, "TelegramClient", _FakeClient)
     monkeypatch.setattr(telethon_fallback, "StringSession", lambda value: value)
+    monkeypatch.setattr(telethon_fallback, "_wait_for_latest_syntax_configure_button", _fake_wait_for_configure)
+    monkeypatch.setattr(telethon_fallback, "_submit_syntax_veo_webview", _fake_submit_webview)
     monkeypatch.setenv("TELEGRAM_API_ID", "123")
     monkeypatch.setenv("TELEGRAM_API_HASH", "hash")
     monkeypatch.setenv("TELETHON_STRING_SESSION", "session")
@@ -1969,16 +1985,21 @@ def test_try_generate_via_syntax_batch_sends_all_requests_before_waiting(monkeyp
 
     assert results["ru"].success is True
     assert results["en"].success is True
-    assert events[:8] == [
-        "send_message:/start",
+    assert events[:12] == [
         "send_message:/video",
         "send_message:Veo",
         "send_message:Сгенерировать",
         "send_file:start_frame.png",
         "send_message:lang:ru prompt",
+        "submit:lang:ru prompt",
+        "send_message:/video",
+        "send_message:Veo",
+        "send_message:Сгенерировать",
         "send_file:start_frame.png",
         "send_message:lang:en prompt",
+        "submit:lang:en prompt",
     ]
+    assert events.index("iter_messages") > events.index("submit:lang:en prompt")
 
 
 def test_batch_routes_edited_video_status_to_english_request():
@@ -2176,9 +2197,17 @@ def test_batch_routes_edited_hard_reject_to_the_right_language(monkeypatch):
     async def _noop_sleep(_sec: float) -> None:
         return None
 
+    async def _fake_wait_for_configure(*_args, **_kwargs):
+        return _IncomingMessage(150), object()
+
+    async def _fake_submit_webview(*_args, **_kwargs):
+        return None
+
     monkeypatch.setattr(telethon_fallback, "TelegramClient", _FakeClient)
     monkeypatch.setattr(telethon_fallback, "StringSession", lambda value: value)
     monkeypatch.setattr(telethon_fallback.asyncio, "sleep", _noop_sleep)
+    monkeypatch.setattr(telethon_fallback, "_wait_for_latest_syntax_configure_button", _fake_wait_for_configure)
+    monkeypatch.setattr(telethon_fallback, "_submit_syntax_veo_webview", _fake_submit_webview)
     monkeypatch.setenv("TELEGRAM_API_ID", "123")
     monkeypatch.setenv("TELEGRAM_API_HASH", "hash")
     monkeypatch.setenv("TELETHON_STRING_SESSION", "session")
@@ -2267,11 +2296,19 @@ def test_try_generate_via_syntax_batch_times_out_each_pending_request(monkeypatc
     async def _advance_sleep(seconds: float) -> None:
         clock["now"] += max(seconds, 2.0)
 
+    async def _fake_wait_for_configure(*_args, **_kwargs):
+        return _IncomingMessage(150), object()
+
+    async def _fake_submit_webview(*_args, **_kwargs):
+        return None
+
     monkeypatch.setattr(telethon_fallback, "TelegramClient", _FakeClient)
     monkeypatch.setattr(telethon_fallback, "StringSession", lambda value: value)
     monkeypatch.setattr(telethon_fallback.time, "monotonic", lambda: clock["now"])
     monkeypatch.setattr(telethon_fallback.asyncio, "sleep", _advance_sleep)
     monkeypatch.setattr(telethon_fallback, "_poll_interval_sec", lambda: 2)
+    monkeypatch.setattr(telethon_fallback, "_wait_for_latest_syntax_configure_button", _fake_wait_for_configure)
+    monkeypatch.setattr(telethon_fallback, "_submit_syntax_veo_webview", _fake_submit_webview)
     monkeypatch.setenv("TELEGRAM_API_ID", "123")
     monkeypatch.setenv("TELEGRAM_API_HASH", "hash")
     monkeypatch.setenv("TELETHON_STRING_SESSION", "session")

@@ -1702,38 +1702,24 @@ async def _run_syntax_veo_configure_flow(
     configure_mid = int(getattr(configure_message, "id", 0) or 0)
     if configure_mid:
         sent_ids.add(configure_mid)
-    webview_url = await _syntax_configure_button_webview_url(
+    configure_error = await _submit_syntax_veo_webview(
         client,
         target,
-        bot_entity,
-        configure_message,
-        configure_button,
+        bot_entity=bot_entity,
+        configure_message=configure_message,
+        configure_button=configure_button,
+        prompt=prompt,
+        start_image=start_image,
+        duration_sec=duration_sec,
+        aspect_ratio=aspect_ratio,
+        timeout_sec=max(30, int(deadline - time.monotonic())),
     )
-    if not webview_url:
+    if configure_error:
         return _result(
             success=False,
             video_bytes=None,
             video_uri=None,
-            provider_message="Syntax Veo Настроить и запустить button did not expose a WebView URL.",
-            attempt_id=attempt_id,
-        )
-    try:
-        remaining = max(30, int(deadline - time.monotonic()))
-        await asyncio.to_thread(
-            _fill_syntax_veo_webapp_sync,
-            url=webview_url,
-            prompt=prompt,
-            start_image=start_image,
-            duration_sec=duration_sec,
-            aspect_ratio=aspect_ratio,
-            timeout_sec=remaining,
-        )
-    except Exception as exc:
-        return _result(
-            success=False,
-            video_bytes=None,
-            video_uri=None,
-            provider_message=f"Syntax Veo UI configure failed: {_sanitize_syntax_webview_error(exc)}",
+            provider_message=configure_error,
             attempt_id=attempt_id,
         )
     return await _poll_syntax_bot_until_video(
@@ -1750,16 +1736,48 @@ async def _run_syntax_veo_configure_flow(
     )
 
 
+async def _submit_syntax_veo_webview(
+    client: Any,
+    target: Any,
+    *,
+    bot_entity: Any,
+    configure_message: Any,
+    configure_button: Any,
+    prompt: str,
+    start_image: bytes,
+    duration_sec: int,
+    aspect_ratio: str,
+    timeout_sec: int,
+) -> str | None:
+    """Submit one Veo draft and return as soon as Livewire accepts Generate."""
+
+    webview_url = await _syntax_configure_button_webview_url(
+        client,
+        target,
+        bot_entity,
+        configure_message,
+        configure_button,
+    )
+    if not webview_url:
+        return "Syntax Veo Настроить и запустить button did not expose a WebView URL."
+    try:
+        await asyncio.to_thread(
+            _fill_syntax_veo_webapp_sync,
+            url=webview_url,
+            prompt=prompt,
+            start_image=start_image,
+            duration_sec=duration_sec,
+            aspect_ratio=aspect_ratio,
+            timeout_sec=max(30, int(timeout_sec)),
+        )
+    except Exception as exc:
+        return f"Syntax Veo UI configure failed: {_sanitize_syntax_webview_error(exc)}"
+    return None
+
+
 async def _send_syntax_video_preflight(client: Any, target: Any, *, provider: str | None, model: str) -> int:
-    # Syntax occasionally loses its selected tool after the Telegram menu is
-    # hidden/reloaded.  In that state it accepts our photo at the transport
-    # level, but answers with "Не выбран инструмент" and the caller used to
-    # wait for the full generation timeout.  Syntax itself documents /start as
-    # the recovery action, so reset its navigation before every isolated
-    # dispatch.  A Telethon session is leased exclusively while this runs,
-    # therefore the reset cannot interrupt another request on the same chat.
-    await client.send_message(target, "/start")
-    await asyncio.sleep(1.5)
+    # /video is sufficient to select the tool and avoids resetting the whole
+    # Syntax conversation before every language dispatch.
     provider_kind = _normalize_syntax_provider(provider, model)
     command = SYNTAX_PROVIDER_COMMANDS[provider_kind]
     await client.send_message(target, "/video")
@@ -2819,14 +2837,14 @@ async def _run_batch_fallback_async(
             return results
 
         target = await client.get_entity(bot_username)
-        await _send_syntax_video_preflight(
-            client,
-            target,
-            provider=syntax_provider,
-            model=model,
-        )
         request_runtime: list[tuple[_BatchRequestState, int, set[int], str]] = []
         for request in ready:
+            await _send_syntax_video_preflight(
+                client,
+                target,
+                provider=syntax_provider,
+                model=model,
+            )
             sent_ids: set[int] = set()
             start_file = io.BytesIO(request.start_image)
             start_file.name = f"start_frame.{_image_ext(request.start_image)}"
@@ -2847,8 +2865,51 @@ async def _run_batch_fallback_async(
                 )
             request_message = await client.send_message(target, request.prompt_text, reply_to=reply_anchor)
             sent_ids.add(int(request_message.id))
+            configure_message, configure_button = await _wait_for_latest_syntax_configure_button(
+                client,
+                target,
+                reply_anchor=reply_anchor,
+                poll=0.5,
+                require_prompt_saved=True,
+            )
+            if configure_message is None or configure_button is None:
+                results[request.key] = _result(
+                    success=False,
+                    video_bytes=None,
+                    video_uri=None,
+                    provider_message="Syntax Veo did not expose the prompt-saved configure button.",
+                    attempt_id=request.attempt_id,
+                )
+                continue
+            configure_mid = int(getattr(configure_message, "id", 0) or 0)
+            if configure_mid:
+                sent_ids.add(configure_mid)
+            configure_error = await _submit_syntax_veo_webview(
+                client,
+                target,
+                bot_entity=target,
+                configure_message=configure_message,
+                configure_button=configure_button,
+                prompt=request.prompt_text,
+                start_image=request.start_image,
+                duration_sec=duration_sec,
+                aspect_ratio=aspect_ratio,
+                timeout_sec=timeout,
+            )
+            if configure_error:
+                results[request.key] = _result(
+                    success=False,
+                    video_bytes=None,
+                    video_uri=None,
+                    provider_message=configure_error,
+                    attempt_id=request.attempt_id,
+                )
+                continue
+            logger.info("syntax_batch.veo_submitted key=%s attempt_id=%s", request.key, request.attempt_id)
             request_runtime.append((request, reply_anchor, sent_ids, last_info))
 
+        if not request_runtime:
+            return results
         deadline = time.monotonic() + timeout
         pending_states = {
             request.key: {
