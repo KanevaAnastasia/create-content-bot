@@ -153,7 +153,7 @@ def test_all_modes_word_synced_subtitles_follow_transcribed_audio_timestamps():
     assert all(entry["word_synced"] is True for entry in entries)
 
 
-def test_guest_mode_keeps_previous_whole_cue_subtitle_style():
+def test_guest_mode_has_no_subtitles():
     scene = {
         "scene": 1,
         "guest_mode": True,
@@ -170,15 +170,7 @@ def test_guest_mode_keeps_previous_whole_cue_subtitle_style():
         speed_coef=1.0,
     )
 
-    assert entries == [
-        {
-            "scene": 1,
-            "language": "ru",
-            "text": "Гостевой текст целиком",
-            "start_sec": 0.4,
-            "end_sec": 2.2,
-        }
-    ]
+    assert entries == []
 
 
 def test_word_synced_ass_uses_spoken_case_and_cream_colour(tmp_path):
