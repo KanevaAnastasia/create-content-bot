@@ -17,6 +17,8 @@ from urllib.parse import quote, unquote, urlparse
 from django import forms as django_forms
 from django.contrib import admin, messages
 from django.db import close_old_connections, connection, transaction
+from django.db.models import Count, IntegerField, OuterRef, Subquery, Value
+from django.db.models.functions import Coalesce
 from django.http import FileResponse, Http404, HttpResponse, HttpResponseRedirect, JsonResponse, StreamingHttpResponse
 from django.middleware.csrf import get_token
 from django.urls import NoReverseMatch, path, reverse
@@ -3957,6 +3959,10 @@ class GenerationRunAdmin(admin.ModelAdmin):
     list_editable = ("is_active", "is_draft", "series", "series_video_index", "series_total_videos")
     search_fields = ("human_title", "script", "id", "series__title_ru", "series__title_en")
     list_filter = ("status", "workflow_type", "language", "series", "is_draft")
+    list_per_page = 50
+    list_max_show_all = 200
+    show_full_result_count = False
+    list_select_related = ("project", "series")
     autocomplete_fields = ("series",)
     actions = (build_final_title_and_videos,)
     readonly_fields = (
@@ -4089,7 +4095,16 @@ class GenerationRunAdmin(admin.ModelAdmin):
         return _scene_text_revision_table(rows)
 
     def get_queryset(self, request):
-        queryset = super().get_queryset(request)
+        artifact_counts = (
+            GenerationArtifact.objects.filter(run_id=OuterRef("pk"))
+            .order_by()
+            .values("run_id")
+            .annotate(total=Count("pk"))
+            .values("total")
+        )
+        queryset = super().get_queryset(request).annotate(
+            _artifact_count=Coalesce(Subquery(artifact_counts, output_field=IntegerField()), Value(0))
+        )
         if request.GET.get("status__exact") == ARCHIVED_TEST_RUN_STATUS:
             return queryset
         return queryset.exclude(status=ARCHIVED_TEST_RUN_STATUS)
@@ -4368,7 +4383,7 @@ class GenerationRunAdmin(admin.ModelAdmin):
 
     @admin.display(description="Artifacts")
     def artifact_count(self, obj: GenerationRun) -> int:
-        return GenerationArtifact.objects.filter(run_id=obj.id).count()
+        return int(obj._artifact_count)
 
     @admin.display(description="Approved media by scene")
     def media_approval_overview(self, obj: GenerationRun) -> str:
