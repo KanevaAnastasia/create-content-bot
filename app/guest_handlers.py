@@ -659,6 +659,7 @@ def _rebuild_guest_session_from_run(identity: BotIdentity, run_id: str) -> tuple
             approved_scenes.append(
                 {
                     "scene": index + 1,
+                    "guest_mode": True,
                     "text": str(scene.text or ""),
                     "duration_sec": 8,
                     "aspect_ratio": _stored_guest_aspect_ratio(video_row, scene),
@@ -2174,6 +2175,7 @@ def _finish_scene_payload(session: dict[str, Any]) -> dict[str, Any]:
     data = _guest_data(session)
     return {
         "scene": int(data.get("scene_index") or 0) + 1,
+        "guest_mode": True,
         "text": str(data.get("scene_description") or ""),
         "duration_sec": 8,
         "aspect_ratio": _guest_aspect_ratio(session),
@@ -2556,7 +2558,11 @@ def _queue_cartoon_final_build(
     force_rebuild: bool = False,
 ) -> dict[str, Any]:
     data = _guest_data(session)
-    scenes = [item for item in data.get("approved_scenes") or [] if isinstance(item, dict)]
+    scenes = [
+        {**item, "guest_mode": True}
+        for item in data.get("approved_scenes") or []
+        if isinstance(item, dict)
+    ]
     if not scenes:
         raise RuntimeError("Нет утверждённых сцен для сборки.")
     if force_rebuild or data.get("rebuilding_after_scene_edit"):

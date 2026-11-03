@@ -153,6 +153,34 @@ def test_all_modes_word_synced_subtitles_follow_transcribed_audio_timestamps():
     assert all(entry["word_synced"] is True for entry in entries)
 
 
+def test_guest_mode_keeps_previous_whole_cue_subtitle_style():
+    scene = {
+        "scene": 1,
+        "guest_mode": True,
+        "speech_cues_by_lang": {
+            "ru": [{"text": "Гостевой текст целиком", "start_sec": 0.4, "end_sec": 2.2}]
+        },
+    }
+
+    entries = post_production._scene_subtitle_entries(
+        scene,
+        "ru",
+        start_offset=0.0,
+        fallback_duration=4.0,
+        speed_coef=1.0,
+    )
+
+    assert entries == [
+        {
+            "scene": 1,
+            "language": "ru",
+            "text": "Гостевой текст целиком",
+            "start_sec": 0.4,
+            "end_sec": 2.2,
+        }
+    ]
+
+
 def test_word_synced_ass_uses_spoken_case_and_cream_colour(tmp_path):
     target = tmp_path / "subtitles.ass"
 

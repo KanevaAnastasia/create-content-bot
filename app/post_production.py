@@ -2659,12 +2659,13 @@ def _scene_subtitle_entries(
     safe_speed = max(0.01, float(speed_coef or 1.0))
     safe_scale = max(0.01, float(timing_scale or 1.0))
     safe_duration = max(0.0, float(fallback_duration or 0.0))
+    progressive_style_enabled = not bool(scene.get("guest_mode"))
     if isinstance(raw_cues, list):
         normalized_cues: list[dict[str, Any]] = []
         for cue in raw_cues:
             if not isinstance(cue, dict):
                 continue
-            if cue.get("word_synced"):
+            if cue.get("word_synced") or not progressive_style_enabled:
                 normalized_cues.append(cue)
                 continue
             try:

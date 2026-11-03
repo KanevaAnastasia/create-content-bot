@@ -1312,7 +1312,9 @@ def test_horizontal_cartoon_uses_selected_ratio_for_frames_video_and_storage(gue
 
     assert captured_image["aspect_ratio"] == "16:9"
     assert captured_video["aspect_ratio"] == "16:9"
-    assert guest_handlers._finish_scene_payload(session)["aspect_ratio"] == "16:9"
+    scene_payload = guest_handlers._finish_scene_payload(session)
+    assert scene_payload["aspect_ratio"] == "16:9"
+    assert scene_payload["guest_mode"] is True
     with guest_db() as db:
         row = db.execute(
             select(SceneVideoCandidate).where(
@@ -1531,6 +1533,7 @@ def test_cartoon_final_confirmation_queues_only_clean_and_4k(guest_db, monkeypat
     assert captured["languages"] == ["ru"]
     assert captured["variants"] == ["clean", "upscaled_4k"]
     assert captured["kick_worker"] is True
+    assert captured["scenes"][0]["guest_mode"] is True
 
 
 def test_rebuild_cartoon_button_forces_clean_and_4k_requeue(guest_db, monkeypatch):
