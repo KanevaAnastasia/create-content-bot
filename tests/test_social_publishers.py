@@ -1,5 +1,6 @@
 import base64
 import json
+import uuid
 from pathlib import Path
 from unittest.mock import Mock, call
 from urllib.parse import parse_qs, urlparse
@@ -8,8 +9,10 @@ import pytest
 
 from app.publication_config import project_env, project_env_name
 from app.publication_media import publication_media_token, publication_media_token_is_valid
+from app.models import PublicationJob
 from app.social_publishers import (
     PublicationDeliveryError,
+    _publish_instagram,
     _tiktok_access_token,
     _youtube_env,
     _vk_access_token,
@@ -79,16 +82,105 @@ def test_youtube_language_credentials_override_legacy(monkeypatch) -> None:
     assert _youtube_env("grandma_kitchen", "YOUTUBE_REFRESH_TOKEN", "en") == "english"
 
 
-def test_instagram_readiness_uses_shared_https_and_project_credentials(monkeypatch) -> None:
+def test_instagram_readiness_only_requires_project_credentials(monkeypatch) -> None:
     monkeypatch.setenv("PUBLISH_GRANDMA_KITCHEN_INSTAGRAM_ACCESS_TOKEN", "token")
     monkeypatch.setenv("PUBLISH_GRANDMA_KITCHEN_INSTAGRAM_BUSINESS_ACCOUNT_ID_RU", "account")
-    monkeypatch.setenv("CONTENT_FABRIC_PUBLIC_BASE_URL", "https://publish.example")
-    monkeypatch.setenv("PUBLICATION_MEDIA_SIGNING_KEY", "signing-key")
+    monkeypatch.delenv("CONTENT_FABRIC_PUBLIC_BASE_URL", raising=False)
+    monkeypatch.delenv("PUBLICATION_MEDIA_SIGNING_KEY", raising=False)
 
     readiness = platform_readiness("grandma_kitchen", "instagram", "ru")
 
     assert readiness.ready is True
     assert readiness.missing == ()
+
+
+def test_instagram_resumable_uploads_local_video_without_public_url(
+    monkeypatch, tmp_path: Path
+) -> None:
+    monkeypatch.setenv("PUBLISH_GRANDMA_KITCHEN_INSTAGRAM_ACCESS_TOKEN", "token")
+    monkeypatch.setenv("PUBLISH_GRANDMA_KITCHEN_INSTAGRAM_BUSINESS_ACCOUNT_ID_RU", "account")
+    monkeypatch.setenv("META_GRAPH_API_VERSION", "v25.0")
+    video_path = tmp_path / "reel.mp4"
+    video_path.write_bytes(b"video-bytes")
+    job = PublicationJob(
+        id=uuid.uuid4(),
+        project_id=uuid.uuid4(),
+        bundle_key="bundle",
+        platform="instagram",
+        language="ru",
+        video_path=str(video_path),
+        description="Caption",
+    )
+
+    def response(payload: dict) -> Mock:
+        result = Mock(ok=True, status_code=200)
+        result.json.return_value = payload
+        return result
+
+    post_calls: list[tuple[str, dict]] = []
+
+    def post(url: str, **kwargs):
+        post_calls.append((url, kwargs))
+        if url.endswith("/account/media"):
+            return response(
+                {
+                    "id": "container-1",
+                    "uri": "https://rupload.facebook.com/ig-api-upload/v25.0/container-1",
+                }
+            )
+        if url.startswith("https://rupload.facebook.com/"):
+            assert kwargs["data"].read() == b"video-bytes"
+            return response({"success": True})
+        assert url.endswith("/account/media_publish")
+        return response({"id": "media-1"})
+
+    monkeypatch.setattr("app.social_publishers.requests.post", post)
+    monkeypatch.setattr(
+        "app.social_publishers.requests.get",
+        Mock(return_value=response({"status_code": "FINISHED"})),
+    )
+
+    assert _publish_instagram(job, "grandma_kitchen") == "media-1"
+    assert post_calls[0][1]["data"] == {
+        "media_type": "REELS",
+        "upload_type": "resumable",
+        "caption": "Caption",
+        "share_to_feed": "true",
+        "access_token": "token",
+    }
+    assert post_calls[1][1]["headers"] == {
+        "Authorization": "OAuth token",
+        "offset": "0",
+        "file_size": str(len(b"video-bytes")),
+        "Content-Type": "video/mp4",
+    }
+
+
+def test_instagram_rejects_non_meta_resumable_upload_uri(monkeypatch, tmp_path: Path) -> None:
+    monkeypatch.setenv("PUBLISH_GRANDMA_KITCHEN_INSTAGRAM_ACCESS_TOKEN", "token")
+    monkeypatch.setenv("PUBLISH_GRANDMA_KITCHEN_INSTAGRAM_BUSINESS_ACCOUNT_ID_RU", "account")
+    video_path = tmp_path / "reel.mp4"
+    video_path.write_bytes(b"video")
+    job = PublicationJob(
+        id=uuid.uuid4(),
+        project_id=uuid.uuid4(),
+        bundle_key="bundle",
+        platform="instagram",
+        language="ru",
+        video_path=str(video_path),
+    )
+    create_response = Mock(ok=True, status_code=200)
+    create_response.json.return_value = {
+        "id": "container-1",
+        "uri": "https://attacker.example/upload",
+    }
+    post = Mock(return_value=create_response)
+    monkeypatch.setattr("app.social_publishers.requests.post", post)
+
+    with pytest.raises(PublicationDeliveryError, match="unsafe resumable upload URI"):
+        _publish_instagram(job, "grandma_kitchen")
+
+    assert post.call_count == 1
 
 
 def test_vk_readiness_requires_expected_user_identity(monkeypatch) -> None:

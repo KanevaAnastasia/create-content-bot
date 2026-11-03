@@ -28,11 +28,9 @@
 - `INSTAGRAM_APP_SECRET`
 - `INSTAGRAM_BUSINESS_ACCOUNT_ID_RU` и при необходимости `..._EN`
 
-Нужен professional-аккаунт и токен Meta с правами публикации. Для загрузки Reels Meta должна получить
-MP4 по публичному HTTPS URL, поэтому также обязательны общие параметры:
-
-- `CONTENT_FABRIC_PUBLIC_BASE_URL`
-- `PUBLICATION_MEDIA_SIGNING_KEY`
+Нужен professional-аккаунт и токен Meta с правами публикации. Видео Reels загружается напрямую с
+локального диска через официальный resumable upload протокол Meta (`rupload.facebook.com`), поэтому
+публичный HTTPS URL для MP4 не требуется.
 
 ## TikTok
 

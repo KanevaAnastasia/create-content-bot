@@ -16,7 +16,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Iterable
-from urllib.parse import quote
+from urllib.parse import urlparse
 
 import requests
 from sqlalchemy import select
@@ -97,10 +97,6 @@ def platform_readiness(project_slug: str, platform: str, language: str) -> Platf
                 for key in oauth_keys
                 if not project_env(project_slug, key)
             )
-    if normalized_platform == "instagram":
-        for shared_key in ("CONTENT_FABRIC_PUBLIC_BASE_URL", "PUBLICATION_MEDIA_SIGNING_KEY"):
-            if not shared_env(shared_key):
-                missing.append(shared_key)
     supported = normalized_platform in SUPPORTED_DIRECT_PLATFORMS
     return PlatformReadiness(
         platform=normalized_platform,
@@ -206,35 +202,56 @@ def _publish_youtube(job: PublicationJob, project_slug: str) -> str:
     return video_id
 
 
-def _publication_media_url(job: PublicationJob) -> str:
-    from .publication_media import publication_media_token
-
-    base = shared_env("CONTENT_FABRIC_PUBLIC_BASE_URL").rstrip("/")
-    if not base.startswith("https://"):
-        raise PublicationDeliveryError("Instagram requires an HTTPS CONTENT_FABRIC_PUBLIC_BASE_URL.")
-    token = publication_media_token(job.id, job.video_path)
-    return f"{base}/publication-media/{job.id}/{quote(token)}/video.mp4"
-
-
 def _publish_instagram(job: PublicationJob, project_slug: str) -> str:
-    version = shared_env("META_GRAPH_API_VERSION", "v24.0")
+    version = shared_env("META_GRAPH_API_VERSION", "v25.0")
     account_id = project_env(project_slug, f"INSTAGRAM_BUSINESS_ACCOUNT_ID_{job.language.upper()}")
     access_token = project_env(project_slug, "INSTAGRAM_ACCESS_TOKEN")
     base_url = f"https://graph.facebook.com/{version}"
+    video_path = Path(job.video_path)
+    if not video_path.is_file():
+        raise PublicationDeliveryError(f"Instagram video does not exist: {video_path}")
+    file_size = video_path.stat().st_size
+    if file_size > 1_000_000_000:
+        raise PublicationDeliveryError("Instagram Reels video exceeds the 1 GB API limit.")
+
+    # Facebook Login for Business supports Meta's resumable upload flow.  It lets
+    # us send the local MP4 directly instead of exposing the admin or media through
+    # a public HTTPS URL.
     create_response = requests.post(
         f"{base_url}/{account_id}/media",
         data={
             "media_type": "REELS",
-            "video_url": _publication_media_url(job),
+            "upload_type": "resumable",
             "caption": str(job.description or "")[:2200],
             "share_to_feed": "true",
             "access_token": access_token,
         },
         timeout=DEFAULT_REQUEST_TIMEOUT,
     )
-    creation_id = str(_response_json(create_response, "Instagram reel container").get("id") or "")
-    if not creation_id:
-        raise PublicationDeliveryError("Instagram did not return a creation id.")
+    create_payload = _response_json(create_response, "Instagram reel container")
+    creation_id = str(create_payload.get("id") or "")
+    upload_url = str(create_payload.get("uri") or "")
+    if not creation_id or not upload_url:
+        raise PublicationDeliveryError("Instagram did not return a creation id and upload URI.")
+    parsed_upload_url = urlparse(upload_url)
+    if parsed_upload_url.scheme != "https" or parsed_upload_url.hostname != "rupload.facebook.com":
+        raise PublicationDeliveryError("Instagram returned an unsafe resumable upload URI.")
+
+    mime_type = mimetypes.guess_type(video_path.name)[0] or "video/mp4"
+    with video_path.open("rb") as handle:
+        upload_response = requests.post(
+            upload_url,
+            headers={
+                "Authorization": f"OAuth {access_token}",
+                "offset": "0",
+                "file_size": str(file_size),
+                "Content-Type": mime_type,
+            },
+            data=handle,
+            timeout=DEFAULT_REQUEST_TIMEOUT,
+        )
+    _response_json(upload_response, "Instagram resumable video upload")
+
     deadline = time.monotonic() + 600
     while time.monotonic() < deadline:
         status_response = requests.get(
