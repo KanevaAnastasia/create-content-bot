@@ -893,6 +893,25 @@ def test_tiktok_oauth_callback_uses_reachable_loopback_admin_host():
     assert _local_oauth_callback_url(request, callback_path) == f"http://127.0.0.1:8000{callback_path}"
 
 
+def test_tiktok_oauth_setup_allows_reusing_saved_client_secret():
+    admin_dir = Path(__file__).resolve().parents[1] / "admin_panel"
+    sys.path.insert(0, str(admin_dir))
+    os.environ.setdefault("DJANGO_SETTINGS_MODULE", "cf_admin.settings")
+
+    import django
+
+    django.setup()
+
+    from pipeline_admin.admin import TikTokOAuthSetupAdminForm
+
+    form = TikTokOAuthSetupAdminForm(
+        data={"project_slug": "grandma_kitchen", "client_key": "client-key", "client_secret": ""},
+        project_choices=(("grandma_kitchen", "Grandma Kitchen"),),
+    )
+    assert form.is_valid()
+    assert form.cleaned_data["client_secret"] == ""
+
+
 def test_generation_run_admin_artifact_count_uses_queryset_annotation():
     admin_dir = Path(__file__).resolve().parents[1] / "admin_panel"
     sys.path.insert(0, str(admin_dir))

@@ -2530,8 +2530,9 @@ class TikTokOAuthSetupAdminForm(django_forms.Form):
     project_slug = django_forms.ChoiceField(required=True, label="Project / account set")
     client_key = django_forms.CharField(required=True, label="TikTok Client key", max_length=256)
     client_secret = django_forms.CharField(
-        required=True,
+        required=False,
         label="TikTok Client secret",
+        help_text="Leave blank to reuse the secret already saved for this project.",
         max_length=256,
         widget=django_forms.PasswordInput,
     )
@@ -5130,33 +5131,39 @@ class PublicationJobAdmin(admin.ModelAdmin):
         if request.method == "POST" and form.is_valid():
             project_slug = str(form.cleaned_data["project_slug"])
             client_key = str(form.cleaned_data["client_key"]).strip()
-            client_secret = str(form.cleaned_data["client_secret"]).strip()
-            verifier, challenge = new_tiktok_pkce_pair()
-            state = uuid.uuid4().hex + uuid.uuid4().hex
-            request.session[f"tiktok_oauth:{state}"] = {
-                "project_slug": project_slug,
-                "client_key": client_key,
-                "redirect_uri": callback_url,
-                "code_verifier": verifier,
-                "created_at": int(time.time()),
-            }
-            request.session.modified = True
-            set_project_secrets(
-                project_slug,
-                {
-                    "TIKTOK_CLIENT_KEY": client_key,
-                    "TIKTOK_CLIENT_SECRET": client_secret,
-                    "TIKTOK_REDIRECT_URI": callback_url,
-                },
+            client_secret = (
+                str(form.cleaned_data["client_secret"]).strip()
+                or project_env(project_slug, "TIKTOK_CLIENT_SECRET")
             )
-            return HttpResponseRedirect(
-                build_tiktok_authorize_url(
-                    client_key=client_key,
-                    redirect_uri=callback_url,
-                    state=state,
-                    code_challenge=challenge,
+            if not client_secret:
+                form.add_error("client_secret", "Enter the TikTok client secret for this project.")
+            else:
+                verifier, challenge = new_tiktok_pkce_pair()
+                state = uuid.uuid4().hex + uuid.uuid4().hex
+                request.session[f"tiktok_oauth:{state}"] = {
+                    "project_slug": project_slug,
+                    "client_key": client_key,
+                    "redirect_uri": callback_url,
+                    "code_verifier": verifier,
+                    "created_at": int(time.time()),
+                }
+                request.session.modified = True
+                set_project_secrets(
+                    project_slug,
+                    {
+                        "TIKTOK_CLIENT_KEY": client_key,
+                        "TIKTOK_CLIENT_SECRET": client_secret,
+                        "TIKTOK_REDIRECT_URI": callback_url,
+                    },
                 )
-            )
+                return HttpResponseRedirect(
+                    build_tiktok_authorize_url(
+                        client_key=client_key,
+                        redirect_uri=callback_url,
+                        state=state,
+                        code_challenge=challenge,
+                    )
+                )
         csrf_token = get_token(request)
         html = format_html(
             '<!doctype html><html><head><title>Connect TikTok publishing</title></head><body>'
