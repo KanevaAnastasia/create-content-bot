@@ -8301,6 +8301,55 @@ def test_attempt_syntax_video_fallback_batch_discards_duplicate_language_payload
     assert captured["aspect_ratio"] == "16:9"
 
 
+def test_attempt_syntax_video_fallback_batch_runs_veo_languages_through_single_flow(monkeypatch):
+    calls: list[dict[str, object]] = []
+
+    async def _fake_single(**kwargs):
+        calls.append(dict(kwargs))
+        return f"video-{kwargs['prompt']}".encode()
+
+    def _unexpected_legacy_batch(**_kwargs):
+        raise AssertionError("Veo must not use the legacy multi-request transport")
+
+    monkeypatch.setattr(handlers_media_core, "_syntax_fallback_env_enabled", lambda: True)
+    monkeypatch.setattr(handlers_media_core, "_attempt_syntax_video_fallback_bytes", _fake_single)
+    monkeypatch.setattr(handlers_media_core, "try_generate_via_syntax_batch", _unexpected_legacy_batch)
+
+    out = asyncio.run(
+        handlers_media_core._attempt_syntax_video_fallback_batch(
+            requests=[
+                handlers_media_core.BatchFallbackRequest(
+                    key="ru",
+                    prompt="русский промпт",
+                    start_image=b"start-ru",
+                ),
+                handlers_media_core.BatchFallbackRequest(
+                    key="en",
+                    prompt="english prompt",
+                    start_image=b"start-en",
+                    end_image=b"end-en",
+                ),
+            ],
+            model="veo3_fast",
+            duration_sec=6,
+            timeout_sec=900,
+            acquire_timeout_sec=900,
+            syntax_provider="veo",
+            aspect_ratio="16:9",
+        )
+    )
+
+    assert out == {
+        "ru": "video-русский промпт".encode(),
+        "en": b"video-english prompt",
+    }
+    assert [call["prompt"] for call in calls] == ["русский промпт", "english prompt"]
+    assert all(call["syntax_provider"] == "veo" for call in calls)
+    assert all(call["aspect_ratio"] == "16:9" for call in calls)
+    assert calls[0]["end_image"] is None
+    assert calls[1]["end_image"] == b"end-en"
+
+
 def test_provider_choice_pending_yields_to_ok_when_video_already_exists():
     scene = {
         "video_provider_choice_pending": {
