@@ -2515,8 +2515,9 @@ class YouTubeOAuthSetupAdminForm(django_forms.Form):
     )
     client_id = django_forms.CharField(required=True, label="Google OAuth Client ID", max_length=256)
     client_secret = django_forms.CharField(
-        required=True,
+        required=False,
         label="Google OAuth Client secret",
+        help_text="Leave blank to reuse the secret already saved for this project.",
         max_length=256,
         widget=django_forms.PasswordInput,
     )
@@ -2524,6 +2525,22 @@ class YouTubeOAuthSetupAdminForm(django_forms.Form):
     def __init__(self, *args, project_choices=(), **kwargs):
         super().__init__(*args, **kwargs)
         self.fields["project_slug"].choices = project_choices
+
+
+def _youtube_reusable_client_secret(project_slug: str, client_id: str, language: str) -> str:
+    suffix = str(language or "").strip().upper()
+    credential_keys = (
+        (f"YOUTUBE_CLIENT_ID_{suffix}", f"YOUTUBE_CLIENT_SECRET_{suffix}"),
+        ("YOUTUBE_CLIENT_ID", "YOUTUBE_CLIENT_SECRET"),
+        ("YOUTUBE_CLIENT_ID_RU", "YOUTUBE_CLIENT_SECRET_RU"),
+        ("YOUTUBE_CLIENT_ID_EN", "YOUTUBE_CLIENT_SECRET_EN"),
+    )
+    for client_id_key, client_secret_key in credential_keys:
+        saved_client_id = project_env(project_slug, client_id_key)
+        saved_client_secret = project_env(project_slug, client_secret_key)
+        if saved_client_id == client_id and saved_client_secret:
+            return saved_client_secret
+    return ""
 
 
 class TikTokOAuthSetupAdminForm(django_forms.Form):
@@ -5013,31 +5030,40 @@ class PublicationJobAdmin(admin.ModelAdmin):
             language = str(form.cleaned_data["language"]).lower()
             suffix = language.upper()
             client_id = str(form.cleaned_data["client_id"]).strip()
-            client_secret = str(form.cleaned_data["client_secret"]).strip()
-            state = uuid.uuid4().hex + uuid.uuid4().hex
-            request.session[f"youtube_oauth:{state}"] = {
-                "project_slug": project_slug,
-                "language": language,
-                "client_id": client_id,
-                "redirect_uri": callback_url,
-                "created_at": int(time.time()),
-            }
-            request.session.modified = True
-            set_project_secrets(
-                project_slug,
-                {
-                    f"YOUTUBE_CLIENT_ID_{suffix}": client_id,
-                    f"YOUTUBE_CLIENT_SECRET_{suffix}": client_secret,
-                    f"YOUTUBE_REDIRECT_URI_{suffix}": callback_url,
-                },
+            client_secret = (
+                str(form.cleaned_data["client_secret"]).strip()
+                or _youtube_reusable_client_secret(project_slug, client_id, language)
             )
-            return HttpResponseRedirect(
-                build_youtube_authorize_url(
-                    client_id=client_id,
-                    redirect_uri=callback_url,
-                    state=state,
+            if not client_secret:
+                form.add_error(
+                    "client_secret",
+                    "Enter the Google OAuth client secret once; it can be reused for the other channel.",
                 )
-            )
+            else:
+                state = uuid.uuid4().hex + uuid.uuid4().hex
+                request.session[f"youtube_oauth:{state}"] = {
+                    "project_slug": project_slug,
+                    "language": language,
+                    "client_id": client_id,
+                    "redirect_uri": callback_url,
+                    "created_at": int(time.time()),
+                }
+                request.session.modified = True
+                set_project_secrets(
+                    project_slug,
+                    {
+                        f"YOUTUBE_CLIENT_ID_{suffix}": client_id,
+                        f"YOUTUBE_CLIENT_SECRET_{suffix}": client_secret,
+                        f"YOUTUBE_REDIRECT_URI_{suffix}": callback_url,
+                    },
+                )
+                return HttpResponseRedirect(
+                    build_youtube_authorize_url(
+                        client_id=client_id,
+                        redirect_uri=callback_url,
+                        state=state,
+                    )
+                )
         csrf_token = get_token(request)
         html = format_html(
             '<!doctype html><html><head><title>Connect YouTube publishing</title></head><body>'

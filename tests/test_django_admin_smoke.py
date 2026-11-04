@@ -912,6 +912,54 @@ def test_tiktok_oauth_setup_allows_reusing_saved_client_secret():
     assert form.cleaned_data["client_secret"] == ""
 
 
+def test_youtube_oauth_setup_allows_reusing_saved_client_secret():
+    admin_dir = Path(__file__).resolve().parents[1] / "admin_panel"
+    sys.path.insert(0, str(admin_dir))
+    os.environ.setdefault("DJANGO_SETTINGS_MODULE", "cf_admin.settings")
+
+    import django
+
+    django.setup()
+
+    from pipeline_admin.admin import YouTubeOAuthSetupAdminForm
+
+    form = YouTubeOAuthSetupAdminForm(
+        data={
+            "project_slug": "grandma_kitchen",
+            "language": "en",
+            "client_id": "client-id",
+            "client_secret": "",
+        },
+        project_choices=(("grandma_kitchen", "Grandma Kitchen"),),
+    )
+    assert form.is_valid()
+    assert form.cleaned_data["client_secret"] == ""
+
+
+def test_youtube_oauth_reuses_secret_only_for_matching_client_id(monkeypatch):
+    admin_dir = Path(__file__).resolve().parents[1] / "admin_panel"
+    sys.path.insert(0, str(admin_dir))
+    os.environ.setdefault("DJANGO_SETTINGS_MODULE", "cf_admin.settings")
+
+    import django
+
+    django.setup()
+
+    import pipeline_admin.admin as admin_module
+
+    values = {
+        "YOUTUBE_CLIENT_ID_RU": "shared-client",
+        "YOUTUBE_CLIENT_SECRET_RU": "shared-secret",
+    }
+    monkeypatch.setattr(admin_module, "project_env", lambda _project, key: values.get(key, ""))
+
+    assert (
+        admin_module._youtube_reusable_client_secret("grandma_kitchen", "shared-client", "en")
+        == "shared-secret"
+    )
+    assert admin_module._youtube_reusable_client_secret("grandma_kitchen", "different-client", "en") == ""
+
+
 def test_generation_run_admin_artifact_count_uses_queryset_annotation():
     admin_dir = Path(__file__).resolve().parents[1] / "admin_panel"
     sys.path.insert(0, str(admin_dir))
