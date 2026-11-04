@@ -46,6 +46,7 @@ from .handlers.handlers_state_scene import keyboard_for_session_state
 from .quiet_mode import (
     BUTTON_CLOSE_QUIET_MODE,
     BUTTON_OPEN_QUIET_MODE,
+    automatic_quiet_mode_status,
     ensure_automatic_quiet_mode_cycle,
     is_quiet_mode_enabled,
     is_quiet_mode_owner,
@@ -151,6 +152,29 @@ async def quiet_mode_command(update, context) -> None:
         status = f"Тихий режим сейчас {'включён' if enabled else 'выключен'}."
     await message.reply_text(
         status,
+        reply_markup=_admin_keyboard_for_current_session(update, identity, enabled),
+    )
+
+
+async def quiet_mode_stats_command(update, context) -> None:
+    _ = context
+    identity = _identity_for_update(update)
+    if not is_quiet_mode_owner(identity):
+        return
+    message = getattr(update, "effective_message", None) or getattr(update, "message", None)
+    if message is None:
+        return
+    status = automatic_quiet_mode_status()
+    if status is None or not status["automatic_enabled"]:
+        text = "Автоматический гостевой режим выключен."
+        enabled = _quiet_mode_enabled_safe()
+    else:
+        count = int(status["generation_count"])
+        target = int(status["generation_target"])
+        text = f"Гостевой режим: использовано {count} из {target} генераций сегодня."
+        enabled = bool(status["quiet_mode_enabled"])
+    await message.reply_text(
+        text,
         reply_markup=_admin_keyboard_for_current_session(update, identity, enabled),
     )
 
@@ -406,6 +430,7 @@ def build_application(token: str) -> Application:
     app.add_handler(CommandHandler("start_quiet", quiet_mode_command))
     app.add_handler(CommandHandler("stop_quiet", quiet_mode_command))
     app.add_handler(CommandHandler("status_quiet", quiet_mode_command))
+    app.add_handler(CommandHandler("stat", quiet_mode_stats_command))
     app.add_handler(CommandHandler("check_env", check_env))
     app.add_handler(CommandHandler("cancel", cancel))
     app.add_handler(CommandHandler("reset", cancel))

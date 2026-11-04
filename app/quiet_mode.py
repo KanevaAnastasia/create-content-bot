@@ -22,8 +22,8 @@ BUTTON_CLOSE_QUIET_MODE = "Закрыть тихий режим"
 
 _MENU_BUTTON: ContextVar[str | None] = ContextVar("admin_quiet_mode_menu_button", default=None)
 QUIET_MODE_TIMEZONE = ZoneInfo("Europe/Moscow")
-QUIET_MODE_GENERATION_MIN = 11
-QUIET_MODE_GENERATION_MAX = 16
+QUIET_MODE_GENERATION_MIN = 10
+QUIET_MODE_GENERATION_MAX = 14
 
 logger = logging.getLogger("bot.quiet_mode")
 
@@ -141,6 +141,27 @@ def ensure_automatic_quiet_mode_cycle(
         generation_target,
     )
     return True
+
+
+def automatic_quiet_mode_status(
+    *,
+    now: datetime | None = None,
+    session_factory=None,
+) -> dict[str, object] | None:
+    """Return the owner's current automatic guest-generation cycle."""
+    factory = session_factory or SessionLocal
+    ensure_automatic_quiet_mode_cycle(now=now, session_factory=factory)
+    with factory() as db:
+        row = _owner_row(db)
+        if row is None:
+            return None
+        return {
+            "quiet_mode_enabled": bool(row.quiet_mode_enabled),
+            "automatic_enabled": bool(row.quiet_mode_auto_enabled),
+            "cycle_date": row.quiet_mode_auto_cycle_date,
+            "generation_count": int(row.quiet_mode_auto_generation_count or 0),
+            "generation_target": int(row.quiet_mode_auto_generation_target or 0),
+        }
 
 
 def record_automatic_quiet_mode_generation(

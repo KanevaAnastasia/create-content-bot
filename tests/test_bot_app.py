@@ -179,3 +179,43 @@ def test_quiet_mode_commands_are_silent_for_non_owner(monkeypatch):
     )
 
     assert sent == []
+
+
+def test_stat_command_reports_guest_generation_usage_to_owner(monkeypatch):
+    owner = SimpleNamespace(user_id="owner-id", role="admin", normalized_username="a_kaneva")
+    current_markup = object()
+    sent = []
+    monkeypatch.setattr(bot_app, "_identity_for_update", lambda *_args, **_kwargs: owner)
+    monkeypatch.setattr(
+        bot_app,
+        "automatic_quiet_mode_status",
+        lambda: {
+            "automatic_enabled": True,
+            "quiet_mode_enabled": False,
+            "generation_count": 4,
+            "generation_target": 15,
+        },
+    )
+    monkeypatch.setattr(bot_app, "_admin_keyboard_for_current_session", lambda *_args: current_markup)
+
+    class Message:
+        async def reply_text(self, text, reply_markup=None):
+            sent.append((text, reply_markup))
+
+    asyncio.run(bot_app.quiet_mode_stats_command(SimpleNamespace(message=Message()), SimpleNamespace()))
+
+    assert sent == [("Гостевой режим: использовано 4 из 15 генераций сегодня.", current_markup)]
+
+
+def test_stat_command_is_silent_for_non_owner(monkeypatch):
+    guest = SimpleNamespace(user_id="guest-id", role="guest", normalized_username="guest")
+    sent = []
+    monkeypatch.setattr(bot_app, "_identity_for_update", lambda *_args, **_kwargs: guest)
+
+    class Message:
+        async def reply_text(self, text, reply_markup=None):
+            sent.append((text, reply_markup))
+
+    asyncio.run(bot_app.quiet_mode_stats_command(SimpleNamespace(message=Message()), SimpleNamespace()))
+
+    assert sent == []

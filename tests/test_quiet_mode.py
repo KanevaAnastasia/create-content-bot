@@ -85,3 +85,31 @@ def test_successful_generations_close_quiet_mode_at_target_and_stop_counting():
 def test_midnight_delay_uses_moscow_time():
     now = datetime(2026, 10, 31, 20, 59, 30, tzinfo=timezone.utc)
     assert quiet_mode.seconds_until_next_moscow_midnight(now) == 30.0
+
+
+def test_next_daily_target_range_is_ten_to_fourteen(monkeypatch):
+    factory = _factory()
+    midnight = datetime(2026, 10, 31, 21, 0, tzinfo=timezone.utc)
+    quiet_mode.enable_automatic_quiet_mode_from_next_midnight(now=midnight, session_factory=factory)
+    monkeypatch.setattr(quiet_mode.random, "randint", lambda minimum, maximum: maximum)
+
+    result = quiet_mode.reset_automatic_quiet_mode_cycle(now=midnight, session_factory=factory)
+
+    assert (quiet_mode.QUIET_MODE_GENERATION_MIN, quiet_mode.QUIET_MODE_GENERATION_MAX) == (10, 14)
+    assert result["generation_target"] == 14
+
+
+def test_automatic_quiet_mode_status_reports_current_count_and_target():
+    factory = _factory()
+    midnight = datetime(2026, 10, 31, 21, 0, tzinfo=timezone.utc)
+    quiet_mode.enable_automatic_quiet_mode_from_next_midnight(now=midnight, session_factory=factory)
+    quiet_mode.reset_automatic_quiet_mode_cycle(now=midnight, target=12, session_factory=factory)
+    quiet_mode.record_automatic_quiet_mode_generation(now=midnight, session_factory=factory)
+
+    status = quiet_mode.automatic_quiet_mode_status(now=midnight, session_factory=factory)
+
+    assert status is not None
+    assert status["automatic_enabled"] is True
+    assert status["quiet_mode_enabled"] is False
+    assert status["generation_count"] == 1
+    assert status["generation_target"] == 12
