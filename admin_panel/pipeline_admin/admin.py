@@ -2527,6 +2527,29 @@ class YouTubeOAuthSetupAdminForm(django_forms.Form):
         self.fields["project_slug"].choices = project_choices
 
 
+YOUTUBE_OAUTH_FLOW_KEY = "youtube_oauth_flow"
+
+
+def _save_youtube_oauth_flow(request, flow: dict[str, Any]) -> str:
+    flow_session = request.session.__class__()
+    flow_session[YOUTUBE_OAUTH_FLOW_KEY] = flow
+    flow_session.set_expiry(900)
+    flow_session.save()
+    state = str(flow_session.session_key or "")
+    if not state:
+        raise RuntimeError("Could not create YouTube OAuth state.")
+    return state
+
+
+def _take_youtube_oauth_flow(request, state: str) -> dict[str, Any] | None:
+    if not state:
+        return None
+    flow_session = request.session.__class__(session_key=state)
+    flow = flow_session.pop(YOUTUBE_OAUTH_FLOW_KEY, None)
+    flow_session.delete()
+    return flow if isinstance(flow, dict) else None
+
+
 def _youtube_reusable_client_secret(project_slug: str, client_id: str, language: str) -> str:
     suffix = str(language or "").strip().upper()
     credential_keys = (
@@ -4977,7 +5000,7 @@ class PublicationJobAdmin(admin.ModelAdmin):
             ),
             path(
                 "youtube-oauth/callback/",
-                self.admin_site.admin_view(self.youtube_oauth_callback_view),
+                self.youtube_oauth_callback_view,
                 name="pipeline_admin_publicationjob_youtube_oauth_callback",
             ),
             path(
@@ -5040,15 +5063,14 @@ class PublicationJobAdmin(admin.ModelAdmin):
                     "Enter the Google OAuth client secret once; it can be reused for the other channel.",
                 )
             else:
-                state = uuid.uuid4().hex + uuid.uuid4().hex
-                request.session[f"youtube_oauth:{state}"] = {
+                flow = {
                     "project_slug": project_slug,
                     "language": language,
                     "client_id": client_id,
                     "redirect_uri": callback_url,
-                    "created_at": int(time.time()),
+                    "nonce": uuid.uuid4().hex,
                 }
-                request.session.modified = True
+                state = _save_youtube_oauth_flow(request, flow)
                 set_project_secrets(
                     project_slug,
                     {
@@ -5084,10 +5106,9 @@ class PublicationJobAdmin(admin.ModelAdmin):
 
     def youtube_oauth_callback_view(self, request):
         state = str(request.GET.get("state") or "")
-        flow = request.session.pop(f"youtube_oauth:{state}", None) if state else None
-        request.session.modified = True
-        if not isinstance(flow, dict) or int(time.time()) - int(flow.get("created_at") or 0) > 900:
-            return HttpResponse("YouTube authorization session is missing or expired.", status=400)
+        flow = _take_youtube_oauth_flow(request, state)
+        if flow is None:
+            return HttpResponse("YouTube authorization session is invalid or expired.", status=400)
         error = str(request.GET.get("error_description") or request.GET.get("error") or "").strip()
         if error:
             return HttpResponse(f"YouTube authorization was not completed: {escape(error)}", status=400)
@@ -5133,10 +5154,19 @@ class PublicationJobAdmin(admin.ModelAdmin):
             (row["title"] for row in channels if row["id"] == expected_channel_id),
             expected_channel_id,
         )
-        messages.success(
-            request,
-            f"YouTube {language.upper()} connected for {project_slug}: {channel_title} ({expected_channel_id}).",
+        success_text = (
+            f"YouTube {language.upper()} connected for {project_slug}: "
+            f"{channel_title} ({expected_channel_id})."
         )
+        if not self.admin_site.has_permission(request):
+            return HttpResponse(
+                format_html(
+                    "<!doctype html><html><head><title>YouTube connected</title></head><body>"
+                    "<h1>{}</h1><p>You can close this browser window.</p></body></html>",
+                    success_text,
+                )
+            )
+        messages.success(request, success_text)
         return HttpResponseRedirect(reverse("admin:pipeline_admin_publicationjob_changelist"))
 
     def tiktok_oauth_view(self, request):

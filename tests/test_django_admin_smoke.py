@@ -960,6 +960,93 @@ def test_youtube_oauth_reuses_secret_only_for_matching_client_id(monkeypatch):
     assert admin_module._youtube_reusable_client_secret("grandma_kitchen", "different-client", "en") == ""
 
 
+def test_youtube_oauth_callback_works_across_browser_profiles(monkeypatch):
+    admin_dir = Path(__file__).resolve().parents[1] / "admin_panel"
+    sys.path.insert(0, str(admin_dir))
+    os.environ.setdefault("DJANGO_SETTINGS_MODULE", "cf_admin.settings")
+
+    import django
+
+    django.setup()
+
+    from django.contrib.admin.sites import AdminSite
+    from django.contrib.auth.models import AnonymousUser
+    from django.test import RequestFactory
+    import pipeline_admin.admin as admin_module
+    from pipeline_admin.models import PublicationJob
+
+    class OAuthSession(dict):
+        rows = {}
+        sequence = 0
+
+        def __init__(self, session_key=None):
+            super().__init__(self.rows.get(session_key, {}))
+            self.session_key = session_key
+
+        def set_expiry(self, _seconds):
+            pass
+
+        def save(self):
+            if not self.session_key:
+                type(self).sequence += 1
+                self.session_key = f"oauth-state-{self.sequence}"
+            self.rows[self.session_key] = dict(self)
+
+        def delete(self):
+            self.rows.pop(self.session_key, None)
+
+    initiating_request = SimpleNamespace(session=OAuthSession())
+    state = admin_module._save_youtube_oauth_flow(
+        initiating_request,
+        {
+            "project_slug": "grandma_kitchen",
+            "language": "en",
+            "client_id": "client-id",
+            "redirect_uri": "http://127.0.0.1:8000/youtube/callback/",
+            "nonce": "nonce",
+        }
+    )
+    saved = {}
+    monkeypatch.setattr(
+        admin_module,
+        "project_env",
+        lambda _project, key: "client-secret" if key == "YOUTUBE_CLIENT_SECRET_EN" else "",
+    )
+    monkeypatch.setattr(
+        admin_module,
+        "exchange_youtube_code",
+        lambda **_kwargs: SimpleNamespace(access_token="access-token", refresh_token="refresh-token"),
+    )
+    monkeypatch.setattr(
+        admin_module,
+        "youtube_channels",
+        lambda _token: [{"id": "channel-en", "title": "Grandma Kitchen"}],
+    )
+    monkeypatch.setattr(
+        admin_module,
+        "set_project_secrets",
+        lambda project, values: saved.update(project=project, values=values),
+    )
+    request = RequestFactory().get(
+        "/admin/pipeline_admin/publicationjob/youtube-oauth/callback/",
+        {"state": state, "code": "authorization-code"},
+    )
+    request.user = AnonymousUser()
+    request.session = OAuthSession()
+
+    response = admin_module.PublicationJobAdmin(PublicationJob, AdminSite()).youtube_oauth_callback_view(request)
+
+    assert response.status_code == 200
+    assert b"YouTube EN connected for grandma_kitchen" in response.content
+    assert saved == {
+        "project": "grandma_kitchen",
+        "values": {
+            "YOUTUBE_REFRESH_TOKEN_EN": "refresh-token",
+            "YOUTUBE_CHANNEL_ID_EN": "channel-en",
+        },
+    }
+
+
 def test_generation_run_admin_artifact_count_uses_queryset_annotation():
     admin_dir = Path(__file__).resolve().parents[1] / "admin_panel"
     sys.path.insert(0, str(admin_dir))
