@@ -1318,9 +1318,11 @@ def test_django_admin_final_build_scenes_prefer_page_speech_over_candidate_snaps
     assert out[0]["speech_by_lang"] == {"ru": "Новая речь со страницы"}
     assert "speech_cues_by_lang" not in out[0]
     candidate = out[0]["video_candidates_by_lang"]["ru"][0]
-    assert "speech_by_lang" not in candidate
-    assert "speech_cues_by_lang" not in candidate
-    assert "video_prompt_by_lang" not in candidate
+    assert candidate["speech_by_lang"] == {"ru": "ОК"}
+    assert candidate["speech_cues_by_lang"] == {
+        "ru": [{"text": "ОК", "start_sec": 0.0, "end_sec": 6.0}]
+    }
+    assert candidate["video_prompt_by_lang"] == {"ru": "CHARACTERS SPEAKS: ОК"}
 
 
 def test_django_admin_final_build_scenes_restore_missing_language_subtitles_from_candidate(monkeypatch):
@@ -1387,9 +1389,127 @@ def test_django_admin_final_build_scenes_restore_missing_language_subtitles_from
     }
     assert out[0]["video_prompt_by_lang"] == {"en": "CHARACTERS SPEAKS: Current English speech"}
     approved = out[0]["video_candidates_by_lang"]["en"][1]
-    assert "speech_by_lang" not in approved
-    assert "speech_cues_by_lang" not in approved
-    assert "video_prompt_by_lang" not in approved
+    assert approved["speech_by_lang"] == {"en": "Current English speech"}
+    assert approved["speech_cues_by_lang"] == {
+        "en": [{"text": "Current English speech", "start_sec": 0.0, "end_sec": 6.0}]
+    }
+    assert approved["video_prompt_by_lang"] == {"en": "CHARACTERS SPEAKS: Current English speech"}
+
+
+def test_django_admin_backfills_actual_spoken_words_for_approved_candidate(monkeypatch, tmp_path):
+    admin_dir = Path(__file__).resolve().parents[1] / "admin_panel"
+    sys.path.insert(0, str(admin_dir))
+    os.environ.setdefault("DJANGO_SETTINGS_MODULE", "cf_admin.settings")
+
+    import django
+
+    django.setup()
+
+    import pipeline_admin.admin as admin_module
+
+    video_path = tmp_path / "approved.mp4"
+    video_path.write_bytes(b"video")
+    candidate = {
+        "candidate_id": "approved",
+        "approved_for_production": True,
+        "media_uri": video_path.as_uri(),
+        "speech_by_lang": {"ru": "Старый плановый текст"},
+    }
+    scenes = [
+        {
+            "scene": 1,
+            "duration_sec": 6.0,
+            "speech_by_lang": {"ru": "Текст страницы"},
+            "video_candidates_by_lang": {"ru": [candidate]},
+        }
+    ]
+    captured = {}
+
+    class _Rows:
+        def update(self, **kwargs):
+            captured.update(kwargs)
+            return 1
+
+    monkeypatch.setattr(admin_module.SceneVideoCandidate.objects, "filter", lambda **_kwargs: _Rows())
+    transcription_calls = []
+
+    def fake_transcribe_video_audio(**kwargs):
+        transcription_calls.append(kwargs)
+        if len(transcription_calls) == 1:
+            return SimpleNamespace(
+                status="HUMAN_REVIEW",
+                match_score=0.0,
+                recognized_text="",
+                word_timings=[],
+                missing_words=[],
+                extra_words=[],
+            )
+        return SimpleNamespace(
+            status="REGENERATE_VIDEO",
+            match_score=0.25,
+            recognized_text="Фактически произнесено здесь.",
+            word_timings=[
+                {"word": "Фактически", "start_sec": 0.7, "end_sec": 1.2},
+                {"word": "произнесено", "start_sec": 1.2, "end_sec": 1.8},
+                {"word": "здесь.", "start_sec": 1.8, "end_sec": 2.2},
+            ],
+            missing_words=["Старый"],
+            extra_words=["Фактически"],
+        )
+
+    monkeypatch.setattr(
+        admin_module,
+        "transcribe_video_audio",
+        fake_transcribe_video_audio,
+    )
+
+    admin_module._ensure_approved_candidate_word_timings(scenes, "ru")
+
+    assert candidate["speech_by_lang"]["ru"] == "Фактически произнесено здесь."
+    cues = candidate["speech_cues_by_lang"]["ru"]
+    assert cues[-1]["text"] == "Фактически произнесено здесь."
+    assert all(cue["word_synced"] is True for cue in cues)
+    assert all(cue["story_timing_source"] == "video_audio_transcription" for cue in cues)
+    assert captured["speech_by_lang"]["ru"] == "Фактически произнесено здесь."
+    assert captured["video_speech_qa_by_lang"]["ru"]["match_score"] == 0.25
+    assert len(transcription_calls) == 2
+
+
+def test_django_admin_does_not_transcribe_guest_candidates(monkeypatch):
+    admin_dir = Path(__file__).resolve().parents[1] / "admin_panel"
+    sys.path.insert(0, str(admin_dir))
+    os.environ.setdefault("DJANGO_SETTINGS_MODULE", "cf_admin.settings")
+
+    import django
+
+    django.setup()
+
+    import pipeline_admin.admin as admin_module
+
+    monkeypatch.setattr(
+        admin_module,
+        "transcribe_video_audio",
+        lambda **_kwargs: (_ for _ in ()).throw(AssertionError("guest audio must not be transcribed")),
+    )
+
+    admin_module._ensure_approved_candidate_word_timings(
+        [
+            {
+                "scene": 1,
+                "guest_mode": True,
+                "video_candidates_by_lang": {
+                    "ru": [
+                        {
+                            "candidate_id": "guest",
+                            "approved_for_production": True,
+                            "speech_by_lang": {"ru": "Не должно попасть в субтитры"},
+                        }
+                    ]
+                },
+            }
+        ],
+        "ru",
+    )
 
 
 def test_django_generation_run_scene_inline_shows_ru_text_fallback_and_saves_en(monkeypatch):
@@ -1963,7 +2083,7 @@ def test_django_admin_titled_only_build_uses_subtitled_source_fast_path(monkeypa
     assert out["renders_by_language"]["ru"]["titled_subtitled_music"]["video_path"] == "/tmp/titled.mp4"
     assert calls[0]["subtitled_video_path"] == Path("/tmp/source_subtitled.mp4")
     assert calls[0]["language"] == "ru"
-    assert calls[0]["use_candidate_subtitle_snapshot"] is False
+    assert calls[0]["use_candidate_subtitle_snapshot"] is True
     assert calls[0]["overlay_subtitle_by_lang"] == {"ru": "КБЖУ на 100 гр: 126/10/4/24"}
     assert calls[0]["overlay_title_style"]["title_color"] == "#1a2b3c"
     assert session["overlay_title_style"]["title_color"] == "#1a2b3c"
@@ -2001,7 +2121,7 @@ def test_django_admin_subtitled_reuse_rejects_stale_scene_video_fingerprint(monk
             "subtitle_fingerprint": admin_module.subtitle_fingerprint_for_language(
                 scenes,
                 "ru",
-                use_candidate_subtitle_snapshot=False,
+                use_candidate_subtitle_snapshot=True,
             ),
             "scene_video_fingerprint": "old-fingerprint",
         }
@@ -2107,7 +2227,7 @@ def test_django_admin_titled_build_prefers_current_series_titles_over_snapshot(m
     )
 
     assert calls[0]["overlay_series_title_by_lang"] == {"ru": "Карта вкусов", "en": "Flavor map"}
-    assert calls[0]["use_candidate_subtitle_snapshot"] is False
+    assert calls[0]["use_candidate_subtitle_snapshot"] is True
     assert production["series_title_by_lang"] == {"ru": "Карта вкусов", "en": "Flavor map"}
 
 
@@ -2155,7 +2275,7 @@ def test_django_admin_non_title_build_keeps_pending_title_color(monkeypatch):
     )
 
     assert calls[0]["overlay_title_style"]["title_color"] == "#c72638"
-    assert calls[0]["use_candidate_subtitle_snapshot"] is False
+    assert calls[0]["use_candidate_subtitle_snapshot"] is True
     assert session["pending_overlay_title_style"] == {"title_color": "#1a2b3c"}
     assert production["pending_overlay_title_style"] == {"title_color": "#1a2b3c"}
 

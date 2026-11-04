@@ -2554,6 +2554,9 @@ def _expand_dense_subtitle_entry(item: dict[str, Any]) -> list[dict[str, Any]]:
     text = _normalize_subtitle_text(str(item.get("text") or ""))
     start_sec = float(item.get("start_sec") or 0.0)
     end_sec = float(item.get("end_sec") or start_sec)
+    fixed_block_words = item.get("fixed_block_words")
+    if isinstance(fixed_block_words, list) and fixed_block_words:
+        return [dict(item, text=text, start_sec=start_sec, end_sec=end_sec)]
     duration = max(0.0, end_sec - start_sec)
     pages = _subtitle_pages(text)
     if len(pages) <= 1 or duration <= 0:
@@ -2715,6 +2718,8 @@ def _scene_subtitle_entries(
                 entry["story_style_version"] = str(
                     cue.get("story_style_version") or STORY_WORD_SYNC_STYLE_VERSION
                 )
+                if cue.get("story_timing_source"):
+                    entry["story_timing_source"] = str(cue["story_timing_source"])
             entries.append(entry)
     if entries:
         expanded: list[dict[str, Any]] = []
@@ -2737,25 +2742,49 @@ def _scene_subtitle_entries(
         end_sec=start_offset + fallback_duration,
     )
     if pause_entries:
-        expanded: list[dict[str, Any]] = []
+        word_synced: list[dict[str, Any]] = []
         for entry in pause_entries:
-            expanded.extend(_expand_dense_subtitle_entry(entry))
-        return expanded
+            cues = build_word_synced_subtitle_cues(
+                _estimated_word_timings_for_cue(
+                    str(entry.get("text") or ""),
+                    start_sec=float(entry.get("start_sec") or start_offset),
+                    end_sec=float(entry.get("end_sec") or start_offset),
+                ),
+                window_end_sec=float(entry.get("end_sec") or start_offset),
+                timing_source="estimated_legacy_pause_text",
+            )
+            for cue in cues:
+                word_synced.append(
+                    {
+                        **cue,
+                        "scene": entry.get("scene"),
+                        "language": language,
+                    }
+                )
+        return word_synced
     text = _normalize_subtitle_text(raw_text)
     if not text and str(language or "").strip().lower() != "ru":
         scene_no = int(scene.get("scene") or 0) or None
         raise RuntimeError(
             f"Missing language-specific subtitle text for scene {scene_no or '?'} ({language})."
         )
-    return _expand_dense_subtitle_entry(
+    cues = build_word_synced_subtitle_cues(
+        _estimated_word_timings_for_cue(
+            text,
+            start_sec=start_offset,
+            end_sec=start_offset + fallback_duration,
+        ),
+        window_end_sec=start_offset + fallback_duration,
+        timing_source="estimated_legacy_scene_text",
+    )
+    return [
         {
+            **cue,
             "scene": int(scene.get("scene") or 0) or None,
             "language": language,
-            "text": text,
-            "start_sec": start_offset,
-            "end_sec": start_offset + fallback_duration,
         }
-    )
+        for cue in cues
+    ]
 
 
 def _subtitle_entries_from_pause_markers(

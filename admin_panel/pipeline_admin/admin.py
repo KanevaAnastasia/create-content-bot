@@ -27,6 +27,7 @@ from django.utils.dateparse import parse_datetime
 from django.utils.html import escape, format_html
 from django.utils.safestring import mark_safe
 
+from app.ai_approval_service import transcribe_video_audio
 from app.artifact_store import persist_post_production_artifacts
 from app.db import SessionLocal
 from app.final_video_delivery import (
@@ -46,6 +47,7 @@ from app.media_file_store import local_path_from_media_uri, read_media_uri_bytes
 from app.post_production import (
     STORY_WORD_SYNC_PROJECT_SLUGS,
     apply_story_word_synced_subtitles,
+    build_word_synced_subtitle_cues,
     build_post_production,
     build_subtitled_post_production_from_upscaled_master,
     build_titled_post_production_from_subtitled_master,
@@ -89,6 +91,7 @@ from app.scene_media_store import (
     rebuild_production_session,
     rebuild_scene_db_ids_for_session,
 )
+from app.scene_media_candidates import resolve_latest_approved_scene_video_for_final_build
 from app.series_store import advance_series_after_successful_render
 
 from .forms import (
@@ -860,12 +863,6 @@ def _ensure_generation_draft_for_admin_run(run: GenerationRun) -> GenerationDraf
     )
 
 
-ADMIN_CANDIDATE_SUBTITLE_SNAPSHOT_KEYS = (
-    "speech_by_lang",
-    "speech_cues_by_lang",
-    "speech_plan_by_lang",
-    "video_prompt_by_lang",
-)
 ADMIN_SCENE_DERIVED_SUBTITLE_KEYS = (
     "speech_cues_by_lang",
     "speech_plan_by_lang",
@@ -904,18 +901,145 @@ def _admin_final_build_scenes_from_page(run: GenerationRun, scenes: list[dict[st
         for key in ADMIN_SCENE_DERIVED_SUBTITLE_KEYS:
             scene.pop(key, None)
         merge_missing_scene_text_from_approved_candidate(scene)
-        candidates_by_lang = scene.get("video_candidates_by_lang")
-        if not isinstance(candidates_by_lang, dict):
-            continue
-        for candidates in candidates_by_lang.values():
-            if not isinstance(candidates, list):
-                continue
-            for candidate in candidates:
-                if not isinstance(candidate, dict):
-                    continue
-                for key in ADMIN_CANDIDATE_SUBTITLE_SNAPSHOT_KEYS:
-                    candidate.pop(key, None)
     return out
+
+
+def _candidate_speech_snapshot(candidate: dict[str, Any], language: str) -> tuple[str, list[dict[str, Any]]]:
+    lang = str(language or "").strip().lower()
+    qa_map = candidate.get("video_speech_qa_by_lang")
+    qa = qa_map.get(lang) if isinstance(qa_map, dict) else None
+    if not isinstance(qa, dict):
+        return "", []
+    recognized_text = str(qa.get("recognized_text") or "").strip()
+    word_timings = qa.get("word_timings")
+    if not recognized_text or not isinstance(word_timings, list) or not word_timings:
+        return "", []
+    return recognized_text, [dict(item) for item in word_timings if isinstance(item, dict)]
+
+
+def _store_candidate_speech_snapshot(
+    candidate: dict[str, Any],
+    language: str,
+    *,
+    recognized_text: str,
+    word_timings: list[dict[str, Any]],
+    qa_payload: dict[str, Any],
+) -> None:
+    lang = str(language or "").strip().lower()
+    cues = build_word_synced_subtitle_cues(
+        word_timings,
+        timing_source="video_audio_transcription",
+    )
+    if not recognized_text.strip() or not cues:
+        raise RuntimeError(
+            f"Could not produce exact spoken-word subtitle timings for candidate "
+            f"{candidate.get('candidate_id') or '?'} ({lang or '?'})."
+        )
+
+    current_speech = candidate.get("speech_by_lang")
+    speech_by_lang = dict(current_speech) if isinstance(current_speech, dict) else {}
+    speech_by_lang[lang] = recognized_text.strip()
+    candidate["speech_by_lang"] = speech_by_lang
+
+    current_cues = candidate.get("speech_cues_by_lang")
+    speech_cues_by_lang = dict(current_cues) if isinstance(current_cues, dict) else {}
+    speech_cues_by_lang[lang] = cues
+    candidate["speech_cues_by_lang"] = speech_cues_by_lang
+
+    current_qa = candidate.get("video_speech_qa_by_lang")
+    video_speech_qa_by_lang = dict(current_qa) if isinstance(current_qa, dict) else {}
+    video_speech_qa_by_lang[lang] = copy.deepcopy(qa_payload)
+    candidate["video_speech_qa_by_lang"] = video_speech_qa_by_lang
+
+    candidate_id = str(candidate.get("candidate_id") or "").strip()
+    if candidate_id:
+        SceneVideoCandidate.objects.filter(candidate_id=candidate_id).update(
+            speech_by_lang=speech_by_lang,
+            speech_cues_by_lang=speech_cues_by_lang,
+            video_speech_qa_by_lang=video_speech_qa_by_lang,
+        )
+
+
+def _ensure_approved_candidate_word_timings(
+    scenes: list[dict[str, Any]],
+    language: str,
+) -> None:
+    """Backfill exact spoken-word timings for approved legacy video candidates."""
+    lang = str(language or "").strip().lower()
+    if not lang:
+        return
+    for scene in scenes:
+        if not isinstance(scene, dict) or bool(scene.get("guest_mode")):
+            continue
+        candidate = resolve_latest_approved_scene_video_for_final_build(scene, lang)
+        if not isinstance(candidate, dict):
+            continue
+
+        recognized_text, word_timings = _candidate_speech_snapshot(candidate, lang)
+        if recognized_text and word_timings:
+            qa_map = candidate.get("video_speech_qa_by_lang")
+            _store_candidate_speech_snapshot(
+                candidate,
+                lang,
+                recognized_text=recognized_text,
+                word_timings=word_timings,
+                qa_payload=(qa_map.get(lang) or {}) if isinstance(qa_map, dict) else {},
+            )
+            continue
+
+        speech_by_lang = candidate.get("speech_by_lang")
+        expected_text = (
+            str(speech_by_lang.get(lang) or "").strip()
+            if isinstance(speech_by_lang, dict)
+            else ""
+        )
+        if not expected_text:
+            scene_speech = scene.get("speech_by_lang")
+            expected_text = (
+                str(scene_speech.get(lang) or "").strip()
+                if isinstance(scene_speech, dict)
+                else ""
+            )
+        if not expected_text:
+            continue
+
+        video_path = local_path_from_media_uri(str(candidate.get("media_uri") or ""))
+        if video_path is None or not video_path.is_file():
+            raise RuntimeError(
+                f"Approved video candidate {candidate.get('candidate_id') or '?'} has no readable local media."
+            )
+        result = None
+        for _attempt in range(5):
+            candidate_result = transcribe_video_audio(
+                video_path=video_path,
+                expected_speech_text=expected_text,
+                duration=scene.get("duration_sec"),
+            )
+            result = candidate_result
+            if candidate_result.recognized_text.strip() and build_word_synced_subtitle_cues(
+                candidate_result.word_timings,
+                timing_source="video_audio_transcription",
+            ):
+                break
+        if result is None:
+            raise RuntimeError(
+                f"Speech transcription did not run for candidate {candidate.get('candidate_id') or '?'} ({lang})."
+            )
+        qa_payload = {
+            "status": result.status,
+            "match_score": result.match_score,
+            "recognized_text": result.recognized_text,
+            "word_timings": list(result.word_timings),
+            "missing_words": list(result.missing_words),
+            "extra_words": list(result.extra_words),
+        }
+        _store_candidate_speech_snapshot(
+            candidate,
+            lang,
+            recognized_text=result.recognized_text,
+            word_timings=list(result.word_timings),
+            qa_payload=qa_payload,
+        )
 
 
 def _overlay_title_for_admin_render(
@@ -1554,6 +1678,13 @@ def _build_final_videos_for_run(
             and bool(narration_audio_path_by_lang)
         )
     )
+    needs_spoken_subtitles = requested_variants is None or bool(
+        {"subtitled_music", "titled_subtitled_music"}.intersection(requested_variants)
+    )
+    if needs_spoken_subtitles and not is_story_workflow:
+        subtitle_languages = [target_language] if target_language else production_languages_for_scenes(scenes)
+        for subtitle_language in subtitle_languages:
+            _ensure_approved_candidate_word_timings(scenes, subtitle_language)
     if (
         source_subtitled_video_path
         and target_language
@@ -1589,7 +1720,7 @@ def _build_final_videos_for_run(
             language=target_language,
             project_slug=project_slug,
             progress_callback=progress_callback,
-            use_candidate_subtitle_snapshot=False,
+            use_candidate_subtitle_snapshot=True,
             include_background_music=not is_story_workflow,
         )
     elif (
@@ -1608,7 +1739,7 @@ def _build_final_videos_for_run(
             overlay_series_title_by_lang=overlay_series_title_by_lang,
             overlay_series_counter_by_lang=overlay_series_counter_by_lang,
             progress_callback=progress_callback,
-            use_candidate_subtitle_snapshot=False,
+            use_candidate_subtitle_snapshot=True,
         )
     else:
         post = build_post_production(
@@ -1622,7 +1753,7 @@ def _build_final_videos_for_run(
             target_languages=[target_language] if target_language else None,
             target_variants=requested_variants,
             progress_callback=progress_callback,
-            use_candidate_subtitle_snapshot=False,
+            use_candidate_subtitle_snapshot=True,
             narration_audio_path_by_lang=narration_audio_path_by_lang or None,
             intro_video_path_by_lang=intro_video_path_by_lang or None,
             include_background_music=not is_story_workflow,
@@ -1977,7 +2108,7 @@ def _subtitled_artifact_matches_current_subtitles(
     return stored == subtitle_fingerprint_for_language(
         scenes,
         language,
-        use_candidate_subtitle_snapshot=False,
+        use_candidate_subtitle_snapshot=True,
     )
 
 

@@ -212,6 +212,19 @@ def test_word_synced_ass_uses_spoken_case_and_cream_colour(tmp_path):
     assert r"\3c&H00000000&\4c&H70000000&\bord3\shad2" in payload
 
 
+def test_word_synced_fixed_block_is_not_split_by_dense_subtitle_fallback():
+    entry = {
+        "text": "Волшебное сливочное пиво прямо",
+        "start_sec": 1.6,
+        "end_sec": 1.9,
+        "word_synced": True,
+        "fixed_block_words": ["Волшебное", "сливочное", "пиво", "прямо"],
+        "visible_word_count": 4,
+    }
+
+    assert post_production._expand_dense_subtitle_entry(entry) == [entry]
+
+
 def test_story_series_title_stack_is_centered_in_three_rows(tmp_path):
     target = tmp_path / "story-title.ass"
     series_cue = post_production._build_title_series_overlay_cue(
@@ -528,11 +541,11 @@ def test_build_post_production_uses_selected_scene_videos_and_speed(monkeypatch)
     out = post_production.build_post_production(scenes, project_slug="grandma_kitchen")
 
     subtitles = out["subtitle_entries"]
-    assert len(subtitles) == 2
-    assert subtitles[0]["text"] == "Первая сцена"
-    assert subtitles[0]["end_sec"] == 8 / 1.1
-    assert subtitles[1]["start_sec"] == 8 / 1.1
-    assert subtitles[1]["end_sec"] == (8 / 1.1) + 4.0
+    assert [item["text"] for item in subtitles] == ["Первая", "Первая сцена", "Вторая", "Вторая сцена"]
+    assert all(item["word_synced"] is True for item in subtitles)
+    assert subtitles[1]["end_sec"] == 8 / 1.1
+    assert subtitles[2]["start_sec"] == 8 / 1.1
+    assert subtitles[-1]["end_sec"] == (8 / 1.1) + 4.0
     assert out["final_clean_video"]["width"] == 1080
     assert out["final_clean_video"]["height"] == 1920
     assert out["final_upscaled_4k_video"]["width"] == 1080
@@ -541,7 +554,13 @@ def test_build_post_production_uses_selected_scene_videos_and_speed(monkeypatch)
     assert out["final_subtitled_music_video"]["source_audio_preserved"] is True
     assert sorted(out["languages"]) == ["en", "ru"]
     assert sorted(out["renders_by_language"]) == ["en", "ru"]
-    assert [item["text"] for item in out["subtitle_entries_by_language"]["en"][:2]] == ["First scene", "line"]
+    assert [item["text"] for item in out["subtitle_entries_by_language"]["en"]] == [
+        "First",
+        "First scene",
+        "line",
+        "Second",
+        "Second line",
+    ]
     ru_payload = base64.b64decode(out["final_subtitled_music_video"]["video_b64"]).decode("utf-8", errors="ignore")
     en_payload = base64.b64decode(out["renders_by_language"]["en"]["subtitled_music"]["video_b64"]).decode(
         "utf-8", errors="ignore"
@@ -552,11 +571,11 @@ def test_build_post_production_uses_selected_scene_videos_and_speed(monkeypatch)
     assert "|upscaled_4k" in ru_payload
     assert "Comic Sans" not in ru_payload
     assert "BorderStyle=3" not in ru_payload
-    assert "ПЕРВАЯ СЦЕНА" in ru_payload
-    assert "ВТОРАЯ СЦЕНА" in ru_payload
-    assert "FIRST SCENE" in en_payload
-    assert "LINE" in en_payload
-    assert "SECOND LINE" in en_payload
+    assert "Первая сцена" in ru_payload
+    assert "Вторая сцена" in ru_payload
+    assert "First scene" in en_payload
+    assert "line" in en_payload
+    assert "Second line" in en_payload
 
 
 def test_normal_recipe_build_does_not_trim_provider_clip_to_planned_duration(monkeypatch):
@@ -1439,9 +1458,16 @@ def test_build_post_production_uses_english_speech_timing_plan_for_subtitles(mon
 
     out = post_production.build_post_production(scenes, target_languages=["en"])
 
-    assert out["subtitle_entries_by_language"]["en"][0]["text"] == (
+    subtitles = out["subtitle_entries_by_language"]["en"]
+    completed_blocks = [
+        item["text"]
+        for item in subtitles
+        if item["visible_word_count"] == len(item["fixed_block_words"])
+    ]
+    assert " ".join(completed_blocks) == (
         "Never throw away watermelon rinds! They make such delicious watermelon jam."
     )
+    assert all(item["word_synced"] is True for item in subtitles)
 
 
 def test_build_post_production_uses_candidate_speech_snapshot_for_subtitles(monkeypatch):
@@ -1468,7 +1494,9 @@ def test_build_post_production_uses_candidate_speech_snapshot_for_subtitles(monk
 
     out = post_production.build_post_production(scenes, target_languages=["ru"])
 
-    assert out["subtitle_entries_by_language"]["ru"][0]["text"] == "Старый текст кандидата"
+    subtitles = out["subtitle_entries_by_language"]["ru"]
+    assert subtitles[-1]["text"] == "Старый текст кандидата"
+    assert all(item["word_synced"] is True for item in subtitles)
 
 
 def test_build_post_production_rejects_english_candidate_snapshot_for_ru_subtitles(monkeypatch):
@@ -1533,7 +1561,9 @@ def test_build_post_production_can_prefer_scene_speech_over_candidate_snapshot(m
         use_candidate_subtitle_snapshot=False,
     )
 
-    assert out["subtitle_entries_by_language"]["ru"][0]["text"] == "Новый текст сцены"
+    subtitles = out["subtitle_entries_by_language"]["ru"]
+    assert subtitles[-1]["text"] == "Новый текст сцены"
+    assert all(item["word_synced"] is True for item in subtitles)
 
 
 def test_build_post_production_splits_fallback_subtitles_on_pause_markers(monkeypatch):
@@ -1561,7 +1591,14 @@ def test_build_post_production_splits_fallback_subtitles_on_pause_markers(monkey
     out = post_production.build_post_production(scenes, target_languages=["ru"])
     subtitles = out["subtitle_entries_by_language"]["ru"]
 
-    assert [item["text"] for item in subtitles] == ["Первая часть", "Вторая часть", "Финал"]
+    assert [item["text"] for item in subtitles] == [
+        "Первая",
+        "Первая часть",
+        "Вторая",
+        "Вторая часть",
+        "Финал",
+    ]
+    assert all(item["word_synced"] is True for item in subtitles)
     assert subtitles[0]["start_sec"] == 0.0
     assert subtitles[-1]["end_sec"] == 6.0
 
@@ -1596,11 +1633,12 @@ def test_build_post_production_ignores_zero_duration_speech_cues(monkeypatch):
     out = post_production.build_post_production(scenes, target_languages=["ru"])
     subtitles = out["subtitle_entries_by_language"]["ru"]
 
-    assert [item["text"] for item in subtitles] == ["Первая часть", "Вторая часть"]
+    assert [item["text"] for item in subtitles] == ["Первая", "Первая часть", "Вторая", "Вторая часть"]
+    assert all(item["word_synced"] is True for item in subtitles)
     assert subtitles[0]["start_sec"] == 0.0
     assert subtitles[0]["end_sec"] > subtitles[0]["start_sec"]
-    assert subtitles[1]["start_sec"] == subtitles[0]["end_sec"]
-    assert subtitles[1]["end_sec"] == 6.0
+    assert subtitles[2]["start_sec"] == subtitles[1]["end_sec"]
+    assert subtitles[-1]["end_sec"] == 6.0
 
 
 def test_build_post_production_scales_speech_cues_with_video_speed(monkeypatch):
