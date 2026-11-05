@@ -167,7 +167,7 @@ from ..advertising_generation import (
 )
 from ..generation_store import set_generation_run_title_color_for_session
 from ..llm_utils import GEMINI_MODEL_PROFILE_CREATIVE, GEMINI_MODEL_PROFILE_EDIT, extract_json_object, gemini_generate_sync
-from ..post_production import _resolve_music_path, latinize_cyrillic_title
+from ..post_production import _resolve_music_path, latinize_cyrillic_title, render_title_overlay_preview
 from ..scene_media_candidates import resolve_candidate_by_message
 from .handlers_state_start import (
     _ADVERTISING_CAMPAIGN_CUSTOM_BUTTON,
@@ -922,19 +922,10 @@ def _render_overlay_title_preview(
     series_counter: str = "",
     subtitle: str = "",
 ) -> bytes:
-    from PIL import Image, ImageDraw, ImageFont
+    from PIL import Image, ImageDraw
 
     width = _OVERLAY_PREVIEW_WIDTH
     height = _OVERLAY_PREVIEW_HEIGHT
-    safe_top = _OVERLAY_PREVIEW_SAFE_TOP_HEIGHT
-    side_ratio = _overlay_preview_ratio(style, "side_margin_ratio", _DEFAULT_OVERLAY_TITLE_SIDE_MARGIN_RATIO)
-    top_ratio = _overlay_preview_ratio(style, "top_margin_ratio", _DEFAULT_OVERLAY_TITLE_TOP_MARGIN_RATIO)
-    margin_x = int(width * side_ratio)
-    max_width = width - margin_x * 2
-    top_y = int(height * top_ratio)
-    max_height = max(64, safe_top - top_y - 28)
-    title_color = str(style.get("title_color") or "#fff7e8")
-
     image = Image.new("RGB", (width, height), "#e5bf94")
     draw = ImageDraw.Draw(image)
     for y in range(height):
@@ -961,93 +952,15 @@ def _render_overlay_title_preview(
         if alpha > 0:
             overlay_draw.line((0, y, width, y), fill=(0, 0, 0, alpha))
     image = Image.alpha_composite(image.convert("RGBA"), overlay).convert("RGB")
-    draw = ImageDraw.Draw(image)
-
-    clean_series_title = " ".join(str(series_title or "").split())
-    clean_series_counter = " ".join(str(series_counter or "").split())
-    series_gap = 0
-    series_height = 0
-    series_parts: list[tuple[str, object]] = []
-    series_metrics = None
-    if clean_series_title or clean_series_counter:
-        series_metrics = _overlay_preview_fit_series_line(
-            draw,
-            language,
-            clean_series_title,
-            clean_series_counter,
-            max_width=max_width,
-        )
-    if series_metrics:
-        series_parts, series_gap, (series_width, series_top, series_bottom) = series_metrics
-        series_height = series_bottom - series_top
-        series_x = margin_x + (max_width - series_width) // 2
-        _overlay_preview_draw_series_line(draw, series_x, top_y, series_parts, gap=series_gap)
-
-    title_top_y = top_y + (int(round(series_height * 0.95)) if series_height else 0)
-    if series_height:
-        title_top_y += 12
-    clean_subtitle = " ".join(str(subtitle or "").split())
-    subtitle_reserved_height = 84 if clean_subtitle else 0
-    max_height = max(64, safe_top - title_top_y - 28 - subtitle_reserved_height)
-    font_path = _OVERLAY_PREVIEW_FONT_BY_LANGUAGE.get(language, _OVERLAY_PREVIEW_FONT_BY_LANGUAGE["ru"])
-    font, lines, spacing, bbox = _overlay_preview_fit_title(
-        draw,
-        title,
-        font_path,
-        max_width=max_width,
-        max_height=max_height,
+    return render_title_overlay_preview(
+        image,
+        language=language,
+        title=title,
+        title_style=style,
+        series_title=series_title,
+        series_counter=series_counter,
+        subtitle=subtitle,
     )
-    left, top, right, bottom = bbox
-    text_width = right - left
-    x = margin_x + (max_width - text_width) // 2 - left
-    y = title_top_y - top
-    _overlay_preview_draw_tracked_multiline(
-        draw,
-        (x, y),
-        lines,
-        font=font,
-        fill=title_color,
-        spacing=spacing,
-        box_width=text_width,
-    )
-    if clean_subtitle:
-        subtitle_font_path = Path("/System/Library/Fonts/Supplemental/Arial Narrow Bold.ttf")
-        if not subtitle_font_path.exists():
-            subtitle_font_path = _OVERLAY_PREVIEW_FONT_BY_LANGUAGE["ru"]
-        subtitle_font = ImageFont.truetype(str(subtitle_font_path), size=46)
-        subtitle_lines = _overlay_preview_wrap_text(draw, clean_subtitle, subtitle_font, max_width)[:2]
-        subtitle_spacing = 6
-        subtitle_bbox = draw.multiline_textbbox(
-            (0, 0),
-            "\n".join(subtitle_lines),
-            font=subtitle_font,
-            spacing=subtitle_spacing,
-            stroke_width=2,
-        )
-        subtitle_width = subtitle_bbox[2] - subtitle_bbox[0]
-        subtitle_x = margin_x + (max_width - subtitle_width) // 2 - subtitle_bbox[0]
-        subtitle_y = y + (bottom - top) + 24 - subtitle_bbox[1]
-        draw.multiline_text(
-            (subtitle_x + 3, subtitle_y + 3),
-            "\n".join(subtitle_lines),
-            font=subtitle_font,
-            fill="#000000",
-            spacing=subtitle_spacing,
-            align="center",
-        )
-        draw.multiline_text(
-            (subtitle_x, subtitle_y),
-            "\n".join(subtitle_lines),
-            font=subtitle_font,
-            fill="#fff7e8",
-            spacing=subtitle_spacing,
-            align="center",
-            stroke_width=2,
-            stroke_fill="#14171b",
-        )
-    bio = io.BytesIO()
-    image.save(bio, format="PNG")
-    return bio.getvalue()
 
 
 async def _send_overlay_title_previews(update: Update, session: dict, style: dict[str, object]) -> None:
@@ -1068,7 +981,9 @@ async def _send_overlay_title_previews(update: Update, session: dict, style: dic
         series_title = _overlay_preview_value_for_language(series_titles, language)
         series_counter = _overlay_preview_value_for_language(series_counters, language)
         try:
-            image_bytes = _render_overlay_title_preview(language, title, style, series_title, series_counter, subtitle)
+            image_bytes = await asyncio.to_thread(
+                _render_overlay_title_preview, language, title, style, series_title, series_counter, subtitle,
+            )
         except Exception:
             logger.exception("overlay title preview render failed language=%s", language)
             continue

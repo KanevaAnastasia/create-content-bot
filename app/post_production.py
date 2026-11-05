@@ -103,7 +103,9 @@ TITLE_OVERLAY_SQUARE_FONT_SIZE = 92
 TITLE_OVERLAY_MARGIN_RATIO = 0.10
 TITLE_OVERLAY_TOP_MARGIN_RATIO = 0.05
 TITLE_OVERLAY_MAX_HEIGHT_RATIO = 0.08
-TITLE_OVERLAY_OUTLINE = 5
+TITLE_OVERLAY_BOLD = -1
+# The reference has solid, heavy letters and a hard offset shadow, no contour.
+TITLE_OVERLAY_OUTLINE = 0
 TITLE_OVERLAY_SHADOW = 12
 TITLE_OVERLAY_SPACING = 0
 TITLE_OVERLAY_ASS_SAFE_WIDTH_RATIO = 1.0
@@ -1926,7 +1928,7 @@ def _write_burned_subtitle_ass(
                         "primary_colour": title_primary_colour,
                         "outline_colour": TITLE_OVERLAY_OUTLINE_COLOUR,
                         "shadow_colour": TITLE_OVERLAY_SHADOW_COLOUR,
-                        "bold": 0,
+                        "bold": TITLE_OVERLAY_BOLD,
                         "spacing": TITLE_OVERLAY_SPACING,
                         "outline": TITLE_OVERLAY_OUTLINE,
                         "shadow": TITLE_OVERLAY_SHADOW,
@@ -3347,6 +3349,43 @@ def _subtitle_filter(subtitles_path: Path, *, fonts_dir: Path | None = None) -> 
     else:
         logger.warning("post_production.subtitle_fonts_dir_missing path=%s", resolved_fonts_dir)
     return "subtitles=" + ":".join(parts)
+
+
+def render_title_overlay_preview(
+    background: Image.Image,
+    *,
+    language: str,
+    title: str,
+    title_style: dict[str, Any] | None = None,
+    series_title: str = "",
+    series_counter: str = "",
+    subtitle: str = "",
+) -> bytes:
+    """Render a still with the exact ASS styles and layout used by final video."""
+    language = str(language or "ru").strip().lower() or "ru"
+    cues = [
+        _build_title_overlay_cue({language: title}, language=language, duration_sec=1),
+        _build_title_series_overlay_cue(
+            {language: series_title}, {language: series_counter}, language=language, duration_sec=1,
+        ),
+        _build_title_subtitle_overlay_cue({language: subtitle}, language=language, duration_sec=1),
+    ]
+    with tempfile.TemporaryDirectory(prefix="title_preview_") as tmp:
+        directory = Path(tmp)
+        source = directory / "background.png"
+        ass_path = directory / "title.ass"
+        destination = directory / "preview.png"
+        background.convert("RGB").save(source)
+        _write_burned_subtitle_ass(
+            ass_path, [], title_cues=[cue for cue in cues if cue is not None],
+            title_style=title_style, video_width=background.width, video_height=background.height,
+        )
+        _run_ffmpeg(
+            [_resolve_ffmpeg(), "-y", "-i", str(source), "-vf", _subtitle_filter(ass_path),
+             "-frames:v", "1", str(destination)],
+            timeout=FFMPEG_SHORT_TIMEOUT_SEC, stage="title_preview",
+        )
+        return destination.read_bytes()
 
 
 def _render_subtitled_music_master(

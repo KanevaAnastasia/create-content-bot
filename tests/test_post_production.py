@@ -714,7 +714,7 @@ def test_build_post_production_adds_title_overlay_for_first_segment_duration(mon
     assert "Style: TitleSubtitleRU,Berezka,40,&H00FFFFFF" in ass_by_name["title_overlay_ru.ass"]
     assert "Style: TitleOverlayRU,TD Afisha,118,&H003826C7" in ass_by_name["title_overlay_ru.ass"]
     assert "&H00000000,&H00000000" in ass_by_name["title_overlay_ru.ass"]
-    assert ",0,1,5,12,7," in ass_by_name["title_overlay_ru.ass"]
+    assert ",0,1,0,12,7," in ass_by_name["title_overlay_ru.ass"]
     assert ",0,1,5,10,7," in ass_by_name["title_overlay_ru.ass"]
     assert ",0,1,5,10,8," in ass_by_name["title_overlay_ru.ass"]
     assert r"\fsp" not in ass_by_name["title_overlay_ru.ass"]
