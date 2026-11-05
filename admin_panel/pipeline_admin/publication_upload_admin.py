@@ -17,6 +17,7 @@ from django.utils.html import escape
 from django.utils.safestring import mark_safe
 
 from app.db import SessionLocal
+from app.publication_config import project_env
 from app.publications import (
     apply_project_publication_copy_rules,
     build_publication_targets,
@@ -84,6 +85,11 @@ class PublicationUploadForm(legacy.PublicationQueueAdminForm):
             label="Подтверждаю права на музыку и звук",
             help_text="Обязательно для публикации: в видео нет чужой музыки либо у проекта есть права на её использование.",
         )
+        self.fields["tiktok_publish_confirmed"] = forms.BooleanField(
+            required=False,
+            label="Просмотрела видео и описание, разрешаю публикацию в выбранный TikTok",
+            help_text="Видео будет передано выбранному провайдеру публикации. Проверьте аккаунт и приватность выше.",
+        )
         self.fields["instagram_ru_trial"] = forms.BooleanField(
             required=False,
             label="Сначала пробный Reel, затем обычный",
@@ -138,6 +144,8 @@ class PublicationUploadForm(legacy.PublicationQueueAdminForm):
                 "Сгенерируйте или заполните отдельное описание для пробного Reel.",
             )
         if "tiktok:ru" in selected:
+            if not cleaned.get("tiktok_publish_confirmed"):
+                self.add_error("tiktok_publish_confirmed", "Подтвердите просмотр видео и согласие на публикацию.")
             if not str(cleaned.get("tiktok_privacy_level") or "").strip():
                 self.add_error(
                     "tiktok_privacy_level",
@@ -223,13 +231,19 @@ def _target_cards(form: PublicationUploadForm, copy_payload: dict[str, str]) -> 
                             "tiktok_brand_organic",
                             "tiktok_is_aigc",
                             "tiktok_music_usage_confirmed",
+                            "tiktok_publish_confirmed",
                         )
                     )
                     if target.key == "tiktok:ru"
                     else ()
                 ),
                 "ready": bool(readiness and readiness.ready),
-                "account": str(account.external_account_id or "") if account else "",
+                "provider_note": readiness.note if readiness else "",
+                "account": (
+                    "@" + project_env(project_slug, "ZERNIO_TIKTOK_USERNAME").lstrip("@")
+                    if target.platform == "tiktok" and project_env(project_slug, "TIKTOK_PROVIDER") == "zernio"
+                    else str(account.external_account_id or "") if account else ""
+                ),
                 "missing": tuple(readiness.missing) if readiness and not readiness.ready else (),
             }
         )
@@ -420,6 +434,7 @@ def _queue_form_jobs(
                 "tiktok_music_usage_confirmed": bool(
                     form.cleaned_data.get("tiktok_music_usage_confirmed")
                 ),
+                "tiktok_publish_confirmed": bool(form.cleaned_data.get("tiktok_publish_confirmed")),
             }
             for job in jobs:
                 if str(job.platform or "").lower() == "tiktok":

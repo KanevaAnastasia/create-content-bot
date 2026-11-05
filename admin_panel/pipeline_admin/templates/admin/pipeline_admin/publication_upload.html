@@ -117,6 +117,7 @@
           {% if card.ready %}<span class="cf-pill ok">API готов</span>{% else %}<span class="cf-pill warn">нужна настройка</span>{% endif %}
         </label>
         <div class="cf-target-fields">
+          {% if card.provider_note %}<div class="cf-muted">Подключение: {{ card.provider_note }}</div>{% endif %}
           {% for field in card.fields %}<div>{{ field.label_tag }}{{ field }}{{ field.errors }}</div>{% endfor %}
           {% if card.tiktok_fields %}
           <div class="cf-tiktok-panel">

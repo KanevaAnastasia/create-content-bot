@@ -246,6 +246,7 @@ def test_instagram_resumable_uploads_local_video_without_public_url(
     monkeypatch, tmp_path: Path
 ) -> None:
     monkeypatch.setenv("PUBLISH_GRANDMA_KITCHEN_INSTAGRAM_ACCESS_TOKEN", "token")
+    monkeypatch.setenv("PUBLISH_GRANDMA_KITCHEN_INSTAGRAM_ACCESS_TOKEN_RU", "token")
     monkeypatch.setenv("PUBLISH_GRANDMA_KITCHEN_INSTAGRAM_BUSINESS_ACCOUNT_ID_RU", "account")
     monkeypatch.setenv("META_GRAPH_API_VERSION", "v25.0")
     video_path = tmp_path / "reel.mp4"

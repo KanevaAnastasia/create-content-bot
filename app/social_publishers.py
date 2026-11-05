@@ -15,18 +15,19 @@ import subprocess
 import time
 import uuid
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Iterable
 from urllib.parse import urlparse
 
 import requests
-from sqlalchemy import select
+from sqlalchemy import or_, select
 
 from .db import SessionLocal
 from .models import Project, PublicationJob
 from .publication_config import project_env, project_env_name, shared_env
 from .publish_secret_store import set_project_secrets
+from . import zernio_publisher
 from .publications import (
     PUBLICATION_STATUS_APPROVED,
     PUBLICATION_STATUS_FAILED,
@@ -72,6 +73,15 @@ def _required_keys(platform: str, language: str) -> tuple[str, ...]:
 def platform_readiness(project_slug: str, platform: str, language: str) -> PlatformReadiness:
     normalized_platform = str(platform or "").strip().lower()
     normalized_language = str(language or "").strip().lower()
+    if normalized_platform == "tiktok":
+        provider = project_env(project_slug, "TIKTOK_PROVIDER", "direct")
+        if provider == "zernio":
+            missing = tuple(project_env_name(project_slug, key) for key in zernio_publisher.CONFIG_KEYS
+                            if not project_env(project_slug, key))
+            return PlatformReadiness(normalized_platform, normalized_language, not missing, missing,
+                                     "Zernio · TikTok (free-only)" if not missing else "")
+        if provider != "direct":
+            return PlatformReadiness(normalized_platform, normalized_language, False, (), "Unknown TikTok provider")
     required = _required_keys(normalized_platform, normalized_language)
     missing = [project_env_name(project_slug, key) for key in required if not project_env(project_slug, key)]
     if normalized_platform == "youtube":
@@ -648,6 +658,8 @@ def _tiktok_chunk_plan(total_size: int) -> tuple[int, int]:
 
 def tiktok_creator_info(project_slug: str, *, access_token: str | None = None) -> dict[str, Any]:
     """Return the current creator posting capabilities for the connected account."""
+    if project_env(project_slug, "TIKTOK_PROVIDER", "direct") == "zernio" and access_token is None:
+        return zernio_publisher.creator_info(project_slug)
     access_token = access_token or _tiktok_access_token(project_slug)
     response = requests.post(
         "https://open.tiktokapis.com/v2/post/publish/creator_info/query/",
@@ -993,6 +1005,14 @@ def publish_publication_job(job_id: str | uuid.UUID) -> dict[str, Any]:
             scheduled_at = scheduled_at.replace(tzinfo=timezone.utc)
         if scheduled_at is not None and scheduled_at > now:
             return {"job_id": str(job.id), "status": PUBLICATION_STATUS_SCHEDULED, "scheduled_at": scheduled_at.isoformat()}
+        if job.platform == "tiktok":
+            pinned = (job.payload_json or {}).get("tiktok_provider")
+            configured = project_env(job.project.slug, "TIKTOK_PROVIDER", "direct")
+            if pinned and pinned != configured:
+                job.status = PUBLICATION_STATUS_NEEDS_MANUAL_ACTION
+                job.publish_error = "TikTok provider changed after submission. Reconcile the old publication before retrying."
+                session.commit()
+                return {"job_id": str(job.id), "status": job.status, "error": job.publish_error}
         readiness = platform_readiness(job.project.slug, job.platform, job.language)
         if not readiness.ready:
             job.status = PUBLICATION_STATUS_NEEDS_MANUAL_ACTION
@@ -1008,14 +1028,28 @@ def publish_publication_job(job_id: str | uuid.UUID) -> dict[str, Any]:
         job.status = PUBLICATION_STATUS_PUBLISHING
         job.publish_error = None
         job.attempt_count = int(job.attempt_count or 0) + 1
+        if job.platform == "tiktok":
+            payload = job.payload_json or {}
+            # Pin the transport for retries even if project settings later change.
+            job.payload_json = {**payload, "tiktok_provider": payload.get("tiktok_provider")
+                                or project_env(job.project.slug, "TIKTOK_PROVIDER", "direct")}
         session.commit()
         try:
-            external_post_id = {
-                "youtube": _publish_youtube,
-                "instagram": _publish_instagram,
-                "tiktok": _publish_tiktok,
-                "vk": _publish_vk,
-            }[job.platform](job, job.project.slug)
+            if job.platform == "tiktok" and job.payload_json.get("tiktok_provider") == "zernio":
+                external_post_id = zernio_publisher.publish(job, job.project.slug, session.commit)
+            else:
+                external_post_id = {
+                    "youtube": _publish_youtube,
+                    "instagram": _publish_instagram,
+                    "tiktok": _publish_tiktok,
+                    "vk": _publish_vk,
+                }[job.platform](job, job.project.slug)
+        except (zernio_publisher.ZernioPending, zernio_publisher.ZernioNeedsReview) as exc:
+            job.status = (PUBLICATION_STATUS_PUBLISHING if isinstance(exc, zernio_publisher.ZernioPending)
+                          else PUBLICATION_STATUS_NEEDS_MANUAL_ACTION)
+            job.publish_error = str(exc)[:4000]
+            session.commit()
+            return {"job_id": str(job.id), "status": job.status, "error": job.publish_error}
         except Exception as exc:
             job.status = PUBLICATION_STATUS_FAILED
             job.publish_error = f"{type(exc).__name__}: {exc}"[:4000]
@@ -1034,6 +1068,7 @@ def publish_publication_jobs(job_ids: Iterable[str | uuid.UUID]) -> list[dict[st
 
 
 def publish_due_publication_jobs(limit: int = 20) -> list[dict[str, Any]]:
+    refresh_zernio_publications(limit=limit)
     now = datetime.now(timezone.utc)
     with SessionLocal() as session:
         rows = session.scalars(
@@ -1044,3 +1079,39 @@ def publish_due_publication_jobs(limit: int = 20) -> list[dict[str, Any]]:
         ).all()
         ids = [row.id for row in rows if row.scheduled_at is None or row.scheduled_at <= now]
     return publish_publication_jobs(ids)
+
+
+def refresh_zernio_publications(limit: int = 20) -> None:
+    """Reconcile asynchronous posts and late TikTok permalinks without publishing."""
+    with SessionLocal() as session:
+        jobs = session.scalars(
+            select(PublicationJob).where(
+                PublicationJob.platform == "tiktok",
+                PublicationJob.status.in_((PUBLICATION_STATUS_PUBLISHING, PUBLICATION_STATUS_PUBLISHED)),
+                PublicationJob.payload_json["tiktok_provider"].as_string() == "zernio",
+                or_(
+                    PublicationJob.payload_json["zernio_post_id"].as_string().is_not(None),
+                    PublicationJob.updated_at < datetime.now(timezone.utc) - timedelta(minutes=15),
+                ),
+                PublicationJob.payload_json["external_post_url"].as_string().is_(None),
+            ).order_by(PublicationJob.updated_at.asc()).limit(max(1, limit))
+        ).all()
+        for job in jobs:
+            try:
+                external_id = zernio_publisher.refresh(job, job.project.slug, session.commit)
+            except zernio_publisher.ZernioPending as exc:
+                job.publish_error = str(exc)
+            except zernio_publisher.ZernioNeedsReview as exc:
+                job.status = PUBLICATION_STATUS_NEEDS_MANUAL_ACTION
+                job.publish_error = str(exc)
+            except zernio_publisher.ZernioError as exc:
+                if (job.payload_json or {}).get("zernio_status") in {"failed", "error", "cancelled", "canceled"}:
+                    job.status = PUBLICATION_STATUS_FAILED
+                job.publish_error = str(exc)
+            else:
+                job.status = PUBLICATION_STATUS_PUBLISHED
+                job.external_post_id = external_id
+                job.published_at = job.published_at or datetime.now(timezone.utc)
+                job.publish_error = None
+            job.updated_at = datetime.now(timezone.utc)
+            session.commit()

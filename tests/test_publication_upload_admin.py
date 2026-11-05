@@ -235,12 +235,14 @@ def test_tiktok_upload_requires_manual_privacy_and_music_confirmation() -> None:
     assert form.is_valid() is False
     assert "tiktok_privacy_level" in form.errors
     assert "tiktok_music_usage_confirmed" in form.errors
+    assert "tiktok_publish_confirmed" in form.errors
 
     form = PublicationUploadForm(
         data={
             **base,
             "tiktok_privacy_level": "SELF_ONLY",
             "tiktok_music_usage_confirmed": "on",
+            "tiktok_publish_confirmed": "on",
             "tiktok_is_aigc": "on",
         },
         files={"custom_video_ru": SimpleUploadedFile("ru.mp4", b"ru")},
