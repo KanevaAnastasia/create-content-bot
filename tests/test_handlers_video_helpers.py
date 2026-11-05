@@ -1,5 +1,6 @@
 import asyncio
 import json
+import uuid
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -6329,7 +6330,64 @@ def test_social_descriptions_approval_ok_finishes_production():
     assert session["state"] == "ready_for_production"
     assert session[handlers_state_media.SOCIAL_DESCRIPTIONS_SENT_KEY] is True
     assert handlers_state_media.SOCIAL_DESCRIPTIONS_PENDING_KEY not in session
+    assert session[handlers_state_media.SOCIAL_DESCRIPTIONS_APPROVED_KEY]["copy"]
+    assert session[handlers_state_media.SOCIAL_DESCRIPTIONS_APPROVED_KEY]["recipe"] == "Картофель натереть и пожарить."
     assert any("Production завершён" in text for text, _ in messages)
+
+
+def test_social_approval_persists_exact_bot_copy_and_run_id(monkeypatch):
+    messages = []
+    run_id = uuid.uuid4()
+    jobs = [SimpleNamespace(payload_json={})]
+    added = []
+
+    class _Db:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+        def add(self, value):
+            added.append(value)
+
+        def commit(self):
+            return None
+
+    class _Msg:
+        async def reply_text(self, text, **_kwargs):
+            messages.append(text)
+
+    monkeypatch.setattr(handlers_state_media, "SessionLocal", _Db)
+    monkeypatch.setattr(handlers_state_media, "queue_publication_bundle", lambda *_args, **_kwargs: jobs)
+    monkeypatch.setattr(handlers_state_media, "mark_generation_run_ready", lambda _session: None)
+    copy = handlers_state_media._fallback_social_copy("Картофель натереть и пожарить.")
+    session = {
+        "state": handlers_state_media.STATE_WAITING_SOCIAL_DESCRIPTIONS_APPROVAL,
+        "generation_run_id": str(run_id),
+        "selected_project_key": "grandma_kitchen",
+        "production": {"post_production": {"renders_by_language": {}}},
+        handlers_state_media.SOCIAL_DESCRIPTIONS_PENDING_KEY: {
+            "recipe": "Картофель натереть и пожарить.",
+            "copy": copy,
+            "origin": "production_final",
+        },
+    }
+
+    out = asyncio.run(
+        handlers_state_media._handle_waiting_social_descriptions_approval_state(
+            SimpleNamespace(message=_Msg()),
+            context=None,
+            chat_id=1,
+            session=session,
+            text="ОК",
+        )
+    )
+
+    assert out is True
+    assert jobs[0].payload_json["run_id"] == str(run_id)
+    assert added[0].artifact_type == "publication_copy_approved"
+    assert added[0].payload_json["copy"] == copy
 
 
 def test_waiting_scene_media_ok_all_languages_moves_to_next_scene():

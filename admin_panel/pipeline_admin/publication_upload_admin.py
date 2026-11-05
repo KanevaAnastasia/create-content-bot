@@ -372,15 +372,18 @@ def _freshest_publication_copy_from_run(run: GenerationRun) -> dict[str, str]:
         sessions = ChatSession.objects.filter(generation_run_id=run.id).order_by("-updated_at")[:20]
         for session in sessions:
             payload = session.session_json if isinstance(session.session_json, dict) else {}
-            pending = payload.get("social_descriptions_pending")
-            copy = pending.get("copy") if isinstance(pending, dict) else None
-            if isinstance(copy, dict) and any(str(value or "").strip() for value in copy.values()):
-                candidates.append(
-                    (
-                        _copy_timestamp(session.updated_at),
-                        {key: str(copy.get(key) or "") for key, _label in legacy.SOCIAL_COPY_FIELD_LABELS},
+            for session_key in ("social_descriptions_pending", "social_descriptions_approved"):
+                source = payload.get(session_key)
+                copy = source.get("copy") if isinstance(source, dict) else None
+                if isinstance(copy, dict) and any(str(value or "").strip() for value in copy.values()):
+                    candidates.append(
+                        (
+                            _copy_timestamp(session.updated_at),
+                            {key: str(copy.get(key) or "") for key, _label in legacy.SOCIAL_COPY_FIELD_LABELS},
+                        )
                     )
-                )
+                    break
+            if candidates:
                 break
     except Exception:
         pass
@@ -388,7 +391,10 @@ def _freshest_publication_copy_from_run(run: GenerationRun) -> dict[str, str]:
         draft = (
             GenerationArtifact.objects.filter(
                 run_id=run.id,
-                artifact_type=legacy.PUBLICATION_COPY_DRAFT_ARTIFACT_TYPE,
+                artifact_type__in=(
+                    legacy.PUBLICATION_COPY_DRAFT_ARTIFACT_TYPE,
+                    "publication_copy_approved",
+                ),
             )
             .order_by("-created_at")
             .first()
@@ -405,12 +411,28 @@ def _freshest_publication_copy_from_run(run: GenerationRun) -> dict[str, str]:
     except Exception:
         pass
     try:
+        recent_jobs = list(PublicationJob.objects.order_by("-created_at")[:500])
+        recipe_candidates = {str(getattr(run, "script", "") or "").strip()}
+        for resolver in (legacy._publication_recipe_from_draft, legacy._publication_recipe_for_run):
+            try:
+                recipe_candidates.add(str(resolver(run) or "").strip())
+            except Exception:
+                pass
+        recipe_candidates.discard("")
         run_jobs = [
             job
-            for job in PublicationJob.objects.order_by("-created_at")[:500]
-            if isinstance(job.payload_json, dict)
-            and str(job.payload_json.get("run_id") or "") == str(run.id)
-            and not bool(job.payload_json.get("instagram_trial"))
+            for job in recent_jobs
+            if (
+                (
+                    isinstance(job.payload_json, dict)
+                    and str(job.payload_json.get("run_id") or "") == str(run.id)
+                )
+                or (
+                    not str((job.payload_json or {}).get("run_id") or "").strip()
+                    and str(job.recipe or "").strip() in recipe_candidates
+                )
+            )
+            and not bool((job.payload_json or {}).get("instagram_trial"))
         ]
         if run_jobs:
             latest_bundle = str(run_jobs[0].bundle_key or "")
@@ -483,14 +505,28 @@ def _generate_instagram_ru_trial_description(
     )
     if str(feedback or "").strip():
         instruction += f" Дополнительное пожелание пользователя: {str(feedback).strip()}"
-    generated = asyncio.run(
-        _refine_social_copy_from_feedback(
-            recipe=clean_recipe,
-            previous_copy=normal_copy,
-            feedback=instruction,
+    normal_description = strip_instagram_ru_attribution(
+        str(normal_copy.get("instagram_ru") or "")
+    ).casefold()
+    for attempt in range(2):
+        generated = asyncio.run(
+            _refine_social_copy_from_feedback(
+                recipe=clean_recipe,
+                previous_copy=normal_copy,
+                feedback=(
+                    instruction
+                    if attempt == 0
+                    else instruction
+                    + " Предыдущий вариант совпал с основным. Перепиши его полностью: другой хук, другая структура и формулировки."
+                ),
+            )
         )
-    )
-    return strip_instagram_ru_attribution(str(generated.get("instagram_ru") or ""))
+        trial_description = strip_instagram_ru_attribution(
+            str(generated.get("instagram_ru") or "")
+        )
+        if trial_description and trial_description.casefold() != normal_description:
+            return trial_description
+    raise ValueError("Генератор дважды вернул одинаковые основной и Trial тексты. Повторите генерацию.")
 
 
 def standalone_upload_view(self, request):
@@ -508,22 +544,77 @@ def standalone_upload_view(self, request):
         initial_project,
         {key: "" for key, _label in legacy.SOCIAL_COPY_FIELD_LABELS},
     )
-    form = PublicationUploadForm(
-        request.POST or None,
-        request.FILES or None,
-        copy=copy_payload,
-        project_choices=project_choices,
-        video_source_choices={"ru": (), "en": ()},
-        initial={
-            "project_slug": initial_project,
-            "video_variant": "clean",
-            "video_source_ru": "upload",
-            "video_source_en": "upload",
-        },
-    )
-    if request.method == "POST" and form.is_valid():
+    recipe = str(request.POST.get("publication_recipe") or "").strip() if request.method == "POST" else ""
+    feedback = str(request.POST.get("generation_feedback") or "") if request.method == "POST" else ""
+    selected_project = str(request.POST.get("project_slug") or initial_project)
+    trial_description = str(request.POST.get("instagram_ru_trial_description") or "")
+    if request.method == "POST" and "generate_descriptions" in request.POST:
+        posted_copy = {
+            key: str(request.POST.get(key) or "")
+            for key, _label in legacy.SOCIAL_COPY_FIELD_LABELS
+        }
         try:
-            jobs = _queue_form_jobs(form, run=None, recipe="Ручная заливка из админки")
+            copy_payload = legacy._generate_publication_copy_for_admin(
+                None,
+                current_copy=posted_copy,
+                recipe=recipe,
+                feedback=feedback,
+            )
+            copy_payload = apply_project_publication_copy_rules(selected_project, copy_payload)
+            trial_description = _generate_instagram_ru_trial_description(
+                recipe=recipe,
+                normal_copy=copy_payload,
+                feedback=feedback,
+            )
+        except Exception as exc:
+            self.message_user(request, f"Описания не сгенерированы: {exc}", level=messages.ERROR)
+            copy_payload = posted_copy
+        else:
+            self.message_user(
+                request,
+                "Все описания созданы отдельно, включая уникальный текст Trial Reel.",
+                level=messages.SUCCESS,
+            )
+            feedback = ""
+        form = PublicationUploadForm(
+            None,
+            copy=copy_payload,
+            project_choices=project_choices,
+            video_source_choices={"ru": (), "en": ()},
+            initial={
+                "project_slug": selected_project,
+                "target_keys": request.POST.getlist("target_keys") or [
+                    target.key for target in build_publication_targets(copy_payload) if target.description
+                ],
+                "video_variant": "clean",
+                "video_source_ru": "upload",
+                "video_source_en": "upload",
+                "instagram_ru_trial": bool(request.POST.get("instagram_ru_trial")),
+                "instagram_ru_trial_description": trial_description,
+                **copy_payload,
+            },
+        )
+    else:
+        form = PublicationUploadForm(
+            request.POST or None,
+            request.FILES or None,
+            copy=copy_payload,
+            project_choices=project_choices,
+            video_source_choices={"ru": (), "en": ()},
+            initial={
+                "project_slug": initial_project,
+                "video_variant": "clean",
+                "video_source_ru": "upload",
+                "video_source_en": "upload",
+            },
+        )
+    if request.method == "POST" and "generate_descriptions" not in request.POST and form.is_valid():
+        try:
+            jobs = _queue_form_jobs(
+                form,
+                run=None,
+                recipe=recipe or "Ручная заливка из админки",
+            )
         except Exception as exc:
             self.message_user(request, f"Публикации не созданы: {exc}", level=messages.ERROR)
         else:
@@ -538,7 +629,14 @@ def standalone_upload_view(self, request):
     response = TemplateResponse(
         request,
         "admin/pipeline_admin/publication_upload.html",
-        _upload_page_context(request, self, form=form, copy_payload=displayed_copy),
+        _upload_page_context(
+            request,
+            self,
+            form=form,
+            copy_payload=displayed_copy,
+            recipe=recipe,
+            generation_feedback=feedback,
+        ),
     )
     response.render()
     return response

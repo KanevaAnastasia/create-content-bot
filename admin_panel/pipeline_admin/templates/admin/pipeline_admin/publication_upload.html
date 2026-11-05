@@ -121,13 +121,11 @@
     </div>
   </section>
 
-  {% if run %}
   <section class="cf-section">
-    <div class="cf-section-head"><div><h2>Помощник описаний</h2><div class="cf-muted">Можно заново сгенерировать подписи и затем отредактировать каждую выше.</div></div></div>
-    <div class="cf-generate"><div><label for="id_generation_feedback">Что изменить</label><textarea id="id_generation_feedback" name="generation_feedback">{{ generation_feedback }}</textarea></div><button class="button" type="submit" name="generate_descriptions" value="1">Сгенерировать описания</button></div>
-    <details class="cf-recipe"><summary>Исходный текст / рецепт</summary><textarea name="publication_recipe">{{ recipe }}</textarea></details>
+    <div class="cf-section-head"><div><h2>Помощник описаний</h2><div class="cf-muted">Генератор создаёт разные тексты для каждой площадки и отдельное уникальное описание Trial Reel. После генерации любое поле можно отредактировать.</div></div></div>
+    <div class="cf-generate"><div><label for="id_generation_feedback">Что изменить</label><textarea id="id_generation_feedback" name="generation_feedback">{{ generation_feedback }}</textarea></div><button class="button" type="submit" name="generate_descriptions" value="1">Сгенерировать все разные описания</button></div>
+    <details class="cf-recipe"{% if not run %} open{% endif %}><summary>Исходный текст / рецепт</summary><textarea name="publication_recipe" placeholder="Для своей загрузки вставьте сюда рецепт, сценарий или исходный текст">{{ recipe }}</textarea></details>
   </section>
-  {% endif %}
 
   <section class="cf-section">
     <div class="cf-project-row"><div class="cf-field">{{ form.scheduled_at.label_tag }}{{ form.scheduled_at }}{{ form.scheduled_at.errors }}</div><div class="cf-muted">Оставьте пустым, чтобы отправить выбранные публикации сразу.</div></div>

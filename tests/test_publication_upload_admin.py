@@ -142,6 +142,33 @@ def test_trial_description_is_generated_separately_and_strips_attribution(monkey
     assert "не упоминай Syntx" in calls[0][2]
 
 
+def test_trial_description_retries_when_generator_copies_normal_text(monkeypatch) -> None:
+    calls = []
+
+    async def refine(**kwargs):
+        calls.append(kwargs["feedback"])
+        return {
+            **kwargs["previous_copy"],
+            "instagram_ru": (
+                "Обычный текст" if len(calls) == 1 else "Новый Trial с другим хуком"
+            ),
+        }
+
+    monkeypatch.setattr(
+        "app.handlers.handlers_state_media._refine_social_copy_from_feedback",
+        refine,
+    )
+
+    result = upload_admin._generate_instagram_ru_trial_description(
+        recipe="Рецепт",
+        normal_copy={"instagram_ru": "Обычный текст"},
+    )
+
+    assert result == "Новый Trial с другим хуком"
+    assert len(calls) == 2
+    assert "Перепиши его полностью" in calls[1]
+
+
 def test_freshest_copy_ignores_trial_job_and_preserves_other_platform_copy(monkeypatch) -> None:
     run_id = uuid.uuid4()
 
@@ -197,6 +224,61 @@ def test_freshest_copy_ignores_trial_job_and_preserves_other_platform_copy(monke
     assert copy["youtube_ru_description"] == "Сохранённое описание"
 
 
+def test_freshest_copy_recovers_legacy_bot_jobs_by_exact_recipe(monkeypatch) -> None:
+    run_id = uuid.uuid4()
+
+    class Query(list):
+        def filter(self, **_kwargs):
+            return self
+
+        def order_by(self, *_args):
+            return self
+
+        def first(self):
+            return self[0] if self else None
+
+    jobs = Query(
+        [
+            SimpleNamespace(
+                created_at=datetime(2026, 1, 2, tzinfo=timezone.utc),
+                payload_json={},
+                bundle_key="bot-bundle",
+                platform="instagram",
+                language="ru",
+                title="",
+                description="Точное ботское описание Instagram",
+                recipe="Точный утверждённый рецепт",
+            ),
+            SimpleNamespace(
+                created_at=datetime(2026, 1, 2, tzinfo=timezone.utc),
+                payload_json={},
+                bundle_key="bot-bundle",
+                platform="vk",
+                language="ru",
+                title="",
+                description="Отдельное ботское описание VK",
+                recipe="Точный утверждённый рецепт",
+            ),
+        ]
+    )
+    monkeypatch.setattr(upload_admin.ChatSession, "objects", Query())
+    monkeypatch.setattr(upload_admin.GenerationArtifact, "objects", Query())
+    monkeypatch.setattr(upload_admin.PublicationJob, "objects", jobs)
+    monkeypatch.setattr(admin_module, "_publication_recipe_from_draft", lambda _run: "")
+    monkeypatch.setattr(
+        admin_module,
+        "_publication_recipe_for_run",
+        lambda _run: "Точный утверждённый рецепт",
+    )
+
+    copy = upload_admin._freshest_publication_copy_from_run(
+        SimpleNamespace(id=run_id, script="Точный утверждённый рецепт")
+    )
+
+    assert copy["instagram_ru"] == "Точное ботское описание Instagram"
+    assert copy["vk_ru"] == "Отдельное ботское описание VK"
+
+
 def test_final_video_panel_has_single_choice_controls_next_to_versions(monkeypatch) -> None:
     run_id = uuid.uuid4()
     artifacts = [
@@ -250,6 +332,54 @@ def test_standalone_upload_page_is_available_from_admin(monkeypatch) -> None:
     assert "Русская версия" in html
     assert "English version" in html
     assert "Опубликовать выбранное" in html
+    assert "Сгенерировать все разные описания" in html
+    assert "отдельное уникальное описание Trial Reel" in html
+
+
+def test_standalone_upload_generates_platform_and_trial_copy_separately(monkeypatch) -> None:
+    monkeypatch.setattr(
+        admin_module,
+        "_publication_project_choices",
+        lambda: (("grandma_kitchen", "Grandma Kitchen"),),
+    )
+    normal = {
+        **_empty_copy(),
+        "instagram_ru": "Основной Instagram #обычный",
+        "vk_ru": "Другой текст VK",
+    }
+    monkeypatch.setattr(
+        admin_module,
+        "_generate_publication_copy_for_admin",
+        lambda *_args, **_kwargs: normal,
+    )
+    monkeypatch.setattr(
+        upload_admin,
+        "_generate_instagram_ru_trial_description",
+        lambda **_kwargs: "Совсем другой Trial #пробный",
+    )
+    messages = []
+    request = RequestFactory().post(
+        "/admin/pipeline_admin/publicationjob/prepare/",
+        {
+            "project_slug": "grandma_kitchen",
+            "publication_recipe": "Исходный рецепт",
+            "generate_descriptions": "1",
+        },
+    )
+    modeladmin = SimpleNamespace(
+        admin_site=None,
+        message_user=lambda _request, message, **_kwargs: messages.append(message),
+    )
+
+    response = admin_module.PublicationJobAdmin.prepare_view(modeladmin, request)
+    response.render()
+    form = response.context_data["form"]
+
+    assert form["instagram_ru"].value().startswith("Основной Instagram")
+    assert "Сделано с помощью @syntx_ai" in form["instagram_ru"].value()
+    assert form["vk_ru"].value() == "Другой текст VK"
+    assert form["instagram_ru_trial_description"].value() == "Совсем другой Trial #пробный"
+    assert any("Все описания созданы отдельно" in message for message in messages)
 
 
 def test_standalone_upload_redirects_generation_links(monkeypatch) -> None:

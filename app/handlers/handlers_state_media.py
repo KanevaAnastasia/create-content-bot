@@ -3,6 +3,7 @@ import hashlib
 import os
 import re
 import subprocess
+import uuid
 from dataclasses import dataclass
 from datetime import timedelta, timezone
 from pathlib import Path
@@ -216,6 +217,7 @@ SCENE_PHRASE_TRANSLATION_PENDING_KEY = "scene_phrase_translation_pending"
 SCENE_PHRASE_ORIGIN_KEY = "speech_origin_by_lang"
 SCENE_SPEECH_BUDGET_OVERRIDE_KEY = "speech_budget_override_by_lang"
 SOCIAL_DESCRIPTIONS_SENT_KEY = "social_descriptions_sent"
+SOCIAL_DESCRIPTIONS_APPROVED_KEY = "social_descriptions_approved"
 STATE_WAITING_SOCIAL_DESCRIPTIONS_APPROVAL = "waiting_social_descriptions_approval"
 STATE_REFINING_SOCIAL_DESCRIPTIONS = "refining_social_descriptions"
 SOCIAL_DESCRIPTIONS_PENDING_KEY = "social_descriptions_pending"
@@ -3677,6 +3679,7 @@ async def _handle_waiting_social_descriptions_approval_state(
             recipe = str(pending.get("recipe") or "").strip()
             if isinstance(post_production, dict) and recipe:
                 try:
+                    run_id = str(session.get("generation_run_id") or "").strip()
                     with SessionLocal() as db:
                         jobs = queue_publication_bundle(
                             db,
@@ -3689,6 +3692,30 @@ async def _handle_waiting_social_descriptions_approval_state(
                             video_variant=str(pending.get(SOCIAL_PUBLISH_VIDEO_VARIANT_KEY) or ""),
                             scheduled_at=pending.get(SOCIAL_PUBLISH_SCHEDULED_AT_KEY),
                         )
+                        if run_id:
+                            for job in jobs:
+                                job.payload_json = {
+                                    **(job.payload_json or {}),
+                                    "run_id": run_id,
+                                }
+                            from ..models import GenerationArtifact
+
+                            db.add(
+                                GenerationArtifact(
+                                    run_id=uuid.UUID(run_id),
+                                    scene_id=None,
+                                    artifact_type="publication_copy_approved",
+                                    label="Bot-approved publication copy",
+                                    uri=f"db://generation_runs/{run_id}/publication_copy/approved",
+                                    language=None,
+                                    mime_type="application/json",
+                                    payload_json={
+                                        "copy": {str(k): str(v) for k, v in copy.items()},
+                                        "recipe": recipe,
+                                        "origin": origin,
+                                    },
+                                )
+                            )
                         db.commit()
                     if jobs:
                         await update.message.reply_text(publication_jobs_summary(jobs))
@@ -3698,6 +3725,12 @@ async def _handle_waiting_social_descriptions_approval_state(
                         "Описания утвердила, но публикационные jobs в БД сохранить не удалось. "
                         "Проверьте DATABASE_URL и настройку автопостинга."
                     )
+        if isinstance(copy, dict):
+            session[SOCIAL_DESCRIPTIONS_APPROVED_KEY] = {
+                "copy": {str(k): str(v) for k, v in copy.items()},
+                "recipe": str(pending.get("recipe") or ""),
+                "origin": origin,
+            }
         session.pop(SOCIAL_DESCRIPTIONS_PENDING_KEY, None)
         session[SOCIAL_DESCRIPTIONS_SENT_KEY] = True
         if origin == "production_final":
