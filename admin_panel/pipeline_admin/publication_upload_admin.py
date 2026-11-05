@@ -377,10 +377,11 @@ def generation_upload_view(self, request, object_id):
     source_choices = legacy._publication_video_source_choices(run)
     source_initials = legacy._publication_video_source_initials(source_choices)
     for language in ("ru", "en"):
-        query_value = str(request.GET.get(f"video_source_{language}") or "")
+        query_key = f"video_source_{language}"
+        query_value = str(request.GET.get(query_key) or "")
         valid_values = {value for value, _label in source_choices.get(language, ())}
-        if query_value in valid_values:
-            source_initials[f"video_source_{language}"] = query_value
+        if query_key in request.GET and (not query_value or query_value in valid_values):
+            source_initials[query_key] = query_value
 
     if not legacy._publication_post_production_has_video(
         legacy._publication_post_production_from_final_artifacts(run)
@@ -522,8 +523,13 @@ def _final_video_publish_chooser(run: GenerationRun) -> str:
 
     sections: list[str] = []
     for language, title in (("ru", "Русская версия"), ("en", "English version")):
-        cards: list[str] = []
-        for index, artifact in enumerate(by_language[language]):
+        cards: list[str] = [
+            '<label class="cf-publish-none">'
+            f'<input type="radio" name="cf_publish_source_{language}" value="" checked>'
+            '<span><strong>Не выбирать видео этого языка</strong><br>'
+            '<span class="cf-publish-meta">Можно загрузить свой MP4 уже на странице заливки.</span></span></label>'
+        ]
+        for artifact in by_language[language]:
             value = f"artifact:{artifact.id}"
             created = artifact.created_at.strftime("%Y-%m-%d %H:%M:%S") if artifact.created_at else ""
             variant = str(artifact.artifact_type or "").removeprefix("final_")
@@ -533,8 +539,7 @@ def _final_video_publish_chooser(run: GenerationRun) -> str:
             cards.append(
                 '<article class="cf-publish-artifact">'
                 f'<label class="cf-publish-artifact-choice"><input type="radio" '
-                f'name="cf_publish_source_{language}" value="{escape(value)}"'
-                f'{" checked" if index == 0 else ""}>'
+                f'name="cf_publish_source_{language}" value="{escape(value)}">'
                 '<span><strong>Использовать эту версию</strong><br>'
                 f'<span class="cf-publish-meta">{escape(variant_label)} · {escape(str(artifact.label or ""))}'
                 f'{" · " + escape(created) if created else ""}</span></span></label>'
@@ -544,7 +549,7 @@ def _final_video_publish_chooser(run: GenerationRun) -> str:
             )
         sections.append(
             f'<section class="cf-publish-language"><h3>{title}</h3>'
-            + ("".join(cards) if cards else '<span class="cf-publish-meta">Готовых версий пока нет.</span>')
+            + "".join(cards)
             + "</section>"
         )
     action = reverse("admin:pipeline_admin_generationrun_queue_publications", args=[run.pk])
@@ -557,6 +562,8 @@ def _final_video_publish_chooser(run: GenerationRun) -> str:
         '.cf-publish-language h3{margin:0 0 10px}.cf-publish-artifact{padding:11px;margin:0 0 10px;border:1px solid var(--border-color);border-radius:10px}'
         '.cf-publish-artifact:has(input:checked){border-color:#7c3aed;box-shadow:0 0 0 2px color-mix(in srgb,#7c3aed 24%,transparent)}'
         '.cf-publish-artifact-choice{display:grid;grid-template-columns:22px 1fr;gap:8px;cursor:pointer}.cf-publish-artifact-choice input{margin-top:2px}'
+        '.cf-publish-none{display:grid;grid-template-columns:22px 1fr;gap:8px;padding:10px;margin:0 0 10px;border:1px dashed var(--border-color);border-radius:10px;cursor:pointer}'
+        '.cf-publish-none:has(input:checked){border-color:#7c3aed;background:color-mix(in srgb,var(--body-bg) 92%,#7c3aed 8%)}'
         '.cf-publish-meta{color:var(--body-quiet-color);font-size:12px}.cf-publish-preview video{max-width:280px!important;margin:9px 0!important}'
         '.cf-publish-open{margin-top:5px}.cf-publish-action{margin:14px 0 0}.cf-publish-action .button{padding:9px 16px}'
         '@media(max-width:900px){.cf-publish-grid{grid-template-columns:1fr}}'

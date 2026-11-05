@@ -99,9 +99,11 @@ def test_final_video_panel_has_single_choice_controls_next_to_versions(monkeypat
     html = str(admin_module._final_videos_panel(SimpleNamespace(id=run_id, pk=run_id)))
 
     assert 'type="radio" name="cf_publish_source_ru"' in html
-    assert html.count('name="cf_publish_source_ru"') == 2
-    assert html.count('name="cf_publish_source_en"') == 1
+    assert html.count('name="cf_publish_source_ru"') == 3
+    assert html.count('name="cf_publish_source_en"') == 2
     assert html.count(" checked") == 2
+    assert html.count('value="" checked') == 2
+    assert "Не выбирать видео этого языка" in html
     assert "Для каждого языка можно выбрать не больше одной версии" in html
     assert "Перейти к заливке с выбранными версиями" in html
     assert "<form" not in html
@@ -145,3 +147,36 @@ def test_standalone_upload_redirects_generation_links(monkeypatch) -> None:
 
     assert isinstance(response, HttpResponseRedirect)
     assert str(run_id) in response.url
+
+
+def test_generation_upload_preserves_explicit_empty_language_selection(monkeypatch) -> None:
+    run_id = uuid.uuid4()
+    run = SimpleNamespace(id=run_id, pk=run_id, human_title="Видео")
+    monkeypatch.setattr(admin_module, "_publication_project_choices", lambda: (("grandma_kitchen", "Grandma"),))
+    monkeypatch.setattr(admin_module, "_project_slug_for_publication_run", lambda _run: "grandma_kitchen")
+    monkeypatch.setattr(
+        admin_module,
+        "_publication_video_source_choices",
+        lambda _run: {"ru": (("artifact:ru-1", "RU one"),), "en": (("artifact:en-1", "EN one"),)},
+    )
+    monkeypatch.setattr(
+        admin_module,
+        "_publication_post_production_from_final_artifacts",
+        lambda _run: {"renders_by_language": {"ru": {"clean": {"video_path": "/tmp/ru.mp4"}}}},
+    )
+    monkeypatch.setattr(admin_module, "all_final_artifacts_delivered", lambda _run_id: True)
+    monkeypatch.setattr(admin_module, "_publication_copy_from_run", lambda _run: _empty_copy())
+    monkeypatch.setattr(admin_module, "_publication_recipe_from_draft", lambda _run: "")
+    monkeypatch.setattr(admin_module, "_publication_recipe_for_run", lambda _run: "recipe")
+    request = RequestFactory().get("/?video_source_ru=&video_source_en=")
+    modeladmin = SimpleNamespace(
+        get_object=lambda _request, _object_id: run,
+        message_user=lambda *_args, **_kwargs: None,
+        admin_site=None,
+    )
+
+    response = admin_module.GenerationRunAdmin.queue_publications_view(modeladmin, request, str(run_id))
+    form = response.context_data["form"]
+
+    assert form["video_source_ru"].value() == ""
+    assert form["video_source_en"].value() == ""
