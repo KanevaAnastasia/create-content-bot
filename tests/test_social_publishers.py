@@ -18,6 +18,7 @@ from app.social_publishers import (
     _publish_vk,
     _set_youtube_thumbnail,
     _tiktok_access_token,
+    tiktok_creator_info,
     _youtube_env,
     _vk_access_token,
     _verify_vk_identity,
@@ -559,6 +560,43 @@ def test_tiktok_access_token_refreshes_and_persists_rotated_values(monkeypatch) 
             "TIKTOK_REFRESH_TOKEN": "new-refresh",
             "TIKTOK_OPEN_ID": "open-1",
         },
+    )
+
+
+def test_tiktok_creator_info_normalizes_account_capabilities(monkeypatch) -> None:
+    response = Mock(ok=True, status_code=200)
+    response.json.return_value = {
+        "data": {
+            "creator_nickname": "У бабушки дома",
+            "creator_username": "grandma",
+            "privacy_level_options": ["PUBLIC_TO_EVERYONE", "SELF_ONLY"],
+            "comment_disabled": False,
+            "duet_disabled": True,
+            "stitch_disabled": False,
+            "max_video_post_duration_sec": 180,
+        },
+        "error": {"code": "ok"},
+    }
+    post = Mock(return_value=response)
+    monkeypatch.setattr("app.social_publishers.requests.post", post)
+
+    payload = tiktok_creator_info("grandma_kitchen", access_token="access")
+
+    assert payload == {
+        "creator_nickname": "У бабушки дома",
+        "creator_username": "grandma",
+        "creator_avatar_url": "",
+        "privacy_level_options": ["PUBLIC_TO_EVERYONE", "SELF_ONLY"],
+        "comment_disabled": False,
+        "duet_disabled": True,
+        "stitch_disabled": False,
+        "max_video_post_duration_sec": 180,
+    }
+    post.assert_called_once_with(
+        "https://open.tiktokapis.com/v2/post/publish/creator_info/query/",
+        headers={"Authorization": "Bearer access", "Content-Type": "application/json; charset=UTF-8"},
+        json={},
+        timeout=(20, 300),
     )
 
 

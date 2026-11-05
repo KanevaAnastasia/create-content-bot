@@ -67,7 +67,7 @@ from app.publications import (
 )
 from app.publication_config import project_env
 from app.publish_secret_store import set_project_secrets
-from app.social_publishers import _verify_vk_identity, platform_readiness
+from app.social_publishers import _verify_vk_identity, platform_readiness, tiktok_creator_info
 from app.social_oauth import (
     build_tiktok_authorize_url,
     build_youtube_authorize_url,
@@ -5495,6 +5495,11 @@ class PublicationJobAdmin(admin.ModelAdmin):
                 name="pipeline_admin_publicationjob_tiktok_oauth",
             ),
             path(
+                "tiktok-creator-info/",
+                self.admin_site.admin_view(self.tiktok_creator_info_view),
+                name="pipeline_admin_publicationjob_tiktok_creator_info",
+            ),
+            path(
                 "tiktok-oauth/callback/",
                 self.admin_site.admin_view(self.tiktok_oauth_callback_view),
                 name="pipeline_admin_publicationjob_tiktok_oauth_callback",
@@ -5785,6 +5790,17 @@ class PublicationJobAdmin(admin.ModelAdmin):
             reverse("admin:pipeline_admin_publicationjob_changelist"),
         )
         return HttpResponse(html)
+
+    def tiktok_creator_info_view(self, request):
+        project_slug = str(request.GET.get("project_slug") or "").strip()
+        allowed_projects = {key for key, _label in _publication_project_choices()}
+        if project_slug not in allowed_projects:
+            return JsonResponse({"ok": False, "error": "Unknown or inactive project."}, status=400)
+        try:
+            payload = tiktok_creator_info(project_slug)
+        except Exception as exc:
+            return JsonResponse({"ok": False, "error": str(exc)}, status=400)
+        return JsonResponse({"ok": True, **payload})
 
     def tiktok_oauth_callback_view(self, request):
         state = str(request.GET.get("state") or "")

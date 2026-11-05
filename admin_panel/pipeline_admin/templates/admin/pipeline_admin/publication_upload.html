@@ -44,6 +44,11 @@
   .cf-trial-toggle input { width:18px; height:18px; margin-top:2px; }
   .cf-trial-copy { min-width:0; }
   .cf-trial-copy[hidden] { display:none; }
+  .cf-tiktok-panel { display:grid; gap:11px; padding:13px; border:1px solid color-mix(in srgb,#111 35%,var(--border-color)); border-radius:11px; background:color-mix(in srgb,var(--body-bg) 95%,#111 5%); }
+  .cf-tiktok-profile { display:flex; flex-wrap:wrap; gap:8px; align-items:center; }
+  .cf-tiktok-options { display:grid; gap:8px; }
+  .cf-tiktok-check { display:grid; grid-template-columns:20px 1fr; gap:8px; align-items:start; cursor:pointer; }
+  .cf-tiktok-check input { width:18px; height:18px; margin-top:2px; }
   .cf-target-fields .errorlist, .cf-file-row .errorlist { margin:4px 0; }
   .cf-submit-bar { position:sticky; bottom:0; z-index:20; display:flex; justify-content:space-between; gap:15px; align-items:center; padding:16px 18px; margin-top:20px; border:1px solid var(--border-color); border-radius:15px 15px 0 0; background:color-mix(in srgb,var(--body-bg) 94%,transparent); backdrop-filter:blur(14px); box-shadow:0 -10px 35px rgba(15,23,42,.1); }
   .cf-submit { border:0; border-radius:10px; padding:12px 22px; color:#fff; background:linear-gradient(110deg,var(--cf-accent-2),var(--cf-accent)); font-weight:750; font-size:15px; cursor:pointer; }
@@ -66,7 +71,7 @@
   <a href="{{ jobs_url }}">Очередь и история публикаций →</a>
 </div>
 
-<form method="post" enctype="multipart/form-data" id="cf-upload-form" novalidate>
+<form method="post" enctype="multipart/form-data" id="cf-upload-form" novalidate data-tiktok-creator-url="{{ tiktok_creator_info_url }}">
   {% csrf_token %}
   <input type="hidden" name="video_variant" value="clean">
   {% if form.non_field_errors %}<div class="errornote">{{ form.non_field_errors }}</div>{% endif %}
@@ -113,6 +118,19 @@
         </label>
         <div class="cf-target-fields">
           {% for field in card.fields %}<div>{{ field.label_tag }}{{ field }}{{ field.errors }}</div>{% endfor %}
+          {% if card.tiktok_fields %}
+          <div class="cf-tiktok-panel">
+            <div><strong>Настройки TikTok перед публикацией</strong><br><span class="cf-muted">Аккаунт, лимиты и доступные уровни приватности загружаются из Creator Info API.</span></div>
+            <div class="cf-tiktok-profile"><button class="button cf-load-tiktok" type="button">Загрузить настройки аккаунта</button><span class="cf-tiktok-status cf-muted">Приватность не выбирается автоматически.</span></div>
+            <div class="cf-tiktok-options">
+            {% for field in card.tiktok_fields %}
+              {% if forloop.first %}<div>{{ field.label_tag }}{{ field }}<span class="help">{{ field.help_text }}</span>{{ field.errors }}</div>
+              {% else %}<label class="cf-tiktok-check">{{ field }}<span><strong>{{ field.label }}</strong><br><span class="cf-muted">{{ field.help_text }}</span></span></label>{{ field.errors }}
+              {% endif %}
+            {% endfor %}
+            </div>
+          </div>
+          {% endif %}
           {% if card.trial_field %}
           <div class="cf-trial-panel">
             <label class="cf-trial-toggle">{{ card.trial_field }}<span><strong>{{ card.trial_field.label }}</strong><br><span class="cf-muted">Сначала отправится Trial Reel для не подписчиков с текстом ниже, затем — обычный Reel с основным описанием выше и строкой Syntx.</span></span></label>
@@ -179,7 +197,7 @@
   function syncTarget(card){
     const checked=card.querySelector('input[name="target_keys"]').checked;
     card.classList.toggle('is-off',!checked);
-    card.querySelectorAll('.cf-target-fields textarea,.cf-target-fields input').forEach(el=>el.disabled=!checked);
+    card.querySelectorAll('.cf-target-fields textarea,.cf-target-fields input,.cf-target-fields select').forEach(el=>el.disabled=!checked||el.dataset.creatorDisabled==='1');
     if(checked)requestAnimationFrame(()=>card.querySelectorAll('.cf-upload-textarea').forEach(grow));
   }
   document.querySelectorAll('.cf-target').forEach(card=>{const box=card.querySelector('input[name="target_keys"]');box.addEventListener('change',()=>syncTarget(card));syncTarget(card);});
@@ -196,6 +214,27 @@
   window.addEventListener('load',()=>growingTextareas.forEach(grow));
   const trial=document.getElementById('id_instagram_ru_trial');if(trial)trial.addEventListener('change',syncTrial);syncTrial();
   const project=document.getElementById('id_project_slug');if(project)project.addEventListener('change',normalInstagramCopy);normalInstagramCopy();
+  const tiktokButton=form.querySelector('.cf-load-tiktok');
+  if(tiktokButton)tiktokButton.addEventListener('click',async function(){
+    const status=form.querySelector('.cf-tiktok-status');
+    const privacy=document.getElementById('id_tiktok_privacy_level');
+    const projectValue=project&&project.value;
+    if(!projectValue){status.textContent='Сначала выберите проект.';return;}
+    status.textContent='Загружаю данные подключённого аккаунта…';tiktokButton.disabled=true;
+    try{
+      const url=new URL(form.dataset.tiktokCreatorUrl,window.location.origin);url.searchParams.set('project_slug',projectValue);
+      const response=await fetch(url,{credentials:'same-origin'});const payload=await response.json();
+      if(!response.ok||!payload.ok)throw new Error(payload.error||'TikTok Creator Info недоступен.');
+      const current=privacy.value;privacy.innerHTML='';privacy.add(new Option('Выберите приватность',''));
+      const labels={PUBLIC_TO_EVERYONE:'Публично для всех',MUTUAL_FOLLOW_FRIENDS:'Друзья (взаимные подписки)',FOLLOWER_OF_CREATOR:'Подписчики автора',SELF_ONLY:'Только я'};
+      (payload.privacy_level_options||[]).forEach(value=>privacy.add(new Option(labels[value]||value,value)));
+      privacy.value=(payload.privacy_level_options||[]).includes(current)?current:'';
+      [['comment','id_tiktok_allow_comment'],['duet','id_tiktok_allow_duet'],['stitch','id_tiktok_allow_stitch']].forEach(([key,id])=>{const box=document.getElementById(id);const disabled=!!payload[key+'_disabled'];box.dataset.creatorDisabled=disabled?'1':'0';box.disabled=disabled;if(disabled)box.checked=false;});
+      const name=payload.creator_nickname||payload.creator_username||'аккаунт TikTok';
+      const max=payload.max_video_post_duration_sec?` · максимум ${payload.max_video_post_duration_sec} сек.`:'';
+      status.textContent=`Подключён: ${name}${max} Выберите приватность вручную.`;
+    }catch(error){status.textContent=error.message||'Не удалось загрузить настройки TikTok.';}finally{tiktokButton.disabled=false;}
+  });
 })();
 </script>
 {% endblock %}

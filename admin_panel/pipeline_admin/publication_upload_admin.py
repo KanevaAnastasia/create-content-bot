@@ -40,6 +40,12 @@ TARGET_ICONS = {
     "vk": "VK",
     "tiktok": "♪",
 }
+TIKTOK_PRIVACY_LABELS = {
+    "PUBLIC_TO_EVERYONE": "Публично для всех",
+    "MUTUAL_FOLLOW_FRIENDS": "Друзья (взаимные подписки)",
+    "FOLLOWER_OF_CREATOR": "Подписчики автора",
+    "SELF_ONLY": "Только я",
+}
 
 
 class PublicationUploadForm(legacy.PublicationQueueAdminForm):
@@ -47,6 +53,37 @@ class PublicationUploadForm(legacy.PublicationQueueAdminForm):
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
+        submitted_privacy = str(self.data.get("tiktok_privacy_level") or "") if self.is_bound else ""
+        privacy_choices = [("", "Сначала загрузите настройки аккаунта")]
+        if submitted_privacy:
+            privacy_choices.append(
+                (submitted_privacy, TIKTOK_PRIVACY_LABELS.get(submitted_privacy, submitted_privacy))
+            )
+        self.fields["tiktok_privacy_level"] = forms.ChoiceField(
+            required=False,
+            label="Кто увидит видео",
+            choices=privacy_choices,
+            help_text="Список загружается напрямую из TikTok Creator Info; значение по умолчанию не выбирается.",
+        )
+        for name, label, help_text in (
+            ("tiktok_allow_comment", "Разрешить комментарии", "Будет отключено, если аккаунт TikTok запрещает комментарии."),
+            ("tiktok_allow_duet", "Разрешить Duet", "Будет отключено, если аккаунт или приватность запрещают Duet."),
+            ("tiktok_allow_stitch", "Разрешить Stitch", "Будет отключено, если аккаунт или приватность запрещают Stitch."),
+            ("tiktok_brand_content", "Продвигает сторонний бренд", "Commercial content disclosure: branded content."),
+            ("tiktok_brand_organic", "Продвигает свой бренд", "Commercial content disclosure: your brand."),
+            ("tiktok_is_aigc", "Содержит AI-generated content", "Передаётся TikTok как признак AI-generated content."),
+        ):
+            self.fields[name] = forms.BooleanField(
+                required=False,
+                label=label,
+                help_text=help_text,
+                initial=(name == "tiktok_is_aigc"),
+            )
+        self.fields["tiktok_music_usage_confirmed"] = forms.BooleanField(
+            required=False,
+            label="Подтверждаю права на музыку и звук",
+            help_text="Обязательно для публикации: в видео нет чужой музыки либо у проекта есть права на её использование.",
+        )
         self.fields["instagram_ru_trial"] = forms.BooleanField(
             required=False,
             label="Сначала пробный Reel, затем обычный",
@@ -100,6 +137,17 @@ class PublicationUploadForm(legacy.PublicationQueueAdminForm):
                 "instagram_ru_trial_description",
                 "Сгенерируйте или заполните отдельное описание для пробного Reel.",
             )
+        if "tiktok:ru" in selected:
+            if not str(cleaned.get("tiktok_privacy_level") or "").strip():
+                self.add_error(
+                    "tiktok_privacy_level",
+                    "Загрузите настройки аккаунта и явно выберите приватность TikTok.",
+                )
+            if not cleaned.get("tiktok_music_usage_confirmed"):
+                self.add_error(
+                    "tiktok_music_usage_confirmed",
+                    "Подтвердите права на музыку и звук перед публикацией в TikTok.",
+                )
         for language in ("ru", "en"):
             cover = cleaned.get(f"cover_{language}")
             if cover is None:
@@ -162,6 +210,23 @@ def _target_cards(form: PublicationUploadForm, copy_payload: dict[str, str]) -> 
                 "trial_field": form["instagram_ru_trial"] if target.key == "instagram:ru" else None,
                 "trial_description_field": (
                     form["instagram_ru_trial_description"] if target.key == "instagram:ru" else None
+                ),
+                "tiktok_fields": (
+                    tuple(
+                        form[name]
+                        for name in (
+                            "tiktok_privacy_level",
+                            "tiktok_allow_comment",
+                            "tiktok_allow_duet",
+                            "tiktok_allow_stitch",
+                            "tiktok_brand_content",
+                            "tiktok_brand_organic",
+                            "tiktok_is_aigc",
+                            "tiktok_music_usage_confirmed",
+                        )
+                    )
+                    if target.key == "tiktok:ru"
+                    else ()
                 ),
                 "ready": bool(readiness and readiness.ready),
                 "account": str(account.external_account_id or "") if account else "",
@@ -228,6 +293,9 @@ def _upload_page_context(
                 else reverse("admin:index")
             ),
             "jobs_url": reverse("admin:pipeline_admin_publicationjob_changelist"),
+            "tiktok_creator_info_url": reverse(
+                "admin:pipeline_admin_publicationjob_tiktok_creator_info"
+            ),
         }
     )
     return context
@@ -341,6 +409,21 @@ def _queue_form_jobs(
                 ),
                 scheduled_at=form.cleaned_data.get("scheduled_at"),
             )
+            tiktok_options = {
+                "tiktok_privacy_level": str(form.cleaned_data.get("tiktok_privacy_level") or ""),
+                "tiktok_allow_comment": bool(form.cleaned_data.get("tiktok_allow_comment")),
+                "tiktok_allow_duet": bool(form.cleaned_data.get("tiktok_allow_duet")),
+                "tiktok_allow_stitch": bool(form.cleaned_data.get("tiktok_allow_stitch")),
+                "tiktok_brand_content": bool(form.cleaned_data.get("tiktok_brand_content")),
+                "tiktok_brand_organic": bool(form.cleaned_data.get("tiktok_brand_organic")),
+                "tiktok_is_aigc": bool(form.cleaned_data.get("tiktok_is_aigc")),
+                "tiktok_music_usage_confirmed": bool(
+                    form.cleaned_data.get("tiktok_music_usage_confirmed")
+                ),
+            }
+            for job in jobs:
+                if str(job.platform or "").lower() == "tiktok":
+                    job.payload_json = {**(job.payload_json or {}), **tiktok_options}
             if run is not None:
                 for job in jobs:
                     job.payload_json = {**(job.payload_json or {}), "run_id": str(run.id)}

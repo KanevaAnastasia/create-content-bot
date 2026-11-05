@@ -646,25 +646,56 @@ def _tiktok_chunk_plan(total_size: int) -> tuple[int, int]:
     return chunk_size, max(1, total_size // chunk_size)
 
 
-def _publish_tiktok(job: PublicationJob, project_slug: str) -> str:
-    access_token = _tiktok_access_token(project_slug)
-    headers = {"Authorization": f"Bearer {access_token}", "Content-Type": "application/json; charset=UTF-8"}
-    creator_response = requests.post(
+def tiktok_creator_info(project_slug: str, *, access_token: str | None = None) -> dict[str, Any]:
+    """Return the current creator posting capabilities for the connected account."""
+    access_token = access_token or _tiktok_access_token(project_slug)
+    response = requests.post(
         "https://open.tiktokapis.com/v2/post/publish/creator_info/query/",
-        headers=headers,
+        headers={
+            "Authorization": f"Bearer {access_token}",
+            "Content-Type": "application/json; charset=UTF-8",
+        },
         json={},
         timeout=DEFAULT_REQUEST_TIMEOUT,
     )
-    creator = _response_json(creator_response, "TikTok creator info")
-    creator_error = creator.get("error") if isinstance(creator.get("error"), dict) else {}
-    if creator_error.get("code") not in {None, "", "ok"}:
-        raise PublicationDeliveryError(f"TikTok creator info: {creator_error}")
-    creator_data = creator.get("data") if isinstance(creator.get("data"), dict) else {}
-    allowed_privacy = [str(item) for item in creator_data.get("privacy_level_options", [])]
-    requested_privacy = shared_env("TIKTOK_PRIVACY_LEVEL", "SELF_ONLY")
-    privacy = requested_privacy if requested_privacy in allowed_privacy else (
-        "SELF_ONLY" if "SELF_ONLY" in allowed_privacy else (allowed_privacy[0] if allowed_privacy else "SELF_ONLY")
+    payload = _response_json(response, "TikTok creator info")
+    error = payload.get("error") if isinstance(payload.get("error"), dict) else {}
+    if error.get("code") not in {None, "", "ok"}:
+        raise PublicationDeliveryError(f"TikTok creator info: {error}")
+    data = payload.get("data") if isinstance(payload.get("data"), dict) else {}
+    return {
+        "creator_nickname": str(data.get("creator_nickname") or ""),
+        "creator_username": str(data.get("creator_username") or ""),
+        "creator_avatar_url": str(data.get("creator_avatar_url") or ""),
+        "privacy_level_options": [
+            str(value)
+            for value in data.get("privacy_level_options", [])
+            if str(value or "").strip()
+        ],
+        "comment_disabled": bool(data.get("comment_disabled")),
+        "duet_disabled": bool(data.get("duet_disabled")),
+        "stitch_disabled": bool(data.get("stitch_disabled")),
+        "max_video_post_duration_sec": int(data.get("max_video_post_duration_sec") or 0),
+    }
+
+
+def _publish_tiktok(job: PublicationJob, project_slug: str) -> str:
+    access_token = _tiktok_access_token(project_slug)
+    headers = {"Authorization": f"Bearer {access_token}", "Content-Type": "application/json; charset=UTF-8"}
+    creator_data = tiktok_creator_info(project_slug, access_token=access_token)
+    allowed_privacy = creator_data["privacy_level_options"]
+    job_options = job.payload_json if isinstance(job.payload_json, dict) else {}
+    requested_privacy = str(
+        job_options.get("tiktok_privacy_level")
+        or shared_env("TIKTOK_PRIVACY_LEVEL", "SELF_ONLY")
     )
+    if requested_privacy not in allowed_privacy:
+        raise PublicationDeliveryError(
+            "TikTok privacy level is unavailable for this creator. Refresh the creator settings and choose again."
+        )
+    music_confirmed = job_options.get("tiktok_music_usage_confirmed")
+    if music_confirmed is False:
+        raise PublicationDeliveryError("TikTok music usage must be confirmed before publishing.")
     video_path = Path(job.video_path)
     total_size = video_path.stat().st_size
     chunk_size, chunk_count = _tiktok_chunk_plan(total_size)
@@ -677,13 +708,21 @@ def _publish_tiktok(job: PublicationJob, project_slug: str) -> str:
         json={
             "post_info": {
                 "title": str(job.description or job.title or "")[:2200],
-                "privacy_level": privacy,
-                "disable_duet": False,
-                "disable_comment": False,
-                "disable_stitch": False,
-                "brand_content_toggle": False,
-                "brand_organic_toggle": False,
-                "is_aigc": shared_env("TIKTOK_IS_AIGC", "1") != "0",
+                "privacy_level": requested_privacy,
+                "disable_duet": bool(creator_data["duet_disabled"]) or not bool(
+                    job_options.get("tiktok_allow_duet", False)
+                ),
+                "disable_comment": bool(creator_data["comment_disabled"]) or not bool(
+                    job_options.get("tiktok_allow_comment", False)
+                ),
+                "disable_stitch": bool(creator_data["stitch_disabled"]) or not bool(
+                    job_options.get("tiktok_allow_stitch", False)
+                ),
+                "brand_content_toggle": bool(job_options.get("tiktok_brand_content", False)),
+                "brand_organic_toggle": bool(job_options.get("tiktok_brand_organic", False)),
+                "is_aigc": bool(
+                    job_options.get("tiktok_is_aigc", shared_env("TIKTOK_IS_AIGC", "1") != "0")
+                ),
             },
             "source_info": {
                 "source": "FILE_UPLOAD",

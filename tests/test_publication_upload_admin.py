@@ -215,6 +215,45 @@ def test_custom_upload_form_accepts_one_video_per_language_and_cover() -> None:
     assert form.cleaned_data["video_source_en"] == "upload"
 
 
+def test_tiktok_upload_requires_manual_privacy_and_music_confirmation() -> None:
+    base = {
+        "project_slug": "grandma_kitchen",
+        "target_keys": ["tiktok:ru"],
+        "video_variant": "clean",
+        "video_source_ru": "upload",
+        "tiktok_ru": "Описание TikTok #рецепт",
+    }
+    files = {"custom_video_ru": SimpleUploadedFile("ru.mp4", b"ru")}
+    form = PublicationUploadForm(
+        data=base,
+        files=files,
+        copy=_empty_copy(),
+        project_choices=(("grandma_kitchen", "Grandma"),),
+        video_source_choices={"ru": (), "en": ()},
+    )
+
+    assert form.is_valid() is False
+    assert "tiktok_privacy_level" in form.errors
+    assert "tiktok_music_usage_confirmed" in form.errors
+
+    form = PublicationUploadForm(
+        data={
+            **base,
+            "tiktok_privacy_level": "SELF_ONLY",
+            "tiktok_music_usage_confirmed": "on",
+            "tiktok_is_aigc": "on",
+        },
+        files={"custom_video_ru": SimpleUploadedFile("ru.mp4", b"ru")},
+        copy=_empty_copy(),
+        project_choices=(("grandma_kitchen", "Grandma"),),
+        video_source_choices={"ru": (), "en": ()},
+    )
+
+    assert form.is_valid(), form.errors
+    assert form.cleaned_data["tiktok_privacy_level"] == "SELF_ONLY"
+    assert form.cleaned_data["tiktok_music_usage_confirmed"] is True
+
+
 def test_instagram_ru_trial_requires_its_own_description_not_normal_copy() -> None:
     form = PublicationUploadForm(
         data={

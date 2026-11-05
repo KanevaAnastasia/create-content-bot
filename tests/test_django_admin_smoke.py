@@ -867,6 +867,7 @@ def test_django_admin_allows_series_binding_and_day_editing():
     assert "pipeline_admin_publicationjob_youtube_oauth" in custom_url_names
     assert "pipeline_admin_publicationjob_youtube_oauth_callback" in custom_url_names
     assert "pipeline_admin_publicationjob_tiktok_oauth" in custom_url_names
+    assert "pipeline_admin_publicationjob_tiktok_creator_info" in custom_url_names
     assert "pipeline_admin_publicationjob_tiktok_oauth_callback" in custom_url_names
 
 
