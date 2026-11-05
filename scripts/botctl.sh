@@ -448,17 +448,25 @@ celery_worker_reload() {
   ensure_runtime
   local domain="gui/$(id -u)"
   local service="$domain/com.contentfabric.celery.worker"
-  if [[ ! -f "$CELERY_WORKER_LAUNCHAGENT_PLIST" ]]; then
-    echo "LaunchAgent plist not found: $CELERY_WORKER_LAUNCHAGENT_PLIST" >&2
+  # launchd can reject bootstrapping a plist directly from /opt. Prefer the
+  # already installed user LaunchAgent, retaining its deployment settings.
+  local reload_plist="$CELERY_WORKER_LAUNCHAGENT_PLIST"
+  local installed_plist="$HOME/Library/LaunchAgents/com.contentfabric.celery.worker.plist"
+  if [[ -f "$installed_plist" ]]; then
+    reload_plist="$installed_plist"
+  fi
+  if [[ ! -f "$reload_plist" ]]; then
+    echo "LaunchAgent plist not found: $reload_plist" >&2
     exit 1
   fi
+  plutil -lint "$reload_plist" >/dev/null
   launchctl bootout "$service" >/dev/null 2>&1 || true
   sleep 1
-  launchctl bootstrap "$domain" "$CELERY_WORKER_LAUNCHAGENT_PLIST"
+  launchctl bootstrap "$domain" "$reload_plist"
   launchctl enable "$service"
   launchctl kickstart -k "$service"
   sleep 1
-  echo "Celery worker LaunchAgent reloaded from $CELERY_WORKER_LAUNCHAGENT_PLIST"
+  echo "Celery worker LaunchAgent reloaded from $reload_plist"
   launchctl print "$service" | rg "state =|pid =|last exit status =" || true
 }
 
