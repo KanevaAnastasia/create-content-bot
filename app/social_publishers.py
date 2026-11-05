@@ -7,6 +7,7 @@ Secrets are strictly project-scoped.  For example, project
 
 from __future__ import annotations
 
+import json
 import math
 import mimetypes
 import secrets
@@ -414,15 +415,26 @@ def _publish_instagram(job: PublicationJob, project_slug: str) -> str:
     # Facebook Login for Business supports Meta's resumable upload flow.  It lets
     # us send the local MP4 directly instead of exposing the admin or media through
     # a public HTTPS URL.
+    create_data = {
+        "media_type": "REELS",
+        "upload_type": "resumable",
+        "caption": str(job.description or "")[:2200],
+        "access_token": access_token,
+    }
+    is_trial_reel = (
+        str(job.language or "").strip().lower() == "ru"
+        and bool((job.payload_json or {}).get("instagram_trial"))
+    )
+    if is_trial_reel:
+        create_data["trial_params"] = json.dumps(
+            {"graduation_strategy": "MANUAL"},
+            separators=(",", ":"),
+        )
+    else:
+        create_data["share_to_feed"] = "true"
     create_response = requests.post(
         f"{base_url}/{account_id}/media",
-        data={
-            "media_type": "REELS",
-            "upload_type": "resumable",
-            "caption": str(job.description or "")[:2200],
-            "share_to_feed": "true",
-            "access_token": access_token,
-        },
+        data=create_data,
         timeout=DEFAULT_REQUEST_TIMEOUT,
     )
     create_payload = _response_json(create_response, "Instagram reel container")
@@ -749,6 +761,33 @@ def publish_publication_job(job_id: str | uuid.UUID) -> dict[str, Any]:
             raise PublicationDeliveryError(f"Publication job not found: {job_id}")
         if job.status == PUBLICATION_STATUS_PUBLISHED:
             return {"job_id": str(job.id), "status": job.status, "external_post_id": job.external_post_id}
+        predecessor_id = str((job.payload_json or {}).get("publish_after_job_id") or "").strip()
+        if predecessor_id:
+            try:
+                predecessor_uuid = uuid.UUID(predecessor_id)
+            except ValueError:
+                predecessor_uuid = None
+            predecessor = (
+                session.scalar(select(PublicationJob).where(PublicationJob.id == predecessor_uuid))
+                if predecessor_uuid is not None
+                else None
+            )
+            if predecessor is None:
+                job.status = PUBLICATION_STATUS_NEEDS_MANUAL_ACTION
+                job.publish_error = "Previous publication in the sequence was not found."
+                session.commit()
+                return {"job_id": str(job.id), "status": job.status, "error": job.publish_error}
+            if predecessor.status != PUBLICATION_STATUS_PUBLISHED:
+                if predecessor.status in {
+                    PUBLICATION_STATUS_FAILED,
+                    PUBLICATION_STATUS_NEEDS_MANUAL_ACTION,
+                }:
+                    job.status = PUBLICATION_STATUS_NEEDS_MANUAL_ACTION
+                job.publish_error = (
+                    f"Waiting for previous publication {predecessor.id}: {predecessor.status}."
+                )
+                session.commit()
+                return {"job_id": str(job.id), "status": job.status, "error": job.publish_error}
         now = datetime.now(timezone.utc)
         scheduled_at = job.scheduled_at
         if scheduled_at is not None and scheduled_at.tzinfo is None:

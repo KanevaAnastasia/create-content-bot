@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import uuid
 from pathlib import Path
 from typing import Any
@@ -16,16 +17,18 @@ from django.utils.safestring import mark_safe
 
 from app.db import SessionLocal
 from app.publications import (
+    apply_project_publication_copy_rules,
     build_publication_targets,
     publication_artifacts_dir,
     publication_jobs_summary,
     publication_target_label,
     queue_publication_bundle,
+    strip_instagram_ru_attribution,
 )
 from app.social_publishers import platform_readiness
 
 from . import admin as legacy
-from .models import GenerationRun, Project, ProjectPublishAccount, PublicationJob
+from .models import ChatSession, GenerationArtifact, GenerationRun, Project, ProjectPublishAccount, PublicationJob
 
 
 MAX_COVER_BYTES = 50 * 1024 * 1024
@@ -42,6 +45,17 @@ class PublicationUploadForm(legacy.PublicationQueueAdminForm):
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
+        self.fields["instagram_ru_trial"] = forms.BooleanField(
+            required=False,
+            label="Сначала пробный Reel, затем обычный",
+            help_text="Будут созданы две последовательные публикации с разными описаниями.",
+        )
+        self.fields["instagram_ru_trial_description"] = forms.CharField(
+            required=False,
+            label="Отдельное описание для пробного Reel",
+            help_text="Генерируется отдельно. Строка про Syntx сюда не добавляется.",
+            widget=forms.Textarea(attrs={"rows": 6}),
+        )
         self.fields["project_slug"].label = "Проект и набор аккаунтов"
         self.fields["target_keys"].label = "Куда публиковать"
         self.fields["scheduled_at"].label = "Когда публиковать"
@@ -71,6 +85,15 @@ class PublicationUploadForm(legacy.PublicationQueueAdminForm):
             for field_name in legacy.SOCIAL_COPY_FIELDS_BY_TARGET.get(target_key, ()):
                 if not str(cleaned.get(field_name) or "").strip():
                     self.add_error(field_name, "Заполните поле для выбранной площадки.")
+        if (
+            "instagram:ru" in selected
+            and cleaned.get("instagram_ru_trial")
+            and not str(cleaned.get("instagram_ru_trial_description") or "").strip()
+        ):
+            self.add_error(
+                "instagram_ru_trial_description",
+                "Сгенерируйте или заполните отдельное описание для пробного Reel.",
+            )
         for language in ("ru", "en"):
             cover = cleaned.get(f"cover_{language}")
             if cover is None:
@@ -130,6 +153,10 @@ def _target_cards(form: PublicationUploadForm, copy_payload: dict[str, str]) -> 
                 "icon": TARGET_ICONS.get(target.platform, "•"),
                 "checked": target.key in selected,
                 "fields": fields,
+                "trial_field": form["instagram_ru_trial"] if target.key == "instagram:ru" else None,
+                "trial_description_field": (
+                    form["instagram_ru_trial_description"] if target.key == "instagram:ru" else None
+                ),
                 "ready": bool(readiness and readiness.ready),
                 "account": str(account.external_account_id or "") if account else "",
                 "missing": tuple(readiness.missing) if readiness and not readiness.ready else (),
@@ -264,19 +291,29 @@ def _queue_form_jobs(
     recipe: str,
 ) -> list[Any]:
     post_production, source_labels, cover_sources, staging = _post_production_and_covers(form, run=run)
+    copy_payload = form.copy_payload()
+    trial_copy = {
+        "instagram_ru": str(form.cleaned_data.get("instagram_ru_trial_description") or "")
+    }
     try:
         with SessionLocal() as db:
             jobs = queue_publication_bundle(
                 db,
                 project_slug=str(form.cleaned_data["project_slug"]),
                 recipe=(f"{run.id}\n\n{recipe}" if run is not None else recipe),
-                copy=form.copy_payload(),
+                copy=copy_payload,
                 post_production=post_production,
                 origin="admin_generation_run" if run is not None else "admin_custom_upload",
                 selected_target_keys=form.cleaned_data["target_keys"],
                 video_variant="clean",
                 video_source_labels=source_labels,
                 cover_sources=cover_sources,
+                trial_copy=trial_copy,
+                trial_target_keys=(
+                    ["instagram:ru"]
+                    if form.cleaned_data.get("instagram_ru_trial")
+                    else []
+                ),
                 scheduled_at=form.cleaned_data.get("scheduled_at"),
             )
             if run is not None:
@@ -318,6 +355,144 @@ def _initial_project(project_choices: tuple[tuple[str, str], ...], preferred: st
     return project_choices[0][0] if project_choices else ""
 
 
+_original_publication_copy_from_run = legacy._publication_copy_from_run
+
+
+def _copy_timestamp(value: Any) -> float:
+    try:
+        return float(value.timestamp())
+    except Exception:
+        return 0.0
+
+
+def _freshest_publication_copy_from_run(run: GenerationRun) -> dict[str, str]:
+    """Prefer the newest bot copy, admin draft, or queued publication bundle."""
+    candidates: list[tuple[float, dict[str, str]]] = []
+    try:
+        sessions = ChatSession.objects.filter(generation_run_id=run.id).order_by("-updated_at")[:20]
+        for session in sessions:
+            payload = session.session_json if isinstance(session.session_json, dict) else {}
+            pending = payload.get("social_descriptions_pending")
+            copy = pending.get("copy") if isinstance(pending, dict) else None
+            if isinstance(copy, dict) and any(str(value or "").strip() for value in copy.values()):
+                candidates.append(
+                    (
+                        _copy_timestamp(session.updated_at),
+                        {key: str(copy.get(key) or "") for key, _label in legacy.SOCIAL_COPY_FIELD_LABELS},
+                    )
+                )
+                break
+    except Exception:
+        pass
+    try:
+        draft = (
+            GenerationArtifact.objects.filter(
+                run_id=run.id,
+                artifact_type=legacy.PUBLICATION_COPY_DRAFT_ARTIFACT_TYPE,
+            )
+            .order_by("-created_at")
+            .first()
+        )
+        payload = draft.payload_json if draft is not None and isinstance(draft.payload_json, dict) else {}
+        copy = payload.get("copy") if isinstance(payload, dict) else None
+        if isinstance(copy, dict) and any(str(value or "").strip() for value in copy.values()):
+            candidates.append(
+                (
+                    _copy_timestamp(draft.created_at),
+                    {key: str(copy.get(key) or "") for key, _label in legacy.SOCIAL_COPY_FIELD_LABELS},
+                )
+            )
+    except Exception:
+        pass
+    try:
+        run_jobs = [
+            job
+            for job in PublicationJob.objects.order_by("-created_at")[:500]
+            if isinstance(job.payload_json, dict)
+            and str(job.payload_json.get("run_id") or "") == str(run.id)
+            and not bool(job.payload_json.get("instagram_trial"))
+        ]
+        if run_jobs:
+            latest_bundle = str(run_jobs[0].bundle_key or "")
+            if latest_bundle:
+                run_jobs = [job for job in run_jobs if str(job.bundle_key or "") == latest_bundle]
+            copy = (
+                dict(max(candidates, key=lambda item: item[0])[1])
+                if candidates
+                else {key: "" for key, _label in legacy.SOCIAL_COPY_FIELD_LABELS}
+            )
+            for job in run_jobs:
+                platform = str(job.platform or "").lower()
+                language = str(job.language or "").lower()
+                if platform == "youtube" and language == "ru":
+                    copy["youtube_ru_title"] = str(job.title or "")
+                    copy["youtube_ru_description"] = str(job.description or "")
+                elif platform == "instagram" and language == "ru":
+                    copy["instagram_ru"] = str(job.description or "")
+                elif platform == "vk" and language == "ru":
+                    copy["vk_ru"] = str(job.description or "")
+                elif platform == "tiktok" and language == "ru":
+                    copy["tiktok_ru"] = str(job.description or "")
+                elif platform == "instagram" and language == "en":
+                    copy["instagram_en"] = str(job.description or "")
+                elif platform == "youtube" and language == "en":
+                    copy["youtube_en_title"] = str(job.title or "")
+                    copy["youtube_en_description"] = str(job.description or "")
+            if any(str(value or "").strip() for value in copy.values()):
+                candidates.append((_copy_timestamp(run_jobs[0].created_at), copy))
+    except Exception:
+        pass
+    if candidates:
+        return max(candidates, key=lambda item: item[0])[1]
+    return _original_publication_copy_from_run(run)
+
+
+def _latest_instagram_ru_trial_description(run: GenerationRun) -> str:
+    try:
+        for job in PublicationJob.objects.order_by("-created_at")[:500]:
+            payload = job.payload_json if isinstance(job.payload_json, dict) else {}
+            if (
+                str(payload.get("run_id") or "") == str(run.id)
+                and bool(payload.get("instagram_trial"))
+                and str(job.platform or "").lower() == "instagram"
+                and str(job.language or "").lower() == "ru"
+            ):
+                return strip_instagram_ru_attribution(str(job.description or ""))
+    except Exception:
+        pass
+    return ""
+
+
+def _generate_instagram_ru_trial_description(
+    *,
+    recipe: str,
+    normal_copy: dict[str, str],
+    feedback: str = "",
+) -> str:
+    """Generate a distinct RU Trial Reel caption without the normal attribution."""
+    from app.handlers.handlers_state_media import _refine_social_copy_from_feedback
+
+    clean_recipe = str(recipe or "").strip()
+    if not clean_recipe:
+        raise ValueError("Для пробного описания нужен исходный текст или рецепт.")
+    instruction = (
+        "Отдельно создай НОВОЕ альтернативное описание только для Instagram RU Trial Reel. "
+        "Оно должно отличаться от обычного Instagram RU описания, начинаться с сильного хука "
+        "для новой аудитории и соответствовать рецепту. Не добавляй строку «Сделано с помощью "
+        "@syntx_ai» и вообще не упоминай Syntx. Верни остальные поля без изменений."
+    )
+    if str(feedback or "").strip():
+        instruction += f" Дополнительное пожелание пользователя: {str(feedback).strip()}"
+    generated = asyncio.run(
+        _refine_social_copy_from_feedback(
+            recipe=clean_recipe,
+            previous_copy=normal_copy,
+            feedback=instruction,
+        )
+    )
+    return strip_instagram_ru_attribution(str(generated.get("instagram_ru") or ""))
+
+
 def standalone_upload_view(self, request):
     run_id = str(request.GET.get("run_id") or "").strip()
     if run_id:
@@ -328,7 +503,11 @@ def standalone_upload_view(self, request):
             reverse("admin:pipeline_admin_generationrun_queue_publications", args=[run.id])
         )
     project_choices = legacy._publication_project_choices()
-    copy_payload = {key: "" for key, _label in legacy.SOCIAL_COPY_FIELD_LABELS}
+    initial_project = _initial_project(project_choices)
+    copy_payload = apply_project_publication_copy_rules(
+        initial_project,
+        {key: "" for key, _label in legacy.SOCIAL_COPY_FIELD_LABELS},
+    )
     form = PublicationUploadForm(
         request.POST or None,
         request.FILES or None,
@@ -336,7 +515,7 @@ def standalone_upload_view(self, request):
         project_choices=project_choices,
         video_source_choices={"ru": (), "en": ()},
         initial={
-            "project_slug": _initial_project(project_choices),
+            "project_slug": initial_project,
             "video_variant": "clean",
             "video_source_ru": "upload",
             "video_source_en": "upload",
@@ -398,7 +577,15 @@ def generation_upload_view(self, request, object_id):
             level=messages.WARNING,
         )
 
-    copy_payload = legacy._publication_copy_from_run(run)
+    copy_payload = apply_project_publication_copy_rules(
+        default_project,
+        legacy._publication_copy_from_run(run),
+    )
+    trial_description = (
+        str(request.POST.get("instagram_ru_trial_description") or "")
+        if request.method == "POST"
+        else _latest_instagram_ru_trial_description(run)
+    )
     recipe = str(
         request.POST.get("publication_recipe")
         if request.method == "POST"
@@ -406,6 +593,7 @@ def generation_upload_view(self, request, object_id):
     ).strip()
     feedback = str(request.POST.get("generation_feedback") or "") if request.method == "POST" else ""
     if request.method == "POST" and "generate_descriptions" in request.POST:
+        selected_project = str(request.POST.get("project_slug") or default_project)
         posted_copy = {
             key: str(request.POST.get(key) or copy_payload.get(key) or "")
             for key, _label in legacy.SOCIAL_COPY_FIELD_LABELS
@@ -415,6 +603,12 @@ def generation_upload_view(self, request, object_id):
                 run,
                 current_copy=posted_copy,
                 recipe=recipe,
+                feedback=feedback,
+            )
+            copy_payload = apply_project_publication_copy_rules(selected_project, copy_payload)
+            trial_description = _generate_instagram_ru_trial_description(
+                recipe=recipe,
+                normal_copy=copy_payload,
                 feedback=feedback,
             )
             legacy._save_publication_copy_draft(
@@ -435,12 +629,14 @@ def generation_upload_view(self, request, object_id):
             project_choices=project_choices,
             video_source_choices=source_choices,
             initial={
-                "project_slug": str(request.POST.get("project_slug") or default_project),
+                "project_slug": selected_project,
                 "target_keys": request.POST.getlist("target_keys") or [
                     target.key for target in build_publication_targets(copy_payload) if target.description
                 ],
                 "video_variant": "clean",
                 "scheduled_at": request.POST.get("scheduled_at") or None,
+                "instagram_ru_trial": bool(request.POST.get("instagram_ru_trial")),
+                "instagram_ru_trial_description": trial_description,
                 **source_initials,
                 "video_source_ru": str(request.POST.get("video_source_ru") or source_initials.get("video_source_ru") or ""),
                 "video_source_en": str(request.POST.get("video_source_en") or source_initials.get("video_source_en") or ""),
@@ -460,6 +656,7 @@ def generation_upload_view(self, request, object_id):
                     target.key for target in build_publication_targets(copy_payload) if target.description
                 ],
                 "video_variant": "clean",
+                "instagram_ru_trial_description": trial_description,
                 **source_initials,
                 **copy_payload,
             },
@@ -600,6 +797,7 @@ def configure_publication_upload_admin() -> None:
     _configured = True
     legacy.PublicationJobAdmin.prepare_view = standalone_upload_view
     legacy.GenerationRunAdmin.queue_publications_view = generation_upload_view
+    legacy._publication_copy_from_run = _freshest_publication_copy_from_run
     legacy._final_videos_panel = _final_videos_with_publish_choices
     legacy._publication_prep_panel = _enhanced_prep_panel
     admin.site.index_template = "admin/pipeline_admin/index.html"

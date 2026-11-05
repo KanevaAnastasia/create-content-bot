@@ -37,7 +37,11 @@
   .cf-target-fields { display:grid; gap:12px; padding:0 15px 16px 91px; }
   .cf-target-fields label, .cf-field label, .cf-file-row label { display:block; margin-bottom:5px; font-weight:650; }
   .cf-upload-textarea, .cf-upload-control, .cf-field select, .cf-field input { width:100%; box-sizing:border-box; border-radius:9px; }
-  .cf-upload-textarea { min-height:96px; resize:vertical; padding:10px; }
+  .cf-upload-textarea { min-height:160px; resize:none; overflow-y:hidden; padding:10px; line-height:1.45; }
+  .cf-trial-panel { display:grid; gap:10px; padding:13px; border:1px solid color-mix(in srgb,#7c3aed 40%,var(--border-color)); border-radius:11px; background:color-mix(in srgb,var(--body-bg) 94%,#7c3aed 6%); }
+  .cf-trial-toggle { display:grid; grid-template-columns:20px 1fr; gap:9px; align-items:start; cursor:pointer; }
+  .cf-trial-toggle input { width:18px; height:18px; margin-top:2px; }
+  .cf-trial-copy[hidden] { display:none; }
   .cf-target-fields .errorlist, .cf-file-row .errorlist { margin:4px 0; }
   .cf-submit-bar { position:sticky; bottom:0; z-index:20; display:flex; justify-content:space-between; gap:15px; align-items:center; padding:16px 18px; margin-top:20px; border:1px solid var(--border-color); border-radius:15px 15px 0 0; background:color-mix(in srgb,var(--body-bg) 94%,transparent); backdrop-filter:blur(14px); box-shadow:0 -10px 35px rgba(15,23,42,.1); }
   .cf-submit { border:0; border-radius:10px; padding:12px 22px; color:#fff; background:linear-gradient(110deg,var(--cf-accent-2),var(--cf-accent)); font-weight:750; font-size:15px; cursor:pointer; }
@@ -101,6 +105,15 @@
         </label>
         <div class="cf-target-fields">
           {% for field in card.fields %}<div>{{ field.label_tag }}{{ field }}{{ field.errors }}</div>{% endfor %}
+          {% if card.trial_field %}
+          <div class="cf-trial-panel">
+            <label class="cf-trial-toggle">{{ card.trial_field }}<span><strong>{{ card.trial_field.label }}</strong><br><span class="cf-muted">Сначала отправится Trial Reel для не подписчиков с текстом ниже, затем — обычный Reel с основным описанием выше и строкой Syntx.</span></span></label>
+            <div class="cf-trial-copy">
+              {{ card.trial_description_field.label_tag }}{{ card.trial_description_field }}
+              <span class="help">{{ card.trial_description_field.help_text }}</span>{{ card.trial_description_field.errors }}
+            </div>
+          </div>
+          {% endif %}
           {% if card.account %}<div class="cf-muted">Аккаунт: {{ card.account }}</div>{% endif %}
         </div>
       </article>
@@ -126,10 +139,35 @@
 <script>
 (function(){
   const form=document.getElementById('cf-upload-form');
+  const attribution='Сделано с помощью @syntx_ai';
+  function grow(el){el.style.height='auto';el.style.height=Math.max(160,el.scrollHeight+2)+'px';}
+  function stripAttribution(value){return value.split('\n').filter(line=>line.trim()!==attribution).join('\n').replace(/\n{3,}/g,'\n\n').trim();}
+  function normalInstagramCopy(){
+    const field=document.getElementById('id_instagram_ru');
+    const project=document.getElementById('id_project_slug');
+    if(!field||!project)return;
+    let value=stripAttribution(field.value);
+    if(project.value==='grandma_kitchen'&&value){
+      const match=value.match(/(^|\s)#[\p{L}\p{N}_]+/u);
+      if(match){const pos=match.index+(match[1]||'').length;value=value.slice(0,pos).trimEnd()+'\n\n'+attribution+'\n\n'+value.slice(pos).trimStart();}
+      else value=value+'\n\n'+attribution;
+    }
+    field.value=value;grow(field);
+  }
+  function syncTrial(){
+    const box=document.getElementById('id_instagram_ru_trial');
+    if(!box)return;
+    const panel=box.closest('.cf-trial-panel');
+    const copy=panel&&panel.querySelector('.cf-trial-copy');
+    if(copy)copy.hidden=!box.checked;
+  }
   function syncTarget(card){const checked=card.querySelector('input[name="target_keys"]').checked;card.classList.toggle('is-off',!checked);card.querySelectorAll('.cf-target-fields textarea,.cf-target-fields input').forEach(el=>el.disabled=!checked);}
   document.querySelectorAll('.cf-target').forEach(card=>{const box=card.querySelector('input[name="target_keys"]');box.addEventListener('change',()=>syncTarget(card));syncTarget(card);});
   function syncUpload(lang){const selected=form.querySelector('input[name="video_source_'+lang+'"]:checked');const row=form.querySelector('.cf-video-upload[data-language="'+lang+'"]');if(row)row.style.display=selected&&selected.value==='upload'?'grid':'none';}
   ['ru','en'].forEach(lang=>{form.querySelectorAll('input[name="video_source_'+lang+'"]').forEach(el=>el.addEventListener('change',()=>syncUpload(lang)));syncUpload(lang);});
+  document.querySelectorAll('.cf-upload-textarea').forEach(el=>{el.addEventListener('input',()=>grow(el));grow(el);});
+  const trial=document.getElementById('id_instagram_ru_trial');if(trial)trial.addEventListener('change',syncTrial);syncTrial();
+  const project=document.getElementById('id_project_slug');if(project)project.addEventListener('change',normalInstagramCopy);normalInstagramCopy();
 })();
 </script>
 {% endblock %}

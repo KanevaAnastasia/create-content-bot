@@ -10,6 +10,7 @@ from app.publications import (
     DEFAULT_PUBLICATION_VIDEO_VARIANT,
     PUBLICATION_STATUS_SCHEDULED,
     build_publication_targets,
+    apply_project_publication_copy_rules,
     export_publication_cover_assets,
     export_publication_video_assets,
     extract_hashtags,
@@ -81,6 +82,28 @@ def test_extract_hashtags_preserves_order_and_dedupes() -> None:
     out = extract_hashtags("text #one #two #one #три")
 
     assert out == ["#one", "#two", "#три"]
+
+
+def test_grandma_instagram_ru_attribution_is_inserted_once_before_hashtags() -> None:
+    copy = apply_project_publication_copy_rules(
+        "grandma_kitchen",
+        {"instagram_ru": "Тёплое описание\n\n#рецепт #ужин"},
+    )
+
+    assert copy["instagram_ru"] == (
+        "Тёплое описание\n\nСделано с помощью @syntx_ai\n\n#рецепт #ужин"
+    )
+    repeated = apply_project_publication_copy_rules("grandma_kitchen", copy)
+    assert repeated == copy
+
+
+def test_non_grandma_copy_does_not_keep_grandma_attribution() -> None:
+    copy = apply_project_publication_copy_rules(
+        "discipline",
+        {"instagram_ru": "Текст\n\nСделано с помощью @syntx_ai\n\n#тег"},
+    )
+
+    assert copy["instagram_ru"] == "Текст\n\n#тег"
 
 
 def test_export_publication_video_assets_writes_language_files(tmp_path: Path) -> None:
@@ -282,6 +305,50 @@ def test_queue_publication_bundle_attaches_language_cover(monkeypatch, tmp_path:
             stored_cover = Path(jobs[0].payload_json["cover_path"])
             assert stored_cover.read_bytes() == b"cover"
             assert stored_cover.name == "publish_cover_ru.png"
+    finally:
+        engine.dispose()
+
+
+def test_queue_trial_instagram_ru_uses_separate_copy_without_attribution(
+    monkeypatch, tmp_path: Path
+) -> None:
+    engine, Session = _session_factory()
+    try:
+        with Session() as session:
+            project = Project(slug="grandma_kitchen", title="Grandma", is_default=True)
+            session.add(project)
+            session.commit()
+            monkeypatch.setenv("PUBLISH_GRANDMA_KITCHEN_INSTAGRAM_ACCESS_TOKEN_RU", "token")
+            monkeypatch.setenv(
+                "PUBLISH_GRANDMA_KITCHEN_INSTAGRAM_BUSINESS_ACCOUNT_ID_RU",
+                "instagram-ru",
+            )
+            monkeypatch.setenv("PUBLICATION_ARTIFACTS_DIR", str(tmp_path / "published"))
+
+            jobs = queue_publication_bundle(
+                session,
+                project_slug="grandma_kitchen",
+                recipe="recipe",
+                copy={"instagram_ru": "Пробный текст\n\n#рецепт"},
+                trial_copy={"instagram_ru": "Отдельный пробный текст\n\n#новаяаудитория"},
+                post_production={
+                    "renders_by_language": {
+                        "ru": {"clean": {"video_b64": base64.b64encode(b"video").decode("ascii")}},
+                    }
+                },
+                selected_target_keys=["instagram:ru"],
+                trial_target_keys=["instagram:ru"],
+            )
+
+            assert len(jobs) == 2
+            assert jobs[0].description == "Отдельный пробный текст\n\n#новаяаудитория"
+            assert "syntx" not in jobs[0].description.lower()
+            assert jobs[0].payload_json["instagram_trial"] is True
+            assert jobs[1].description == (
+                "Пробный текст\n\nСделано с помощью @syntx_ai\n\n#рецепт"
+            )
+            assert jobs[1].payload_json["instagram_trial"] is False
+            assert jobs[1].payload_json["publish_after_job_id"] == str(jobs[0].id)
     finally:
         engine.dispose()
 

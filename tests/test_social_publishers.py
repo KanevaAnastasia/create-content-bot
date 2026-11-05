@@ -269,6 +269,54 @@ def test_instagram_resumable_uploads_local_video_without_public_url(
     }
 
 
+def test_instagram_ru_trial_uses_manual_trial_params_without_share_to_feed(
+    monkeypatch, tmp_path: Path
+) -> None:
+    monkeypatch.setenv("PUBLISH_GRANDMA_KITCHEN_INSTAGRAM_ACCESS_TOKEN", "token")
+    monkeypatch.setenv("PUBLISH_GRANDMA_KITCHEN_INSTAGRAM_BUSINESS_ACCOUNT_ID_RU", "account")
+    video_path = tmp_path / "trial.mp4"
+    video_path.write_bytes(b"trial-video")
+    job = PublicationJob(
+        id=uuid.uuid4(),
+        project_id=uuid.uuid4(),
+        bundle_key="bundle",
+        platform="instagram",
+        language="ru",
+        video_path=str(video_path),
+        description="Отдельное пробное описание",
+        payload_json={"instagram_trial": True},
+    )
+
+    def response(payload: dict) -> Mock:
+        result = Mock(ok=True, status_code=200)
+        result.json.return_value = payload
+        return result
+
+    post_calls: list[tuple[str, dict]] = []
+
+    def post(url: str, **kwargs):
+        post_calls.append((url, kwargs))
+        if url.endswith("/account/media"):
+            return response({
+                "id": "trial-container",
+                "uri": "https://rupload.facebook.com/ig-api-upload/v25.0/trial-container",
+            })
+        if url.startswith("https://rupload.facebook.com/"):
+            return response({"success": True})
+        return response({"id": "trial-media"})
+
+    monkeypatch.setattr("app.social_publishers.requests.post", post)
+    monkeypatch.setattr(
+        "app.social_publishers.requests.get",
+        Mock(return_value=response({"status_code": "FINISHED"})),
+    )
+
+    assert _publish_instagram(job, "grandma_kitchen") == "trial-media"
+    create_data = post_calls[0][1]["data"]
+    assert create_data["trial_params"] == '{"graduation_strategy":"MANUAL"}'
+    assert "share_to_feed" not in create_data
+
+
 def test_instagram_rejects_non_meta_resumable_upload_uri(monkeypatch, tmp_path: Path) -> None:
     monkeypatch.setenv("PUBLISH_GRANDMA_KITCHEN_INSTAGRAM_ACCESS_TOKEN", "token")
     monkeypatch.setenv("PUBLISH_GRANDMA_KITCHEN_INSTAGRAM_BUSINESS_ACCOUNT_ID_RU", "account")

@@ -3,6 +3,7 @@ from __future__ import annotations
 import os
 import sys
 import uuid
+from datetime import datetime, timezone
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -72,6 +73,128 @@ def test_custom_upload_form_accepts_one_video_per_language_and_cover() -> None:
     assert form.is_valid(), form.errors
     assert form.cleaned_data["video_source_ru"] == "upload"
     assert form.cleaned_data["video_source_en"] == "upload"
+
+
+def test_instagram_ru_trial_requires_its_own_description_not_normal_copy() -> None:
+    form = PublicationUploadForm(
+        data={
+            "project_slug": "grandma_kitchen",
+            "target_keys": ["instagram:ru"],
+            "video_variant": "clean",
+            "video_source_ru": "upload",
+            "instagram_ru_trial": "on",
+            "instagram_ru": "Обычное описание",
+        },
+        files={"custom_video_ru": SimpleUploadedFile("ru.mp4", b"ru")},
+        copy=_empty_copy(),
+        project_choices=(("grandma_kitchen", "Grandma"),),
+        video_source_choices={"ru": (), "en": ()},
+    )
+
+    assert form.is_valid() is False
+    assert "instagram_ru_trial_description" in form.errors
+
+    form = PublicationUploadForm(
+        data={
+            "project_slug": "grandma_kitchen",
+            "target_keys": ["instagram:ru"],
+            "video_variant": "clean",
+            "video_source_ru": "upload",
+            "instagram_ru_trial": "on",
+            "instagram_ru": "Обычное описание",
+            "instagram_ru_trial_description": "Отдельный пробный текст #тест",
+        },
+        files={"custom_video_ru": SimpleUploadedFile("ru.mp4", b"ru")},
+        copy=_empty_copy(),
+        project_choices=(("grandma_kitchen", "Grandma"),),
+        video_source_choices={"ru": (), "en": ()},
+    )
+
+    assert form.is_valid(), form.errors
+
+
+def test_trial_description_is_generated_separately_and_strips_attribution(monkeypatch) -> None:
+    calls = []
+
+    async def refine(*, recipe, previous_copy, feedback):
+        calls.append((recipe, previous_copy, feedback))
+        return {
+            **previous_copy,
+            "instagram_ru": (
+                "Новый пробный хук\n\nСделано с помощью @syntx_ai\n\n#рецепт"
+            ),
+        }
+
+    monkeypatch.setattr(
+        "app.handlers.handlers_state_media._refine_social_copy_from_feedback",
+        refine,
+    )
+
+    result = upload_admin._generate_instagram_ru_trial_description(
+        recipe="Рецепт",
+        normal_copy={"instagram_ru": "Обычный текст"},
+        feedback="короче",
+    )
+
+    assert result == "Новый пробный хук\n\n#рецепт"
+    assert len(calls) == 1
+    assert "НОВОЕ альтернативное описание" in calls[0][2]
+    assert "не упоминай Syntx" in calls[0][2]
+
+
+def test_freshest_copy_ignores_trial_job_and_preserves_other_platform_copy(monkeypatch) -> None:
+    run_id = uuid.uuid4()
+
+    class Query(list):
+        def filter(self, **_kwargs):
+            return self
+
+        def order_by(self, *_args):
+            return self
+
+        def first(self):
+            return self[0] if self else None
+
+    session = SimpleNamespace(
+        updated_at=datetime(2026, 1, 1, tzinfo=timezone.utc),
+        session_json={
+            "social_descriptions_pending": {
+                "copy": {
+                    **_empty_copy(),
+                    "youtube_ru_title": "Сохранённый заголовок",
+                    "youtube_ru_description": "Сохранённое описание",
+                    "instagram_ru": "Старое обычное описание",
+                }
+            }
+        },
+    )
+    normal_job = SimpleNamespace(
+        created_at=datetime(2026, 1, 2, tzinfo=timezone.utc),
+        payload_json={"run_id": str(run_id), "instagram_trial": False},
+        bundle_key="normal",
+        platform="instagram",
+        language="ru",
+        title="",
+        description="Новое обычное описание",
+    )
+    trial_job = SimpleNamespace(
+        created_at=datetime(2026, 1, 3, tzinfo=timezone.utc),
+        payload_json={"run_id": str(run_id), "instagram_trial": True},
+        bundle_key="trial",
+        platform="instagram",
+        language="ru",
+        title="",
+        description="Пробное описание",
+    )
+    monkeypatch.setattr(upload_admin.ChatSession, "objects", Query([session]))
+    monkeypatch.setattr(upload_admin.GenerationArtifact, "objects", Query())
+    monkeypatch.setattr(upload_admin.PublicationJob, "objects", Query([trial_job, normal_job]))
+
+    copy = upload_admin._freshest_publication_copy_from_run(SimpleNamespace(id=run_id))
+
+    assert copy["instagram_ru"] == "Новое обычное описание"
+    assert copy["youtube_ru_title"] == "Сохранённый заголовок"
+    assert copy["youtube_ru_description"] == "Сохранённое описание"
 
 
 def test_final_video_panel_has_single_choice_controls_next_to_versions(monkeypatch) -> None:

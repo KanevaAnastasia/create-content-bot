@@ -29,6 +29,8 @@ PUBLICATION_STATUS_NEEDS_MANUAL_ACTION = "needs_manual_action"
 
 PUBLICATION_ARTIFACTS_DIR_ENV_NAME = "PUBLICATION_ARTIFACTS_DIR"
 DEFAULT_PUBLICATION_ARTIFACTS_DIR = "artifacts/publications"
+GRANDMA_PROJECT_SLUG = "grandma_kitchen"
+GRANDMA_INSTAGRAM_RU_ATTRIBUTION = "Сделано с помощью @syntx_ai"
 
 _HASHTAG_RE = re.compile(r"#[\wа-яА-ЯёЁ]+", flags=re.UNICODE)
 _ENV_ACCOUNT_SPECS = (
@@ -149,6 +151,51 @@ def extract_hashtags(text: str) -> list[str]:
         if tag not in seen:
             seen.append(tag)
     return seen
+
+
+def instagram_ru_attribution_text(text: str) -> str:
+    """Place the Grandma project attribution immediately before hashtags."""
+    clean = str(text or "").strip()
+    attribution_pattern = re.compile(
+        rf"(?im)^\s*{re.escape(GRANDMA_INSTAGRAM_RU_ATTRIBUTION)}\s*$"
+    )
+    clean = attribution_pattern.sub("", clean)
+    clean = re.sub(r"\n{3,}", "\n\n", clean).strip()
+    if not clean:
+        return ""
+    hashtag = _HASHTAG_RE.search(clean)
+    if hashtag is None:
+        return f"{clean}\n\n{GRANDMA_INSTAGRAM_RU_ATTRIBUTION}"
+    body = clean[: hashtag.start()].rstrip()
+    tags = clean[hashtag.start() :].lstrip()
+    return f"{body}\n\n{GRANDMA_INSTAGRAM_RU_ATTRIBUTION}\n\n{tags}".strip()
+
+
+def strip_instagram_ru_attribution(text: str) -> str:
+    clean = re.sub(
+        rf"(?im)^\s*{re.escape(GRANDMA_INSTAGRAM_RU_ATTRIBUTION)}\s*$",
+        "",
+        str(text or ""),
+    )
+    return re.sub(r"\n{3,}", "\n\n", clean).strip()
+
+
+def apply_project_publication_copy_rules(
+    project_slug: str | None,
+    copy: dict[str, str],
+) -> dict[str, str]:
+    """Apply project-owned copy rules before previewing or persisting jobs."""
+    out = {str(key): str(value or "") for key, value in copy.items()}
+    instagram_ru = str(out.get("instagram_ru") or "")
+    if not instagram_ru.strip():
+        return out
+    without_attribution = strip_instagram_ru_attribution(instagram_ru)
+    out["instagram_ru"] = (
+        instagram_ru_attribution_text(without_attribution)
+        if str(project_slug or "").strip() == GRANDMA_PROJECT_SLUG
+        else without_attribution
+    )
+    return out
 
 
 def build_publication_targets(
@@ -351,11 +398,15 @@ def queue_publication_bundle(
     video_variant: str | None = None,
     video_source_labels: dict[str, str] | None = None,
     cover_sources: dict[str, str | Path] | None = None,
+    trial_copy: dict[str, str] | None = None,
+    trial_target_keys: Any = None,
     scheduled_at: Any = None,
 ) -> list[PublicationJob]:
     from .social_publishers import platform_readiness
 
     project = resolve_project_for_publications(session, project_slug)
+    copy = apply_project_publication_copy_rules(project.slug, copy)
+    trial_targets = normalize_publication_target_keys(trial_target_keys) & {"instagram:ru"}
     accounts = upsert_project_publish_accounts_from_env(session, project)
     account_index = {
         (row.platform, row.language): row
@@ -393,46 +444,62 @@ def queue_publication_bundle(
         external_account_id = account.external_account_id if account else None
         publish_policy = account.publish_policy if account else "manual_review_required"
         source_label = str((video_source_labels or {}).get(target.language) or "").strip()
-        job = PublicationJob(
-            project_id=project.id,
-            bundle_key=bundle_key,
-            origin=origin,
-            platform=target.platform,
-            language=target.language,
-            account_key=account_key,
-            external_account_id=external_account_id,
-            status=status,
-            video_path=video_path,
-            video_label=source_label or f"{target.language.upper()} video / {PUBLICATION_VIDEO_VARIANT_LABELS[normalized_variant]}",
-            title=target.title,
-            description=target.description,
-            hashtags_json=extract_hashtags(target.description),
-            recipe=recipe,
-            publish_policy=publish_policy,
-            scheduled_at=normalized_scheduled_at,
-            approved_at=approved_at if status in {PUBLICATION_STATUS_APPROVED, PUBLICATION_STATUS_SCHEDULED} else None,
-            payload_json={
-                "bundle_key": bundle_key,
-                "platform": target.platform,
-                "language": target.language,
-                "video_path": video_path,
-                "title": target.title,
-                "description": target.description,
-                "hashtags": extract_hashtags(target.description),
-                "target_key": target.key,
-                "target_label": publication_target_label(target),
-                "video_variant": normalized_variant,
-                "video_source_label": source_label or None,
-                "cover_path": cover_paths.get(target.language),
-                "scheduled_at": normalized_scheduled_at.isoformat() if normalized_scheduled_at else None,
-                "direct_api_ready": readiness.ready,
-                "missing_configuration": list(readiness.missing),
-            },
-        )
-        if not readiness.ready:
-            job.publish_error = readiness.note or f"Missing configuration: {', '.join(readiness.missing)}"
-        session.add(job)
-        jobs.append(job)
+        variants: list[tuple[str, bool, str]] = []
+        if target.key in trial_targets:
+            trial_description = strip_instagram_ru_attribution(
+                str((trial_copy or {}).get("instagram_ru") or "")
+            )
+            if not trial_description:
+                raise ValueError("Instagram RU Trial Reel requires its own description.")
+            variants.append((trial_description, True, f"{bundle_key}-trial"))
+        variants.append((target.description, False, bundle_key))
+        predecessor: PublicationJob | None = None
+        for description, is_trial, job_bundle_key in variants:
+            job = PublicationJob(
+                id=uuid.uuid4(),
+                project_id=project.id,
+                bundle_key=job_bundle_key,
+                origin=origin,
+                platform=target.platform,
+                language=target.language,
+                account_key=account_key,
+                external_account_id=external_account_id,
+                status=status,
+                video_path=video_path,
+                video_label=source_label or f"{target.language.upper()} video / {PUBLICATION_VIDEO_VARIANT_LABELS[normalized_variant]}",
+                title=target.title,
+                description=description,
+                hashtags_json=extract_hashtags(description),
+                recipe=recipe,
+                publish_policy=publish_policy,
+                scheduled_at=normalized_scheduled_at,
+                approved_at=approved_at if status in {PUBLICATION_STATUS_APPROVED, PUBLICATION_STATUS_SCHEDULED} else None,
+                payload_json={
+                    "bundle_key": job_bundle_key,
+                    "platform": target.platform,
+                    "language": target.language,
+                    "video_path": video_path,
+                    "title": target.title,
+                    "description": description,
+                    "hashtags": extract_hashtags(description),
+                    "target_key": target.key,
+                    "target_label": publication_target_label(target),
+                    "video_variant": normalized_variant,
+                    "video_source_label": source_label or None,
+                    "cover_path": cover_paths.get(target.language),
+                    "instagram_trial": is_trial,
+                    "publish_after_job_id": str(predecessor.id) if predecessor is not None else None,
+                    "scheduled_at": normalized_scheduled_at.isoformat() if normalized_scheduled_at else None,
+                    "direct_api_ready": readiness.ready,
+                    "missing_configuration": list(readiness.missing),
+                },
+            )
+            if not readiness.ready:
+                job.publish_error = readiness.note or f"Missing configuration: {', '.join(readiness.missing)}"
+            session.add(job)
+            jobs.append(job)
+            if is_trial:
+                predecessor = job
     session.flush()
     return jobs
 
