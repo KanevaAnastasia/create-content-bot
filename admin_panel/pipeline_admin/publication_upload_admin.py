@@ -77,6 +77,10 @@ class PublicationUploadForm(legacy.PublicationQueueAdminForm):
             if isinstance(field.widget, forms.Textarea):
                 field.widget.attrs.pop("style", None)
                 field.widget.attrs["class"] = "cf-upload-textarea"
+                value = self.data.get(name) if self.is_bound else self.initial.get(name, field.initial or "")
+                lines = str(value or "").splitlines() or [""]
+                estimated_rows = sum(max(1, (len(line) // 72) + 1) for line in lines) + 1
+                field.widget.attrs["rows"] = max(7, estimated_rows)
             elif isinstance(field.widget, (forms.Select, forms.DateTimeInput)):
                 field.widget.attrs["class"] = "cf-upload-control"
 
@@ -528,6 +532,7 @@ def _generate_instagram_ru_trial_description(
     recipe: str,
     normal_copy: dict[str, str],
     feedback: str = "",
+    project_slug: str | None = None,
 ) -> str:
     """Generate a distinct RU Trial Reel caption without the normal attribution."""
     from app.handlers.handlers_state_media import _refine_social_copy_from_feedback
@@ -557,6 +562,7 @@ def _generate_instagram_ru_trial_description(
                     else instruction
                     + " Предыдущий вариант совпал с основным. Перепиши его полностью: другой хук, другая структура и формулировки."
                 ),
+                project_slug=project_slug,
             )
         )
         trial_description = strip_instagram_ru_attribution(
@@ -597,12 +603,14 @@ def standalone_upload_view(self, request):
                 current_copy=posted_copy,
                 recipe=recipe,
                 feedback=feedback,
+                project_slug=selected_project,
             )
             copy_payload = apply_project_publication_copy_rules(selected_project, copy_payload)
             trial_description = _generate_instagram_ru_trial_description(
                 recipe=recipe,
                 normal_copy=copy_payload,
                 feedback=feedback,
+                project_slug=selected_project,
             )
         except Exception as exc:
             self.message_user(request, f"Описания не сгенерированы: {exc}", level=messages.ERROR)
@@ -740,12 +748,14 @@ def generation_upload_view(self, request, object_id):
                 current_copy=posted_copy,
                 recipe=recipe,
                 feedback=feedback,
+                project_slug=selected_project,
             )
             copy_payload = apply_project_publication_copy_rules(selected_project, copy_payload)
             trial_description = _generate_instagram_ru_trial_description(
                 recipe=recipe,
                 normal_copy=copy_payload,
                 feedback=feedback,
+                project_slug=selected_project,
             )
             _save_instagram_ru_trial_draft(run, trial_description)
             legacy._save_publication_copy_draft(

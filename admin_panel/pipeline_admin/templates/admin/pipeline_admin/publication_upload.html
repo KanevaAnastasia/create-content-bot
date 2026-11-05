@@ -37,7 +37,7 @@
   .cf-target-fields { display:grid; gap:12px; padding:0 15px 16px 91px; }
   .cf-target-fields label, .cf-field label, .cf-file-row label { display:block; margin-bottom:5px; font-weight:650; }
   .cf-upload-textarea, .cf-upload-control, .cf-field select, .cf-field input { width:100%; box-sizing:border-box; border-radius:9px; }
-  .cf-upload-textarea { min-height:160px; resize:none; overflow-y:hidden; padding:10px; line-height:1.45; }
+  .cf-upload-textarea { min-height:160px !important; height:auto; max-height:none !important; resize:none; overflow-y:hidden !important; padding:10px; line-height:1.45; white-space:pre-wrap; box-sizing:border-box; }
   .cf-trial-panel { display:grid; gap:10px; padding:13px; border:1px solid color-mix(in srgb,#7c3aed 40%,var(--border-color)); border-radius:11px; background:color-mix(in srgb,var(--body-bg) 94%,#7c3aed 6%); }
   .cf-trial-toggle { display:grid; grid-template-columns:20px 1fr; gap:9px; align-items:start; cursor:pointer; }
   .cf-trial-toggle input { width:18px; height:18px; margin-top:2px; }
@@ -138,7 +138,12 @@
 (function(){
   const form=document.getElementById('cf-upload-form');
   const attribution='Сделано с помощью @syntx_ai';
-  function grow(el){el.style.height='auto';el.style.height=Math.max(160,el.scrollHeight+2)+'px';}
+  function grow(el){
+    el.style.setProperty('height','auto','important');
+    el.style.setProperty('max-height','none','important');
+    el.style.setProperty('overflow-y','hidden','important');
+    el.style.setProperty('height',Math.max(160,el.scrollHeight+4)+'px','important');
+  }
   function stripAttribution(value){return value.split('\n').filter(line=>line.trim()!==attribution).join('\n').replace(/\n{3,}/g,'\n\n').trim();}
   function normalInstagramCopy(){
     const field=document.getElementById('id_instagram_ru');
@@ -163,7 +168,10 @@
   document.querySelectorAll('.cf-target').forEach(card=>{const box=card.querySelector('input[name="target_keys"]');box.addEventListener('change',()=>syncTarget(card));syncTarget(card);});
   function syncUpload(lang){const selected=form.querySelector('input[name="video_source_'+lang+'"]:checked');const row=form.querySelector('.cf-video-upload[data-language="'+lang+'"]');if(row)row.style.display=selected&&selected.value==='upload'?'grid':'none';}
   ['ru','en'].forEach(lang=>{form.querySelectorAll('input[name="video_source_'+lang+'"]').forEach(el=>el.addEventListener('change',()=>syncUpload(lang)));syncUpload(lang);});
-  document.querySelectorAll('.cf-upload-textarea').forEach(el=>{el.addEventListener('input',()=>grow(el));grow(el);});
+  const growingTextareas=document.querySelectorAll('.cf-upload-textarea');
+  growingTextareas.forEach(el=>{el.addEventListener('input',()=>grow(el));grow(el);});
+  requestAnimationFrame(()=>growingTextareas.forEach(grow));
+  window.addEventListener('load',()=>growingTextareas.forEach(grow));
   const trial=document.getElementById('id_instagram_ru_trial');if(trial)trial.addEventListener('change',syncTrial);syncTrial();
   const project=document.getElementById('id_project_slug');if(project)project.addEventListener('change',normalInstagramCopy);normalInstagramCopy();
 })();

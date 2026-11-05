@@ -3096,6 +3096,7 @@ def _generate_publication_copy_for_admin(
     current_copy: dict[str, str],
     recipe: str | None = None,
     feedback: str = "",
+    project_slug: str | None = None,
 ) -> dict[str, str]:
     recipe_text = str(recipe if recipe is not None else _publication_recipe_for_run(run)).strip()
     if not recipe_text:
@@ -3110,16 +3111,30 @@ def _generate_publication_copy_for_admin(
         for key, _label in SOCIAL_COPY_FIELD_LABELS
     }
     clean_feedback = str(feedback or "").strip()
+    resolved_project_slug = str(
+        project_slug or (_project_slug_for_publication_run(run) if run is not None else "")
+    ).strip() or None
     if not clean_feedback:
-        return asyncio.run(_generate_social_copy_from_recipe(recipe_text))
+        return asyncio.run(
+            _generate_social_copy_from_recipe(
+                recipe_text,
+                project_slug=resolved_project_slug,
+            )
+        )
     has_existing_copy = any(str(value or "").strip() for value in base_copy.values())
     if not has_existing_copy:
-        base_copy = asyncio.run(_generate_social_copy_from_recipe(recipe_text))
+        base_copy = asyncio.run(
+            _generate_social_copy_from_recipe(
+                recipe_text,
+                project_slug=resolved_project_slug,
+            )
+        )
     return asyncio.run(
         _refine_social_copy_from_feedback(
             recipe=recipe_text,
             previous_copy=base_copy,
             feedback=clean_feedback,
+            project_slug=resolved_project_slug,
         )
     )
 

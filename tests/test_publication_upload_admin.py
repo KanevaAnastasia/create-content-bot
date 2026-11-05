@@ -48,6 +48,22 @@ def test_custom_upload_form_requires_copy_for_each_selected_target() -> None:
     assert "youtube_ru_description" in form.errors
 
 
+def test_description_textarea_rows_expand_for_full_copy() -> None:
+    copy = _empty_copy()
+    copy["youtube_en_description"] = "\n".join(
+        ["A long platform description " * 8 for _ in range(18)]
+    )
+    form = PublicationUploadForm(
+        copy=copy,
+        project_choices=(("grandma_kitchen", "Grandma"),),
+        video_source_choices={"ru": (), "en": ()},
+    )
+
+    widget = form.fields["youtube_en_description"].widget
+    assert widget.attrs["class"] == "cf-upload-textarea"
+    assert int(widget.attrs["rows"]) > 18
+
+
 def test_custom_upload_form_accepts_one_video_per_language_and_cover() -> None:
     form = PublicationUploadForm(
         data={
@@ -116,8 +132,8 @@ def test_instagram_ru_trial_requires_its_own_description_not_normal_copy() -> No
 def test_trial_description_is_generated_separately_and_strips_attribution(monkeypatch) -> None:
     calls = []
 
-    async def refine(*, recipe, previous_copy, feedback):
-        calls.append((recipe, previous_copy, feedback))
+    async def refine(*, recipe, previous_copy, feedback, project_slug=None):
+        calls.append((recipe, previous_copy, feedback, project_slug))
         return {
             **previous_copy,
             "instagram_ru": (
@@ -140,6 +156,32 @@ def test_trial_description_is_generated_separately_and_strips_attribution(monkey
     assert len(calls) == 1
     assert "НОВОЕ альтернативное описание" in calls[0][2]
     assert "не упоминай Syntx" in calls[0][2]
+
+
+def test_admin_copy_generator_passes_project_to_hashtag_generator(monkeypatch) -> None:
+    calls = []
+
+    async def generate(recipe, *, project_slug=None, **_kwargs):
+        calls.append((recipe, project_slug))
+        return {**_empty_copy(), "instagram_ru": "Текст #тихаядисциплина"}
+
+    monkeypatch.setattr(
+        "app.handlers.handlers_state_media._generate_social_copy_from_recipe",
+        generate,
+    )
+    run = SimpleNamespace(
+        project_id=1,
+        project=SimpleNamespace(slug="discipline"),
+    )
+
+    result = admin_module._generate_publication_copy_for_admin(
+        run,
+        current_copy=_empty_copy(),
+        recipe="История",
+    )
+
+    assert result["instagram_ru"].endswith("#тихаядисциплина")
+    assert calls == [("История", "discipline")]
 
 
 def test_trial_description_retries_when_generator_copies_normal_text(monkeypatch) -> None:

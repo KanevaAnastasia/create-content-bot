@@ -2658,6 +2658,7 @@ def test_django_publication_generate_descriptions_saves_draft(monkeypatch):
 
     from django.test import RequestFactory
     import pipeline_admin.admin as admin_module
+    import pipeline_admin.publication_upload_admin as upload_admin
 
     run_id = uuid.uuid4()
     run = SimpleNamespace(id=run_id, pk=run_id, human_title="Баурсаки", script="recipe")
@@ -2676,6 +2677,12 @@ def test_django_publication_generate_descriptions_saves_draft(monkeypatch):
     monkeypatch.setattr(admin_module, "_save_publication_copy_draft", lambda *args, **kwargs: saved.append(kwargs))
     monkeypatch.setattr(admin_module, "_publication_post_production_from_final_artifacts", lambda _run: {})
     monkeypatch.setattr(admin_module, "_publication_account_index", lambda _run: {})
+    monkeypatch.setattr(
+        upload_admin,
+        "_generate_instagram_ru_trial_description",
+        lambda **_kwargs: "Отдельный Trial #пробный",
+    )
+    monkeypatch.setattr(upload_admin, "_save_instagram_ru_trial_draft", lambda *_args, **_kwargs: None)
 
     modeladmin = SimpleNamespace(
         get_object=lambda _request, _object_id: run,
