@@ -148,6 +148,48 @@ def _youtube_access_token(project_slug: str, language: str) -> str:
     return token
 
 
+def _set_youtube_thumbnail(access_token: str, video_id: str, cover_path: str | Path) -> str:
+    """Apply a custom thumbnail after a YouTube video finishes processing."""
+    path = Path(cover_path)
+    if not path.is_file():
+        return "cover_missing"
+    deadline = time.monotonic() + 300
+    while time.monotonic() < deadline:
+        status_response = requests.get(
+            "https://www.googleapis.com/youtube/v3/videos",
+            params={"part": "processingDetails", "id": video_id},
+            headers={"Authorization": f"Bearer {access_token}"},
+            timeout=DEFAULT_REQUEST_TIMEOUT,
+        )
+        status_payload = _response_json(status_response, "YouTube processing status")
+        items = status_payload.get("items") if isinstance(status_payload.get("items"), list) else []
+        details = items[0].get("processingDetails") if items and isinstance(items[0], dict) else {}
+        status = str((details or {}).get("processingStatus") or "").lower()
+        if status == "succeeded":
+            break
+        if status in {"failed", "terminated"}:
+            return f"processing_{status}"
+        time.sleep(5)
+    else:
+        return "processing_timeout"
+
+    mime_type = mimetypes.guess_type(path.name)[0] or "application/octet-stream"
+    with path.open("rb") as handle:
+        response = requests.post(
+            "https://www.googleapis.com/upload/youtube/v3/thumbnails/set",
+            params={"videoId": video_id},
+            headers={
+                "Authorization": f"Bearer {access_token}",
+                "Content-Type": mime_type,
+                "Content-Length": str(path.stat().st_size),
+            },
+            data=handle,
+            timeout=DEFAULT_REQUEST_TIMEOUT,
+        )
+    _response_json(response, "YouTube custom thumbnail")
+    return "applied"
+
+
 def _publish_youtube(job: PublicationJob, project_slug: str) -> str:
     token = _youtube_access_token(project_slug, str(job.language or "ru"))
     headers = {"Authorization": f"Bearer {token}"}
@@ -206,6 +248,14 @@ def _publish_youtube(job: PublicationJob, project_slug: str) -> str:
     video_id = str(upload_payload.get("id") or "").strip()
     if not video_id:
         raise PublicationDeliveryError("YouTube upload completed without a video id.")
+    payload = job.payload_json if isinstance(job.payload_json, dict) else {}
+    cover_path = str(payload.get("cover_path") or "").strip()
+    if cover_path:
+        try:
+            cover_status = _set_youtube_thumbnail(token, video_id, cover_path)
+        except Exception as exc:
+            cover_status = f"failed:{type(exc).__name__}"
+        job.payload_json = {**payload, "cover_delivery": cover_status}
     return video_id
 
 

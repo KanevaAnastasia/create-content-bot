@@ -1,0 +1,11 @@
+{% extends "admin/index.html" %}
+
+{% block content %}
+<div style="margin:0 0 24px;padding:22px;border-radius:16px;color:#fff;background:linear-gradient(120deg,#1f2937,#7c3aed 55%,#cf304a);box-shadow:0 16px 38px rgba(31,41,55,.18);">
+  <div style="display:flex;justify-content:space-between;gap:24px;align-items:center;flex-wrap:wrap;">
+    <div><h1 style="margin:0 0 7px;color:#fff;font-size:27px;">Заливка видео</h1><p style="margin:0;opacity:.88;">Загрузить RU и/или EN видео, проверить подписи и опубликовать сразу во все выбранные площадки.</p></div>
+    <a href="{% url 'admin:pipeline_admin_publicationjob_prepare' %}" style="display:inline-block;padding:12px 20px;border-radius:10px;background:#fff;color:#4c1d95;text-decoration:none;font-weight:750;">Открыть заливку →</a>
+  </div>
+</div>
+{{ block.super }}
+{% endblock %}

@@ -14,6 +14,7 @@ from app.social_publishers import (
     PublicationDeliveryError,
     _instagram_access_token,
     _publish_instagram,
+    _set_youtube_thumbnail,
     _tiktok_access_token,
     _youtube_env,
     _vk_access_token,
@@ -82,6 +83,29 @@ def test_youtube_language_credentials_override_legacy(monkeypatch) -> None:
 
     assert _youtube_env("grandma_kitchen", "YOUTUBE_REFRESH_TOKEN", "ru") == "russian"
     assert _youtube_env("grandma_kitchen", "YOUTUBE_REFRESH_TOKEN", "en") == "english"
+
+
+def test_youtube_custom_thumbnail_waits_for_processing_and_uploads(monkeypatch, tmp_path: Path) -> None:
+    cover = tmp_path / "cover.png"
+    cover.write_bytes(b"png-cover")
+    status = Mock(ok=True, status_code=200)
+    status.json.return_value = {
+        "items": [{"processingDetails": {"processingStatus": "succeeded"}}]
+    }
+    uploaded = Mock(ok=True, status_code=200)
+    uploaded.json.return_value = {"items": []}
+    get = Mock(return_value=status)
+    post = Mock(return_value=uploaded)
+    monkeypatch.setattr("app.social_publishers.requests.get", get)
+    monkeypatch.setattr("app.social_publishers.requests.post", post)
+
+    assert _set_youtube_thumbnail("token", "video-id", cover) == "applied"
+    assert get.call_args.kwargs["params"] == {
+        "part": "processingDetails",
+        "id": "video-id",
+    }
+    assert post.call_args.args[0].endswith("/youtube/v3/thumbnails/set")
+    assert post.call_args.kwargs["params"] == {"videoId": "video-id"}
 
 
 def test_instagram_readiness_only_requires_project_credentials(monkeypatch) -> None:

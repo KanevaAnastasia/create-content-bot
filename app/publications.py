@@ -316,6 +316,29 @@ def export_publication_video_assets(
     return out
 
 
+def export_publication_cover_assets(
+    cover_sources: dict[str, str | Path] | None,
+    *,
+    bundle_key: str,
+    base_dir: Path | None = None,
+) -> dict[str, str]:
+    """Copy optional per-language covers into the immutable publication bundle."""
+    target_dir = (base_dir or publication_artifacts_dir()) / bundle_key
+    target_dir.mkdir(parents=True, exist_ok=True)
+    out: dict[str, str] = {}
+    for language, raw_source in (cover_sources or {}).items():
+        source = Path(raw_source)
+        if not source.is_file():
+            continue
+        suffix = source.suffix.lower()
+        if suffix not in {".jpg", ".jpeg", ".png"}:
+            continue
+        target = target_dir / f"publish_cover_{str(language).lower()}{suffix}"
+        shutil.copyfile(source, target)
+        out[str(language).lower()] = str(target.resolve())
+    return out
+
+
 def queue_publication_bundle(
     session: Session,
     *,
@@ -327,6 +350,7 @@ def queue_publication_bundle(
     selected_target_keys: Any = None,
     video_variant: str | None = None,
     video_source_labels: dict[str, str] | None = None,
+    cover_sources: dict[str, str | Path] | None = None,
     scheduled_at: Any = None,
 ) -> list[PublicationJob]:
     from .social_publishers import platform_readiness
@@ -344,6 +368,10 @@ def queue_publication_bundle(
         post_production,
         bundle_key=bundle_key,
         video_variant=normalized_variant,
+    )
+    cover_paths = export_publication_cover_assets(
+        cover_sources,
+        bundle_key=bundle_key,
     )
     approved_at = datetime.now(timezone.utc)
     normalized_scheduled_at = normalize_publication_scheduled_at(scheduled_at)
@@ -395,6 +423,7 @@ def queue_publication_bundle(
                 "target_label": publication_target_label(target),
                 "video_variant": normalized_variant,
                 "video_source_label": source_label or None,
+                "cover_path": cover_paths.get(target.language),
                 "scheduled_at": normalized_scheduled_at.isoformat() if normalized_scheduled_at else None,
                 "direct_api_ready": readiness.ready,
                 "missing_configuration": list(readiness.missing),

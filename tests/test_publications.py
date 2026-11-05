@@ -10,6 +10,7 @@ from app.publications import (
     DEFAULT_PUBLICATION_VIDEO_VARIANT,
     PUBLICATION_STATUS_SCHEDULED,
     build_publication_targets,
+    export_publication_cover_assets,
     export_publication_video_assets,
     extract_hashtags,
     normalize_publication_target_keys,
@@ -164,6 +165,22 @@ def test_export_publication_video_assets_accepts_render_paths(tmp_path: Path) ->
     assert Path(out["ru"]).read_bytes() == b"rendered-ru"
 
 
+def test_export_publication_cover_assets_copies_supported_images(tmp_path: Path) -> None:
+    ru_cover = tmp_path / "ru.png"
+    en_cover = tmp_path / "en.jpg"
+    ru_cover.write_bytes(b"ru-cover")
+    en_cover.write_bytes(b"en-cover")
+
+    out = export_publication_cover_assets(
+        {"ru": ru_cover, "en": en_cover},
+        bundle_key="bundle-covers",
+        base_dir=tmp_path / "exports",
+    )
+
+    assert Path(out["ru"]).read_bytes() == b"ru-cover"
+    assert Path(out["en"]).read_bytes() == b"en-cover"
+
+
 def test_queue_publication_bundle_sets_scheduled_status(monkeypatch, tmp_path: Path) -> None:
     engine, Session = _session_factory()
     try:
@@ -231,6 +248,40 @@ def test_queue_publication_bundle_keeps_explicit_source_label(monkeypatch, tmp_p
 
             assert jobs[0].video_label == "RU · custom upload · my-video.mp4"
             assert jobs[0].payload_json["video_source_label"] == "RU · custom upload · my-video.mp4"
+    finally:
+        engine.dispose()
+
+
+def test_queue_publication_bundle_attaches_language_cover(monkeypatch, tmp_path: Path) -> None:
+    engine, Session = _session_factory()
+    try:
+        cover = tmp_path / "cover.png"
+        cover.write_bytes(b"cover")
+        with Session() as session:
+            project = Project(slug="grandma_kitchen", title="Grandma", is_default=True)
+            session.add(project)
+            session.commit()
+            monkeypatch.setenv("PUBLISH_GRANDMA_KITCHEN_YOUTUBE_CHANNEL_ID_RU", "channel")
+            monkeypatch.setenv("PUBLICATION_ARTIFACTS_DIR", str(tmp_path / "published"))
+
+            jobs = queue_publication_bundle(
+                session,
+                project_slug="grandma_kitchen",
+                recipe="recipe",
+                copy={"youtube_ru_title": "Title", "youtube_ru_description": "Description"},
+                post_production={
+                    "renders_by_language": {
+                        "ru": {"clean": {"video_b64": base64.b64encode(b"video").decode("ascii")}},
+                    }
+                },
+                selected_target_keys=["youtube:ru"],
+                video_variant="clean",
+                cover_sources={"ru": cover},
+            )
+
+            stored_cover = Path(jobs[0].payload_json["cover_path"])
+            assert stored_cover.read_bytes() == b"cover"
+            assert stored_cover.name == "publish_cover_ru.png"
     finally:
         engine.dispose()
 

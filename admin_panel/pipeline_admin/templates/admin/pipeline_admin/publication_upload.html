@@ -1,0 +1,135 @@
+{% extends "admin/base_site.html" %}
+{% load i18n %}
+
+{% block extrastyle %}
+{{ block.super }}
+<style>
+  :root { --cf-accent:#cf304a; --cf-accent-2:#7c3aed; --cf-card:var(--body-bg); --cf-soft:color-mix(in srgb,var(--body-bg) 92%,#64748b 8%); }
+  #content { max-width:1440px; margin:0 auto; }
+  .cf-upload-hero { display:flex; justify-content:space-between; gap:24px; align-items:end; padding:26px; margin-bottom:20px; border-radius:18px; color:#fff; background:linear-gradient(125deg,#1f2937 0%,#7c3aed 52%,#cf304a 100%); box-shadow:0 18px 45px rgba(31,41,55,.18); }
+  .cf-upload-hero h1 { color:#fff; margin:0 0 7px; font-size:30px; letter-spacing:-.02em; }
+  .cf-upload-hero p { margin:0; opacity:.86; font-size:15px; }
+  .cf-upload-hero a { color:#fff; text-decoration:none; white-space:nowrap; opacity:.9; }
+  .cf-section { margin:0 0 20px; padding:20px; border:1px solid var(--border-color); border-radius:16px; background:var(--cf-card); box-shadow:0 7px 25px rgba(15,23,42,.05); }
+  .cf-section-head { display:flex; justify-content:space-between; gap:20px; align-items:start; margin-bottom:15px; }
+  .cf-section h2 { margin:0 0 4px; font-size:19px; }
+  .cf-muted { color:var(--body-quiet-color); }
+  .cf-project-row { display:grid; grid-template-columns:minmax(260px,1fr) minmax(260px,.8fr); gap:18px; align-items:end; }
+  .cf-language-grid { display:grid; grid-template-columns:repeat(2,minmax(320px,1fr)); gap:16px; }
+  .cf-language-card { position:relative; padding:18px; border:1px solid var(--border-color); border-radius:14px; background:var(--cf-soft); overflow:hidden; }
+  .cf-language-card:before { content:""; position:absolute; left:0; top:0; bottom:0; width:5px; background:linear-gradient(var(--cf-accent-2),var(--cf-accent)); }
+  .cf-language-card h3 { margin:0 0 3px; font-size:18px; }
+  .cf-source-list ul { display:grid; gap:7px; margin:12px 0; padding:0; list-style:none; }
+  .cf-source-list label { display:grid; grid-template-columns:20px 1fr; gap:8px; padding:10px; border:1px solid var(--border-color); border-radius:10px; background:var(--body-bg); cursor:pointer; }
+  .cf-source-list input { margin-top:2px; }
+  .cf-file-row { display:grid; gap:7px; margin-top:13px; }
+  .cf-file-row input[type=file] { width:100%; padding:10px; box-sizing:border-box; border:1px dashed var(--border-color); border-radius:10px; background:var(--body-bg); }
+  .cf-target-grid { display:grid; grid-template-columns:repeat(2,minmax(340px,1fr)); gap:14px; }
+  .cf-target { border:1px solid var(--border-color); border-radius:14px; background:var(--body-bg); overflow:hidden; transition:.18s ease; }
+  .cf-target.is-off { opacity:.58; background:var(--cf-soft); }
+  .cf-target-top { display:grid; grid-template-columns:24px 42px 1fr auto; gap:10px; align-items:center; padding:15px; cursor:pointer; }
+  .cf-target-top input { width:19px; height:19px; }
+  .cf-target-icon { display:grid; place-items:center; width:38px; height:38px; border-radius:11px; color:#fff; background:#111827; font-weight:800; }
+  .cf-target-name { font-weight:700; font-size:15px; }
+  .cf-pill { display:inline-flex; align-items:center; padding:4px 8px; border-radius:999px; font-size:11px; font-weight:700; }
+  .cf-pill.ok { color:#166534; background:#dcfce7; }
+  .cf-pill.warn { color:#92400e; background:#fef3c7; }
+  .cf-target-fields { display:grid; gap:12px; padding:0 15px 16px 91px; }
+  .cf-target-fields label, .cf-field label, .cf-file-row label { display:block; margin-bottom:5px; font-weight:650; }
+  .cf-upload-textarea, .cf-upload-control, .cf-field select, .cf-field input { width:100%; box-sizing:border-box; border-radius:9px; }
+  .cf-upload-textarea { min-height:96px; resize:vertical; padding:10px; }
+  .cf-target-fields .errorlist, .cf-file-row .errorlist { margin:4px 0; }
+  .cf-submit-bar { position:sticky; bottom:0; z-index:20; display:flex; justify-content:space-between; gap:15px; align-items:center; padding:16px 18px; margin-top:20px; border:1px solid var(--border-color); border-radius:15px 15px 0 0; background:color-mix(in srgb,var(--body-bg) 94%,transparent); backdrop-filter:blur(14px); box-shadow:0 -10px 35px rgba(15,23,42,.1); }
+  .cf-submit { border:0; border-radius:10px; padding:12px 22px; color:#fff; background:linear-gradient(110deg,var(--cf-accent-2),var(--cf-accent)); font-weight:750; font-size:15px; cursor:pointer; }
+  .cf-generate { display:grid; grid-template-columns:1fr auto; gap:12px; align-items:end; }
+  .cf-generate textarea { width:100%; box-sizing:border-box; min-height:75px; border-radius:9px; }
+  details.cf-recipe { margin-top:12px; }
+  details.cf-recipe textarea { width:100%; min-height:150px; box-sizing:border-box; }
+  @media(max-width:900px){ .cf-language-grid,.cf-target-grid,.cf-project-row{grid-template-columns:1fr}.cf-target-fields{padding-left:15px}.cf-upload-hero{align-items:start;flex-direction:column}.cf-submit-bar{align-items:stretch;flex-direction:column}.cf-submit{width:100%}.cf-generate{grid-template-columns:1fr} }
+</style>
+{% endblock %}
+
+{% block breadcrumbs %}
+<div class="breadcrumbs"><a href="{% url 'admin:index' %}">{% translate 'Home' %}</a> &rsaquo; Заливка</div>
+{% endblock %}
+
+{% block content %}
+<span hidden>Queue publications for {{ subtitle }} · Queue publication jobs</span>
+<div class="cf-upload-hero">
+  <div><h1>Заливка видео</h1><p>{{ subtitle }}</p></div>
+  <a href="{{ jobs_url }}">Очередь и история публикаций →</a>
+</div>
+
+<form method="post" enctype="multipart/form-data" id="cf-upload-form" novalidate>
+  {% csrf_token %}
+  <input type="hidden" name="video_variant" value="clean">
+  {% if form.non_field_errors %}<div class="errornote">{{ form.non_field_errors }}</div>{% endif %}
+
+  <section class="cf-section">
+    <div class="cf-section-head"><div><h2>1. Проект</h2><div class="cf-muted">Аккаунты и токены разных проектов никогда не смешиваются.</div></div></div>
+    <div class="cf-project-row">
+      <div class="cf-field">{{ form.project_slug.label_tag }}{{ form.project_slug }}{{ form.project_slug.errors }}</div>
+      <div class="cf-muted">Выберите проект до публикации. Видео и подписи попадут только в его подключённые аккаунты.</div>
+    </div>
+  </section>
+
+  <section class="cf-section">
+    <div class="cf-section-head"><div><h2>2. Видео и обложки</h2><div class="cf-muted">Можно заполнить один язык или оба. Для одного языка выбирается ровно одна версия.</div></div></div>
+    <div class="cf-language-grid">
+      {% for panel in language_panels %}
+      <article class="cf-language-card" data-language="{{ panel.code }}">
+        <h3>{{ panel.title }}</h3><div class="cf-muted">{{ panel.hint }}</div>
+        <div class="cf-source-list">{{ panel.source.errors }}{{ panel.source }}</div>
+        <div class="cf-file-row cf-video-upload" data-language="{{ panel.code }}">{{ panel.upload.label_tag }}{{ panel.upload }}{{ panel.upload.errors }}</div>
+        <div class="cf-file-row">{{ panel.cover.label_tag }}{{ panel.cover }}<span class="help">{{ panel.cover.help_text }} {{ panel.cover_hint }}</span>{{ panel.cover.errors }}</div>
+      </article>
+      {% endfor %}
+    </div>
+  </section>
+
+  <section class="cf-section">
+    <div class="cf-section-head"><div><h2>3. Площадки и тексты</h2><div class="cf-muted">Отметьте только нужные площадки. Под каждым полем видно, куда именно уйдёт текст.</div></div></div>
+    {{ form.target_keys.errors }}
+    <div class="cf-target-grid">
+      {% for card in target_cards %}
+      <article class="cf-target{% if not card.checked %} is-off{% endif %}" data-target="{{ card.key }}">
+        <label class="cf-target-top">
+          <input type="checkbox" name="target_keys" value="{{ card.key }}" {% if card.checked %}checked{% endif %}>
+          <span class="cf-target-icon">{{ card.icon }}</span>
+          <span><span class="cf-target-name">{{ card.label }}</span><br><span class="cf-muted">{{ card.language|upper }} · {{ card.platform }}</span></span>
+          {% if card.ready %}<span class="cf-pill ok">API готов</span>{% else %}<span class="cf-pill warn">нужна настройка</span>{% endif %}
+        </label>
+        <div class="cf-target-fields">
+          {% for field in card.fields %}<div>{{ field.label_tag }}{{ field }}{{ field.errors }}</div>{% endfor %}
+          {% if card.account %}<div class="cf-muted">Аккаунт: {{ card.account }}</div>{% endif %}
+        </div>
+      </article>
+      {% endfor %}
+    </div>
+  </section>
+
+  {% if run %}
+  <section class="cf-section">
+    <div class="cf-section-head"><div><h2>Помощник описаний</h2><div class="cf-muted">Можно заново сгенерировать подписи и затем отредактировать каждую выше.</div></div></div>
+    <div class="cf-generate"><div><label for="id_generation_feedback">Что изменить</label><textarea id="id_generation_feedback" name="generation_feedback">{{ generation_feedback }}</textarea></div><button class="button" type="submit" name="generate_descriptions" value="1">Сгенерировать описания</button></div>
+    <details class="cf-recipe"><summary>Исходный текст / рецепт</summary><textarea name="publication_recipe">{{ recipe }}</textarea></details>
+  </section>
+  {% endif %}
+
+  <section class="cf-section">
+    <div class="cf-project-row"><div class="cf-field">{{ form.scheduled_at.label_tag }}{{ form.scheduled_at }}{{ form.scheduled_at.errors }}</div><div class="cf-muted">Оставьте пустым, чтобы отправить выбранные публикации сразу.</div></div>
+  </section>
+
+  <div class="cf-submit-bar"><a href="{{ back_url }}">← Назад</a><button class="cf-submit" type="submit">Опубликовать выбранное</button></div>
+</form>
+
+<script>
+(function(){
+  const form=document.getElementById('cf-upload-form');
+  function syncTarget(card){const checked=card.querySelector('input[name="target_keys"]').checked;card.classList.toggle('is-off',!checked);card.querySelectorAll('.cf-target-fields textarea,.cf-target-fields input').forEach(el=>el.disabled=!checked);}
+  document.querySelectorAll('.cf-target').forEach(card=>{const box=card.querySelector('input[name="target_keys"]');box.addEventListener('change',()=>syncTarget(card));syncTarget(card);});
+  function syncUpload(lang){const selected=form.querySelector('input[name="video_source_'+lang+'"]:checked');const row=form.querySelector('.cf-video-upload[data-language="'+lang+'"]');if(row)row.style.display=selected&&selected.value==='upload'?'grid':'none';}
+  ['ru','en'].forEach(lang=>{form.querySelectorAll('input[name="video_source_'+lang+'"]').forEach(el=>el.addEventListener('change',()=>syncUpload(lang)));syncUpload(lang);});
+})();
+</script>
+{% endblock %}
