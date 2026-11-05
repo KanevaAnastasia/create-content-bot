@@ -54,13 +54,13 @@ def report_chunks(report: InstagramReport) -> list[str]:
     known = [video.views for video in report.videos if video.views is not None]
     total = f"{sum(known):,}".replace(",", " ")
     lines = [
-        "Instagram · @syntx_ai в описании",
+        "Instagram · Бабушка (русская версия) · @syntx_ai в описании",
         f"Публикации: {report.start:%d.%m.%Y} — {report.as_of:%d.%m.%Y} включительно (МСК).",
         f"Подключённых аккаунтов: {report.accounts}.",
         f"{'Всего роликов' if report.listing_complete else 'Найдено роликов (список неполный)'}: {count}.",
     ]
     if not report.accounts:
-        lines.append("Нет подключённых Instagram-аккаунтов.")
+        lines.append("Instagram русской Бабушки не подключён.")
     elif len(known) == count and report.listing_complete:
         lines.append(f"Всего просмотров: {total}.")
     elif known:

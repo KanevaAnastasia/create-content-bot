@@ -31,15 +31,16 @@ def test_exact_mention(caption, matches):
     assert bool(stats.MENTION.search(caption)) is matches
 
 
-def test_account_configuration_deduplicates_accounts(monkeypatch):
-    db = Mock()
-    db.scalars.return_value = ["one", "two"]
-    factory = Mock()
-    factory.return_value.__enter__ = Mock(return_value=db)
-    factory.return_value.__exit__ = Mock(return_value=False)
-    monkeypatch.setattr(stats, "SessionLocal", factory)
-    monkeypatch.setattr(stats, "project_env", lambda project, key: "123" if key.endswith("RU") else "")
-    assert stats.configured_accounts() == [stats.InstagramAccount("one", "ru", "123")]
+def test_account_configuration_only_reads_russian_grandma(monkeypatch):
+    env = Mock(return_value="123")
+    monkeypatch.setattr(stats, "project_env", env)
+    assert stats.configured_accounts() == [stats.InstagramAccount("grandma_kitchen", "ru", "123")]
+    env.assert_called_once_with("grandma_kitchen", "INSTAGRAM_BUSINESS_ACCOUNT_ID_RU")
+
+
+def test_account_configuration_never_falls_back_to_english(monkeypatch):
+    monkeypatch.setattr(stats, "project_env", lambda project, key: "456" if key.endswith("EN") else "")
+    assert stats.configured_accounts() == []
 
 
 def media(media_id, timestamp="2026-10-10T00:00:00+0300", **kwargs):

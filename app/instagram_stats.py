@@ -8,10 +8,8 @@ from datetime import date, datetime, timedelta
 from zoneinfo import ZoneInfo
 
 import requests
-from sqlalchemy import select
 
-from .db import SessionLocal
-from .models import Project
+from .character_catalog import GRANDMA_KITCHEN_PROJECT_SLUG
 from .publication_config import project_env, shared_env
 from .social_publishers import _instagram_access_token
 
@@ -67,17 +65,11 @@ def default_start(today: date) -> date:
 
 
 def configured_accounts() -> list[InstagramAccount]:
-    with SessionLocal() as db:
-        slugs = list(db.scalars(select(Project.slug).where(Project.is_active.is_(True)).order_by(Project.slug)))
-    accounts = []
-    seen = set()
-    for slug in slugs:
-        for language in ("ru", "en"):
-            account_id = project_env(slug, f"INSTAGRAM_BUSINESS_ACCOUNT_ID_{language.upper()}")
-            if account_id and account_id not in seen:
-                accounts.append(InstagramAccount(slug, language, account_id))
-                seen.add(account_id)
-    return accounts
+    """The sponsor report is exclusively for Grandma Kitchen's Russian account."""
+    account_id = project_env(GRANDMA_KITCHEN_PROJECT_SLUG, "INSTAGRAM_BUSINESS_ACCOUNT_ID_RU")
+    if not account_id:
+        return []
+    return [InstagramAccount(GRANDMA_KITCHEN_PROJECT_SLUG, "ru", account_id)]
 
 
 def _get(session: requests.Session, path: str, **params) -> dict:
