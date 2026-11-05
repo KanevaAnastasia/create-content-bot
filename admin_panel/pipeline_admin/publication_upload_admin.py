@@ -71,7 +71,7 @@ class PublicationUploadForm(legacy.PublicationQueueAdminForm):
                 required=False,
                 label=f"Обложка · {label}",
                 widget=forms.ClearableFileInput(attrs={"accept": "image/jpeg,image/png,.jpg,.jpeg,.png"}),
-                help_text="Необязательно. JPG или PNG до 50 МБ.",
+                help_text="Сформируйте кадр около 1-й секунды кнопкой ниже или загрузите свой JPG/PNG до 50 МБ.",
             )
         for name, field in self.fields.items():
             if isinstance(field.widget, forms.Textarea):
@@ -185,6 +185,7 @@ def _upload_page_context(
     admin_site = getattr(modeladmin, "admin_site", None)
     if admin_site is not None and hasattr(request, "user"):
         context.update(admin_site.each_context(request))
+    video_previews = _publication_video_previews(run) if run is not None else {"ru": (), "en": ()}
     context.update(
         {
             "title": "Заливка видео",
@@ -205,6 +206,7 @@ def _upload_page_context(
                     "source": form["video_source_ru"],
                     "upload": form["custom_video_ru"],
                     "cover": form["cover_ru"],
+                    "video_previews": video_previews["ru"],
                 },
                 {
                     "code": "en",
@@ -214,6 +216,7 @@ def _upload_page_context(
                     "source": form["video_source_en"],
                     "upload": form["custom_video_en"],
                     "cover": form["cover_en"],
+                    "video_previews": video_previews["en"],
                 },
             ),
             "run": run,
@@ -239,6 +242,22 @@ def _store_cover_upload(upload, *, scope: str, language: str) -> Path:
         for chunk in upload.chunks():
             handle.write(chunk)
     return target
+
+
+def _publication_video_previews(run: GenerationRun) -> dict[str, tuple[dict[str, str], ...]]:
+    result: dict[str, list[dict[str, str]]] = {"ru": [], "en": []}
+    for artifact in legacy._publication_all_final_artifacts(run):
+        language = str(artifact.language or "").strip().lower()
+        if language not in result:
+            continue
+        result[language].append(
+            {
+                "source": f"artifact:{artifact.id}",
+                "url": legacy._artifact_media_url(artifact),
+                "label": str(artifact.label or "Final video"),
+            }
+        )
+    return {language: tuple(rows) for language, rows in result.items()}
 
 
 def _post_production_and_covers(
@@ -344,12 +363,21 @@ def _dispatch_ready_jobs(jobs: list[Any]) -> str:
     if not ready_ids:
         return ""
     try:
-        from .tasks import publish_publication_jobs_task
+        from .tasks import dispatch_publication_jobs
 
-        publish_publication_jobs_task.delay(ready_ids)
+        dispatch_publication_jobs(ready_ids)
     except Exception as exc:
         return f" Фоновая отправка не запущена: {type(exc).__name__}."
     return ""
+
+
+def _publication_jobs_monitor_url(jobs: list[Any]) -> str:
+    base_url = reverse("admin:pipeline_admin_publicationjob_changelist")
+    if not jobs:
+        return base_url
+    bundle_key = str(getattr(jobs[0], "bundle_key", "") or "")
+    root_bundle = bundle_key[:-6] if bundle_key.endswith("-trial") else bundle_key
+    return f"{base_url}?bundle={root_bundle}" if root_bundle else base_url
 
 
 def _initial_project(project_choices: tuple[tuple[str, str], ...], preferred: str = "") -> str:
@@ -670,7 +698,7 @@ def standalone_upload_view(self, request):
                 publication_jobs_summary(jobs) + dispatch_error,
                 level=messages.SUCCESS if jobs and not dispatch_error else messages.WARNING,
             )
-            return HttpResponseRedirect(reverse("admin:pipeline_admin_publicationjob_changelist"))
+            return HttpResponseRedirect(_publication_jobs_monitor_url(jobs))
     displayed_copy = _copy_payload_from_form(form, copy_payload)
     response = TemplateResponse(
         request,
@@ -830,7 +858,7 @@ def generation_upload_view(self, request, object_id):
                 publication_jobs_summary(jobs) + dispatch_error,
                 level=messages.SUCCESS if jobs and not dispatch_error else messages.WARNING,
             )
-            return HttpResponseRedirect(reverse("admin:pipeline_admin_publicationjob_changelist"))
+            return HttpResponseRedirect(_publication_jobs_monitor_url(jobs))
 
     displayed_copy = _copy_payload_from_form(form, copy_payload)
     response = TemplateResponse(

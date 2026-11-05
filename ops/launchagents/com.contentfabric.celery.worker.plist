@@ -13,8 +13,8 @@
     <string>cf_admin</string>
     <string>worker</string>
     <string>--loglevel=INFO</string>
-    <string>--concurrency=1</string>
-    <string>--pool=solo</string>
+    <string>--concurrency=4</string>
+    <string>--pool=threads</string>
   </array>
   <key>WorkingDirectory</key>
   <string>/opt/content_fabric</string>

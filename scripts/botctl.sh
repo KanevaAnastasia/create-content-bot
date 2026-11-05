@@ -15,6 +15,7 @@ CELERY_WORKER_LOG="$LOG_DIR/celery_worker.log"
 CELERY_WORKER_LAUNCHD_LOG="$LOG_DIR/celery_worker.launchd.log"
 CELERY_WORKER_LAUNCHD_ERR_LOG="$LOG_DIR/celery_worker.launchd.err.log"
 CELERY_WORKER_PID_FILE="$RUNTIME_DIR/celery_worker.pid"
+CELERY_WORKER_LAUNCHAGENT_PLIST="$ROOT_DIR/ops/launchagents/com.contentfabric.celery.worker.plist"
 CELERY_BEAT_LOG="$LOG_DIR/celery_beat.log"
 CELERY_BEAT_LAUNCHD_LOG="$LOG_DIR/celery_beat.launchd.log"
 CELERY_BEAT_LAUNCHD_ERR_LOG="$LOG_DIR/celery_beat.launchd.err.log"
@@ -25,7 +26,7 @@ ADMIN_MANAGE="$ROOT_DIR/admin_panel/manage.py"
 LOCK_FILE="/tmp/content_fabric_bot.lock"
 
 usage() {
-  echo "Usage: $0 {start [-f|--follow]|launchd-foreground|stop|restart [-f|--follow]|status|logs [-f|--follow]|adopt <pid>|final-worker <run_id>|final-worker-foreground <run_id>|final-worker-status|scheduled-worker [limit]|scheduled-worker-status|celery-worker|celery-worker-foreground|celery-worker-status|celery-beat|celery-beat-foreground|celery-beat-status}"
+  echo "Usage: $0 {start [-f|--follow]|launchd-foreground|stop|restart [-f|--follow]|status|logs [-f|--follow]|adopt <pid>|final-worker <run_id>|final-worker-foreground <run_id>|final-worker-status|scheduled-worker [limit]|scheduled-worker-status|celery-worker|celery-worker-foreground|celery-worker-reload|celery-worker-status|celery-beat|celery-beat-foreground|celery-beat-status}"
 }
 
 ensure_runtime() {
@@ -401,7 +402,8 @@ celery_pythonpath() {
 celery_worker_start() {
   ensure_runtime
   cd "$ROOT_DIR"
-  nohup env "PYTHONPATH=$(celery_pythonpath)" "$PYTHON_BIN" -m celery -A cf_admin worker --loglevel=INFO --concurrency=1 --pool=solo >> "$CELERY_WORKER_LOG" 2>&1 &
+  local concurrency="${CELERY_WORKER_CONCURRENCY:-4}"
+  nohup env "PYTHONPATH=$(celery_pythonpath)" "$PYTHON_BIN" -m celery -A cf_admin worker --loglevel=INFO --concurrency="$concurrency" --pool=threads >> "$CELERY_WORKER_LOG" 2>&1 &
   local pid="$!"
   echo "$pid" > "$CELERY_WORKER_PID_FILE"
   echo "Celery worker started: pid=$pid"
@@ -438,7 +440,26 @@ celery_worker_status() {
 celery_worker_foreground() {
   ensure_runtime
   cd "$ROOT_DIR"
-  env "PYTHONPATH=$(celery_pythonpath)" "$PYTHON_BIN" -m celery -A cf_admin worker --loglevel=INFO --concurrency=1 --pool=solo
+  local concurrency="${CELERY_WORKER_CONCURRENCY:-4}"
+  env "PYTHONPATH=$(celery_pythonpath)" "$PYTHON_BIN" -m celery -A cf_admin worker --loglevel=INFO --concurrency="$concurrency" --pool=threads
+}
+
+celery_worker_reload() {
+  ensure_runtime
+  local domain="gui/$(id -u)"
+  local service="$domain/com.contentfabric.celery.worker"
+  if [[ ! -f "$CELERY_WORKER_LAUNCHAGENT_PLIST" ]]; then
+    echo "LaunchAgent plist not found: $CELERY_WORKER_LAUNCHAGENT_PLIST" >&2
+    exit 1
+  fi
+  launchctl bootout "$service" >/dev/null 2>&1 || true
+  sleep 1
+  launchctl bootstrap "$domain" "$CELERY_WORKER_LAUNCHAGENT_PLIST"
+  launchctl enable "$service"
+  launchctl kickstart -k "$service"
+  sleep 1
+  echo "Celery worker LaunchAgent reloaded from $CELERY_WORKER_LAUNCHAGENT_PLIST"
+  launchctl print "$service" | rg "state =|pid =|last exit status =" || true
 }
 
 celery_beat_start() {
@@ -572,6 +593,9 @@ case "${1:-}" in
     ;;
   celery-worker-foreground)
     celery_worker_foreground
+    ;;
+  celery-worker-reload)
+    celery_worker_reload
     ;;
   celery-worker-status)
     celery_worker_status

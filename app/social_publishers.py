@@ -8,7 +8,6 @@ Secrets are strictly project-scoped.  For example, project
 from __future__ import annotations
 
 import json
-import math
 import mimetypes
 import secrets
 import time
@@ -121,7 +120,7 @@ def _response_json(response: requests.Response, context: str) -> dict[str, Any]:
     except Exception as exc:
         raise PublicationDeliveryError(f"{context}: invalid JSON response ({response.status_code})") from exc
     if not response.ok:
-        detail = payload.get("error") if isinstance(payload, dict) else payload
+        detail = (payload.get("error") or payload) if isinstance(payload, dict) else payload
         raise PublicationDeliveryError(f"{context}: HTTP {response.status_code}: {detail}")
     return payload if isinstance(payload, dict) else {}
 
@@ -210,9 +209,9 @@ def _publish_youtube(job: PublicationJob, project_slug: str) -> str:
 
     video_path = Path(job.video_path)
     mime_type = mimetypes.guess_type(video_path.name)[0] or "video/mp4"
-    privacy = shared_env("YOUTUBE_PRIVACY_STATUS", "private").lower()
+    privacy = shared_env("YOUTUBE_PRIVACY_STATUS", "public").lower()
     if privacy not in {"private", "unlisted", "public"}:
-        privacy = "private"
+        privacy = "public"
     metadata = {
         "snippet": {
             "title": str(job.title or job.description or video_path.stem)[:100],
@@ -485,6 +484,20 @@ def _publish_instagram(job: PublicationJob, project_slug: str) -> str:
     media_id = str(_response_json(publish_response, "Instagram reel publish").get("id") or "")
     if not media_id:
         raise PublicationDeliveryError("Instagram publish completed without a media id.")
+    # A permalink makes the admin monitor useful after delivery.  Do not turn a
+    # successful publish into a failure if Meta delays or withholds the field.
+    try:
+        permalink_response = requests.get(
+            f"{base_url}/{media_id}",
+            params={"fields": "permalink", "access_token": access_token},
+            timeout=DEFAULT_REQUEST_TIMEOUT,
+        )
+        permalink_payload = _response_json(permalink_response, "Instagram media permalink")
+        permalink = str(permalink_payload.get("permalink") or "").strip()
+        if permalink.startswith("https://"):
+            job.payload_json = {**(job.payload_json or {}), "external_post_url": permalink}
+    except Exception:
+        pass
     return media_id
 
 
@@ -532,6 +545,13 @@ def _tiktok_access_token(project_slug: str) -> str:
     return access_token
 
 
+def _tiktok_chunk_plan(total_size: int) -> tuple[int, int]:
+    if total_size <= 0:
+        raise PublicationDeliveryError("TikTok cannot upload an empty video file.")
+    chunk_size = total_size if total_size <= 64 * 1024 * 1024 else 64 * 1024 * 1024
+    return chunk_size, max(1, total_size // chunk_size)
+
+
 def _publish_tiktok(job: PublicationJob, project_slug: str) -> str:
     access_token = _tiktok_access_token(project_slug)
     headers = {"Authorization": f"Bearer {access_token}", "Content-Type": "application/json; charset=UTF-8"}
@@ -553,10 +573,10 @@ def _publish_tiktok(job: PublicationJob, project_slug: str) -> str:
     )
     video_path = Path(job.video_path)
     total_size = video_path.stat().st_size
-    if total_size <= 0:
-        raise PublicationDeliveryError("TikTok cannot upload an empty video file.")
-    chunk_size = total_size if total_size <= 64 * 1024 * 1024 else 64 * 1024 * 1024
-    chunk_count = max(1, math.ceil(total_size / chunk_size))
+    chunk_size, chunk_count = _tiktok_chunk_plan(total_size)
+    # TikTok deliberately defines the count as floor(video_size/chunk_size).
+    # Any trailing bytes are appended to the final chunk (which may be up to
+    # 128 MB), rather than reported as an extra undersized chunk.
     init_response = requests.post(
         "https://open.tiktokapis.com/v2/post/publish/video/init/",
         headers=headers,
@@ -593,7 +613,8 @@ def _publish_tiktok(job: PublicationJob, project_slug: str) -> str:
     with video_path.open("rb") as handle:
         for index in range(chunk_count):
             start = index * chunk_size
-            payload = handle.read(min(chunk_size, total_size - start))
+            bytes_to_read = total_size - start if index == chunk_count - 1 else chunk_size
+            payload = handle.read(bytes_to_read)
             end = start + len(payload) - 1
             upload_response = requests.put(
                 upload_url,
@@ -756,11 +777,17 @@ def _publish_vk(job: PublicationJob, project_slug: str) -> str:
 
 def publish_publication_job(job_id: str | uuid.UUID) -> dict[str, Any]:
     with SessionLocal() as session:
-        job = session.scalar(select(PublicationJob).where(PublicationJob.id == uuid.UUID(str(job_id))))
+        job = session.scalar(
+            select(PublicationJob)
+            .where(PublicationJob.id == uuid.UUID(str(job_id)))
+            .with_for_update()
+        )
         if job is None:
             raise PublicationDeliveryError(f"Publication job not found: {job_id}")
         if job.status == PUBLICATION_STATUS_PUBLISHED:
             return {"job_id": str(job.id), "status": job.status, "external_post_id": job.external_post_id}
+        if job.status == PUBLICATION_STATUS_PUBLISHING:
+            return {"job_id": str(job.id), "status": job.status}
         predecessor_id = str((job.payload_json or {}).get("publish_after_job_id") or "").strip()
         if predecessor_id:
             try:

@@ -4771,9 +4771,9 @@ class GenerationRunAdmin(admin.ModelAdmin):
                 ]
                 if ready_job_ids:
                     try:
-                        from .tasks import publish_publication_jobs_task
+                        from .tasks import dispatch_publication_jobs
 
-                        publish_publication_jobs_task.delay(ready_job_ids)
+                        dispatch_publication_jobs(ready_job_ids)
                     except Exception as exc:
                         dispatch_error = f" Direct API worker was not queued: {exc}"
                 self.message_user(
@@ -5291,13 +5291,123 @@ def publish_selected_publication_jobs(modeladmin, request, queryset):
         modeladmin.message_user(request, "No publication jobs selected.", level=messages.WARNING)
         return
     try:
-        from .tasks import publish_publication_jobs_task
+        from .tasks import dispatch_publication_jobs
 
-        publish_publication_jobs_task.delay(job_ids)
+        dispatch_publication_jobs(job_ids)
     except Exception as exc:
         modeladmin.message_user(request, f"Direct API worker was not queued: {exc}", level=messages.ERROR)
         return
     modeladmin.message_user(request, f"Queued {len(job_ids)} publication job(s) for direct API delivery.", level=messages.SUCCESS)
+
+
+_PUBLICATION_STATUS_LABELS = {
+    "draft": "Черновик",
+    "approved": "В очереди",
+    "scheduled": "Запланировано",
+    "publishing": "Загружается",
+    "published": "Опубликовано",
+    "failed": "Ошибка",
+    "needs_manual_action": "Нужно вмешательство",
+}
+_PUBLICATION_FINISHED_STATUSES = {"published", "failed", "needs_manual_action"}
+_PUBLICATION_ERROR_STATUSES = {"failed", "needs_manual_action"}
+
+
+def _publication_root_bundle_key(bundle_key: str) -> str:
+    clean = str(bundle_key or "").strip()
+    return clean[:-6] if clean.endswith("-trial") else clean
+
+
+def _publication_external_url(job: PublicationJob) -> str:
+    payload = job.payload_json if isinstance(job.payload_json, dict) else {}
+    saved_url = str(payload.get("external_post_url") or "").strip()
+    if saved_url.startswith("https://"):
+        return saved_url
+    external_id = str(job.external_post_id or "").strip()
+    if not external_id:
+        return ""
+    if job.platform == "youtube":
+        return f"https://www.youtube.com/watch?v={quote(external_id, safe='')}"
+    if job.platform == "vk":
+        return f"https://vk.com/video{quote(external_id, safe='_')}"
+    return ""
+
+
+def _publication_monitor_context(request) -> dict[str, Any] | None:
+    requested = str(request.GET.get("bundle") or "").strip()[:128]
+    root_bundle = _publication_root_bundle_key(requested)
+    if not root_bundle:
+        latest = PublicationJob.objects.order_by("-created_at").only("bundle_key").first()
+        if latest is None:
+            return None
+        root_bundle = _publication_root_bundle_key(latest.bundle_key)
+    jobs = list(
+        PublicationJob.objects.select_related("project")
+        .filter(bundle_key__in=(root_bundle, f"{root_bundle}-trial"))
+        .order_by("created_at", "platform", "language")
+    )
+    if not jobs:
+        return None
+    platform_order = {"youtube": 0, "instagram": 1, "vk": 2, "tiktok": 3}
+    language_order = {"ru": 0, "en": 1}
+    jobs.sort(
+        key=lambda job: (
+            language_order.get(str(job.language or ""), 99),
+            platform_order.get(str(job.platform or ""), 99),
+            0 if bool((job.payload_json or {}).get("instagram_trial")) else 1,
+        )
+    )
+    rows = []
+    for job in jobs:
+        payload = job.payload_json if isinstance(job.payload_json, dict) else {}
+        is_trial = bool(payload.get("instagram_trial"))
+        status = str(job.status or "draft")
+        rows.append(
+            {
+                "label": (
+                    "Instagram RU · Trial Reel"
+                    if is_trial
+                    else publication_target_label(f"{job.platform}:{job.language}")
+                ),
+                "status": status,
+                "status_label": _PUBLICATION_STATUS_LABELS.get(status, status),
+                "status_class": (
+                    "success"
+                    if status == "published"
+                    else "error"
+                    if status in _PUBLICATION_ERROR_STATUSES
+                    else "active"
+                    if status == "publishing"
+                    else "waiting"
+                ),
+                "attempt_count": int(job.attempt_count or 0),
+                "external_post_id": str(job.external_post_id or ""),
+                "external_url": _publication_external_url(job),
+                "publish_error": str(job.publish_error or ""),
+                "published_at": job.published_at,
+                "change_url": reverse("admin:pipeline_admin_publicationjob_change", args=[job.pk]),
+                "retry_url": (
+                    reverse("admin:pipeline_admin_publicationjob_retry", args=[job.pk])
+                    if status in _PUBLICATION_ERROR_STATUSES
+                    else ""
+                ),
+            }
+        )
+    published = sum(row["status"] == "published" for row in rows)
+    failed = sum(row["status"] in _PUBLICATION_ERROR_STATUSES for row in rows)
+    finished = sum(row["status"] in _PUBLICATION_FINISHED_STATUSES for row in rows)
+    pending = finished < len(rows)
+    return {
+        "bundle_key": root_bundle,
+        "rows": rows,
+        "total": len(rows),
+        "published": published,
+        "failed": failed,
+        "finished": finished,
+        "pending": pending,
+        "auto_refresh": bool(requested) and pending,
+        "percent": round(100 * finished / len(rows)),
+    }
 
 
 @admin.register(PublicationJob)
@@ -5389,6 +5499,11 @@ class PublicationJobAdmin(admin.ModelAdmin):
                 self.admin_site.admin_view(self.tiktok_oauth_callback_view),
                 name="pipeline_admin_publicationjob_tiktok_oauth_callback",
             ),
+            path(
+                "<uuid:job_id>/retry/",
+                self.admin_site.admin_view(self.retry_publication_job_view),
+                name="pipeline_admin_publicationjob_retry",
+            ),
         ]
         return custom + urls
 
@@ -5398,7 +5513,64 @@ class PublicationJobAdmin(admin.ModelAdmin):
         extra["vk_oauth_url"] = reverse("admin:pipeline_admin_publicationjob_vk_oauth")
         extra["youtube_oauth_url"] = reverse("admin:pipeline_admin_publicationjob_youtube_oauth")
         extra["tiktok_oauth_url"] = reverse("admin:pipeline_admin_publicationjob_tiktok_oauth")
+        extra["publication_monitor"] = _publication_monitor_context(request)
         return super().changelist_view(request, extra_context=extra)
+
+    def retry_publication_job_view(self, request, job_id):
+        job = self.get_object(request, str(job_id))
+        changelist_url = reverse("admin:pipeline_admin_publicationjob_changelist")
+        if job is None:
+            raise Http404("Publication job not found.")
+        root_bundle = _publication_root_bundle_key(job.bundle_key)
+        monitor_url = f"{changelist_url}?bundle={quote(root_bundle, safe='')}" if root_bundle else changelist_url
+        if request.method != "POST":
+            return HttpResponseRedirect(monitor_url)
+        if job.status not in _PUBLICATION_ERROR_STATUSES:
+            self.message_user(
+                request,
+                "Повтор доступен только для публикации с ошибкой.",
+                level=messages.WARNING,
+            )
+            return HttpResponseRedirect(monitor_url)
+
+        old_status = job.status
+        old_error = job.publish_error
+        try:
+            with transaction.atomic():
+                locked = PublicationJob.objects.select_for_update().get(pk=job.pk)
+                if locked.status not in _PUBLICATION_ERROR_STATUSES:
+                    self.message_user(
+                        request,
+                        "Статус уже изменился; повтор не запущен.",
+                        level=messages.WARNING,
+                    )
+                    return HttpResponseRedirect(monitor_url)
+                locked.status = "approved"
+                locked.publish_error = None
+                locked.approved_at = timezone.now()
+                locked.updated_at = timezone.now()
+                locked.save(update_fields=("status", "publish_error", "approved_at", "updated_at"))
+            from .tasks import dispatch_publication_jobs
+
+            dispatch_publication_jobs([str(job.pk)])
+        except Exception as exc:
+            PublicationJob.objects.filter(pk=job.pk, status="approved").update(
+                status=old_status,
+                publish_error=old_error,
+                updated_at=timezone.now(),
+            )
+            self.message_user(
+                request,
+                f"Не удалось поставить публикацию в очередь: {exc}",
+                level=messages.ERROR,
+            )
+        else:
+            self.message_user(
+                request,
+                f"Повторная публикация {job.platform}:{job.language} поставлена в очередь.",
+                level=messages.SUCCESS,
+            )
+        return HttpResponseRedirect(monitor_url)
 
     def youtube_oauth_view(self, request):
         project_choices = _publication_project_choices()

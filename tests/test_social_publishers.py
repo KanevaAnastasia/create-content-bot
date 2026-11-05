@@ -19,7 +19,9 @@ from app.social_publishers import (
     _youtube_env,
     _vk_access_token,
     _verify_vk_identity,
+    _tiktok_chunk_plan,
     platform_readiness,
+    publish_publication_job,
     refresh_expiring_instagram_tokens,
 )
 from app.vk_oauth import (
@@ -43,6 +45,36 @@ def test_project_scoped_publish_env_never_falls_back_to_global_tokens(monkeypatc
     assert project_env_name("grandma_kitchen", "youtube_refresh_token") == (
         "PUBLISH_GRANDMA_KITCHEN_YOUTUBE_REFRESH_TOKEN"
     )
+
+
+def test_publishing_job_is_not_delivered_twice(monkeypatch) -> None:
+    job_id = uuid.uuid4()
+    job = Mock(id=job_id, status="publishing")
+
+    class FakeSession:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return None
+
+        def scalar(self, _query):
+            return job
+
+    monkeypatch.setattr("app.social_publishers.SessionLocal", FakeSession)
+
+    assert publish_publication_job(job_id) == {
+        "job_id": str(job_id),
+        "status": "publishing",
+    }
+
+
+def test_tiktok_chunk_plan_merges_trailing_bytes_into_final_chunk() -> None:
+    chunk_size, chunk_count = _tiktok_chunk_plan(135 * 1024 * 1024)
+
+    assert chunk_size == 64 * 1024 * 1024
+    assert chunk_count == 2
+    assert 135 * 1024 * 1024 - chunk_size == 71 * 1024 * 1024
 
 
 def test_platform_readiness_reports_project_scoped_missing_keys(monkeypatch) -> None:

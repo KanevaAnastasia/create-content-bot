@@ -64,6 +64,130 @@ def test_description_textarea_rows_expand_for_full_copy() -> None:
     assert int(widget.attrs["rows"]) > 18
 
 
+def test_publication_jobs_are_dispatched_as_independent_tasks(monkeypatch) -> None:
+    from pipeline_admin import tasks
+
+    calls = []
+    monkeypatch.setattr(
+        tasks,
+        "publish_publication_job_task",
+        SimpleNamespace(delay=lambda job_id: calls.append(job_id) or f"task-{job_id}"),
+    )
+
+    results = tasks.dispatch_publication_jobs(["job-a", "job-b", "job-c"])
+
+    assert calls == ["job-a", "job-b", "job-c"]
+    assert results == ["task-job-a", "task-job-b", "task-job-c"]
+
+
+def test_publication_monitor_groups_trial_and_main_jobs(monkeypatch) -> None:
+    root = "11111111-2222-3333-4444-555555555555"
+    jobs = [
+        SimpleNamespace(
+            pk=uuid.uuid4(),
+            bundle_key=f"{root}-trial",
+            platform="instagram",
+            language="ru",
+            status="published",
+            payload_json={"instagram_trial": True},
+            attempt_count=1,
+            external_post_id="trial-media-id",
+            publish_error=None,
+            published_at=datetime.now(timezone.utc),
+        ),
+        SimpleNamespace(
+            pk=uuid.uuid4(),
+            bundle_key=root,
+            platform="instagram",
+            language="ru",
+            status="approved",
+            payload_json={"publish_after_job_id": "previous"},
+            attempt_count=0,
+            external_post_id=None,
+            publish_error="Waiting for previous publication.",
+            published_at=None,
+        ),
+        SimpleNamespace(
+            pk=uuid.uuid4(),
+            bundle_key=root,
+            platform="youtube",
+            language="en",
+            status="failed",
+            payload_json={},
+            attempt_count=1,
+            external_post_id=None,
+            publish_error="API error",
+            published_at=None,
+        ),
+    ]
+
+    class FakeQuerySet:
+        def select_related(self, *_args):
+            return self
+
+        def filter(self, **_kwargs):
+            return self
+
+        def order_by(self, *_args):
+            return self
+
+        def __iter__(self):
+            return iter(jobs)
+
+    monkeypatch.setattr(admin_module.PublicationJob, "objects", FakeQuerySet())
+    request = RequestFactory().get("/admin/pipeline_admin/publicationjob/", {"bundle": root})
+
+    monitor = admin_module._publication_monitor_context(request)
+
+    assert monitor is not None
+    assert monitor["total"] == 3
+    assert monitor["published"] == 1
+    assert monitor["failed"] == 1
+    assert monitor["pending"] is True
+    assert monitor["auto_refresh"] is True
+    assert monitor["rows"][0]["label"] == "Instagram RU · Trial Reel"
+    failed_row = next(row for row in monitor["rows"] if row["status"] == "failed")
+    assert failed_row["retry_url"].endswith(f"/{jobs[2].pk}/retry/")
+
+
+def test_publication_external_url_prefers_saved_permalink() -> None:
+    job = SimpleNamespace(
+        payload_json={"external_post_url": "https://www.instagram.com/reel/example/"},
+        external_post_id="media-id",
+        platform="instagram",
+    )
+
+    assert admin_module._publication_external_url(job) == "https://www.instagram.com/reel/example/"
+
+
+def test_publication_video_previews_are_scoped_per_language(monkeypatch) -> None:
+    ru = SimpleNamespace(id=uuid.uuid4(), language="ru", label="RU final")
+    en = SimpleNamespace(id=uuid.uuid4(), language="en", label="EN final")
+    monkeypatch.setattr(admin_module, "_publication_all_final_artifacts", lambda _run: [ru, en])
+    monkeypatch.setattr(admin_module, "_artifact_media_url", lambda artifact: f"/media/{artifact.id}/")
+
+    previews = upload_admin._publication_video_previews(SimpleNamespace(id=uuid.uuid4()))
+
+    assert previews["ru"] == ({
+        "source": f"artifact:{ru.id}",
+        "url": f"/media/{ru.id}/",
+        "label": "RU final",
+    },)
+    assert previews["en"] == ({
+        "source": f"artifact:{en.id}",
+        "url": f"/media/{en.id}/",
+        "label": "EN final",
+    },)
+
+
+def test_monitor_url_uses_root_bundle_for_trial_job() -> None:
+    jobs = [SimpleNamespace(bundle_key="bundle-123-trial")]
+
+    url = upload_admin._publication_jobs_monitor_url(jobs)
+
+    assert url.endswith("?bundle=bundle-123")
+
+
 def test_custom_upload_form_accepts_one_video_per_language_and_cover() -> None:
     form = PublicationUploadForm(
         data={
