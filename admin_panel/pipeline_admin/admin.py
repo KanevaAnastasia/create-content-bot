@@ -6,6 +6,7 @@ from datetime import timedelta
 import mimetypes
 import os
 from pathlib import Path
+import re
 import subprocess
 import sys
 import threading
@@ -5383,6 +5384,13 @@ def _publication_monitor_context(request) -> dict[str, Any] | None:
                 "attempt_count": int(job.attempt_count or 0),
                 "external_post_id": str(job.external_post_id or ""),
                 "external_url": _publication_external_url(job),
+                "vk_story_results": [
+                    {"url": f"https://vk.com/story{part['id']}", "verified": bool(part.get("verified"))}
+                    for part in payload.get("vk_story_parts", [])
+                    if isinstance(part, dict) and re.fullmatch(r"-\d+_\d+", str(part.get("id") or ""))
+                ] if job.platform == "vk" else [],
+                "vk_stories_enabled": job.platform == "vk" and bool(payload.get("vk_stories")),
+                "vk_wall_verified": job.platform == "vk" and bool(payload.get("vk_wall_post_verified")),
                 "publish_error": str(job.publish_error or ""),
                 "published_at": job.published_at,
                 "change_url": reverse("admin:pipeline_admin_publicationjob_change", args=[job.pk]),

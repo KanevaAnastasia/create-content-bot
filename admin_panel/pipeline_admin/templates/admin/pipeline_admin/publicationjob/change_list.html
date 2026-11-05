@@ -55,8 +55,17 @@
               <td>
                 {% if row.external_post_id %}
                   {% if row.external_url %}<a href="{{ row.external_url }}" target="_blank" rel="noopener">Открыть публикацию</a> · {% endif %}<span class="cf-monitor-id">{{ row.external_post_id }}</span>
-                {% elif row.publish_error %}<span class="cf-monitor-error">{{ row.publish_error }}</span>
                 {% else %}—{% endif %}
+                {% if row.vk_stories_enabled %}
+                  <div>Стена: {% if row.vk_wall_verified %}подтверждена{% else %}не подтверждена{% endif %}</div>
+                  <div>Сториз:
+                    {% for story in row.vk_story_results %}
+                      <a href="{{ story.url }}" target="_blank" rel="noopener">Часть {{ forloop.counter }}</a>
+                      ({% if story.verified %}подтверждена{% else %}проверяется{% endif %})
+                    {% empty %}ещё не опубликованы{% endfor %}
+                  </div>
+                {% endif %}
+                {% if row.publish_error %}<div class="cf-monitor-error">{{ row.publish_error }}</div>{% endif %}
                 {% if row.retry_url %}
                   <form class="cf-retry-form" method="post" action="{{ row.retry_url }}">
                     {% csrf_token %}<button class="cf-retry-button" type="submit">Повторить только эту площадку</button>

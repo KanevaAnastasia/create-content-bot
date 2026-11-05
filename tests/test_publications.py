@@ -275,6 +275,24 @@ def test_queue_publication_bundle_keeps_explicit_source_label(monkeypatch, tmp_p
         engine.dispose()
 
 
+def test_new_vk_jobs_include_stories_without_changing_other_platforms(monkeypatch, tmp_path):
+    engine, Session = _session_factory()
+    try:
+        with Session() as session:
+            session.add(Project(slug='story-test', title='Stories', is_default=True))
+            session.commit()
+            monkeypatch.setenv('PUBLICATION_ARTIFACTS_DIR', str(tmp_path))
+            jobs = queue_publication_bundle(
+                session, project_slug='story-test', recipe='recipe',
+                copy={'vk_ru': 'VK recipe', 'youtube_ru_title': 'Title', 'youtube_ru_description': 'Recipe'},
+                post_production={'renders_by_language': {'ru': {'clean': {'video_b64': base64.b64encode(b'video').decode()}}}},
+                selected_target_keys=['vk:ru', 'youtube:ru'], video_variant='clean',
+            )
+            assert {j.platform: j.payload_json['vk_stories'] for j in jobs} == {'vk': True, 'youtube': False}
+    finally:
+        engine.dispose()
+
+
 def test_queue_publication_bundle_attaches_language_cover(monkeypatch, tmp_path: Path) -> None:
     engine, Session = _session_factory()
     try:

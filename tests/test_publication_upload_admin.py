@@ -149,6 +149,23 @@ def test_publication_monitor_groups_trial_and_main_jobs(monkeypatch) -> None:
     failed_row = next(row for row in monitor["rows"] if row["status"] == "failed")
     assert failed_row["retry_url"].endswith(f"/{jobs[2].pk}/retry/")
 
+    jobs[2].platform = 'vk'
+    jobs[2].language = 'ru'
+    jobs[2].external_post_id = '-123_42'
+    jobs[2].payload_json = {
+        'vk_stories': True, 'vk_wall_post_verified': True,
+        'external_post_url': 'https://vk.com/wall-123_99',
+        'vk_story_parts': [{'id': '-123_7', 'verified': True, 'upload_result': 'private-result'},
+                           {'id': 'javascript:alert(1)', 'verified': False}],
+    }
+    monitor = admin_module._publication_monitor_context(request)
+    row = next(r for r in monitor['rows'] if r['vk_stories_enabled'])
+    assert row['vk_wall_verified']
+    assert row['external_url'] == 'https://vk.com/wall-123_99'
+    assert row['vk_story_results'] == [{'url': 'https://vk.com/story-123_7', 'verified': True}]
+    assert row['publish_error'] == 'API error'
+    assert 'private-result' not in str(row)
+
 
 def test_publication_external_url_prefers_saved_permalink() -> None:
     job = SimpleNamespace(

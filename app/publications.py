@@ -67,7 +67,7 @@ DEFAULT_PUBLICATION_VIDEO_VARIANT = "titled_subtitled_music"
 PUBLICATION_TARGET_LABELS = {
     "youtube:ru": "YouTube Shorts RU",
     "instagram:ru": "Instagram RU",
-    "vk:ru": "VK RU",
+    "vk:ru": "VK RU · стена + сториз",
     "tiktok:ru": "TikTok RU",
     "instagram:en": "Instagram EN",
     "youtube:en": "YouTube Shorts EN",
@@ -488,6 +488,7 @@ def queue_publication_bundle(
                     "video_source_label": source_label or None,
                     "cover_path": cover_paths.get(target.language),
                     "instagram_trial": is_trial,
+                    "vk_stories": target.platform == "vk",
                     "publish_after_job_id": str(predecessor.id) if predecessor is not None else None,
                     "scheduled_at": normalized_scheduled_at.isoformat() if normalized_scheduled_at else None,
                     "direct_api_ready": readiness.ready,

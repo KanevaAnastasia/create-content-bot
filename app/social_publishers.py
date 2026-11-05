@@ -8,6 +8,7 @@ Secrets are strictly project-scoped.  For example, project
 from __future__ import annotations
 
 import json
+import math
 import mimetypes
 import os
 import secrets
@@ -129,7 +130,7 @@ def platform_readiness(project_slug: str, platform: str, language: str) -> Platf
         language=normalized_language,
         ready=supported and not missing,
         missing=tuple(missing),
-        note=("VK · видео + запись на стене сообщества" if normalized_platform == "vk" else "Official direct API")
+        note=("VK · видео + стена + сториз" if normalized_platform == "vk" else "Official direct API")
         if supported and not missing else ("Unsupported platform" if not supported else ""),
     )
 
@@ -910,6 +911,120 @@ def _vk_call(method: str, token: str, api_version: str, **params) -> dict:
     return payload["response"]
 
 
+def _vk_story_files(job: PublicationJob) -> list[Path]:
+    """Keep the whole video, in conservative <15s / <10MB story parts."""
+    from .ai_approval_service import _resolve_ffmpeg, _video_duration_seconds
+
+    source = Path(job.video_path)
+    duration = _video_duration_seconds(source)
+    ffmpeg = _resolve_ffmpeg()
+    if not duration or not math.isfinite(duration) or duration <= 0 or not ffmpeg:
+        raise PublicationDeliveryError("VK Stories: cannot read video duration or find ffmpeg.")
+    directory = source.parent / f"vk-stories-{job.id}"
+    directory.mkdir(exist_ok=True)
+    parts = []
+    for index in range(math.ceil(duration / 14)):
+        destination = directory / f"part-{index + 1:03d}.mp4"
+        temporary = directory / f".{uuid.uuid4().hex}.mp4"
+        try:
+            subprocess.run([
+                ffmpeg, "-hide_banner", "-loglevel", "error", "-y", "-ss", str(index * 14),
+                "-i", str(source), "-t", str(min(14, duration - index * 14)),
+                "-map", "0:v:0", "-map", "0:a:0?",
+                "-vf", "scale=720:1280:force_original_aspect_ratio=decrease:force_divisible_by=2,"
+                       "pad=720:1280:(ow-iw)/2:(oh-ih)/2,setsar=1,fps=30",
+                "-c:v", "libx264", "-preset", "fast", "-pix_fmt", "yuv420p",
+                "-b:v", "2500k", "-maxrate", "3000k", "-bufsize", "6000k",
+                "-c:a", "aac", "-b:a", "128k", "-ar", "44100", "-movflags", "+faststart",
+                str(temporary),
+            ], check=True, capture_output=True, timeout=600)
+            actual_duration = _video_duration_seconds(temporary)
+            if (not temporary.is_file() or not 0 < temporary.stat().st_size <= 10 * 1024**2
+                    or not actual_duration or not 0 < actual_duration <= 15):
+                raise PublicationDeliveryError("VK Stories: encoded part exceeds media limits.")
+            temporary.replace(destination)
+        except (subprocess.SubprocessError, OSError):
+            raise PublicationDeliveryError("VK Stories: video preparation failed.") from None
+        finally:
+            temporary.unlink(missing_ok=True)
+        parts.append(destination)
+    return parts
+
+
+def _publish_vk_stories(job: PublicationJob, token: str, group_id: str, version: str,
+                        persist: Callable[[], None]) -> None:
+    parts = [dict(part) for part in (job.payload_json or {}).get("vk_story_parts", [])]
+
+    def save() -> None:
+        job.payload_json = {**(job.payload_json or {}), "vk_story_parts": [dict(p) for p in parts]}
+        persist()
+
+    if not parts:
+        parts = [{"path": str(path)} for path in _vk_story_files(job)]
+        if not parts:
+            raise PublicationDeliveryError("VK Stories: no video parts were prepared.")
+        save()
+    for part in parts:
+        if part.get("verified"):
+            continue
+        if not part.get("id"):
+            if part.get("save_started_at"):
+                raise PublicationNeedsReview("VK Stories: previous save outcome is unknown; check stories before retrying.")
+            if not part.get("upload_result"):
+                if part.get("upload_started_at"):
+                    raise PublicationNeedsReview("VK Stories: previous upload outcome is unknown; automatic repeat blocked.")
+                path = Path(part["path"])
+                if not path.is_file():
+                    raise PublicationDeliveryError("VK Stories: prepared video part is missing.")
+                server = _vk_call("stories.getVideoUploadServer", token, version,
+                                  group_id=group_id, add_to_news=1)
+                url = str(server.get("upload_url") or "")
+                parsed = urlparse(url)
+                if parsed.scheme != "https" or not parsed.hostname or parsed.username or parsed.password:
+                    raise PublicationDeliveryError("VK Stories: invalid upload URL.")
+                part["upload_started_at"] = datetime.now(timezone.utc).isoformat()
+                save()
+                try:
+                    with path.open("rb") as handle:
+                        response = requests.post(url, files={"video_file": (path.name, handle, "video/mp4")},
+                                                 timeout=DEFAULT_REQUEST_TIMEOUT, allow_redirects=False)
+                    result = response.json()
+                    data = result.get("response") if isinstance(result, dict) else None
+                    upload_result = data.get("upload_result") if isinstance(data, dict) else None
+                    if not response.ok or not isinstance(upload_result, str) or not upload_result:
+                        raise ValueError("Missing upload result")
+                except (requests.RequestException, ValueError):
+                    raise PublicationNeedsReview("VK Stories: upload was not confirmed; check before retrying.") from None
+                part["upload_result"] = upload_result
+                save()
+            part["save_started_at"] = datetime.now(timezone.utc).isoformat()
+            save()
+            # Even an error can be ambiguous after a write; never repeat save blindly.
+            try:
+                data = _vk_call("stories.save", token, version, upload_results=part["upload_result"])
+            except PublicationDeliveryError:
+                raise PublicationNeedsReview("VK Stories: save not confirmed; check stories before retrying.") from None
+            items = data.get("items") or []
+            if (len(items) != 1 or not isinstance(items[0], dict)
+                    or str(items[0].get("owner_id")) != f"-{group_id}"
+                    or not str(items[0].get("id") or "").isdigit()):
+                raise PublicationNeedsReview("VK Stories: unexpected saved story owner/ID; check before retrying.")
+            part["id"] = f"-{group_id}_{items[0]['id']}"
+            part["url"] = f"https://vk.com/story{part['id']}"
+            part.pop("upload_result", None)
+            save()
+        if not str(part["id"]).startswith(f"-{group_id}_"):
+            raise PublicationNeedsReview("VK Stories: saved story belongs to another community.")
+        data = _vk_call("stories.getById", token, version, stories=part["id"])
+        item = next((s for s in data.get("items", [])
+                     if f"{s.get('owner_id')}_{s.get('id')}" == part["id"]), None)
+        if (not item or item.get("type") != "video" or item.get("is_deleted")
+                or item.get("is_expired") or not item.get("video")):
+            raise PublicationNeedsReview("VK Stories: saved story video not verified; retry checks it without reposting.")
+        part["verified"] = True
+        save()
+
+
 def _publish_vk(job: PublicationJob, project_slug: str, persist: Callable[[], None]) -> str:
     language = str(job.language or "ru").upper()
     group_id = project_env(project_slug, f"VK_GROUP_ID_{language}")
@@ -1013,6 +1128,8 @@ def _publish_vk(job: PublicationJob, project_slug: str, persist: Callable[[], No
             or str(post.get("text") or "").replace("\r\n", "\n") != str(job.description or "").replace("\r\n", "\n")):
         raise PublicationNeedsReview("VK wall post exists but its video/text was not verified. Inspect the saved post link; retry only verifies it.")
     save(vk_wall_post_verified=True)
+    if (job.payload_json or {}).get("vk_stories"):
+        _publish_vk_stories(job, wall_token, group_id, api_version, persist)
     return external_id
 
 

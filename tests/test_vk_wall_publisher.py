@@ -80,6 +80,32 @@ def test_upload_wall_and_verification_are_checkpointed(configured, monkeypatch, 
     assert [url.rsplit('/', 1)[-1] for url, _ in calls] == ['groups.getById', 'wall.get']
 
 
+def test_stories_only_for_opted_in_jobs_after_verified_wall(configured, monkeypatch, job):
+    setup_api(monkeypatch, job)
+    story = Mock()
+    monkeypatch.setattr(p, '_publish_vk_stories', story)
+    p._publish_vk(job, 'grandma', lambda: None)
+    story.assert_not_called()
+    job.payload_json = {**job.payload_json, 'vk_stories': True}
+    persist = Mock()
+    p._publish_vk(job, 'grandma', persist)
+    story.assert_called_once_with(job, 'wall-secret', '123', '5.199', persist)
+    assert job.payload_json['vk_wall_post_verified']
+
+
+def test_story_failure_retry_never_repeats_video_or_wall(configured, monkeypatch, job):
+    calls = setup_api(monkeypatch, job)
+    job.payload_json = {'vk_stories': True}
+    story = Mock(side_effect=[p.PublicationDeliveryError('Stories unavailable'), None])
+    monkeypatch.setattr(p, '_publish_vk_stories', story)
+    with pytest.raises(p.PublicationDeliveryError, match='Stories unavailable'):
+        p._publish_vk(job, 'grandma', lambda: None)
+    assert job.payload_json['vk_wall_post_verified']
+    calls.clear()
+    assert p._publish_vk(job, 'grandma', lambda: None) == '-123_42'
+    assert [url.rsplit('/', 1)[-1] for url, _ in calls] == ['groups.getById', 'wall.get']
+
+
 def test_unknown_wall_result_never_reposts(configured, monkeypatch, job):
     def timeout():
         raise requests.Timeout('request body includes secret')
