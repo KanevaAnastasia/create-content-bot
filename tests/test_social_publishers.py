@@ -19,6 +19,7 @@ from app.social_publishers import (
     _vk_access_token,
     _verify_vk_identity,
     platform_readiness,
+    refresh_expiring_instagram_tokens,
 )
 from app.vk_oauth import (
     VKOAuthError,
@@ -102,6 +103,70 @@ def test_instagram_language_token_overrides_legacy(monkeypatch) -> None:
 
     assert _instagram_access_token("grandma_kitchen", "ru") == "russian"
     assert _instagram_access_token("grandma_kitchen", "en") == "english"
+
+
+def test_instagram_language_token_refreshes_near_expiry(monkeypatch) -> None:
+    for key, value in {
+        "INSTAGRAM_ACCESS_TOKEN_EN": "old-english",
+        "INSTAGRAM_ACCESS_TOKEN_EXPIRES_AT_EN": "1001000",
+        "INSTAGRAM_APP_ID_EN": "app-id-en",
+        "INSTAGRAM_APP_SECRET_EN": "app-secret-en",
+    }.items():
+        monkeypatch.setenv(f"PUBLISH_GRANDMA_KITCHEN_{key}", value)
+    monkeypatch.setattr("app.social_publishers.time.time", lambda: 1_000_000)
+    response = Mock(ok=True, status_code=200)
+    response.json.return_value = {"access_token": "new-english", "expires_in": 5_184_000}
+    get = Mock(return_value=response)
+    store = Mock()
+    monkeypatch.setattr("app.social_publishers.requests.get", get)
+    monkeypatch.setattr("app.social_publishers.set_project_secrets", store)
+
+    assert _instagram_access_token("grandma_kitchen", "en") == "new-english"
+    assert get.call_args.kwargs["params"] == {
+        "grant_type": "fb_exchange_token",
+        "client_id": "app-id-en",
+        "client_secret": "app-secret-en",
+        "fb_exchange_token": "old-english",
+    }
+    store.assert_called_once_with(
+        "grandma_kitchen",
+        {
+            "INSTAGRAM_ACCESS_TOKEN_EN": "new-english",
+            "INSTAGRAM_ACCESS_TOKEN_EXPIRES_AT_EN": "6184000",
+        },
+    )
+
+
+def test_instagram_language_token_does_not_refresh_early(monkeypatch) -> None:
+    monkeypatch.setenv("PUBLISH_GRANDMA_KITCHEN_INSTAGRAM_ACCESS_TOKEN_EN", "english")
+    monkeypatch.setenv(
+        "PUBLISH_GRANDMA_KITCHEN_INSTAGRAM_ACCESS_TOKEN_EXPIRES_AT_EN",
+        "7000000",
+    )
+    monkeypatch.setattr("app.social_publishers.time.time", lambda: 1_000_000)
+    get = Mock()
+    monkeypatch.setattr("app.social_publishers.requests.get", get)
+
+    assert _instagram_access_token("grandma_kitchen", "en") == "english"
+    get.assert_not_called()
+
+
+def test_instagram_maintenance_only_checks_scoped_tokens_with_expiry(monkeypatch) -> None:
+    monkeypatch.setenv("PUBLISH_GRANDMA_KITCHEN_INSTAGRAM_ACCESS_TOKEN_EN", "english")
+    monkeypatch.setenv(
+        "PUBLISH_GRANDMA_KITCHEN_INSTAGRAM_ACCESS_TOKEN_EXPIRES_AT_EN",
+        "7000000",
+    )
+    monkeypatch.setenv("PUBLISH_GRANDMA_KITCHEN_INSTAGRAM_ACCESS_TOKEN", "legacy-russian")
+    access_token = Mock(return_value="english")
+    monkeypatch.setattr("app.social_publishers._instagram_access_token", access_token)
+
+    results = refresh_expiring_instagram_tokens(["grandma_kitchen", "discipline"])
+
+    assert results == [
+        {"project": "grandma_kitchen", "language": "en", "status": "valid"}
+    ]
+    access_token.assert_called_once_with("grandma_kitchen", "en")
 
 
 def test_instagram_readiness_accepts_language_token_without_legacy(monkeypatch) -> None:

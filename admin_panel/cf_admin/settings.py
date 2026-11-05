@@ -172,4 +172,8 @@ else:
             "schedule": 60.0,
             "kwargs": {"limit": int(os.getenv("PUBLICATION_WORKER_BATCH_SIZE", "20") or 20)},
         },
+        "refresh-expiring-instagram-tokens": {
+            "task": "pipeline_admin.refresh_expiring_instagram_tokens",
+            "schedule": crontab(hour=3, minute=30),
+        },
     }

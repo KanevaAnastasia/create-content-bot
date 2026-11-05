@@ -5,7 +5,11 @@ from __future__ import annotations
 import uuid
 
 from app.scheduled_generation import process_due_scheduled_generations, process_scheduled_generation_item
-from app.social_publishers import publish_due_publication_jobs, publish_publication_jobs
+from app.social_publishers import (
+    publish_due_publication_jobs,
+    publish_publication_jobs,
+    refresh_expiring_instagram_tokens,
+)
 
 try:
     from cf_admin.celery import app as celery_app
@@ -37,6 +41,10 @@ if celery_app is not None:
     def publish_due_publication_jobs_task(limit: int = 20) -> list[dict]:
         return publish_due_publication_jobs(limit=max(1, int(limit or 20)))
 
+    @celery_app.task(name="pipeline_admin.refresh_expiring_instagram_tokens")
+    def refresh_expiring_instagram_tokens_task() -> list[dict[str, str]]:
+        return refresh_expiring_instagram_tokens()
+
 else:
 
     class _UnavailableTask:
@@ -47,3 +55,4 @@ else:
     process_due_scheduled_generations_task = _UnavailableTask()
     publish_publication_jobs_task = _UnavailableTask()
     publish_due_publication_jobs_task = _UnavailableTask()
+    refresh_expiring_instagram_tokens_task = _UnavailableTask()

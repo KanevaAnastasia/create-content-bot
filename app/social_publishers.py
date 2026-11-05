@@ -22,7 +22,7 @@ import requests
 from sqlalchemy import select
 
 from .db import SessionLocal
-from .models import PublicationJob
+from .models import Project, PublicationJob
 from .publication_config import project_env, project_env_name, shared_env
 from .publish_secret_store import set_project_secrets
 from .publications import (
@@ -36,6 +36,7 @@ from .publications import (
 
 
 DEFAULT_REQUEST_TIMEOUT = (20, 300)
+INSTAGRAM_TOKEN_REFRESH_WINDOW_SECONDS = 7 * 24 * 60 * 60
 SUPPORTED_DIRECT_PLATFORMS = frozenset({"youtube", "instagram", "tiktok", "vk"})
 
 
@@ -208,12 +209,144 @@ def _publish_youtube(job: PublicationJob, project_slug: str) -> str:
     return video_id
 
 
+def _refresh_instagram_access_token(
+    project_slug: str,
+    language: str,
+    access_token: str,
+    *,
+    language_scoped: bool,
+) -> str:
+    lang = str(language or "ru").strip().upper()
+    app_id = (
+        project_env(project_slug, f"INSTAGRAM_APP_ID_{lang}")
+        or project_env(project_slug, "INSTAGRAM_APP_ID")
+    )
+    app_secret = (
+        project_env(project_slug, f"INSTAGRAM_APP_SECRET_{lang}")
+        or project_env(project_slug, "INSTAGRAM_APP_SECRET")
+    )
+    if not app_id or not app_secret:
+        raise PublicationDeliveryError(
+            f"Instagram {lang} token is near expiry, but its app id or app secret is not configured."
+        )
+    version = shared_env("META_GRAPH_API_VERSION", "v25.0")
+    try:
+        response = requests.get(
+            f"https://graph.facebook.com/{version}/oauth/access_token",
+            params={
+                "grant_type": "fb_exchange_token",
+                "client_id": app_id,
+                "client_secret": app_secret,
+                "fb_exchange_token": access_token,
+            },
+            timeout=DEFAULT_REQUEST_TIMEOUT,
+        )
+    except requests.RequestException as exc:
+        raise PublicationDeliveryError(
+            f"Instagram {lang} token refresh request failed ({type(exc).__name__})."
+        ) from exc
+    try:
+        payload = response.json()
+    except Exception as exc:
+        raise PublicationDeliveryError(
+            f"Instagram {lang} token refresh returned invalid JSON ({response.status_code})."
+        ) from exc
+    refreshed_token = str(payload.get("access_token") or "").strip() if isinstance(payload, dict) else ""
+    if not response.ok or not refreshed_token:
+        error = payload.get("error") if isinstance(payload, dict) else None
+        error_code = error.get("code") if isinstance(error, dict) else None
+        raise PublicationDeliveryError(
+            f"Instagram {lang} token refresh failed with HTTP {response.status_code}"
+            f"{f' (code {error_code})' if error_code else ''}."
+        )
+
+    suffix = f"_{lang}" if language_scoped else ""
+    values = {f"INSTAGRAM_ACCESS_TOKEN{suffix}": refreshed_token}
+    expires_in = payload.get("expires_in")
+    try:
+        expires_in_seconds = int(expires_in) if expires_in is not None else 0
+    except (TypeError, ValueError):
+        expires_in_seconds = 0
+    if expires_in_seconds > 0:
+        values[f"INSTAGRAM_ACCESS_TOKEN_EXPIRES_AT{suffix}"] = str(
+            int(time.time()) + expires_in_seconds
+        )
+    set_project_secrets(project_slug, values)
+    return refreshed_token
+
+
 def _instagram_access_token(project_slug: str, language: str) -> str:
     lang = str(language or "ru").strip().upper()
-    return (
-        project_env(project_slug, f"INSTAGRAM_ACCESS_TOKEN_{lang}")
-        or project_env(project_slug, "INSTAGRAM_ACCESS_TOKEN")
+    scoped_token = project_env(project_slug, f"INSTAGRAM_ACCESS_TOKEN_{lang}")
+    language_scoped = bool(scoped_token)
+    access_token = scoped_token or project_env(project_slug, "INSTAGRAM_ACCESS_TOKEN")
+    if not access_token:
+        return ""
+    expiry_key = (
+        f"INSTAGRAM_ACCESS_TOKEN_EXPIRES_AT_{lang}"
+        if language_scoped
+        else "INSTAGRAM_ACCESS_TOKEN_EXPIRES_AT"
     )
+    expires_at_raw = project_env(project_slug, expiry_key)
+    if not expires_at_raw:
+        return access_token
+    try:
+        expires_at = int(expires_at_raw)
+    except ValueError:
+        return access_token
+    if expires_at > int(time.time()) + INSTAGRAM_TOKEN_REFRESH_WINDOW_SECONDS:
+        return access_token
+    return _refresh_instagram_access_token(
+        project_slug,
+        lang,
+        access_token,
+        language_scoped=language_scoped,
+    )
+
+
+def refresh_expiring_instagram_tokens(
+    project_slugs: Iterable[str] | None = None,
+) -> list[dict[str, str]]:
+    """Refresh configured language-scoped Meta tokens before they expire."""
+    if project_slugs is None:
+        with SessionLocal() as db:
+            project_slugs = tuple(
+                db.scalars(select(Project.slug).where(Project.is_active.is_(True))).all()
+            )
+    results: list[dict[str, str]] = []
+    for project_slug in project_slugs:
+        normalized_slug = str(project_slug or "").strip()
+        if not normalized_slug:
+            continue
+        for language in ("ru", "en"):
+            lang = language.upper()
+            token = project_env(normalized_slug, f"INSTAGRAM_ACCESS_TOKEN_{lang}")
+            expires_at = project_env(
+                normalized_slug,
+                f"INSTAGRAM_ACCESS_TOKEN_EXPIRES_AT_{lang}",
+            )
+            if not token or not expires_at:
+                continue
+            try:
+                refreshed = _instagram_access_token(normalized_slug, language)
+            except Exception as exc:
+                results.append(
+                    {
+                        "project": normalized_slug,
+                        "language": language,
+                        "status": "error",
+                        "detail": type(exc).__name__,
+                    }
+                )
+            else:
+                results.append(
+                    {
+                        "project": normalized_slug,
+                        "language": language,
+                        "status": "refreshed" if refreshed != token else "valid",
+                    }
+                )
+    return results
 
 
 def _publish_instagram(job: PublicationJob, project_slug: str) -> str:
