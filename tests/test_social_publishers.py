@@ -12,6 +12,7 @@ from app.publication_media import publication_media_token, publication_media_tok
 from app.models import PublicationJob
 from app.social_publishers import (
     PublicationDeliveryError,
+    _instagram_access_token,
     _publish_instagram,
     _tiktok_access_token,
     _youtube_env,
@@ -89,6 +90,29 @@ def test_instagram_readiness_only_requires_project_credentials(monkeypatch) -> N
     monkeypatch.delenv("PUBLICATION_MEDIA_SIGNING_KEY", raising=False)
 
     readiness = platform_readiness("grandma_kitchen", "instagram", "ru")
+
+    assert readiness.ready is True
+    assert readiness.missing == ()
+
+
+def test_instagram_language_token_overrides_legacy(monkeypatch) -> None:
+    monkeypatch.setenv("PUBLISH_GRANDMA_KITCHEN_INSTAGRAM_ACCESS_TOKEN", "legacy")
+    monkeypatch.setenv("PUBLISH_GRANDMA_KITCHEN_INSTAGRAM_ACCESS_TOKEN_RU", "russian")
+    monkeypatch.setenv("PUBLISH_GRANDMA_KITCHEN_INSTAGRAM_ACCESS_TOKEN_EN", "english")
+
+    assert _instagram_access_token("grandma_kitchen", "ru") == "russian"
+    assert _instagram_access_token("grandma_kitchen", "en") == "english"
+
+
+def test_instagram_readiness_accepts_language_token_without_legacy(monkeypatch) -> None:
+    monkeypatch.delenv("PUBLISH_GRANDMA_KITCHEN_INSTAGRAM_ACCESS_TOKEN", raising=False)
+    monkeypatch.setenv("PUBLISH_GRANDMA_KITCHEN_INSTAGRAM_ACCESS_TOKEN_EN", "english")
+    monkeypatch.setenv(
+        "PUBLISH_GRANDMA_KITCHEN_INSTAGRAM_BUSINESS_ACCOUNT_ID_EN",
+        "english-account",
+    )
+
+    readiness = platform_readiness("grandma_kitchen", "instagram", "en")
 
     assert readiness.ready is True
     assert readiness.missing == ()

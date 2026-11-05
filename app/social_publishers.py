@@ -59,7 +59,6 @@ def _required_keys(platform: str, language: str) -> tuple[str, ...]:
             f"YOUTUBE_CHANNEL_ID_{lang}",
         ),
         "instagram": (
-            "INSTAGRAM_ACCESS_TOKEN",
             f"INSTAGRAM_BUSINESS_ACCOUNT_ID_{lang}",
         ),
         "tiktok": ("TIKTOK_OPEN_ID",),
@@ -80,6 +79,13 @@ def platform_readiness(project_slug: str, platform: str, language: str) -> Platf
                 or project_env(project_slug, key)
             ):
                 missing.append(project_env_name(project_slug, f"{key}_{lang}"))
+    if normalized_platform == "instagram":
+        lang = normalized_language.upper()
+        if not (
+            project_env(project_slug, f"INSTAGRAM_ACCESS_TOKEN_{lang}")
+            or project_env(project_slug, "INSTAGRAM_ACCESS_TOKEN")
+        ):
+            missing.append(project_env_name(project_slug, f"INSTAGRAM_ACCESS_TOKEN_{lang}"))
     if normalized_platform == "tiktok" and not project_env(project_slug, "TIKTOK_ACCESS_TOKEN"):
         for key in ("TIKTOK_CLIENT_KEY", "TIKTOK_CLIENT_SECRET", "TIKTOK_REFRESH_TOKEN"):
             if not project_env(project_slug, key):
@@ -202,10 +208,18 @@ def _publish_youtube(job: PublicationJob, project_slug: str) -> str:
     return video_id
 
 
+def _instagram_access_token(project_slug: str, language: str) -> str:
+    lang = str(language or "ru").strip().upper()
+    return (
+        project_env(project_slug, f"INSTAGRAM_ACCESS_TOKEN_{lang}")
+        or project_env(project_slug, "INSTAGRAM_ACCESS_TOKEN")
+    )
+
+
 def _publish_instagram(job: PublicationJob, project_slug: str) -> str:
     version = shared_env("META_GRAPH_API_VERSION", "v25.0")
     account_id = project_env(project_slug, f"INSTAGRAM_BUSINESS_ACCOUNT_ID_{job.language.upper()}")
-    access_token = project_env(project_slug, "INSTAGRAM_ACCESS_TOKEN")
+    access_token = _instagram_access_token(project_slug, job.language)
     base_url = f"https://graph.facebook.com/{version}"
     video_path = Path(job.video_path)
     if not video_path.is_file():
