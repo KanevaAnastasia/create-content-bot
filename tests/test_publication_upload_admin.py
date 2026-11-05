@@ -394,6 +394,7 @@ def test_standalone_upload_page_is_available_from_admin(monkeypatch) -> None:
     assert "Опубликовать выбранное" in html
     assert "Сгенерировать все разные описания" in html
     assert "отдельное уникальное описание Trial Reel" in html
+    assert "requestAnimationFrame(()=>grow(trialCopy))" in html
 
 
 def test_standalone_upload_generates_platform_and_trial_copy_separately(monkeypatch) -> None:

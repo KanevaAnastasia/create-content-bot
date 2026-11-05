@@ -41,6 +41,7 @@
   .cf-trial-panel { display:grid; gap:10px; padding:13px; border:1px solid color-mix(in srgb,#7c3aed 40%,var(--border-color)); border-radius:11px; background:color-mix(in srgb,var(--body-bg) 94%,#7c3aed 6%); }
   .cf-trial-toggle { display:grid; grid-template-columns:20px 1fr; gap:9px; align-items:start; cursor:pointer; }
   .cf-trial-toggle input { width:18px; height:18px; margin-top:2px; }
+  .cf-trial-copy { min-width:0; }
   .cf-trial-copy[hidden] { display:none; }
   .cf-target-fields .errorlist, .cf-file-row .errorlist { margin:4px 0; }
   .cf-submit-bar { position:sticky; bottom:0; z-index:20; display:flex; justify-content:space-between; gap:15px; align-items:center; padding:16px 18px; margin-top:20px; border:1px solid var(--border-color); border-radius:15px 15px 0 0; background:color-mix(in srgb,var(--body-bg) 94%,transparent); backdrop-filter:blur(14px); box-shadow:0 -10px 35px rgba(15,23,42,.1); }
@@ -162,9 +163,18 @@
     if(!box)return;
     const panel=box.closest('.cf-trial-panel');
     const copy=panel&&panel.querySelector('.cf-trial-copy');
-    if(copy)copy.hidden=!box.checked;
+    if(copy){
+      copy.hidden=!box.checked;
+      const trialCopy=copy.querySelector('textarea');
+      if(box.checked&&trialCopy)requestAnimationFrame(()=>grow(trialCopy));
+    }
   }
-  function syncTarget(card){const checked=card.querySelector('input[name="target_keys"]').checked;card.classList.toggle('is-off',!checked);card.querySelectorAll('.cf-target-fields textarea,.cf-target-fields input').forEach(el=>el.disabled=!checked);}
+  function syncTarget(card){
+    const checked=card.querySelector('input[name="target_keys"]').checked;
+    card.classList.toggle('is-off',!checked);
+    card.querySelectorAll('.cf-target-fields textarea,.cf-target-fields input').forEach(el=>el.disabled=!checked);
+    if(checked)requestAnimationFrame(()=>card.querySelectorAll('.cf-upload-textarea').forEach(grow));
+  }
   document.querySelectorAll('.cf-target').forEach(card=>{const box=card.querySelector('input[name="target_keys"]');box.addEventListener('change',()=>syncTarget(card));syncTarget(card);});
   function syncUpload(lang){const selected=form.querySelector('input[name="video_source_'+lang+'"]:checked');const row=form.querySelector('.cf-video-upload[data-language="'+lang+'"]');if(row)row.style.display=selected&&selected.value==='upload'?'grid':'none';}
   ['ru','en'].forEach(lang=>{form.querySelectorAll('input[name="video_source_'+lang+'"]').forEach(el=>el.addEventListener('change',()=>syncUpload(lang)));syncUpload(lang);});
