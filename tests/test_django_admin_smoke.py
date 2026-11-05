@@ -1713,6 +1713,7 @@ def test_django_generation_admin_shows_final_videos_panel(monkeypatch):
     assert "final_titled_subtitled_music" in html
     assert "Синхронизировать и пересобрать субтитры" in html
     assert "Первая сборка всегда остаётся бесплатной" in html
+    assert html.index("Build/rebuild this video") < html.index("Синхронизировать и пересобрать субтитры")
     assert "open latest video" in html
     assert "open folder in Finder" in html
     assert "file:///tmp" in html

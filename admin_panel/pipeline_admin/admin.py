@@ -3755,8 +3755,6 @@ def _final_videos_panel(run: GenerationRun) -> str:
         parts.append("</div>")
         return mark_safe("".join(str(part) for part in parts))
 
-    parts.append(_subtitle_sync_panel(run, languages))
-
     parts.append(
         '<table style="width:100%;border-collapse:collapse;margin:0 0 14px;">'
         "<thead><tr>"
@@ -3873,7 +3871,9 @@ def _final_videos_panel(run: GenerationRun) -> str:
                     links,
                 )
             )
-    parts.append("</tbody></table></div>")
+    parts.append("</tbody></table>")
+    parts.append(_subtitle_sync_panel(run, languages))
+    parts.append("</div>")
     return mark_safe("".join(str(part) for part in parts))
 
 
