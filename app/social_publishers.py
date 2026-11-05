@@ -859,7 +859,9 @@ def _publish_vk(job: PublicationJob, project_slug: str) -> str:
     upload_url = str(data.get("upload_url") or "")
     if not upload_url:
         raise PublicationDeliveryError("VK video.save did not return upload_url.")
-    video_path = Path(job.video_path)
+    # VK's upload host may time out while receiving the 4K/30+ Mbps master.
+    # Reuse the cached 1080x1920 H.264 delivery copy prepared for Reels.
+    video_path = _instagram_compatible_video(Path(job.video_path))
     with video_path.open("rb") as handle:
         upload_response = requests.post(
             upload_url,
