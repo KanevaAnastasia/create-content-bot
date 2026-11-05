@@ -405,6 +405,7 @@ def test_instagram_normalization_is_cached(monkeypatch, tmp_path: Path) -> None:
 
 
 def test_vk_readiness_requires_expected_user_identity(monkeypatch) -> None:
+    monkeypatch.setenv("PUBLISH_GRANDMA_KITCHEN_VK_COMMUNITY_TOKEN_RU", "community")
     monkeypatch.setenv("PUBLISH_GRANDMA_KITCHEN_VK_ACCESS_TOKEN", "token")
     monkeypatch.setenv("PUBLISH_GRANDMA_KITCHEN_VK_GROUP_ID_RU", "238619215")
     monkeypatch.setenv("PUBLISH_GRANDMA_KITCHEN_VK_USER_ID", "")
@@ -416,8 +417,9 @@ def test_vk_readiness_requires_expected_user_identity(monkeypatch) -> None:
     assert readiness.missing == ("PUBLISH_GRANDMA_KITCHEN_VK_USER_ID",)
 
 
-def test_vk_upload_survives_separate_wall_post_denial(monkeypatch, tmp_path: Path) -> None:
+def test_vk_wall_denial_is_not_success_and_retry_reuses_video(monkeypatch, tmp_path: Path) -> None:
     monkeypatch.setenv("PUBLISH_GRANDMA_KITCHEN_VK_GROUP_ID_RU", "238619215")
+    monkeypatch.setenv("PUBLISH_GRANDMA_KITCHEN_VK_COMMUNITY_TOKEN_RU", "community")
     video_path = tmp_path / "vk.mp4"
     video_path.write_bytes(b"video")
     job = PublicationJob(
@@ -431,6 +433,7 @@ def test_vk_upload_survives_separate_wall_post_denial(monkeypatch, tmp_path: Pat
     )
     monkeypatch.setattr("app.social_publishers._vk_access_token", lambda _project: "token")
     monkeypatch.setattr("app.social_publishers._verify_vk_identity", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr("app.social_publishers._instagram_compatible_video", lambda p: p)
 
     def response(payload: dict) -> Mock:
         result = Mock(ok=True, status_code=200)
@@ -441,7 +444,12 @@ def test_vk_upload_survives_separate_wall_post_denial(monkeypatch, tmp_path: Pat
 
     def post(url: str, **kwargs):
         calls.append((url, kwargs))
+        if url.endswith("/groups.getById"):
+            assert kwargs["data"]["access_token"] == "community"
+            assert "group_id" not in kwargs["data"]
+            return response({"response": {"groups": [{"id": 238619215}]}})
         if url.endswith("/video.save"):
+            assert kwargs["data"]["access_token"] == "token"
             assert kwargs["data"]["wallpost"] == 0
             return response({
                 "response": {
@@ -453,13 +461,24 @@ def test_vk_upload_survives_separate_wall_post_denial(monkeypatch, tmp_path: Pat
         if url.startswith("https://upload.vk.example/"):
             return response({"owner_id": -238619215, "video_id": 42})
         assert url.endswith("/wall.post")
+        assert kwargs["data"]["access_token"] == "community"
+        assert kwargs["data"]["guid"] == f"content-fabric-wall-{job.id}"
         return response({"error": {"error_code": 15, "error_msg": "Access denied"}})
 
     monkeypatch.setattr("app.social_publishers.requests.post", post)
 
-    assert _publish_vk(job, "grandma_kitchen") == "-238619215_42"
+    persist = Mock()
+    with pytest.raises(PublicationDeliveryError, match="Access denied"):
+        _publish_vk(job, "grandma_kitchen", persist)
     assert job.payload_json["external_post_url"] == "https://vk.com/video-238619215_42"
     assert "VK wall.post: Access denied" in job.payload_json["vk_wall_post_error"]
+    assert job.external_post_id == "-238619215_42"
+    assert job.payload_json["vk_wall_create_started_at"] is None
+    assert persist.call_count >= 4
+    calls.clear()
+    with pytest.raises(PublicationDeliveryError, match="Access denied"):
+        _publish_vk(job, "grandma_kitchen", persist)
+    assert [url.rsplit('/', 1)[-1] for url, _ in calls] == ["groups.getById", "wall.post"]
 
 
 def test_vk_readiness_accepts_refresh_credentials_without_static_token(monkeypatch) -> None:
@@ -471,6 +490,7 @@ def test_vk_readiness_accepts_refresh_credentials_without_static_token(monkeypat
         "VK_REDIRECT_URI": "http://localhost/callback",
         "VK_USER_ID": "1114556285",
         "VK_GROUP_ID_RU": "238619215",
+        "VK_COMMUNITY_TOKEN_RU": "community",
     }.items():
         monkeypatch.setenv(f"PUBLISH_GRANDMA_KITCHEN_{key}", value)
 

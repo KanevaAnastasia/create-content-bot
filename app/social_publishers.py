@@ -17,7 +17,7 @@ import uuid
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any, Iterable
+from typing import Any, Callable, Iterable
 from urllib.parse import urlparse
 
 import requests
@@ -45,6 +45,10 @@ SUPPORTED_DIRECT_PLATFORMS = frozenset({"youtube", "instagram", "tiktok", "vk"})
 
 class PublicationDeliveryError(RuntimeError):
     """A platform rejected or could not complete a publication request."""
+
+
+class PublicationNeedsReview(PublicationDeliveryError):
+    """A remote write may have succeeded; do not create another copy."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -104,6 +108,9 @@ def platform_readiness(project_slug: str, platform: str, language: str) -> Platf
             if not project_env(project_slug, key):
                 missing.append(project_env_name(project_slug, key))
     if normalized_platform == "vk":
+        wall_key = f"VK_COMMUNITY_TOKEN_{normalized_language.upper()}"
+        if not project_env(project_slug, wall_key):
+            missing.append(project_env_name(project_slug, wall_key))
         if not (
             project_env(project_slug, "VK_USER_ID")
             or project_env(project_slug, "VK_USER_SCREEN_NAME")
@@ -122,7 +129,8 @@ def platform_readiness(project_slug: str, platform: str, language: str) -> Platf
         language=normalized_language,
         ready=supported and not missing,
         missing=tuple(missing),
-        note="Official direct API" if supported and not missing else ("Unsupported platform" if not supported else ""),
+        note=("VK · видео + запись на стене сообщества" if normalized_platform == "vk" else "Official direct API")
+        if supported and not missing else ("Unsupported platform" if not supported else ""),
     )
 
 
@@ -883,79 +891,128 @@ def _verify_vk_identity(project_slug: str, *, token: str, group_id: str, api_ver
         )
 
 
-def _publish_vk(job: PublicationJob, project_slug: str) -> str:
-    token = _vk_access_token(project_slug)
-    language = str(job.language or "ru").upper()
-    group_id = project_env(project_slug, f"VK_GROUP_ID_{language}")
-    api_version = shared_env("VK_API_VERSION", "5.199")
-    _verify_vk_identity(project_slug, token=token, group_id=group_id, api_version=api_version)
-    save_response = requests.post(
-        "https://api.vk.ru/method/video.save",
-        data={
-            "access_token": token,
-            "v": api_version,
-            "group_id": group_id,
-            "name": str(job.title or job.description or "Video")[:128],
-            "description": str(job.description or "")[:5000],
-            # Upload first.  VK may allow an administrator to upload video while
-            # rejecting video.save(wallpost=1) with code 15.  Posting to the wall
-            # is therefore a separate best-effort operation below.
-            "wallpost": 0,
-        },
-        timeout=DEFAULT_REQUEST_TIMEOUT,
-    )
-    save_payload = _response_json(save_response, "VK video.save")
-    _vk_error_message(save_payload, "VK video.save")
-    data = save_payload.get("response") if isinstance(save_payload.get("response"), dict) else {}
-    upload_url = str(data.get("upload_url") or "")
-    if not upload_url:
-        raise PublicationDeliveryError("VK video.save did not return upload_url.")
-    # VK's upload host may time out while receiving the 4K/30+ Mbps master.
-    # Reuse the cached 1080x1920 H.264 delivery copy prepared for Reels.
-    video_path = _instagram_compatible_video(Path(job.video_path))
-    with video_path.open("rb") as handle:
-        upload_response = requests.post(
-            upload_url,
-            files={"video_file": (video_path.name, handle, mimetypes.guess_type(video_path.name)[0] or "video/mp4")},
+def _vk_call(method: str, token: str, api_version: str, **params) -> dict:
+    # Never include VK's request_params (which contain access_token) in errors.
+    try:
+        response = requests.post(
+            f"https://api.vk.ru/method/{method}",
+            data={"access_token": token, "v": api_version, **params},
             timeout=DEFAULT_REQUEST_TIMEOUT,
         )
-    upload_payload = _response_json(upload_response, "VK video upload")
-    video_id = upload_payload.get("video_id") or data.get("video_id")
-    owner_id = upload_payload.get("owner_id") or data.get("owner_id")
-    external_id = (
-        f"{owner_id}_{video_id}"
-        if owner_id is not None and video_id is not None
-        else str(video_id or "uploaded")
-    )
-    if owner_id is not None and video_id is not None:
-        payload = {**(job.payload_json or {})}
-        payload["external_post_url"] = f"https://vk.com/video{external_id}"
+        payload = response.json()
+    except (requests.RequestException, ValueError):
+        raise PublicationDeliveryError(f"VK {method}: response unavailable.") from None
+    if not isinstance(payload, dict):
+        raise PublicationDeliveryError(f"VK {method}: invalid response.")
+    _vk_error_message(payload, f"VK {method}")
+    if not response.ok or not isinstance(payload.get("response"), dict):
+        raise PublicationDeliveryError(f"VK {method}: incomplete response.")
+    return payload["response"]
+
+
+def _publish_vk(job: PublicationJob, project_slug: str, persist: Callable[[], None]) -> str:
+    language = str(job.language or "ru").upper()
+    group_id = project_env(project_slug, f"VK_GROUP_ID_{language}")
+    if not group_id.isdigit() or int(group_id) <= 0:
+        raise PublicationDeliveryError("VK community ID is invalid.")
+    wall_token = project_env(project_slug, f"VK_COMMUNITY_TOKEN_{language}")
+    if not wall_token:
+        raise PublicationDeliveryError("VK community wall token is not configured.")
+    api_version = shared_env("VK_API_VERSION", "5.199")
+    payload = job.payload_json or {}
+    if payload.get("vk_group_id") and str(payload["vk_group_id"]) != group_id:
+        raise PublicationNeedsReview("VK community changed after submission; retry blocked.")
+    # With a community token, no group_id means the token's own community.
+    groups = _vk_call("groups.getById", wall_token, api_version).get("groups", [])
+    if len(groups) != 1 or str(groups[0].get("id")) != group_id:
+        raise PublicationDeliveryError("VK wall token belongs to a different community.")
+
+    def save(**values) -> None:
+        job.payload_json = {**(job.payload_json or {}), **values}
+        persist()
+
+    save(vk_group_id=group_id)
+    external_id = str(payload.get("vk_video_external_id") or job.external_post_id or "")
+    if external_id:
+        owner, _, video = external_id.partition("_")
+        if owner != f"-{group_id}" or not video.isdigit():
+            raise PublicationNeedsReview("Saved VK video does not belong to the configured community.")
+    else:
+        if payload.get("vk_upload_started_at"):
+            raise PublicationNeedsReview("Previous VK upload outcome is unknown. Check the saved video ID before retrying.")
+        token = _vk_access_token(project_slug)
+        _verify_vk_identity(project_slug, token=token, group_id=group_id, api_version=api_version)
+        video_path = _instagram_compatible_video(Path(job.video_path))
+        # Persist before the first remote write: an interruption must not re-upload.
+        save(vk_upload_started_at=datetime.now(timezone.utc).isoformat())
         try:
-            wall_response = requests.post(
-                "https://api.vk.ru/method/wall.post",
-                data={
-                    "access_token": token,
-                    "v": api_version,
-                    "owner_id": f"-{group_id}",
-                    "from_group": 1,
-                    "message": str(job.description or "")[:5000],
-                    "attachments": f"video{external_id}",
-                },
-                timeout=DEFAULT_REQUEST_TIMEOUT,
+            data = _vk_call(
+                "video.save", token, api_version, group_id=group_id,
+                name=str(job.title or job.description or "Video")[:128],
+                description=str(job.description or ""), wallpost=0,
             )
-            wall_payload = _response_json(wall_response, "VK wall.post")
-            _vk_error_message(wall_payload, "VK wall.post")
-            wall_data = wall_payload.get("response") if isinstance(wall_payload.get("response"), dict) else {}
-            post_id = wall_data.get("post_id")
-            if post_id is not None:
-                payload["vk_wall_post_id"] = str(post_id)
-                payload["external_post_url"] = f"https://vk.com/wall-{group_id}_{post_id}"
-        except PublicationDeliveryError as exc:
-            # The video is already safely published in the community.  Surface
-            # the partial wall-post failure without turning the upload into a
-            # misleading full failure.
-            payload["vk_wall_post_error"] = str(exc)
-        job.payload_json = payload
+            upload_url = str(data.get("upload_url") or "")
+            parsed = urlparse(upload_url)
+            if parsed.scheme != "https" or not parsed.hostname or parsed.username or parsed.password:
+                raise PublicationDeliveryError("VK returned an invalid upload URL.")
+            if str(data.get("owner_id")) != f"-{group_id}" or not str(data.get("video_id", "")).isdigit():
+                raise PublicationDeliveryError("VK returned an unexpected upload owner/video ID.")
+            save(vk_allocated_video_id=f"{data['owner_id']}_{data['video_id']}")
+            with video_path.open("rb") as handle:
+                response = requests.post(upload_url, files={"video_file": (video_path.name, handle, "video/mp4")},
+                                         timeout=DEFAULT_REQUEST_TIMEOUT, allow_redirects=False)
+            uploaded = response.json()
+            if not response.ok or not isinstance(uploaded, dict) or uploaded.get("error"):
+                raise PublicationDeliveryError("VK video upload was not confirmed.")
+            if str(uploaded.get("owner_id")) != f"-{group_id}" or str(uploaded.get("video_id")) != str(data["video_id"]):
+                raise PublicationDeliveryError("VK upload returned an unexpected video ID.")
+        except (PublicationDeliveryError, requests.RequestException, ValueError):
+            raise PublicationNeedsReview("VK upload not confirmed. Check the saved upload stage; automatic re-upload is blocked.") from None
+        external_id = f"{data['owner_id']}_{data['video_id']}"
+        job.external_post_id = external_id
+        save(vk_video_external_id=external_id, external_post_url=f"https://vk.com/video{external_id}")
+
+    payload = job.payload_json or {}
+    post_id = payload.get("vk_wall_post_id")
+    if not post_id:
+        if payload.get("vk_wall_create_started_at"):
+            raise PublicationNeedsReview("VK wall request outcome is unknown. Check the wall before retrying; video will not be uploaded again.")
+        guid = f"content-fabric-wall-{job.id}"
+        save(vk_wall_publish_guid=guid, vk_wall_create_started_at=datetime.now(timezone.utc).isoformat())
+        try:
+            # Decode separately to distinguish an explicit rejection from an unknown outcome.
+            response = requests.post("https://api.vk.ru/method/wall.post", data={
+                "access_token": wall_token, "v": api_version, "owner_id": f"-{group_id}",
+                "from_group": 1, "message": str(job.description or ""),
+                "attachments": f"video{external_id}", "guid": guid,
+            }, timeout=DEFAULT_REQUEST_TIMEOUT)
+            result = response.json()
+        except (requests.RequestException, ValueError):
+            raise PublicationNeedsReview("VK wall response unavailable. Check the wall before retrying.") from None
+        if isinstance(result, dict) and isinstance(result.get("error"), dict):
+            save(vk_wall_create_started_at=None)
+            try:
+                _vk_error_message(result, "VK wall.post")
+            except PublicationDeliveryError as exc:
+                save(vk_wall_post_error=str(exc))
+                raise
+        post_id = (result.get("response") or {}).get("post_id") if isinstance(result, dict) and isinstance(result.get("response"), dict) else None
+        if not response.ok or not str(post_id or "").isdigit():
+            raise PublicationNeedsReview("VK wall post ID missing. Check the wall before retrying.")
+        save(vk_wall_post_id=str(post_id), external_post_url=f"https://vk.com/wall-{group_id}_{post_id}",
+             vk_wall_post_error=None)
+
+    # A returned post ID is not sufficient: VK can silently drop attachments.
+    token = _vk_access_token(project_slug)
+    wall = _vk_call("wall.get", token, api_version, owner_id=f"-{group_id}", count=100, filter="owner")
+    post = next((p for p in wall.get("items", []) if str(p.get("id")) == str(post_id)), None)
+    videos = [(a.get("video") or {}) for a in (post or {}).get("attachments", []) if a.get("type") == "video"]
+    if (not post or str(post.get("owner_id")) != f"-{group_id}"
+            or str(post.get("from_id")) != f"-{group_id}"
+            or not any(f"{v.get('owner_id')}_{v.get('id')}" == external_id for v in videos)
+            or str(post.get("text") or "").replace("\r\n", "\n") != str(job.description or "").replace("\r\n", "\n")):
+        raise PublicationNeedsReview("VK wall post exists but its video/text was not verified. Inspect the saved post link; retry only verifies it.")
+    save(vk_wall_post_verified=True)
     return external_id
 
 
@@ -1020,7 +1077,8 @@ def publish_publication_job(job_id: str | uuid.UUID) -> dict[str, Any]:
             session.commit()
             return {"job_id": str(job.id), "status": job.status, "error": job.publish_error}
         video_path = Path(job.video_path)
-        if not video_path.is_file():
+        vk_uploaded = job.platform == "vk" and bool((job.payload_json or {}).get("vk_video_external_id") or job.external_post_id)
+        if not video_path.is_file() and not vk_uploaded:
             job.status = PUBLICATION_STATUS_FAILED
             job.publish_error = f"Video file not found: {video_path}"
             session.commit()
@@ -1037,14 +1095,15 @@ def publish_publication_job(job_id: str | uuid.UUID) -> dict[str, Any]:
         try:
             if job.platform == "tiktok" and job.payload_json.get("tiktok_provider") == "zernio":
                 external_post_id = zernio_publisher.publish(job, job.project.slug, session.commit)
+            elif job.platform == "vk":
+                external_post_id = _publish_vk(job, job.project.slug, session.commit)
             else:
                 external_post_id = {
                     "youtube": _publish_youtube,
                     "instagram": _publish_instagram,
                     "tiktok": _publish_tiktok,
-                    "vk": _publish_vk,
                 }[job.platform](job, job.project.slug)
-        except (zernio_publisher.ZernioPending, zernio_publisher.ZernioNeedsReview) as exc:
+        except (PublicationNeedsReview, zernio_publisher.ZernioPending, zernio_publisher.ZernioNeedsReview) as exc:
             job.status = (PUBLICATION_STATUS_PUBLISHING if isinstance(exc, zernio_publisher.ZernioPending)
                           else PUBLICATION_STATUS_NEEDS_MANUAL_ACTION)
             job.publish_error = str(exc)[:4000]
