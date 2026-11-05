@@ -197,6 +197,11 @@ def test_stat_command_reports_guest_generation_usage_to_owner(monkeypatch):
         },
     )
     monkeypatch.setattr(bot_app, "_admin_keyboard_for_current_session", lambda *_args: current_markup)
+    monkeypatch.setattr(
+        bot_app,
+        "speech_alignment_monthly_usage",
+        lambda: {"used_seconds": 40.0, "remaining_seconds": 3560.0},
+    )
 
     class Message:
         async def reply_text(self, text, reply_markup=None):
@@ -204,7 +209,14 @@ def test_stat_command_reports_guest_generation_usage_to_owner(monkeypatch):
 
     asyncio.run(bot_app.quiet_mode_stats_command(SimpleNamespace(message=Message()), SimpleNamespace()))
 
-    assert sent == [("Гостевой режим: использовано 4 из 15 генераций сегодня.", current_markup)]
+    assert sent == [
+        (
+            "Гостевой режим: использовано 4 из 15 генераций сегодня.\n"
+            "Точная синхронизация субтитров: осталось 59 мин 20 сек из 60 мин в этом месяце "
+            "(использовано 0 мин 40 сек по учёту бота).",
+            current_markup,
+        )
+    ]
 
 
 def test_stat_command_is_silent_for_non_owner(monkeypatch):

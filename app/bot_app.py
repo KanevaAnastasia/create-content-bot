@@ -57,6 +57,7 @@ from .quiet_mode import (
 )
 from .state import SESSIONS
 from .session_store import recover_interrupted_guest_syntax_sessions
+from .speech_usage import format_speech_alignment_remaining, speech_alignment_monthly_usage
 
 logger = logging.getLogger("bot")
 _QUIET_MODE_MIDNIGHT_TASK_KEY = "quiet_mode_midnight_task"
@@ -173,6 +174,12 @@ async def quiet_mode_stats_command(update, context) -> None:
         target = int(status["generation_target"])
         text = f"Гостевой режим: использовано {count} из {target} генераций сегодня."
         enabled = bool(status["quiet_mode_enabled"])
+    try:
+        speech_status = speech_alignment_monthly_usage()
+        text += "\n" + format_speech_alignment_remaining(speech_status)
+    except Exception:
+        logger.exception("speech_alignment.usage_stats_failed")
+        text += "\nТочная синхронизация субтитров: статистика временно недоступна."
     await message.reply_text(
         text,
         reply_markup=_admin_keyboard_for_current_session(update, identity, enabled),
@@ -430,7 +437,7 @@ def build_application(token: str) -> Application:
     app.add_handler(CommandHandler("start_quiet", quiet_mode_command))
     app.add_handler(CommandHandler("stop_quiet", quiet_mode_command))
     app.add_handler(CommandHandler("status_quiet", quiet_mode_command))
-    app.add_handler(CommandHandler("stat", quiet_mode_stats_command))
+    app.add_handler(CommandHandler(["stat", "stats"], quiet_mode_stats_command))
     app.add_handler(CommandHandler("check_env", check_env))
     app.add_handler(CommandHandler("cancel", cancel))
     app.add_handler(CommandHandler("reset", cancel))

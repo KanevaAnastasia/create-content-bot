@@ -27,7 +27,6 @@ from django.utils.dateparse import parse_datetime
 from django.utils.html import escape, format_html
 from django.utils.safestring import mark_safe
 
-from app.ai_approval_service import transcribe_video_audio
 from app.artifact_store import persist_post_production_artifacts
 from app.db import SessionLocal
 from app.final_video_delivery import (
@@ -90,6 +89,11 @@ from app.scene_media_store import (
     merge_missing_scene_text_from_approved_candidate,
     rebuild_production_session,
     rebuild_scene_db_ids_for_session,
+)
+from app.speech_alignment import (
+    GOOGLE_CLOUD_SPEECH_TIMING_PROVIDER,
+    GOOGLE_CLOUD_SPEECH_TIMING_SOURCE,
+    align_video_speech,
 )
 from app.scene_media_candidates import resolve_latest_approved_scene_video_for_final_build
 from app.series_store import advance_series_after_successful_render
@@ -176,6 +180,8 @@ FINAL_VIDEO_VARIANT_LABELS = {
 FINAL_VIDEO_ARTIFACT_TYPES = tuple(f"final_{key}" for key in FINAL_VIDEO_VARIANT_LABELS)
 FINAL_BUILD_STATUS_ARTIFACT_TYPE = "final_build_status"
 FINAL_BUILD_ACTIVE_STATUSES = {"pending", "running"}
+SPEECH_ALIGNMENT_USAGE_ARTIFACT_TYPE = "speech_alignment_usage"
+SPEECH_ALIGNMENT_USAGE_URI_PREFIX = "admin://speech-alignment-usage/"
 TITLE_STYLE_OVERRIDE_ARTIFACT_TYPE = "title_overlay_style_override"
 TITLE_STYLE_OVERRIDE_URI_PREFIX = "admin://title-overlay-style/"
 TITLE_OVERRIDE_ARTIFACT_TYPE = "title_overlay_override"
@@ -910,11 +916,49 @@ def _candidate_speech_snapshot(candidate: dict[str, Any], language: str) -> tupl
     qa = qa_map.get(lang) if isinstance(qa_map, dict) else None
     if not isinstance(qa, dict):
         return "", []
+    if qa.get("timing_provider") != GOOGLE_CLOUD_SPEECH_TIMING_PROVIDER:
+        return "", []
     recognized_text = str(qa.get("recognized_text") or "").strip()
     word_timings = qa.get("word_timings")
     if not recognized_text or not isinstance(word_timings, list) or not word_timings:
         return "", []
     return recognized_text, [dict(item) for item in word_timings if isinstance(item, dict)]
+
+
+def _record_speech_alignment_usage(
+    run: GenerationRun | None,
+    candidate: dict[str, Any],
+    language: str,
+    *,
+    billed_duration_sec: float,
+) -> None:
+    if run is None:
+        return
+    candidate_id = str(candidate.get("candidate_id") or "").strip()
+    lang = str(language or "").strip().lower()
+    if not candidate_id or not lang:
+        return
+    uri = f"{SPEECH_ALIGNMENT_USAGE_URI_PREFIX}{candidate_id}/{lang}"
+    if GenerationArtifact.objects.filter(
+        run_id=run.id,
+        artifact_type=SPEECH_ALIGNMENT_USAGE_ARTIFACT_TYPE,
+        uri=uri,
+    ).exists():
+        return
+    GenerationArtifact.objects.create(
+        run=run,
+        artifact_type=SPEECH_ALIGNMENT_USAGE_ARTIFACT_TYPE,
+        label=f"Speech-to-Text subtitle alignment {lang}: {candidate_id}",
+        uri=uri,
+        language=lang,
+        mime_type="application/json",
+        payload_json={
+            "candidate_id": candidate_id,
+            "language": lang,
+            "provider": GOOGLE_CLOUD_SPEECH_TIMING_PROVIDER,
+            "billed_duration_sec": max(0.0, float(billed_duration_sec or 0.0)),
+        },
+    )
 
 
 def _store_candidate_speech_snapshot(
@@ -928,7 +972,7 @@ def _store_candidate_speech_snapshot(
     lang = str(language or "").strip().lower()
     cues = build_word_synced_subtitle_cues(
         word_timings,
-        timing_source="video_audio_transcription",
+        timing_source=GOOGLE_CLOUD_SPEECH_TIMING_SOURCE,
     )
     if not recognized_text.strip() or not cues:
         raise RuntimeError(
@@ -963,6 +1007,8 @@ def _store_candidate_speech_snapshot(
 def _ensure_approved_candidate_word_timings(
     scenes: list[dict[str, Any]],
     language: str,
+    *,
+    run: GenerationRun | None = None,
 ) -> None:
     """Backfill exact spoken-word timings for approved legacy video candidates."""
     lang = str(language or "").strip().lower()
@@ -1008,30 +1054,15 @@ def _ensure_approved_candidate_word_timings(
             raise RuntimeError(
                 f"Approved video candidate {candidate.get('candidate_id') or '?'} has no readable local media."
             )
-        result = None
-        for _attempt in range(5):
-            candidate_result = transcribe_video_audio(
-                video_path=video_path,
-                expected_speech_text=expected_text,
-                duration=scene.get("duration_sec"),
-            )
-            result = candidate_result
-            if candidate_result.recognized_text.strip() and build_word_synced_subtitle_cues(
-                candidate_result.word_timings,
-                timing_source="video_audio_transcription",
-            ):
-                break
-        if result is None:
-            raise RuntimeError(
-                f"Speech transcription did not run for candidate {candidate.get('candidate_id') or '?'} ({lang})."
-            )
+        result = align_video_speech(video_path=video_path, language=lang)
         qa_payload = {
-            "status": result.status,
-            "match_score": result.match_score,
+            "status": "ALIGNED",
             "recognized_text": result.recognized_text,
             "word_timings": list(result.word_timings),
-            "missing_words": list(result.missing_words),
-            "extra_words": list(result.extra_words),
+            "confidence": result.confidence,
+            "timing_provider": result.provider,
+            "billed_duration_sec": max(0.0, float(getattr(result, "billed_duration_sec", 0.0) or 0.0)),
+            "aligned_at": timezone.now().isoformat(),
         }
         _store_candidate_speech_snapshot(
             candidate,
@@ -1039,6 +1070,12 @@ def _ensure_approved_candidate_word_timings(
             recognized_text=result.recognized_text,
             word_timings=list(result.word_timings),
             qa_payload=qa_payload,
+        )
+        _record_speech_alignment_usage(
+            run,
+            candidate,
+            lang,
+            billed_duration_sec=qa_payload["billed_duration_sec"],
         )
 
 
@@ -1603,6 +1640,7 @@ def _build_final_videos_for_run(
     source_clean_video_path: str | Path | None = None,
     source_upscaled_video_path: str | Path | None = None,
     source_subtitled_video_path: str | Path | None = None,
+    synchronize_subtitles: bool = False,
 ) -> dict[str, Any]:
     chat_session, session, production = _run_session_for_admin_render(run)
     scenes = production.get("json_plan") if isinstance(production, dict) else None
@@ -1678,13 +1716,19 @@ def _build_final_videos_for_run(
             and bool(narration_audio_path_by_lang)
         )
     )
-    needs_spoken_subtitles = requested_variants is None or bool(
-        {"subtitled_music", "titled_subtitled_music"}.intersection(requested_variants)
-    )
-    if needs_spoken_subtitles and not is_story_workflow:
+    # Speech-to-Text is opt-in and may only run while the subtitle master itself
+    # is being created. A title-only rebuild must always reuse saved subtitle
+    # timings and must never consume recognition quota.
+    builds_subtitle_master = requested_variants is None or "subtitled_music" in requested_variants
+    if synchronize_subtitles and builds_subtitle_master and not is_story_workflow:
         subtitle_languages = [target_language] if target_language else production_languages_for_scenes(scenes)
         for subtitle_language in subtitle_languages:
-            _ensure_approved_candidate_word_timings(scenes, subtitle_language)
+            normalized_subtitle_language = str(subtitle_language or "").strip().lower()
+            _ensure_approved_candidate_word_timings(
+                scenes,
+                normalized_subtitle_language,
+                run=run,
+            )
     if (
         source_subtitled_video_path
         and target_language
@@ -2227,6 +2271,10 @@ def _run_final_build_batch(
             plan_variants = normalized_variants
         delivered_all = True
         current_statuses = _latest_final_build_statuses(run.id)
+        synchronize_subtitles = any(
+            bool(current_statuses.get((language, variant), {}).get("synchronize_subtitles"))
+            for variant in normalized_variants
+        )
         for variant in plan_variants:
             current = current_statuses.get((language, variant), {})
             attempts = int(current.get("attempt_count") or 0) + 1
@@ -2291,6 +2339,7 @@ def _run_final_build_batch(
                 source_clean_video_path=source_clean_video_path,
                 source_upscaled_video_path=source_upscaled_video_path,
                 source_subtitled_video_path=source_subtitled_video_path,
+                synchronize_subtitles=(synchronize_subtitles and active_variant == "subtitled_music"),
             )
             artifact = _latest_final_artifact(run.id, language, active_variant)
             latest_paths[active_variant] = _render_video_path_from_post(post, language, active_variant) or latest_variant_path(active_variant)
@@ -2376,7 +2425,14 @@ def _run_final_build_job(run_id: str, language: str, variant: str, *, worker_id:
     _run_final_build_batch(run_id, language, [variant], worker_id=worker_id)
 
 
-def _queue_final_build(run: GenerationRun, *, language: str, variant: str, kick_worker: bool = True) -> str:
+def _queue_final_build(
+    run: GenerationRun,
+    *,
+    language: str,
+    variant: str,
+    kick_worker: bool = True,
+    synchronize_subtitles: bool = False,
+) -> str:
     normalized_language = str(language or "").strip().lower()
     normalized_variant = str(variant or "").strip()
     if not normalized_language:
@@ -2394,6 +2450,7 @@ def _queue_final_build(run: GenerationRun, *, language: str, variant: str, kick_
         language=normalized_language,
         variant=normalized_variant,
         status="pending",
+        extra_payload={"synchronize_subtitles": bool(synchronize_subtitles)},
     )
     try:
         GenerationRun.objects.filter(id=run.id).update(status="final_render_pending", is_active=True)
@@ -3492,6 +3549,108 @@ def _final_build_url(run: GenerationRun, language: str, variant: str) -> str:
         return f"/admin/pipeline_admin/generationrun/{run.pk}/queue-final/{language}/{variant}/"
 
 
+def _subtitle_sync_url(run: GenerationRun) -> str:
+    try:
+        return reverse("admin:pipeline_admin_generationrun_sync_subtitles", args=[run.pk])
+    except NoReverseMatch:
+        return f"/admin/pipeline_admin/generationrun/{run.pk}/sync-subtitles/"
+
+
+def _story_alignment_counts_for_run(run: GenerationRun) -> tuple[int, int]:
+    try:
+        rows = GenerationArtifact.objects.filter(
+            run_id=run.id,
+            artifact_type="story_narration_audio",
+        )
+        total = 0
+        aligned = 0
+        seen_languages: set[str] = set()
+        for row in rows.order_by("-created_at", "-id"):
+            language = str(row.language or "ru").strip().lower() or "ru"
+            if language in seen_languages:
+                continue
+            seen_languages.add(language)
+            total += 1
+            payload = row.payload_json if isinstance(row.payload_json, dict) else {}
+            alignment = payload.get("alignment")
+            if isinstance(alignment, dict) and alignment.get("characters"):
+                aligned += 1
+        return total, aligned
+    except Exception:
+        return 0, 0
+
+
+def _subtitle_sync_panel(run: GenerationRun, languages: list[str]) -> str:
+    story_total, story_aligned = _story_alignment_counts_for_run(run)
+    if str(getattr(run, "workflow_type", "") or "").strip().lower() == "story" or story_total:
+        if story_total and story_aligned == story_total:
+            detail = "Точные тайминги ElevenLabs сохранены вместе с озвучкой; Speech-to-Text не используется."
+        elif story_total:
+            detail = (
+                "Это старая история без сохранённой разметки ElevenLabs; используется прежний оценочный тайминг. "
+                "Speech-to-Text автоматически не вызывается."
+            )
+        else:
+            detail = "История использует тайминги ElevenLabs; Speech-to-Text автоматически не вызывается."
+        return format_html(
+            '<div style="margin:0 0 14px;padding:10px 12px;border:1px solid var(--border-color);border-radius:6px;">'
+            '<strong>Синхронизация субтитров</strong><div style="margin-top:4px;color:var(--body-quiet-color);">{}</div></div>',
+            detail,
+        )
+    if not languages:
+        return ""
+    run_key = str(run.pk)
+    checkbox_name = f"cf-subtitle-sync-{run_key}"
+    status_id = f"cf-subtitle-sync-status-{run_key}"
+    button_id = f"cf-subtitle-sync-button-{run_key}"
+    checkbox_html = "".join(
+        str(
+            format_html(
+                '<label style="display:inline-flex;align-items:center;gap:5px;margin-right:14px;">'
+                '<input type="checkbox" name="{}" value="{}"> <code>{}</code></label>',
+                checkbox_name,
+                language,
+                language,
+            )
+        )
+        for language in languages
+    )
+    return format_html(
+        '<div style="margin:0 0 14px;padding:10px 12px;border:1px solid var(--border-color);border-radius:6px;">'
+        '<strong>Точная синхронизация субтитров — только по запросу</strong>'
+        '<div style="margin:6px 0;">{}</div>'
+        '<button type="button" class="button" id="{}">Синхронизировать и пересобрать субтитры</button>'
+        '<span id="{}" style="margin-left:8px;color:var(--body-quiet-color);"></span>'
+        '<div style="margin-top:6px;color:var(--body-quiet-color);font-size:12px;">'
+        'Первая сборка всегда остаётся бесплатной. Платное распознавание запускается только этой кнопкой, '
+        'только для выбранных языков и только при пересборке subtitled/music. Сохранённые тайминги повторно не оплачиваются.'
+        '</div></div>'
+        '<script>(function(){{'
+        'const button=document.getElementById("{}");const status=document.getElementById("{}");'
+        'if(!button||button.dataset.bound==="1")return;button.dataset.bound="1";'
+        'function csrf(){{const field=document.querySelector("input[name=csrfmiddlewaretoken]");'
+        'if(field&&field.value)return field.value;const match=document.cookie.match(/(?:^|; )csrftoken=([^;]+)/);'
+        'return match?decodeURIComponent(match[1]):"";}}'
+        'button.addEventListener("click",function(){{const selected=Array.from(document.querySelectorAll("input[name=\\"{}\\"]:checked"));'
+        'if(!selected.length){{status.textContent="Выберите хотя бы один язык.";return;}}'
+        'const body=new URLSearchParams();selected.forEach(function(item){{body.append("languages",item.value);}});'
+        'button.disabled=true;status.textContent="Ставлю точную пересборку в очередь...";'
+        'fetch("{}",{{method:"POST",headers:{{"X-CSRFToken":csrf()}},body:body}})'
+        '.then(function(response){{return response.json().then(function(payload){{return {{ok:response.ok,payload:payload}};}});}})'
+        '.then(function(result){{if(!result.ok||!result.payload.ok)throw new Error(result.payload.error||"Ошибка");'
+        'status.textContent=result.payload.message;}})'
+        '.catch(function(error){{status.textContent=error.message||"Ошибка";}})'
+        '.finally(function(){{button.disabled=false;}});}});}})();</script>',
+        mark_safe(checkbox_html),
+        button_id,
+        status_id,
+        button_id,
+        status_id,
+        checkbox_name,
+        _subtitle_sync_url(run),
+    )
+
+
 def _status_badge_html(status: str, message: str = "") -> str:
     normalized = str(status or "").strip().lower()
     palette = {
@@ -3595,6 +3754,8 @@ def _final_videos_panel(run: GenerationRun) -> str:
         )
         parts.append("</div>")
         return mark_safe("".join(str(part) for part in parts))
+
+    parts.append(_subtitle_sync_panel(run, languages))
 
     parts.append(
         '<table style="width:100%;border-collapse:collapse;margin:0 0 14px;">'
@@ -4323,6 +4484,11 @@ class GenerationRunAdmin(admin.ModelAdmin):
                 name="pipeline_admin_generationrun_queue_final",
             ),
             path(
+                "<path:object_id>/sync-subtitles/",
+                self.admin_site.admin_view(self.sync_subtitles_view),
+                name="pipeline_admin_generationrun_sync_subtitles",
+            ),
+            path(
                 "<path:object_id>/queue-publications/",
                 self.admin_site.admin_view(self.queue_publications_view),
                 name="pipeline_admin_generationrun_queue_publications",
@@ -4394,6 +4560,59 @@ class GenerationRunAdmin(admin.ModelAdmin):
                 level=messages.SUCCESS,
             )
         return HttpResponseRedirect(reverse("admin:pipeline_admin_generationrun_change", args=[run.pk]))
+
+    def sync_subtitles_view(self, request, object_id):
+        if request.method != "POST":
+            return JsonResponse({"ok": False, "error": "POST required."}, status=405)
+        run = self.get_object(request, object_id)
+        if run is None:
+            raise Http404("Generation run not found.")
+        artifacts = _final_artifacts_for_run(run.id)
+        statuses = _latest_final_build_statuses(run.id)
+        available_languages = set(_final_target_languages_for_run(run, artifacts, statuses))
+        requested_languages = {
+            str(item).strip().lower()
+            for item in request.POST.getlist("languages")
+            if str(item).strip()
+        }
+        languages = sorted(requested_languages & available_languages)
+        if not languages:
+            return JsonResponse(
+                {"ok": False, "error": "Выберите хотя бы один доступный язык."},
+                status=400,
+            )
+        story_total, _story_aligned = _story_alignment_counts_for_run(run)
+        if str(getattr(run, "workflow_type", "") or "").strip().lower() == "story" or story_total:
+            return JsonResponse(
+                {"ok": False, "error": "Для режима «История» используются сохранённые тайминги ElevenLabs."},
+                status=400,
+            )
+        queued = 0
+        for language in languages:
+            for variant in ("subtitled_music", "titled_subtitled_music"):
+                status = _queue_final_build(
+                    run,
+                    language=language,
+                    variant=variant,
+                    kick_worker=False,
+                    synchronize_subtitles=True,
+                )
+                if status == "pending":
+                    queued += 1
+        if queued:
+            _kick_final_build_worker(run.id)
+        return JsonResponse(
+            {
+                "ok": True,
+                "languages": languages,
+                "queued": queued,
+                "message": (
+                    f"Точная пересборка поставлена в очередь: {', '.join(languages)}."
+                    if queued
+                    else "Для выбранных языков сборка уже выполняется."
+                ),
+            }
+        )
 
     def queue_publications_view(self, request, object_id):
         run = self.get_object(request, object_id)

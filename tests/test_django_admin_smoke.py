@@ -1431,36 +1431,26 @@ def test_django_admin_backfills_actual_spoken_words_for_approved_candidate(monke
             return 1
 
     monkeypatch.setattr(admin_module.SceneVideoCandidate.objects, "filter", lambda **_kwargs: _Rows())
-    transcription_calls = []
+    alignment_calls = []
 
-    def fake_transcribe_video_audio(**kwargs):
-        transcription_calls.append(kwargs)
-        if len(transcription_calls) == 1:
-            return SimpleNamespace(
-                status="HUMAN_REVIEW",
-                match_score=0.0,
-                recognized_text="",
-                word_timings=[],
-                missing_words=[],
-                extra_words=[],
-            )
+    def fake_align_video_speech(**kwargs):
+        alignment_calls.append(kwargs)
         return SimpleNamespace(
-            status="REGENERATE_VIDEO",
-            match_score=0.25,
             recognized_text="Фактически произнесено здесь.",
             word_timings=[
                 {"word": "Фактически", "start_sec": 0.7, "end_sec": 1.2},
                 {"word": "произнесено", "start_sec": 1.2, "end_sec": 1.8},
                 {"word": "здесь.", "start_sec": 1.8, "end_sec": 2.2},
             ],
-            missing_words=["Старый"],
-            extra_words=["Фактически"],
+            confidence=0.91,
+            billed_duration_sec=3.0,
+            provider="google_cloud_speech_v1",
         )
 
     monkeypatch.setattr(
         admin_module,
-        "transcribe_video_audio",
-        fake_transcribe_video_audio,
+        "align_video_speech",
+        fake_align_video_speech,
     )
 
     admin_module._ensure_approved_candidate_word_timings(scenes, "ru")
@@ -1469,10 +1459,12 @@ def test_django_admin_backfills_actual_spoken_words_for_approved_candidate(monke
     cues = candidate["speech_cues_by_lang"]["ru"]
     assert cues[-1]["text"] == "Фактически произнесено здесь."
     assert all(cue["word_synced"] is True for cue in cues)
-    assert all(cue["story_timing_source"] == "video_audio_transcription" for cue in cues)
+    assert all(cue["story_timing_source"] == "google_cloud_speech_word_offsets" for cue in cues)
     assert captured["speech_by_lang"]["ru"] == "Фактически произнесено здесь."
-    assert captured["video_speech_qa_by_lang"]["ru"]["match_score"] == 0.25
-    assert len(transcription_calls) == 2
+    assert captured["video_speech_qa_by_lang"]["ru"]["confidence"] == 0.91
+    assert captured["video_speech_qa_by_lang"]["ru"]["billed_duration_sec"] == 3.0
+    assert captured["video_speech_qa_by_lang"]["ru"]["timing_provider"] == "google_cloud_speech_v1"
+    assert alignment_calls == [{"video_path": video_path, "language": "ru"}]
 
 
 def test_django_admin_does_not_transcribe_guest_candidates(monkeypatch):
@@ -1488,7 +1480,7 @@ def test_django_admin_does_not_transcribe_guest_candidates(monkeypatch):
 
     monkeypatch.setattr(
         admin_module,
-        "transcribe_video_audio",
+        "align_video_speech",
         lambda **_kwargs: (_ for _ in ()).throw(AssertionError("guest audio must not be transcribed")),
     )
 
@@ -1719,6 +1711,8 @@ def test_django_generation_admin_shows_final_videos_panel(monkeypatch):
     assert "title/subtitled/music" in html
     assert "render exploded" in html
     assert "final_titled_subtitled_music" in html
+    assert "Синхронизировать и пересобрать субтитры" in html
+    assert "Первая сборка всегда остаётся бесплатной" in html
     assert "open latest video" in html
     assert "open folder in Finder" in html
     assert "file:///tmp" in html
@@ -1911,6 +1905,54 @@ def test_django_generation_admin_queue_requeues_stale_running_status(monkeypatch
 
     assert status == "pending"
     assert calls[-1]["status"] == "pending"
+    assert calls[-1]["extra_payload"] == {"synchronize_subtitles": False}
+    assert kicks == [run_id]
+
+
+def test_django_generation_admin_sync_subtitles_queues_only_selected_languages(monkeypatch):
+    admin_dir = Path(__file__).resolve().parents[1] / "admin_panel"
+    sys.path.insert(0, str(admin_dir))
+    os.environ.setdefault("DJANGO_SETTINGS_MODULE", "cf_admin.settings")
+
+    import django
+
+    django.setup()
+
+    import pipeline_admin.admin as admin_module
+    from pipeline_admin.admin import GenerationRunAdmin
+
+    run_id = uuid.uuid4()
+    run = SimpleNamespace(id=run_id, pk=run_id, workflow_type="")
+    queue_calls = []
+    kicks = []
+
+    class PostData:
+        @staticmethod
+        def getlist(_key):
+            return ["ru", "de"]
+
+    request = SimpleNamespace(method="POST", POST=PostData())
+    modeladmin = SimpleNamespace(get_object=lambda _request, _object_id: run)
+    monkeypatch.setattr(admin_module, "_final_artifacts_for_run", lambda _run_id: [])
+    monkeypatch.setattr(admin_module, "_latest_final_build_statuses", lambda _run_id: {})
+    monkeypatch.setattr(admin_module, "_final_target_languages_for_run", lambda *_args: ["ru", "en"])
+    monkeypatch.setattr(admin_module, "_story_alignment_counts_for_run", lambda _run: (0, 0))
+
+    def fake_queue(_run, **kwargs):
+        queue_calls.append(kwargs)
+        return "pending"
+
+    monkeypatch.setattr(admin_module, "_queue_final_build", fake_queue)
+    monkeypatch.setattr(admin_module, "_kick_final_build_worker", lambda value: kicks.append(value) or True)
+
+    response = GenerationRunAdmin.sync_subtitles_view(modeladmin, request, str(run_id))
+    payload = json.loads(response.content)
+
+    assert response.status_code == 200
+    assert payload["languages"] == ["ru"]
+    assert [call["variant"] for call in queue_calls] == ["subtitled_music", "titled_subtitled_music"]
+    assert all(call["language"] == "ru" for call in queue_calls)
+    assert all(call["synchronize_subtitles"] is True for call in queue_calls)
     assert kicks == [run_id]
 
 
@@ -2072,12 +2114,20 @@ def test_django_admin_titled_only_build_uses_subtitled_source_fast_path(monkeypa
         lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("full build should not run")),
     )
     monkeypatch.setattr(admin_module, "persist_post_production_artifacts", lambda _session, _post: None)
+    monkeypatch.setattr(
+        admin_module,
+        "_ensure_approved_candidate_word_timings",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("title-only build must never call Speech-to-Text")
+        ),
+    )
 
     out = admin_module._build_final_videos_for_run(
         RunStub(id=run_id, human_title=""),
         target_language="ru",
         target_variants=["titled_subtitled_music"],
         source_subtitled_video_path=Path("/tmp/source_subtitled.mp4"),
+        synchronize_subtitles=True,
     )
 
     assert out["renders_by_language"]["ru"]["titled_subtitled_music"]["video_path"] == "/tmp/titled.mp4"
@@ -2090,6 +2140,99 @@ def test_django_admin_titled_only_build_uses_subtitled_source_fast_path(monkeypa
     assert production["overlay_title_style"]["title_color"] == "#1a2b3c"
     assert "pending_overlay_title_style" not in session
     assert "pending_overlay_title_style" not in production
+
+
+def test_django_admin_first_subtitle_build_does_not_call_speech_to_text(monkeypatch):
+    admin_dir = Path(__file__).resolve().parents[1] / "admin_panel"
+    sys.path.insert(0, str(admin_dir))
+    os.environ.setdefault("DJANGO_SETTINGS_MODULE", "cf_admin.settings")
+
+    import django
+
+    django.setup()
+
+    import pipeline_admin.admin as admin_module
+
+    production = {
+        "json_plan": [{"scene": 1, "duration_sec": 8, "text": "scene"}],
+        "overlay_title_by_lang": {"ru": "Борщ"},
+    }
+    session = {"production": production}
+
+    class RunStub(SimpleNamespace):
+        def save(self, **_kwargs):
+            pass
+
+    monkeypatch.setattr(admin_module, "_run_session_for_admin_render", lambda _run: (None, session, production))
+    monkeypatch.setattr(admin_module, "_admin_final_build_scenes_from_page", lambda _run, scenes: scenes)
+    monkeypatch.setattr(
+        admin_module,
+        "_ensure_approved_candidate_word_timings",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("default subtitle build must remain free")
+        ),
+    )
+    monkeypatch.setattr(
+        admin_module,
+        "build_subtitled_post_production_from_upscaled_master",
+        lambda *_args, **_kwargs: {"renders_by_language": {"ru": {"subtitled_music": {}}}},
+    )
+    monkeypatch.setattr(admin_module, "persist_post_production_artifacts", lambda *_args, **_kwargs: None)
+
+    admin_module._build_final_videos_for_run(
+        RunStub(id=uuid.uuid4(), human_title="", workflow_type=""),
+        target_language="ru",
+        target_variants=["subtitled_music"],
+        source_upscaled_video_path=Path("/tmp/upscaled.mp4"),
+    )
+
+
+def test_django_admin_opt_in_subtitle_rebuild_aligns_only_requested_language(monkeypatch):
+    admin_dir = Path(__file__).resolve().parents[1] / "admin_panel"
+    sys.path.insert(0, str(admin_dir))
+    os.environ.setdefault("DJANGO_SETTINGS_MODULE", "cf_admin.settings")
+
+    import django
+
+    django.setup()
+
+    import pipeline_admin.admin as admin_module
+
+    production = {
+        "json_plan": [{"scene": 1, "duration_sec": 8, "text": "scene"}],
+        "overlay_title_by_lang": {"ru": "Борщ"},
+    }
+    session = {"production": production}
+    calls = []
+
+    class RunStub(SimpleNamespace):
+        def save(self, **_kwargs):
+            pass
+
+    run = RunStub(id=uuid.uuid4(), human_title="", workflow_type="")
+    monkeypatch.setattr(admin_module, "_run_session_for_admin_render", lambda _run: (None, session, production))
+    monkeypatch.setattr(admin_module, "_admin_final_build_scenes_from_page", lambda _run, scenes: scenes)
+    monkeypatch.setattr(
+        admin_module,
+        "_ensure_approved_candidate_word_timings",
+        lambda scenes, language, *, run=None: calls.append((scenes, language, run)),
+    )
+    monkeypatch.setattr(
+        admin_module,
+        "build_subtitled_post_production_from_upscaled_master",
+        lambda *_args, **_kwargs: {"renders_by_language": {"ru": {"subtitled_music": {}}}},
+    )
+    monkeypatch.setattr(admin_module, "persist_post_production_artifacts", lambda *_args, **_kwargs: None)
+
+    admin_module._build_final_videos_for_run(
+        run,
+        target_language="ru",
+        target_variants=["subtitled_music"],
+        source_upscaled_video_path=Path("/tmp/upscaled.mp4"),
+        synchronize_subtitles=True,
+    )
+
+    assert calls == [(production["json_plan"], "ru", run)]
 
 
 def test_django_admin_subtitled_reuse_rejects_stale_scene_video_fingerprint(monkeypatch, tmp_path):

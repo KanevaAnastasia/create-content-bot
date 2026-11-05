@@ -1553,6 +1553,7 @@ def _store_ai_video_speech_qa(scene: dict, language: str, result: AIApprovalResu
         "word_timings": list(result.speech_word_timings),
         "missing_words": list(result.speech_missing_words),
         "extra_words": list(result.speech_extra_words),
+        "timing_provider": "gemini_multimodal_approximate",
     }
     candidate["video_speech_qa_by_lang"] = qa_map
     if result.speech_recognized_text.strip():
