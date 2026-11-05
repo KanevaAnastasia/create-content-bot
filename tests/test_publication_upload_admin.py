@@ -169,6 +169,24 @@ def test_trial_description_retries_when_generator_copies_normal_text(monkeypatch
     assert "Перепиши его полностью" in calls[1]
 
 
+def test_trial_description_draft_is_saved_without_syntx(monkeypatch) -> None:
+    created = []
+    monkeypatch.setattr(
+        upload_admin.GenerationArtifact,
+        "objects",
+        SimpleNamespace(create=lambda **kwargs: created.append(kwargs)),
+    )
+    run_id = uuid.uuid4()
+
+    upload_admin._save_instagram_ru_trial_draft(
+        SimpleNamespace(id=run_id),
+        "Пробное описание\n\nСделано с помощью @syntx_ai\n\n#пробное",
+    )
+
+    assert created[0]["artifact_type"] == upload_admin.PUBLICATION_TRIAL_COPY_DRAFT_ARTIFACT_TYPE
+    assert created[0]["payload_json"]["description"] == "Пробное описание\n\n#пробное"
+
+
 def test_freshest_copy_ignores_trial_job_and_preserves_other_platform_copy(monkeypatch) -> None:
     run_id = uuid.uuid4()
 

@@ -12,6 +12,7 @@ from django.contrib import admin, messages
 from django.http import Http404, HttpResponseRedirect
 from django.template.response import TemplateResponse
 from django.urls import reverse
+from django.utils import timezone
 from django.utils.html import escape
 from django.utils.safestring import mark_safe
 
@@ -32,6 +33,7 @@ from .models import ChatSession, GenerationArtifact, GenerationRun, Project, Pro
 
 
 MAX_COVER_BYTES = 50 * 1024 * 1024
+PUBLICATION_TRIAL_COPY_DRAFT_ARTIFACT_TYPE = "publication_trial_copy_draft"
 TARGET_ICONS = {
     "youtube": "▶",
     "instagram": "◎",
@@ -470,6 +472,22 @@ def _freshest_publication_copy_from_run(run: GenerationRun) -> dict[str, str]:
 
 
 def _latest_instagram_ru_trial_description(run: GenerationRun) -> str:
+    candidates: list[tuple[float, str]] = []
+    try:
+        draft = (
+            GenerationArtifact.objects.filter(
+                run_id=run.id,
+                artifact_type=PUBLICATION_TRIAL_COPY_DRAFT_ARTIFACT_TYPE,
+            )
+            .order_by("-created_at")
+            .first()
+        )
+        payload = draft.payload_json if draft is not None and isinstance(draft.payload_json, dict) else {}
+        description = strip_instagram_ru_attribution(str(payload.get("description") or ""))
+        if description:
+            candidates.append((_copy_timestamp(draft.created_at), description))
+    except Exception:
+        pass
     try:
         for job in PublicationJob.objects.order_by("-created_at")[:500]:
             payload = job.payload_json if isinstance(job.payload_json, dict) else {}
@@ -479,10 +497,30 @@ def _latest_instagram_ru_trial_description(run: GenerationRun) -> str:
                 and str(job.platform or "").lower() == "instagram"
                 and str(job.language or "").lower() == "ru"
             ):
-                return strip_instagram_ru_attribution(str(job.description or ""))
+                description = strip_instagram_ru_attribution(str(job.description or ""))
+                if description:
+                    candidates.append((_copy_timestamp(job.created_at), description))
+                break
     except Exception:
         pass
-    return ""
+    return max(candidates, key=lambda item: item[0])[1] if candidates else ""
+
+
+def _save_instagram_ru_trial_draft(run: GenerationRun, description: str) -> None:
+    clean = strip_instagram_ru_attribution(description)
+    if not clean:
+        return
+    GenerationArtifact.objects.create(
+        run_id=run.id,
+        scene_id=None,
+        artifact_type=PUBLICATION_TRIAL_COPY_DRAFT_ARTIFACT_TYPE,
+        label="Instagram RU Trial copy draft",
+        uri=f"db://generation_runs/{run.id}/publication_copy/instagram_ru_trial",
+        language="ru",
+        mime_type="application/json",
+        payload_json={"description": clean},
+        created_at=timezone.now(),
+    )
 
 
 def _generate_instagram_ru_trial_description(
@@ -709,6 +747,7 @@ def generation_upload_view(self, request, object_id):
                 normal_copy=copy_payload,
                 feedback=feedback,
             )
+            _save_instagram_ru_trial_draft(run, trial_description)
             legacy._save_publication_copy_draft(
                 run,
                 copy_payload=copy_payload,
@@ -761,6 +800,10 @@ def generation_upload_view(self, request, object_id):
         )
     if request.method == "POST" and "generate_descriptions" not in request.POST and form.is_valid():
         try:
+            _save_instagram_ru_trial_draft(
+                run,
+                str(form.cleaned_data.get("instagram_ru_trial_description") or ""),
+            )
             legacy._save_publication_copy_draft(
                 run,
                 copy_payload=form.copy_payload(),
