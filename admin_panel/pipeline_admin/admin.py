@@ -3756,13 +3756,13 @@ def _final_videos_panel(run: GenerationRun) -> str:
         return mark_safe("".join(str(part) for part in parts))
 
     parts.append(
-        '<table style="width:100%;border-collapse:collapse;margin:0 0 14px;">'
+        '<table style="width:100%;table-layout:fixed;overflow-wrap:anywhere;border-collapse:collapse;margin:0 0 14px;">'
+        '<colgroup><col style="width:8%"><col style="width:20%"><col style="width:34%"><col style="width:38%"></colgroup>'
         "<thead><tr>"
         '<th style="text-align:left;border-bottom:1px solid var(--border-color);padding:6px;">Language</th>'
         '<th style="text-align:left;border-bottom:1px solid var(--border-color);padding:6px;">Variant</th>'
         '<th style="text-align:left;border-bottom:1px solid var(--border-color);padding:6px;">Latest video</th>'
         '<th style="text-align:left;border-bottom:1px solid var(--border-color);padding:6px;">Build status</th>'
-        '<th style="text-align:left;border-bottom:1px solid var(--border-color);padding:6px;">Links</th>'
         "</tr></thead><tbody>"
     )
     for language in languages:
@@ -3837,7 +3837,7 @@ def _final_videos_panel(run: GenerationRun) -> str:
                 )
                 if active
                 else format_html(
-                    '<a class="button" href="{}">Build/rebuild this video</a>',
+                    '<a class="button" style="display:inline-block;white-space:normal;" href="{}">Build/rebuild this video</a>',
                     _final_build_url(run, language, variant),
                 )
             )
@@ -3854,12 +3854,13 @@ def _final_videos_panel(run: GenerationRun) -> str:
                 format_html(
                     '<tr><td style="vertical-align:top;padding:8px;border-bottom:1px solid var(--border-color);"><code>{}</code></td>'
                     '<td style="vertical-align:top;padding:8px;border-bottom:1px solid var(--border-color);">{}</td>'
-                    '<td style="vertical-align:top;padding:8px;border-bottom:1px solid var(--border-color);">{}</td>'
-                    '<td style="vertical-align:top;padding:8px;border-bottom:1px solid var(--border-color);">{} {} {}</td>'
-                    '<td style="vertical-align:top;padding:8px;border-bottom:1px solid var(--border-color);">{}</td></tr>',
+                    '<td style="vertical-align:top;padding:8px;border-bottom:1px solid var(--border-color);">{}'
+                    '<div aria-label="Links" style="margin-top:10px;">{}</div></td>'
+                    '<td style="vertical-align:top;padding:8px;border-bottom:1px solid var(--border-color);">{} {} {}</td></tr>',
                     language,
                     label,
                     latest_video,
+                    links,
                     _status_badge_html(display_state, status_message),
                     str(status.get("updated_at") or "")[:19],
                     format_html(
@@ -3868,7 +3869,6 @@ def _final_videos_panel(run: GenerationRun) -> str:
                         status_detail,
                         visible_message,
                     ),
-                    links,
                 )
             )
     parts.append("</tbody></table>")
