@@ -75,7 +75,7 @@ def report_chunks(report: InstagramReport) -> list[str]:
         lines.append("За этот период роликов с @syntx_ai в описании нет.")
     for index, video in enumerate(report.videos, 1):
         views = f"{video.views:,}".replace(",", " ") + " просмотров" if video.views is not None else "просмотры недоступны"
-        lines.append(f"\n{index}. {video.published_at:%d.%m.%Y} · {video.account}\n{video.permalink or 'Ссылка недоступна'} — {views}")
+        lines.append(f"\n{index}. {video.published_at:%d.%m.%Y}\n{video.permalink or 'Ссылка недоступна'} — {views}")
     chunks = []
     chunk = ""
     for line in lines:
