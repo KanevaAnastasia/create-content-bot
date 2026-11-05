@@ -20,6 +20,7 @@ import django
 django.setup()
 
 from pipeline_admin import admin as admin_module
+from pipeline_admin import publication_upload_admin as upload_admin
 from pipeline_admin.publication_upload_admin import PublicationUploadForm
 
 
@@ -73,29 +74,37 @@ def test_custom_upload_form_accepts_one_video_per_language_and_cover() -> None:
     assert form.cleaned_data["video_source_en"] == "upload"
 
 
-def test_generation_publication_panel_has_single_choice_controls(monkeypatch) -> None:
+def test_final_video_panel_has_single_choice_controls_next_to_versions(monkeypatch) -> None:
     run_id = uuid.uuid4()
-    monkeypatch.setattr(admin_module, "_publication_copy_from_run", lambda _run: _empty_copy())
-    monkeypatch.setattr(admin_module, "_final_artifacts_for_run", lambda _run_id: [])
+    artifacts = [
+        SimpleNamespace(
+            id=uuid.uuid4(),
+            language=language,
+            artifact_type="final_clean",
+            label=label,
+            created_at=None,
+        )
+        for language, label in (("ru", "RU one"), ("ru", "RU two"), ("en", "EN one"))
+    ]
     monkeypatch.setattr(
         admin_module,
-        "_publication_video_source_choices",
-        lambda _run: {
-            "ru": (("artifact:ru-1", "RU one"), ("artifact:ru-2", "RU two")),
-            "en": (("artifact:en-1", "EN one"),),
-        },
+        "_publication_all_final_artifacts",
+        lambda _run: artifacts,
     )
+    monkeypatch.setattr(admin_module, "_publication_artifact_video_payload", lambda artifact: {"video_path": str(artifact.id)})
+    monkeypatch.setattr(admin_module, "_artifact_video_preview", lambda artifact: f"<video>{artifact.label}</video>")
+    monkeypatch.setattr(admin_module, "_generation_artifact_link", lambda artifact, _label: f"open-{artifact.id}")
+    monkeypatch.setattr(upload_admin, "_original_final_videos_panel", lambda _run: "<div>build controls</div>")
 
-    class _EmptyJobs:
-        def order_by(self, *_args):
-            return []
+    html = str(admin_module._final_videos_panel(SimpleNamespace(id=run_id, pk=run_id)))
 
-    monkeypatch.setattr(admin_module.PublicationJob, "objects", _EmptyJobs())
-    html = str(admin_module._publication_prep_panel(SimpleNamespace(id=run_id, pk=run_id)))
-
-    assert 'type="radio" name="video_source_ru"' in html
-    assert html.count('name="video_source_ru"') == 2
+    assert 'type="radio" name="cf_publish_source_ru"' in html
+    assert html.count('name="cf_publish_source_ru"') == 2
+    assert html.count('name="cf_publish_source_en"') == 1
+    assert html.count(" checked") == 2
     assert "Для каждого языка можно выбрать не больше одной версии" in html
+    assert "Перейти к заливке с выбранными версиями" in html
+    assert "<form" not in html
 
 
 def test_standalone_upload_page_is_available_from_admin(monkeypatch) -> None:

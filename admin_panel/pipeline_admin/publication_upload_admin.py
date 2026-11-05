@@ -503,41 +503,87 @@ def generation_upload_view(self, request, object_id):
 
 _configured = False
 _original_prep_panel = legacy._publication_prep_panel
+_original_final_videos_panel = legacy._final_videos_panel
 
 
-def _enhanced_prep_panel(run: GenerationRun) -> str:
-    original = _original_prep_panel(run)
+def _final_video_publish_chooser(run: GenerationRun) -> str:
     try:
-        choices = legacy._publication_video_source_choices(run)
+        artifacts = legacy._publication_all_final_artifacts(run)
     except Exception:
-        choices = {"ru": (), "en": ()}
+        artifacts = []
+    by_language: dict[str, list[Any]] = {"ru": [], "en": []}
+    for artifact in artifacts:
+        language = str(getattr(artifact, "language", "") or "").strip().lower()
+        if language not in by_language or not legacy._publication_artifact_video_payload(artifact):
+            continue
+        by_language[language].append(artifact)
+    if not any(by_language.values()):
+        return ""
+
     sections: list[str] = []
     for language, title in (("ru", "Русская версия"), ("en", "English version")):
-        radios: list[str] = []
-        for index, (value, label) in enumerate(choices.get(language, ())):
-            radios.append(
-                f'<label style="display:grid;grid-template-columns:22px 1fr;gap:8px;padding:8px 0;cursor:pointer;">'
-                f'<input type="radio" name="video_source_{language}" value="{escape(value)}"'
-                f'{" checked" if index == 0 else ""}><span>{escape(label)}</span></label>'
+        cards: list[str] = []
+        for index, artifact in enumerate(by_language[language]):
+            value = f"artifact:{artifact.id}"
+            created = artifact.created_at.strftime("%Y-%m-%d %H:%M:%S") if artifact.created_at else ""
+            variant = str(artifact.artifact_type or "").removeprefix("final_")
+            variant_label = legacy.PUBLICATION_VIDEO_VARIANT_LABELS.get(variant, variant)
+            preview = legacy._artifact_video_preview(artifact)
+            open_link = legacy._generation_artifact_link(artifact, "Открыть файл")
+            cards.append(
+                '<article class="cf-publish-artifact">'
+                f'<label class="cf-publish-artifact-choice"><input type="radio" '
+                f'name="cf_publish_source_{language}" value="{escape(value)}"'
+                f'{" checked" if index == 0 else ""}>'
+                '<span><strong>Использовать эту версию</strong><br>'
+                f'<span class="cf-publish-meta">{escape(variant_label)} · {escape(str(artifact.label or ""))}'
+                f'{" · " + escape(created) if created else ""}</span></span></label>'
+                f'<div class="cf-publish-preview">{preview}</div>'
+                f'<div class="cf-publish-open">{open_link}</div>'
+                '</article>'
             )
         sections.append(
-            f'<section style="padding:14px;border:1px solid var(--border-color);border-radius:10px;">'
-            f'<h3 style="margin:0 0 8px;">{title}</h3>'
-            + ("".join(radios) if radios else '<span style="color:var(--body-quiet-color);">Готовых версий пока нет.</span>')
+            f'<section class="cf-publish-language"><h3>{title}</h3>'
+            + ("".join(cards) if cards else '<span class="cf-publish-meta">Готовых версий пока нет.</span>')
             + "</section>"
         )
     action = reverse("admin:pipeline_admin_generationrun_queue_publications", args=[run.pk])
-    chooser = (
-        '<div style="margin:0 0 18px;padding:16px;border:1px solid var(--border-color);border-radius:12px;'
-        'background:color-mix(in srgb,var(--body-bg) 92%,#417690 8%);">'
-        '<h2 style="margin:0 0 6px;">Выбрать версии и перейти к заливке</h2>'
-        '<p style="margin:0 0 14px;color:var(--body-quiet-color);">Для каждого языка можно выбрать не больше одной версии.</p>'
-        f'<form method="get" action="{escape(action)}">'
-        '<div style="display:grid;grid-template-columns:repeat(2,minmax(280px,1fr));gap:12px;">'
+    return mark_safe(
+        '<style>'
+        '.cf-final-publish-picker{margin:0 0 18px;padding:18px;border:1px solid var(--border-color);border-radius:14px;'
+        'background:color-mix(in srgb,var(--body-bg) 92%,#7c3aed 8%)}'
+        '.cf-final-publish-picker h2{margin:0 0 5px}.cf-publish-grid{display:grid;grid-template-columns:repeat(2,minmax(300px,1fr));gap:14px}'
+        '.cf-publish-language{padding:14px;border:1px solid var(--border-color);border-radius:12px;background:var(--body-bg)}'
+        '.cf-publish-language h3{margin:0 0 10px}.cf-publish-artifact{padding:11px;margin:0 0 10px;border:1px solid var(--border-color);border-radius:10px}'
+        '.cf-publish-artifact:has(input:checked){border-color:#7c3aed;box-shadow:0 0 0 2px color-mix(in srgb,#7c3aed 24%,transparent)}'
+        '.cf-publish-artifact-choice{display:grid;grid-template-columns:22px 1fr;gap:8px;cursor:pointer}.cf-publish-artifact-choice input{margin-top:2px}'
+        '.cf-publish-meta{color:var(--body-quiet-color);font-size:12px}.cf-publish-preview video{max-width:280px!important;margin:9px 0!important}'
+        '.cf-publish-open{margin-top:5px}.cf-publish-action{margin:14px 0 0}.cf-publish-action .button{padding:9px 16px}'
+        '@media(max-width:900px){.cf-publish-grid{grid-template-columns:1fr}}'
+        '</style>'
+        '<div class="cf-final-publish-picker" data-upload-url="' + escape(action) + '">'
+        '<h2>Выберите готовое видео для заливки</h2>'
+        '<p class="cf-publish-meta" style="margin:0 0 14px;">Все сохранённые версии доступны. Для каждого языка можно выбрать не больше одной версии.</p>'
+        '<div class="cf-publish-grid">'
         + "".join(sections)
-        + '</div><p style="margin:14px 0 0;"><button class="button" type="submit">Открыть заливку</button></p></form></div>'
+        + '</div><p class="cf-publish-action"><button class="button" type="button" id="cf-open-publication-upload">'
+        'Перейти к заливке с выбранными версиями</button></p></div>'
+        '<script>(function(){const root=document.querySelector(".cf-final-publish-picker");'
+        'const button=document.getElementById("cf-open-publication-upload");if(!root||!button)return;'
+        'button.addEventListener("click",function(){const params=new URLSearchParams();'
+        '["ru","en"].forEach(function(lang){const selected=root.querySelector(`input[name="cf_publish_source_${lang}"]:checked`);'
+        'if(selected)params.set("video_source_"+lang,selected.value);});'
+        'window.location.href=root.dataset.uploadUrl+(params.toString()?"?"+params.toString():"");});})();</script>'
     )
-    return mark_safe(chooser + str(original))
+
+
+def _final_videos_with_publish_choices(run: GenerationRun) -> str:
+    chooser = _final_video_publish_chooser(run)
+    return mark_safe(str(chooser) + str(_original_final_videos_panel(run)))
+
+
+def _enhanced_prep_panel(run: GenerationRun) -> str:
+    return _original_prep_panel(run)
 
 
 def configure_publication_upload_admin() -> None:
@@ -547,6 +593,7 @@ def configure_publication_upload_admin() -> None:
     _configured = True
     legacy.PublicationJobAdmin.prepare_view = standalone_upload_view
     legacy.GenerationRunAdmin.queue_publications_view = generation_upload_view
+    legacy._final_videos_panel = _final_videos_with_publish_choices
     legacy._publication_prep_panel = _enhanced_prep_panel
     admin.site.index_template = "admin/pipeline_admin/index.html"
 
