@@ -9,7 +9,9 @@ from __future__ import annotations
 
 import json
 import mimetypes
+import os
 import secrets
+import subprocess
 import time
 import uuid
 from dataclasses import dataclass
@@ -407,6 +409,7 @@ def _publish_instagram(job: PublicationJob, project_slug: str) -> str:
     video_path = Path(job.video_path)
     if not video_path.is_file():
         raise PublicationDeliveryError(f"Instagram video does not exist: {video_path}")
+    video_path = _instagram_compatible_video(video_path)
     file_size = video_path.stat().st_size
     if file_size > 1_000_000_000:
         raise PublicationDeliveryError("Instagram Reels video exceeds the 1 GB API limit.")
@@ -499,6 +502,97 @@ def _publish_instagram(job: PublicationJob, project_slug: str) -> str:
     except Exception:
         pass
     return media_id
+
+
+def _instagram_compatible_video(video_path: Path) -> Path:
+    """Create and cache a conservative Instagram-compatible MP4.
+
+    Final builds are intentionally 4K for YouTube, while Instagram's publishing
+    API rejects video wider than 1920 px and video above its bitrate ceiling with
+    an opaque ``ProcessingFailedError``.  Normalizing here also covers MP4 files
+    uploaded manually through the publication page.
+    """
+
+    try:
+        from .ai_approval_service import _resolve_ffmpeg
+        from .post_production import _video_dimensions
+
+        width, height = _video_dimensions(video_path)
+        ffmpeg = _resolve_ffmpeg()
+    except Exception:
+        width = height = None
+        ffmpeg = None
+    # Invalid tiny fixtures and environments without ffmpeg retain the existing
+    # behavior; real media with known dimensions is normalized exactly once.
+    if not width or not height or not ffmpeg:
+        return video_path
+
+    output_path = video_path.with_name(f"{video_path.stem}.instagram.mp4")
+    try:
+        if (
+            output_path.is_file()
+            and output_path.stat().st_size > 0
+            and output_path.stat().st_mtime_ns >= video_path.stat().st_mtime_ns
+        ):
+            return output_path
+    except OSError:
+        pass
+
+    temp_path = output_path.with_name(
+        f".{output_path.stem}.{uuid.uuid4().hex}.tmp.mp4"
+    )
+    scale_filter = "scale=w='min(1080,iw)':h=-2:flags=lanczos"
+    command = [
+        ffmpeg,
+        "-hide_banner",
+        "-loglevel",
+        "error",
+        "-y",
+        "-i",
+        str(video_path),
+        "-map",
+        "0:v:0",
+        "-map",
+        "0:a:0?",
+        "-vf",
+        scale_filter,
+        "-c:v",
+        "libx264",
+        "-profile:v",
+        "high",
+        "-pix_fmt",
+        "yuv420p",
+        "-preset",
+        "fast",
+        "-crf",
+        "21",
+        "-maxrate",
+        "20M",
+        "-bufsize",
+        "40M",
+        "-c:a",
+        "aac",
+        "-b:a",
+        "128k",
+        "-ar",
+        "48000",
+        "-movflags",
+        "+faststart",
+        str(temp_path),
+    ]
+    try:
+        subprocess.run(command, check=True, capture_output=True, text=True, timeout=900)
+        os.replace(temp_path, output_path)
+    except (OSError, subprocess.SubprocessError) as exc:
+        try:
+            temp_path.unlink(missing_ok=True)
+        except OSError:
+            pass
+        detail = str(getattr(exc, "stderr", "") or exc).strip()
+        raise PublicationDeliveryError(
+            f"Instagram video normalization failed: {detail[:1000]}"
+        ) from exc
+    return output_path
 
 
 def _tiktok_access_token(project_slug: str) -> str:
@@ -752,7 +846,10 @@ def _publish_vk(job: PublicationJob, project_slug: str) -> str:
             "group_id": group_id,
             "name": str(job.title or job.description or "Video")[:128],
             "description": str(job.description or "")[:5000],
-            "wallpost": 1,
+            # Upload first.  VK may allow an administrator to upload video while
+            # rejecting video.save(wallpost=1) with code 15.  Posting to the wall
+            # is therefore a separate best-effort operation below.
+            "wallpost": 0,
         },
         timeout=DEFAULT_REQUEST_TIMEOUT,
     )
@@ -772,7 +869,41 @@ def _publish_vk(job: PublicationJob, project_slug: str) -> str:
     upload_payload = _response_json(upload_response, "VK video upload")
     video_id = upload_payload.get("video_id") or data.get("video_id")
     owner_id = upload_payload.get("owner_id") or data.get("owner_id")
-    return f"{owner_id}_{video_id}" if owner_id is not None and video_id is not None else str(video_id or "uploaded")
+    external_id = (
+        f"{owner_id}_{video_id}"
+        if owner_id is not None and video_id is not None
+        else str(video_id or "uploaded")
+    )
+    if owner_id is not None and video_id is not None:
+        payload = {**(job.payload_json or {})}
+        payload["external_post_url"] = f"https://vk.com/video{external_id}"
+        try:
+            wall_response = requests.post(
+                "https://api.vk.ru/method/wall.post",
+                data={
+                    "access_token": token,
+                    "v": api_version,
+                    "owner_id": f"-{group_id}",
+                    "from_group": 1,
+                    "message": str(job.description or "")[:5000],
+                    "attachments": f"video{external_id}",
+                },
+                timeout=DEFAULT_REQUEST_TIMEOUT,
+            )
+            wall_payload = _response_json(wall_response, "VK wall.post")
+            _vk_error_message(wall_payload, "VK wall.post")
+            wall_data = wall_payload.get("response") if isinstance(wall_payload.get("response"), dict) else {}
+            post_id = wall_data.get("post_id")
+            if post_id is not None:
+                payload["vk_wall_post_id"] = str(post_id)
+                payload["external_post_url"] = f"https://vk.com/wall-{group_id}_{post_id}"
+        except PublicationDeliveryError as exc:
+            # The video is already safely published in the community.  Surface
+            # the partial wall-post failure without turning the upload into a
+            # misleading full failure.
+            payload["vk_wall_post_error"] = str(exc)
+        job.payload_json = payload
+    return external_id
 
 
 def publish_publication_job(job_id: str | uuid.UUID) -> dict[str, Any]:

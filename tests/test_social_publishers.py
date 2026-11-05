@@ -13,7 +13,9 @@ from app.models import PublicationJob
 from app.social_publishers import (
     PublicationDeliveryError,
     _instagram_access_token,
+    _instagram_compatible_video,
     _publish_instagram,
+    _publish_vk,
     _set_youtube_thumbnail,
     _tiktok_access_token,
     _youtube_env,
@@ -376,6 +378,30 @@ def test_instagram_rejects_non_meta_resumable_upload_uri(monkeypatch, tmp_path: 
     assert post.call_count == 1
 
 
+def test_instagram_normalization_is_cached(monkeypatch, tmp_path: Path) -> None:
+    source = tmp_path / "publish_ru.mp4"
+    source.write_bytes(b"4k-video")
+    monkeypatch.setattr("app.post_production._video_dimensions", lambda _path: (2160, 3840))
+    monkeypatch.setattr("app.ai_approval_service._resolve_ffmpeg", lambda: "/fake/ffmpeg")
+    commands: list[list[str]] = []
+
+    def run(command: list[str], **_kwargs) -> Mock:
+        commands.append(command)
+        Path(command[-1]).write_bytes(b"instagram-video")
+        return Mock(returncode=0)
+
+    monkeypatch.setattr("app.social_publishers.subprocess.run", run)
+
+    normalized = _instagram_compatible_video(source)
+
+    assert normalized == tmp_path / "publish_ru.instagram.mp4"
+    assert normalized.read_bytes() == b"instagram-video"
+    assert "scale=w='min(1080,iw)':h=-2:flags=lanczos" in commands[0]
+    assert "20M" in commands[0]
+    assert _instagram_compatible_video(source) == normalized
+    assert len(commands) == 1
+
+
 def test_vk_readiness_requires_expected_user_identity(monkeypatch) -> None:
     monkeypatch.setenv("PUBLISH_GRANDMA_KITCHEN_VK_ACCESS_TOKEN", "token")
     monkeypatch.setenv("PUBLISH_GRANDMA_KITCHEN_VK_GROUP_ID_RU", "238619215")
@@ -386,6 +412,52 @@ def test_vk_readiness_requires_expected_user_identity(monkeypatch) -> None:
 
     assert readiness.ready is False
     assert readiness.missing == ("PUBLISH_GRANDMA_KITCHEN_VK_USER_ID",)
+
+
+def test_vk_upload_survives_separate_wall_post_denial(monkeypatch, tmp_path: Path) -> None:
+    monkeypatch.setenv("PUBLISH_GRANDMA_KITCHEN_VK_GROUP_ID_RU", "238619215")
+    video_path = tmp_path / "vk.mp4"
+    video_path.write_bytes(b"video")
+    job = PublicationJob(
+        id=uuid.uuid4(),
+        project_id=uuid.uuid4(),
+        bundle_key="bundle",
+        platform="vk",
+        language="ru",
+        video_path=str(video_path),
+        description="Описание",
+    )
+    monkeypatch.setattr("app.social_publishers._vk_access_token", lambda _project: "token")
+    monkeypatch.setattr("app.social_publishers._verify_vk_identity", lambda *_args, **_kwargs: None)
+
+    def response(payload: dict) -> Mock:
+        result = Mock(ok=True, status_code=200)
+        result.json.return_value = payload
+        return result
+
+    calls: list[tuple[str, dict]] = []
+
+    def post(url: str, **kwargs):
+        calls.append((url, kwargs))
+        if url.endswith("/video.save"):
+            assert kwargs["data"]["wallpost"] == 0
+            return response({
+                "response": {
+                    "upload_url": "https://upload.vk.example/video",
+                    "owner_id": -238619215,
+                    "video_id": 42,
+                }
+            })
+        if url.startswith("https://upload.vk.example/"):
+            return response({"owner_id": -238619215, "video_id": 42})
+        assert url.endswith("/wall.post")
+        return response({"error": {"error_code": 15, "error_msg": "Access denied"}})
+
+    monkeypatch.setattr("app.social_publishers.requests.post", post)
+
+    assert _publish_vk(job, "grandma_kitchen") == "-238619215_42"
+    assert job.payload_json["external_post_url"] == "https://vk.com/video-238619215_42"
+    assert "VK wall.post: Access denied" in job.payload_json["vk_wall_post_error"]
 
 
 def test_vk_readiness_accepts_refresh_credentials_without_static_token(monkeypatch) -> None:
