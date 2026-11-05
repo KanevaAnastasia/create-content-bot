@@ -945,6 +945,9 @@ def _record_speech_alignment_usage(
         uri=uri,
     ).exists():
         return
+    qa_map = candidate.get("video_speech_qa_by_lang")
+    qa = qa_map.get(lang) if isinstance(qa_map, dict) else None
+    aligned_at = parse_datetime(str(qa.get("aligned_at") or "")) if isinstance(qa, dict) else None
     GenerationArtifact.objects.create(
         run=run,
         artifact_type=SPEECH_ALIGNMENT_USAGE_ARTIFACT_TYPE,
@@ -952,6 +955,7 @@ def _record_speech_alignment_usage(
         uri=uri,
         language=lang,
         mime_type="application/json",
+        created_at=aligned_at or timezone.now(),
         payload_json={
             "candidate_id": candidate_id,
             "language": lang,
@@ -1024,12 +1028,19 @@ def _ensure_approved_candidate_word_timings(
         recognized_text, word_timings = _candidate_speech_snapshot(candidate, lang)
         if recognized_text and word_timings:
             qa_map = candidate.get("video_speech_qa_by_lang")
+            qa_payload = (qa_map.get(lang) or {}) if isinstance(qa_map, dict) else {}
             _store_candidate_speech_snapshot(
                 candidate,
                 lang,
                 recognized_text=recognized_text,
                 word_timings=word_timings,
-                qa_payload=(qa_map.get(lang) or {}) if isinstance(qa_map, dict) else {},
+                qa_payload=qa_payload,
+            )
+            _record_speech_alignment_usage(
+                run,
+                candidate,
+                lang,
+                billed_duration_sec=qa_payload.get("billed_duration_sec", 0.0),
             )
             continue
 

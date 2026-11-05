@@ -1453,7 +1453,34 @@ def test_django_admin_backfills_actual_spoken_words_for_approved_candidate(monke
         fake_align_video_speech,
     )
 
-    admin_module._ensure_approved_candidate_word_timings(scenes, "ru")
+    usage_rows = []
+    create_attempts = []
+
+    def create_usage(**kwargs):
+        assert kwargs.get("created_at") is not None
+        create_attempts.append(kwargs)
+        if len(create_attempts) == 1:
+            raise RuntimeError("usage storage unavailable")
+        usage_rows.append(kwargs)
+
+    monkeypatch.setattr(
+        admin_module.GenerationArtifact.objects,
+        "filter",
+        lambda **_kwargs: SimpleNamespace(exists=lambda: bool(usage_rows)),
+    )
+    monkeypatch.setattr(admin_module.GenerationArtifact.objects, "create", create_usage)
+    run = SimpleNamespace(id=uuid.uuid4())
+    with pytest.raises(RuntimeError, match="usage storage unavailable"):
+        admin_module._ensure_approved_candidate_word_timings(scenes, "ru", run=run)
+
+    # Retry after a bookkeeping failure must use the saved recognition result,
+    # restore its usage entry, and never bill the same audio again.
+    aligned_at = candidate["video_speech_qa_by_lang"]["ru"]["aligned_at"]
+    admin_module._ensure_approved_candidate_word_timings(scenes, "ru", run=run)
+    admin_module._ensure_approved_candidate_word_timings(scenes, "ru", run=run)
+    assert len(usage_rows) == 1
+    assert usage_rows[0]["created_at"].isoformat() == aligned_at
+    assert usage_rows[0]["payload_json"]["billed_duration_sec"] == 3.0
 
     assert candidate["speech_by_lang"]["ru"] == "Фактически произнесено здесь."
     cues = candidate["speech_cues_by_lang"]["ru"]
