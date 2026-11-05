@@ -1,6 +1,7 @@
 import asyncio
 import logging
 from types import SimpleNamespace
+from unittest.mock import AsyncMock
 
 from telegram.error import Conflict
 
@@ -185,6 +186,8 @@ def test_stat_command_reports_guest_generation_usage_to_owner(monkeypatch):
     owner = SimpleNamespace(user_id="owner-id", role="admin", normalized_username="a_kaneva")
     current_markup = object()
     sent = []
+    instagram = AsyncMock()
+    monkeypatch.setattr(bot_app, "send_instagram_stats", instagram)
     monkeypatch.setattr(bot_app, "_identity_for_update", lambda *_args, **_kwargs: owner)
     monkeypatch.setattr(
         bot_app,
@@ -217,11 +220,14 @@ def test_stat_command_reports_guest_generation_usage_to_owner(monkeypatch):
             current_markup,
         )
     ]
+    instagram.assert_awaited_once()
 
 
 def test_stat_command_is_silent_for_non_owner(monkeypatch):
     guest = SimpleNamespace(user_id="guest-id", role="guest", normalized_username="guest")
     sent = []
+    instagram = AsyncMock()
+    monkeypatch.setattr(bot_app, "send_instagram_stats", instagram)
     monkeypatch.setattr(bot_app, "_identity_for_update", lambda *_args, **_kwargs: guest)
 
     class Message:
@@ -231,3 +237,14 @@ def test_stat_command_is_silent_for_non_owner(monkeypatch):
     asyncio.run(bot_app.quiet_mode_stats_command(SimpleNamespace(message=Message()), SimpleNamespace()))
 
     assert sent == []
+    instagram.assert_not_awaited()
+
+
+def test_instagram_calendar_is_owner_only(monkeypatch):
+    calendar = AsyncMock()
+    monkeypatch.setattr(bot_app, "handle_calendar", calendar)
+    monkeypatch.setattr(bot_app, "_identity_for_update", lambda *_: SimpleNamespace(role="guest", normalized_username="guest"))
+    update = SimpleNamespace(callback_query=SimpleNamespace(answer=AsyncMock()))
+    asyncio.run(bot_app.instagram_stats_callback(update, SimpleNamespace()))
+    calendar.assert_not_awaited()
+    update.callback_query.answer.assert_awaited_once()

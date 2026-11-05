@@ -12,7 +12,7 @@ import uuid
 
 from telegram import Update as TelegramUpdate
 from telegram.error import Conflict
-from telegram.ext import Application, CommandHandler, ContextTypes, MessageHandler, filters
+from telegram.ext import Application, CallbackQueryHandler, CommandHandler, ContextTypes, MessageHandler, filters
 from telegram.request import HTTPXRequest
 
 from .llm_utils import GeminiQuotaError
@@ -58,6 +58,7 @@ from .quiet_mode import (
 from .state import SESSIONS
 from .session_store import recover_interrupted_guest_syntax_sessions
 from .speech_usage import format_speech_alignment_remaining, speech_alignment_monthly_usage
+from .handlers.instagram_stats import handle_calendar, send_instagram_stats
 
 logger = logging.getLogger("bot")
 _QUIET_MODE_MIDNIGHT_TASK_KEY = "quiet_mode_midnight_task"
@@ -184,6 +185,14 @@ async def quiet_mode_stats_command(update, context) -> None:
         text,
         reply_markup=_admin_keyboard_for_current_session(update, identity, enabled),
     )
+    await send_instagram_stats(message)
+
+
+async def instagram_stats_callback(update, context) -> None:
+    if not is_quiet_mode_owner(_identity_for_update(update)):
+        await update.callback_query.answer()
+        return
+    await handle_calendar(update, context)
 
 
 async def start(update, context) -> None:
@@ -437,7 +446,8 @@ def build_application(token: str) -> Application:
     app.add_handler(CommandHandler("start_quiet", quiet_mode_command))
     app.add_handler(CommandHandler("stop_quiet", quiet_mode_command))
     app.add_handler(CommandHandler("status_quiet", quiet_mode_command))
-    app.add_handler(CommandHandler(["stat", "stats"], quiet_mode_stats_command))
+    app.add_handler(CommandHandler(["stat", "stats"], quiet_mode_stats_command, block=False))
+    app.add_handler(CallbackQueryHandler(instagram_stats_callback, pattern=r"^igstat:", block=False))
     app.add_handler(CommandHandler("check_env", check_env))
     app.add_handler(CommandHandler("cancel", cancel))
     app.add_handler(CommandHandler("reset", cancel))
