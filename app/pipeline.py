@@ -46,7 +46,8 @@ from .llm_utils import (
     extract_json_object,
     gemini_generate_sync,
 )
-from .generation_modes import GENERATION_MODE_LONG, GENERATION_MODE_NORMAL, GENERATION_MODE_SILENCE, normalize_generation_mode
+from .advice_generation import ADVICE_SCENE_RULE
+from .generation_modes import GENERATION_MODE_ADVICE, GENERATION_MODE_LONG, GENERATION_MODE_NORMAL, GENERATION_MODE_SILENCE, normalize_generation_mode
 from .multilingual import language_name, target_languages_from_env
 from . import pipeline_llm_steps as llm_steps
 from .scene_speech_budget import (
@@ -2442,6 +2443,8 @@ async def generate_scenes_plan(
     fb = (user_feedback or "").strip()
     comment = (generation_comment or "").strip()
     mode = normalize_generation_mode(generation_mode)
+    if mode == GENERATION_MODE_ADVICE:
+        comment = (comment + "\n\n" + ADVICE_SCENE_RULE).strip()
     remove_neighbor_cats = _feedback_requests_remove_neighbor_cats(fb)
     explicit_neighbor_cat_request = _feedback_mentions_neighbor_cats(fb) and not remove_neighbor_cats
     effective_romantic_subplot = _disabled_romantic_subplot() if remove_neighbor_cats else romantic_drama_subplot
@@ -3228,7 +3231,9 @@ async def generate_full_production(
     comment = (generation_comment or "").strip()
     dish_brief = str(dish_visual_brief or "").strip()
     mode = normalize_generation_mode(generation_mode)
-    target_languages = ["ru"] if mode in {GENERATION_MODE_SILENCE, GENERATION_MODE_LONG} else list(target_languages or target_languages_from_env())
+    if mode == GENERATION_MODE_ADVICE:
+        comment = (comment + "\n\n" + ADVICE_SCENE_RULE).strip()
+    target_languages = ["ru"] if mode in {GENERATION_MODE_ADVICE, GENERATION_MODE_SILENCE, GENERATION_MODE_LONG} else list(target_languages or target_languages_from_env())
     silence_prompt_rule = ""
     if mode == GENERATION_MODE_SILENCE:
         silence_prompt_rule = (

@@ -95,7 +95,7 @@ CUSTOM_REFERENCE_ROWS = [["больше файлов не нужно"], ["В н�
             "state_waiting_first_step_project_selection",
             [["Grandma Kitchen"], ["Дисциплина"], ["Назад"], ["В начало"]],
         ),
-        (STATE_WAITING_GENERATION_MODE, [["Обычный"], ["Silence"], ["Длинный"], ["Копия"], ["История"], ["Визуализация"], ["Реклама"]]),
+        (STATE_WAITING_GENERATION_MODE, [["Обычный", "Совет"], ["Silence"], ["Длинный"], ["Копия"], ["История"], ["Визуализация"], ["Реклама"]]),
         (
             STATE_WAITING_ADVERTISING_CAMPAIGN_CHOICE,
             [["1", "2", "3"], ["4", "5"], ["Другие варианты", "Усилить варианты"], ["Свой вариант"], ["В начало"]],

@@ -91,7 +91,9 @@ from ..discipline_intro import (
     intro_character_names,
     parse_intro_dialogue_text,
 )
+from ..advice_generation import ADVICE_SCENE_RULE, advice_concept_input, format_advice_choices
 from ..generation_modes import (
+    GENERATION_MODE_ADVICE,
     GENERATION_MODE_ADVERTISING,
     GENERATION_MODE_COPY,
     GENERATION_MODE_LONG,
@@ -378,7 +380,7 @@ def _generation_mode_markup() -> object | None:
         return None
     return ReplyKeyboardMarkup(
         [
-            [_GENERATION_MODE_BUTTON_NORMAL],
+            [_GENERATION_MODE_BUTTON_NORMAL, "Совет"],
             [_GENERATION_MODE_BUTTON_SILENCE],
             [_GENERATION_MODE_BUTTON_LONG],
             [_GENERATION_MODE_BUTTON_COPY],
@@ -870,7 +872,8 @@ async def _continue_generation_with_recipe(
         )
     parsed_steps = _try_parse_direct_recipe_from_user_text(recipe)
     # Если пользователь сразу прислал рецепт по шагам — пропускаем этап концептов.
-    if parsed_steps or source_url:
+    advice_mode = normalize_generation_mode(existing_session.get(GENERATION_MODE_SESSION_KEY)) == GENERATION_MODE_ADVICE
+    if (parsed_steps or source_url) and not advice_mode:
         new_session = _build_direct_recipe_session(
             recipe,
             parsed_steps or [],
@@ -911,7 +914,7 @@ async def _continue_generation_with_recipe(
             context,
             chat_id,
             "generate_recipe_concepts",
-            lambda: generate_recipe_concepts(recipe),
+            lambda: generate_recipe_concepts(advice_concept_input(recipe, normalize_generation_mode(existing_session.get(GENERATION_MODE_SESSION_KEY)))),
         )
     except ServiceUnavailableRetriesExhaustedError as e:
         logger.exception("generate failed after retries")
@@ -936,10 +939,10 @@ async def _continue_generation_with_recipe(
     _copy_overlay_title_context(existing_session, new_session)
     SESSIONS[chat_id] = new_session
     logger.info("chat=%s state=%s", chat_id, STATE_WAITING_CONCEPT)
-    await _reply_text_chunked(update, result["text_plan"])
+    await _reply_text_chunked(update, format_advice_choices(result["concepts"]) if normalize_generation_mode(SESSIONS[chat_id].get(GENERATION_MODE_SESSION_KEY)) == GENERATION_MODE_ADVICE else result["text_plan"])
     await _reply_text_with_optional_markup(
         update,
-        "Выберите номер концепта кнопкой. "
+        "Выберите номер варианта кнопкой. "
         "Либо нажмите «Добавь»/«Исправь» и отправьте правку для нейросети.",
         reply_markup=_concept_choice_markup(result["concepts"]),
     )
@@ -1471,6 +1474,8 @@ async def _handle_waiting_generation_mode_state(
     )
     if retry_story:
         mode = GENERATION_MODE_STORY
+    elif low in {"совет", "advice"}:
+        mode = GENERATION_MODE_ADVICE
     elif low in {_GENERATION_MODE_BUTTON_NORMAL.lower(), "normal", "обычная", "обычный режим"}:
         mode = GENERATION_MODE_NORMAL
     elif low in {_GENERATION_MODE_BUTTON_SILENCE.lower(), GENERATION_MODE_SILENCE, "silent", "тихий"}:
@@ -1499,16 +1504,21 @@ async def _handle_waiting_generation_mode_state(
     else:
         await _reply_text_with_optional_markup(
             update,
-            "Выберите «Обычный», «Silence», «Длинный», «Копия», «История», «Визуализация» или «Реклама».",
+            "Выберите «Обычный», «Совет», «Silence», «Длинный», «Копия», «История», «Визуализация» или «Реклама».",
             reply_markup=_generation_mode_markup(),
         )
+        return True
+    if mode == GENERATION_MODE_ADVICE and str(session.get(_PROJECT_KEY_SESSION) or "grandma_kitchen") != "grandma_kitchen":
+        await update.message.reply_text("Формат «Совет» доступен для проекта бабушки. Выберите проект бабушки и начните снова.")
         return True
     session[GENERATION_MODE_SESSION_KEY] = normalize_generation_mode(mode)
     session["target_languages"] = target_languages_for_generation_mode(
         mode,
         target_languages_from_env(),
     )
-    if mode == GENERATION_MODE_SILENCE:
+    if mode == GENERATION_MODE_ADVICE:
+        message = "Формат «Совет», только RU: предложу вопросы дочери на выбор. В первом клипе дочь задаёт вопрос, бабушка сразу отвечает; дальше показываем решение."
+    elif mode == GENERATION_MODE_SILENCE:
         message = "Ок, запускаю silence-режим: один RU-формат, Kling, короткие динамичные кадры."
     elif mode == GENERATION_MODE_LONG:
         message = "Ок, запускаю длинный режим: RU, горизонталь 16:9, подробный ролик от 3:10."
@@ -1808,6 +1818,8 @@ async def _handle_waiting_concept_state(
             return True
         selected = concepts[idx]
         concept_text = f"{selected.get('name', '')}. {selected.get('hook', '')}"
+        if normalize_generation_mode(session.get(GENERATION_MODE_SESSION_KEY)) == GENERATION_MODE_ADVICE:
+            concept_text += "\nРешение: " + str(selected.get("why") or "") + "\n\n" + ADVICE_SCENE_RULE + "\nИсходный запрос/рецепт:\n" + str(session.get("user_input") or "")
         session["selected_concept"] = concept_text
         session["selected_concept_name"] = str(selected.get("name", "")).strip() or concept_text
         try:
@@ -1858,7 +1870,7 @@ async def _handle_waiting_concept_state(
             chat_id,
             "refine_recipe_concepts",
             lambda: generate_recipe_concepts(
-                session["user_input"],
+                advice_concept_input(session["user_input"], normalize_generation_mode(session.get(GENERATION_MODE_SESSION_KEY))),
                 user_feedback=text,
                 previous_concepts=session.get("concepts"),
             ),
@@ -1875,10 +1887,10 @@ async def _handle_waiting_concept_state(
     session["concepts"] = result["concepts"]
     session["state"] = STATE_WAITING_CONCEPT
     await update.message.reply_text("Обновила концепты по фидбеку:")
-    await _reply_text_chunked(update, result["text_plan"])
+    await _reply_text_chunked(update, format_advice_choices(result["concepts"]) if normalize_generation_mode(SESSIONS[chat_id].get(GENERATION_MODE_SESSION_KEY)) == GENERATION_MODE_ADVICE else result["text_plan"])
     await _reply_text_with_optional_markup(
         update,
-        "Выберите номер концепта кнопкой. "
+        "Выберите номер варианта кнопкой. "
         "Либо нажмите «Добавь»/«Исправь» и отправьте правку для нейросети.",
         reply_markup=_concept_choice_markup(result["concepts"]),
     )
