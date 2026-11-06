@@ -220,6 +220,17 @@ def test_instagram_language_token_does_not_refresh_early(monkeypatch) -> None:
     get.assert_not_called()
 
 
+def test_instagram_zero_expiry_does_not_refresh_on_every_request(monkeypatch) -> None:
+    monkeypatch.setenv("PUBLISH_DISCIPLINE_INSTAGRAM_ACCESS_TOKEN_RU", "verified-user-token")
+    monkeypatch.setenv("PUBLISH_DISCIPLINE_INSTAGRAM_ACCESS_TOKEN_EXPIRES_AT_RU", "0")
+    refresh = Mock()
+    monkeypatch.setattr("app.social_publishers._refresh_instagram_access_token", refresh)
+
+    assert _instagram_access_token("discipline", "ru") == "verified-user-token"
+    assert {"project": "discipline", "language": "ru", "status": "valid"} in refresh_expiring_instagram_tokens(["discipline"])
+    refresh.assert_not_called()
+
+
 def test_instagram_maintenance_only_checks_scoped_tokens_with_expiry(monkeypatch) -> None:
     monkeypatch.setenv("PUBLISH_GRANDMA_KITCHEN_INSTAGRAM_ACCESS_TOKEN_EN", "english")
     monkeypatch.setenv(

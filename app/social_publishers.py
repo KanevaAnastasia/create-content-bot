@@ -373,7 +373,9 @@ def _instagram_access_token(project_slug: str, language: str) -> str:
         expires_at = int(expires_at_raw)
     except ValueError:
         return access_token
-    if expires_at > int(time.time()) + INSTAGRAM_TOKEN_REFRESH_WINDOW_SECONDS:
+    # Meta debug_token uses an explicit zero for no fixed token expiry. This is
+    # distinct from revoked permissions or the separate data-access expiry.
+    if expires_at == 0 or expires_at > int(time.time()) + INSTAGRAM_TOKEN_REFRESH_WINDOW_SECONDS:
         return access_token
     return _refresh_instagram_access_token(
         project_slug,
