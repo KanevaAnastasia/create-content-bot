@@ -17,7 +17,7 @@ from django.http import HttpResponseRedirect
 from django.template.response import TemplateResponse
 from django.urls import reverse
 
-from app.marketer import METRICS, MetricsUnavailable, collect_metrics, diagnose, discover_niche, marketing_brief
+from app.marketer import METRICS, MetricsUnavailable, collect_metrics, diagnose, discover_niche, marketing_brief, group_videos, youtube_history
 from app.publication_config import project_env
 from app.social_publishers import _youtube_access_token
 from .models import Project, PublicationJob
@@ -82,6 +82,7 @@ def job_dict(job):
     if not str(url).startswith("https://"):
         url = ""
     return {"id": str(job.id), "project_id": str(job.project_id), "project_slug": job.project.slug,
+            "bundle_key": str(job.bundle_key or ""),
             "platform": job.platform, "language": job.language, "account_key": job.account_key,
             "title": job.title or (job.description or "Без названия")[:140],
             "posted_at": job.published_at.isoformat() if job.published_at else None,
@@ -109,6 +110,21 @@ def run_report(project_id, task_id, action, query="", language="ru"):
             jobs = list(PublicationJob.objects.filter(project=project, status="published")
                         .select_related("project").order_by("-published_at")[:30])
             rows = [job_dict(job) for job in jobs]
+            existing = read_report(project_id)
+            history = existing.get("history", [])
+            if action == "history":
+                notices = []
+                for lang in ("ru", "en"):
+                    try:
+                        imported = youtube_history(project.slug, lang, _youtube_access_token(project.slug, lang))
+                        history = [r for r in history if r.get("language") != lang] + imported
+                    except Exception:
+                        notices.append(f"YouTube {lang.upper()}: импорт недоступен; прежние данные сохранены. Проверьте доступ к чтению канала.")
+                update_report(project_id, task_id, history=history, history_notices=notices)
+            known = {(r["platform"], r["language"], r["external_post_id"]) for r in rows}
+            for row in history:
+                if (row["platform"], row["language"], row["external_post_id"]) not in known:
+                    rows.append({**row, "project_id": str(project.id), "project_slug": project.slug})
             tokens = {}
             for row in rows:
                 key = (row["platform"], row["language"])
@@ -149,7 +165,7 @@ class MarketerForm(forms.Form):
     language = forms.ChoiceField(choices=(("ru", "Русский"), ("en", "English")), label="Язык исследования")
     query = forms.CharField(max_length=160, required=False, label="Тема / запрос для поиска",
                            widget=forms.TextInput(attrs={"placeholder": "Например: привычки, прокрастинация"}))
-    action = forms.ChoiceField(choices=(("refresh", "Статистика"), ("niche", "Ниша"), ("brief", "AI-разбор")), required=False)
+    action = forms.ChoiceField(choices=(("refresh", "Статистика"), ("history", "История YouTube"), ("niche", "Ниша"), ("brief", "AI-разбор")), required=False)
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
@@ -201,7 +217,7 @@ def marketer_view(request):
     pending = report.get("state") in {"queued", "running"}
     stale = pending and time.time() - report.get("started", 0) >= 1200
     context = {**admin.site.each_context(request), "title": "Маркетолог", "form": form,
-               "project": project, "projects": projects, "report": report, "rows": rows,
+               "project": project, "projects": projects, "report": report, "rows": rows, "video_groups": group_videos(rows),
                "brief_stale": bool(report.get("brief")) and (report.get("brief_data_at") != report.get("fetched_at") or report.get("brief_niche_at") != report.get("niche_fetched")),
                "pending": pending and not stale, "stale": stale,
                "can_change": request.user.has_perm("pipeline_admin.change_publicationjob")}

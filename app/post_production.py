@@ -1992,7 +1992,12 @@ def _write_burned_subtitle_ass(
         ]
     )
     lines = [header]
+    from .editorial_titles import STYLE_KEY, STYLES, ass_events
+    editorial = str(title_style.get(STYLE_KEY) or "") in STYLES
     for cue in title_cues or []:
+        if editorial and str(cue.get("kind") or "title") == "title":
+            lines.extend(ass_events(cue, title_style, layout.width, layout.height, SUBTITLE_STYLE_NAME))
+            continue
         kind = str(cue.get("kind") or "title")
         if kind == "end_title":
             language = str(cue.get("language") or "ru")
@@ -3357,13 +3362,18 @@ def _subtitle_filter(subtitles_path: Path, *, fonts_dir: Path | None = None) -> 
     resolved_fonts_dir = fonts_dir
     if resolved_fonts_dir is None:
         try:
-            uses_story_font = STORY_WORD_SYNC_FONT_NAME in subtitles_path.read_text(
-                encoding="utf-8", errors="ignore"
-            )
+            ass_content = subtitles_path.read_text(encoding="utf-8", errors="ignore")
+            uses_editorial_font = "\\fnCF " in ass_content
+            uses_story_font = STORY_WORD_SYNC_FONT_NAME in ass_content and not uses_editorial_font
         except OSError:
             uses_story_font = False
-        story_font_path = _story_subtitle_font_path() if uses_story_font else None
-        resolved_fonts_dir = story_font_path.parent if story_font_path is not None else subtitle_fonts_dir()
+            uses_editorial_font = False
+        if uses_editorial_font:
+            from .editorial_titles import FONT_DIR
+            resolved_fonts_dir = FONT_DIR
+        else:
+            story_font_path = _story_subtitle_font_path() if uses_story_font else None
+            resolved_fonts_dir = story_font_path.parent if story_font_path is not None else subtitle_fonts_dir()
     parts = [f"filename={_ffmpeg_filter_quote(subtitles_path)}"]
     if resolved_fonts_dir.exists():
         parts.append(f"fontsdir={_ffmpeg_filter_quote(resolved_fonts_dir)}")

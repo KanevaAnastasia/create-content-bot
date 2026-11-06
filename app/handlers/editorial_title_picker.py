@@ -1,0 +1,108 @@
+"""Visual selection of the eight approved Discipline title presets."""
+from __future__ import annotations
+
+import asyncio
+import io
+import re
+
+from PIL import Image, ImageDraw, ImageFont
+from telegram import ReplyKeyboardMarkup
+
+from ..editorial_titles import FONT_DIR, STYLE_IDS, STYLES, STYLE_KEY, PARTS_KEY, DEFAULT_DIM, propose_parts, valid_parts
+from ..post_production import render_title_overlay_preview
+from .handlers_generation_utils import OVERLAY_TITLE_BY_LANG_SESSION_KEY, OVERLAY_TITLE_STYLE_SESSION_KEY
+
+
+def picker_markup():
+    return ReplyKeyboardMarkup([
+        ['Стиль 1', 'Стиль 2', 'Стиль 3'], ['Стиль 5', 'Стиль 6', 'Стиль 7'],
+        ['Стиль 9', 'Стиль 10'], ['Все стили', 'ОК'], ['В начало'],
+    ], resize_keyboard=True)
+
+
+def render_card(titles: dict, style: dict) -> bytes:
+    """Use the production ASS renderer, not AI images, for every selectable card."""
+    languages = [lang for lang in ('ru', 'en') if titles.get(lang)]
+    width, height = 540, 960
+    card = Image.new('RGB', (width * len(languages), height + 82), '#eee8dc')
+    draw = ImageDraw.Draw(card)
+    font = ImageFont.truetype(str(FONT_DIR / 'CF-Manrope.ttf'), 20)
+    style_id = str(style[STYLE_KEY])
+    draw.text((20, 14), f'{style_id}. {STYLES[style_id].name}', font=font, fill='#24282a')
+    for index, language in enumerate(languages):
+        # The first video frame does not exist at title selection time.
+        # A neutral light background makes typography and 23% scrim comparable.
+        background = Image.new('RGB', (width, height), '#8b9698')
+        data = render_title_overlay_preview(background, language=language, title=titles[language], title_style=style)
+        card.paste(Image.open(io.BytesIO(data)), (index * width, 82))
+        draw.text((index * width + 20, 48), language.upper(), font=font, fill='#42484a')
+    stream = io.BytesIO()
+    card.save(stream, format='PNG')
+    return stream.getvalue()
+
+
+async def _send_card(update, titles, style):
+    from .handlers_state_scene import safe_reply_photo
+    data = await asyncio.to_thread(render_card, titles, style)
+    stream = io.BytesIO(data)
+    stream.name = f'editorial_style_{style[STYLE_KEY]}.png'
+    await safe_reply_photo(update.message, photo=stream, caption=f'Стиль {style[STYLE_KEY]} · {STYLES[str(style[STYLE_KEY])].name}')
+
+
+async def ask_picker(update, session, *, all_styles=True):
+    titles = {lang: str(value) for lang, value in (session.get(OVERLAY_TITLE_BY_LANG_SESSION_KEY) or {}).items()
+              if lang in {'ru', 'en'} and str(value).strip()}
+    if not titles:
+        return False
+    style = dict(session.get(OVERLAY_TITLE_STYLE_SESSION_KEY) or {})
+    parts = style.get(PARTS_KEY) or {}
+    if not all(valid_parts(title, parts.get(lang)) for lang, title in titles.items()):
+        parts = await propose_parts(titles)
+    style.update({PARTS_KEY: parts, 'dim_opacity': style.get('dim_opacity', DEFAULT_DIM)})
+    session[OVERLAY_TITLE_STYLE_SESSION_KEY] = style
+    await update.message.reply_text('Выберите оформление заголовка. На карточках ваш текст; фон условный, затемнение всего кадра 23%.')
+    for style_id in STYLE_IDS if all_styles else (str(style.get(STYLE_KEY) or '7'),):
+        await _send_card(update, titles, {**style, STYLE_KEY: style_id})
+    await update.message.reply_text(
+        'Нажмите номер стиля. Смысловые части:\n' + '\n'.join(f'{lang.upper()}: ' + ' | '.join(value) for lang, value in parts.items())
+        + '\nМожно исправить: RU: У меня | нет | энергии (или EN: I have | no | energy). '
+        'Затемнение: «затемнение 23%». После выбора нажмите «ОК».', reply_markup=picker_markup())
+    return True
+
+
+async def handle_picker_input(update, session, text):
+    """Return True if consumed; False means continue the existing approval path."""
+    low = text.strip().lower()
+    style = dict(session.get(OVERLAY_TITLE_STYLE_SESSION_KEY) or {})
+    titles = session.get(OVERLAY_TITLE_BY_LANG_SESSION_KEY) or {}
+    if low in {'ок', 'ok', 'okay', 'approve'}:
+        if str(style.get(STYLE_KEY)) not in STYLES:
+            await update.message.reply_text('Сначала выберите стиль по номеру.', reply_markup=picker_markup())
+            return True
+        return False
+    if low == 'все стили':
+        return await ask_picker(update, session)
+    choice = re.fullmatch(r'(?:стиль\s*)?(1|2|3|5|6|7|9|10)', low)
+    if choice:
+        style[STYLE_KEY] = choice.group(1)
+    elif '|' in text:
+        match = re.match(r'\s*(RU|EN)\s*:\s*(.*)', text, re.I | re.S)
+        language, body = (match.group(1).lower(), match.group(2)) if match else ('ru', text)
+        parts = [part.strip() for part in body.split('|')]
+        if not valid_parts(str(titles.get(language) or ''), parts):
+            await update.message.reply_text('Разделите исходный заголовок на 3 части, сохранив все слова и их порядок. Для короткого заголовка можно 1–2 части.')
+            return True
+        style[PARTS_KEY] = {**(style.get(PARTS_KEY) or {}), language: parts}
+    else:
+        dim = re.fullmatch(r'затемнение\s+(\d{1,2})\s*%', low)
+        if not dim or not 0 <= int(dim.group(1)) <= 60:
+            await update.message.reply_text('Выберите стиль, измените смысловые части через | или напишите «затемнение 23%».', reply_markup=picker_markup())
+            return True
+        style['dim_opacity'] = int(dim.group(1)) / 100
+    session[OVERLAY_TITLE_STYLE_SESSION_KEY] = style
+    if style.get(STYLE_KEY):
+        await _send_card(update, titles, style)
+        await update.message.reply_text('Если оформление подходит — «ОК». Можно выбрать другой стиль.', reply_markup=picker_markup())
+    else:
+        await ask_picker(update, session)
+    return True

@@ -106,12 +106,39 @@ def test_page_requires_publication_permission(page):
 def test_template_renders_nulls_and_escapes_titles(page):
     from django.template.loader import render_to_string
     html = render_to_string("admin/pipeline_admin/marketer.html", {
-        "rows": [{"title": "<script>alert(1)</script>", "metric_cells": [None, 0], "advice": []}],
+        "video_groups": [{"title": "<script>alert(1)</script>", "rows": [{"metric_cells": [None, 0], "advice": [], "metrics": {"views": 0}}]}],
         "report": {}, "projects": [], "can_change": False,
     })
     assert "&lt;script&gt;" in html
     assert "<td>—</td>" in html
     assert "<td>0</td>" in html
+    assert "0 просмотров" in html
+
+
+def test_grouping_never_uses_titles_or_crosses_projects():
+    rows = [{"id": str(i), "project_id": project, "bundle_key": bundle, "title": "Same"}
+            for i, (project, bundle) in enumerate([("a", "one"), ("a", "one"), ("b", "one"), ("a", ""), ("a", "")])]
+    groups = m.group_videos(rows)
+    assert [len(g["rows"]) for g in groups] == [2, 1, 1, 1]
+
+
+def test_history_is_bounded_and_filters_dates(monkeypatch):
+    from datetime import datetime, timezone
+    monkeypatch.setattr(m, "project_env", lambda *a: "channel")
+    calls = []
+    def get(url, token, params):
+        calls.append(params)
+        if url.endswith("channels"):
+            return {"items": [{"id": "channel", "contentDetails": {"relatedPlaylists": {"uploads": "uploads"}}}]}
+        return {"nextPageToken": "more", "items": [
+            {"snippet": {"title": "Recent"}, "contentDetails": {"videoId": "abcdefghijk", "videoPublishedAt": "2026-11-01T00:00:00Z"}},
+            {"contentDetails": {"videoId": "oldabcdefgh", "videoPublishedAt": "2025-01-01T00:00:00Z"}}]}
+    monkeypatch.setattr(m, "api_get", get)
+    result = m.youtube_history("discipline", "en", "secret", datetime(2026, 11, 6, tzinfo=timezone.utc))
+    assert len(result) == 1
+    assert result[0]["external_post_id"] == "abcdefghijk"
+    assert len(calls) == 2
+    assert calls[0]["id"] == "channel"
 
 
 def test_niche_empty_results_does_not_call_videos(monkeypatch):

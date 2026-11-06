@@ -9,21 +9,27 @@
 <div class="mk-grid"><section class="mk-card"><h2>Рабочее пространство</h2>
 <form method="get"><label for="project-view">Показать проект</label><select name="project" id="project-view">{% for p in projects %}<option value="{{ p.id }}" {% if project.id == p.id %}selected{% endif %}>{{ p.title }}</option>{% endfor %}</select> <button>Открыть</button></form>
 <p>Сейчас: <strong>{{ project.title|default:"Нет активных проектов" }}</strong></p>
-<p>В отчёте — последние 30 опубликованных заданий из админки. Более старые и загруженные вручную на площадках ролики пока не импортируются.</p>
+<p>Одна карточка — один исходный ролик из админки, внутри публикации по площадкам и языкам. Историю YouTube можно импортировать отдельно: за 90 дней, максимум 50 последних загрузок на каждый язык (не только Shorts). История остальных площадок пока не импортируется.</p>
 </section><section class="mk-card"><h2>Собрать данные</h2>
 {% if can_change %}<form method="post">{% csrf_token %}{{ form.non_field_errors }}
 {{ form.project.label_tag }}{{ form.project }}{{ form.project.errors }}
 {{ form.language.label_tag }}{{ form.language }}{{ form.language.errors }}
 {{ form.query.label_tag }}{{ form.query }}{{ form.query.errors }}
-<div class="mk-actions"><button name="action" value="refresh">Обновить статистику</button><button name="action" value="niche">Исследовать нишу</button><button name="action" value="brief">Составить AI-план</button></div></form>{% else %}<p>Для запуска сбора нужны права изменения публикаций.</p>{% endif %}
+<div class="mk-actions"><button name="action" value="refresh">Обновить статистику</button><button name="action" value="history">Импортировать историю YouTube</button><button name="action" value="niche">Исследовать нишу</button><button name="action" value="brief">Составить AI-план</button></div></form>{% else %}<p>Для запуска сбора нужны права изменения публикаций.</p>{% endif %}
 <p><small>Сбор работает в фоне. Поиск использует квоту YouTube API: максимум 10 кандидатов за 90 дней. «AI-план» отправляет названия, метрики и результаты поиска в уже настроенный Gemini / Vertex AI и расходует его квоту/бюджет. Автоматически AI не вызывается.</small></p></section></div>
 {% if pending %}<p class="warning">Сбор в очереди или выполняется. <a href="?project={{ project.id }}">Обновить страницу</a>. Ниже пока предыдущий отчёт.</p>{% endif %}
 {% if stale %}<p class="warning">Задача не завершилась за 20 минут. Проверьте Celery и запустите сбор заново.</p>{% endif %}
 {% if report.error %}<p class="warning">{{ report.error }}</p>{% endif %}
 <section class="mk-card"><h2>AI-план на неделю</h2>{% if brief_stale %}<p class="warning">После этого разбора данные обновились. Составьте новый план по актуальному срезу.</p>{% endif %}{% if report.brief %}<div style="white-space:pre-wrap;line-height:1.7">{{ report.brief }}</div><p><small>AI может ошибаться. Проверяйте цифры по карточкам ниже. Этот план ничего не меняет в генерациях и публикациях.</small></p>{% else %}<p>Соберите статистику и/или примеры из ниши, затем нажмите «Составить AI-план»: получите приоритеты, новые хуки, оригинальные идеи и измеримые эксперименты.</p>{% endif %}</section>
 <section class="mk-card"><h2>Как читать отчёт</h2><p>«—» означает нет данных, а не ноль. Просмотры разных платформ не суммируются. Сравнение — только внутри проекта, языка, аккаунта и возрастной группы, минимум с тремя другими роликами. Даже такое сравнение не доказывает причину успеха.</p><p>Это объяснимый диагностический разбор по правилам, не просмотр видео нейросетью. Советы — гипотезы для теста, не выводы о монтаже, который система не видела.</p></section>
-<h2>Ваши ролики · {{ rows|length }}</h2>
-{% for row in rows %}<article class="mk-card"><details open><summary>{{ row.title }}</summary>
+{% for notice in report.history_notices %}<p class="warning">{{ notice }}</p>{% endfor %}
+<h2>Ваши ролики · {{ video_groups|length }} карточек / {{ rows|length }} публикаций</h2>
+<p><small>Исторические загрузки показаны отдельно: одинаковое название не доказывает, что это одно видео. Превью берётся из YouTube, если он есть в карточке.</small></p>
+{% for group in video_groups %}<article class="mk-card">
+<div class="mk-grid">{% if group.thumbnail %}<img src="{{ group.thumbnail }}" alt="Превью ролика" loading="lazy" referrerpolicy="no-referrer" style="width:240px;max-width:100%;border-radius:12px">{% endif %}<div><h3>{{ group.title }}</h3>
+{% for row in group.rows %}<span class="pill">{{ row.platform }} {{ row.language|upper }}: {{ row.metrics.views|default_if_none:"—" }} просмотров</span>{% endfor %}</div></div>
+<details><summary>Подробности, ссылки и рекомендации</summary>
+{% for row in group.rows %}<section><h3>{{ row.title }}</h3>
 <p><span class="pill">{{ row.platform }} · {{ row.language|upper }}</span><span class="pill">{{ row.age_band }}</span>{% if row.url %}<a href="{{ row.url }}" target="_blank" rel="noopener noreferrer">Открыть ролик ↗</a>{% endif %}</p>
 <small>Опубликован: {{ row.posted_at|default:"неизвестно" }} · Срез: {{ row.fetched_at|default:"не получен" }}</small>
 <div class="mk-table"><table><thead><tr><th>Просмотры</th><th>Охват</th><th>Лайки</th><th>Комментарии</th><th>Сохранения</th><th>Репосты</th></tr></thead><tbody><tr>{% for value in row.metric_cells %}<td>{{ value|default_if_none:"—" }}</td>{% endfor %}</tr></tbody></table></div>
@@ -32,7 +38,7 @@
 {% if row.relative != None %}<p>К медиане группы: <strong>{{ row.relative }}×</strong> · медиана {{ row.baseline }}, других роликов {{ row.cohort_count }}.</p>{% endif %}
 {% for warning in row.warnings %}<p class="warning">{{ warning }}</p>{% endfor %}
 <h3>Что делать дальше</h3><ul>{% for tip in row.advice %}<li>{{ tip }}</li>{% endfor %}</ul>
-<p><strong>Идея эксперимента:</strong> {{ row.experiment }} Меняйте один параметр, фиксируйте результат через одинаковый срок.</p></details></article>
+<p><strong>Идея эксперимента:</strong> {{ row.experiment }} Меняйте один параметр, фиксируйте результат через одинаковый срок.</p></section>{% endfor %}</details></article>
 {% empty %}<div class="mk-card">Нажмите «Обновить статистику». Если публикаций ещё нет, начните с 3–5 роликов одной рубрики и сравните их на 7-й день.</div>{% endfor %}
 <section class="mk-card"><h2>Радар ниши</h2><p>Запрос: <strong>{{ report.niche_query|default:"ещё не задан" }}</strong> · язык: {{ report.niche_language|default:"—" }}.</p><p>Выборка популярных коротких видео YouTube, не рейтинг всей ниши. Фильтр short означает видео до 4 минут, не обязательно Shorts; язык — предпочтение поиска. Просмотры в день — среднее за жизнь ролика, не текущая скорость роста.</p>
 {% for item in report.niche %}<article class="mk-card"><h3><a href="{{ item.url }}" target="_blank" rel="noopener noreferrer">{{ item.title }}</a></h3><p>{{ item.channel }} · {{ item.views|default_if_none:"—" }} просмотров · ~{{ item.views_per_day|default_if_none:"—" }} в день · {{ item.posted_at }}</p><p>{{ item.adaptation }}</p><small>Идея по теме/заголовку. Содержание и монтаж не просмотрены; сначала проверьте ролик по ссылке. Не копируйте чужое видео или текст.</small></article>{% empty %}<p>Введите тему и нажмите «Исследовать нишу». Для «Бабушки»: конкретное блюдо или приём. Для «Дисциплины»: конкретная проблема и действие.</p>{% endfor %}</section>

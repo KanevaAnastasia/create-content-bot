@@ -15,6 +15,56 @@ from .publication_config import project_env, shared_env
 METRICS = ("views", "reach", "likes", "comments", "saves", "shares")
 
 
+def group_videos(rows):
+    """Only a shared, project-scoped source bundle proves that posts belong together."""
+    groups = {}
+    for row in rows:
+        key = (row.get("project_id"), row.get("bundle_key") or row["id"])
+        group = groups.setdefault(key, {"title": row.get("title"), "rows": [], "thumbnail": ""})
+        group["rows"].append(row)
+        if row.get("platform") == "youtube" and re.fullmatch(r"[\w-]{11}", str(row.get("external_post_id", ""))):
+            group["thumbnail"] = f"https://i.ytimg.com/vi/{row['external_post_id']}/mqdefault.jpg"
+    return list(groups.values())
+
+
+def youtube_history(slug, language, token, now=None):
+    """Read at most 50 recent uploads, never infer ownership from titles."""
+    channel = project_env(slug, f"YOUTUBE_CHANNEL_ID_{language.upper()}")
+    if not channel:
+        raise MetricsUnavailable("Не настроен ID YouTube-канала этого проекта и языка.")
+    base = "https://www.googleapis.com/youtube/v3/"
+    items = api_get(base + "channels", token, {"part": "contentDetails", "id": channel}).get("items", [])
+    if not items or items[0].get("id") != channel:
+        raise MetricsUnavailable("Настроенный канал недоступен.")
+    playlist = items[0].get("contentDetails", {}).get("relatedPlaylists", {}).get("uploads")
+    if not playlist:
+        raise MetricsUnavailable("API не вернул список загрузок канала.")
+    cutoff = (now or datetime.now(timezone.utc)) - timedelta(days=90)
+    result, cursor = [], ""
+    for _ in range(1):
+        data = api_get(base + "playlistItems", token, {"part": "snippet,contentDetails", "playlistId": playlist,
+                                                       "maxResults": 50, "pageToken": cursor})
+        for item in data.get("items", []):
+            snippet, detail = item.get("snippet", {}), item.get("contentDetails", {})
+            stamp = detail.get("videoPublishedAt")
+            try:
+                if not stamp or datetime.fromisoformat(stamp.replace("Z", "+00:00")) < cutoff:
+                    continue
+            except (ValueError, TypeError):
+                continue
+            video_id = detail.get("videoId", "")
+            if not re.fullmatch(r"[\w-]{11}", video_id):
+                continue
+            result.append({"id": f"history:youtube:{channel}:{video_id}", "platform": "youtube",
+                           "language": language, "account_key": "default", "external_post_id": video_id,
+                           "title": snippet.get("title") or "Без названия", "posted_at": stamp,
+                           "url": f"https://www.youtube.com/watch?v={video_id}", "origin": "history"})
+        cursor = data.get("nextPageToken")
+        if not cursor:
+            break
+    return result
+
+
 def marketing_brief(project_title, rows, niche, query):
     """Use the project's existing Gemini provider, with only allowlisted data."""
     from .llm_utils import gemini_generate_sync

@@ -28,3 +28,17 @@ AI не смотрит видео; адаптации по названиям п
 Документация: https://developers.google.com/youtube/v3/docs/videos/list
 и https://developers.google.com/youtube/v3/docs/search/list ;
 Meta Instagram API: https://www.postman.com/meta/instagram/documentation/6yqw8pt/instagram-api
+# Grouped cards and history
+
+Cards group only by project and publication bundle, never by title. Expand a card
+to inspect individual language/platform metrics, links and advice. YouTube-backed
+cards use its public thumbnail. Missing metrics remain distinct from measured zero.
+
+The history button reads each configured RU/EN YouTube channel's uploads playlist:
+at most 50 latest uploads per language, filtered to 90 days, including non-Shorts.
+Imported records live only in the project report cache and cannot be published.
+Existing jobs take precedence when platform/language/video ID match. Unknown
+cross-platform matches remain separate. Failed imports preserve the prior data
+and display a warning. Other platforms' history and manual merging are not yet
+implemented. Existing Instagram insight permissions and VK/TikTok limitations
+remain unchanged.

@@ -993,6 +993,9 @@ async def _send_overlay_title_previews(update: Update, session: dict, style: dic
 
 
 async def _ask_overlay_title_style_approval(update: Update, session: dict) -> bool:
+    if str(session.get(PROJECT_KEY_SESSION) or "") == "discipline":
+        from .editorial_title_picker import ask_picker
+        return await ask_picker(update, session)
     style = _default_overlay_title_style(session)
     session[OVERLAY_TITLE_STYLE_SESSION_KEY] = style
     await _send_overlay_title_previews(update, session, style)
@@ -1246,6 +1249,9 @@ def keyboard_for_session_state(session: dict):
     if state == STATE_WAITING_OVERLAY_SUBTITLE_EN_APPROVAL:
         return ok_only_markup()
     if state == STATE_WAITING_OVERLAY_TITLE_STYLE_APPROVAL:
+        if str(session.get(PROJECT_KEY_SESSION) or "") == "discipline":
+            from .editorial_title_picker import picker_markup
+            return picker_markup()
         return ok_only_markup()
     if state == STATE_WAITING_SERIES_CHOICE:
         return _series_choice_markup(session)
@@ -3023,6 +3029,10 @@ async def _approve_story_audio_and_build_scenes(
                     "alignment": english_alignment if isinstance(english_alignment, dict) else {},
                 },
             )
+    if str(session.get(PROJECT_KEY_SESSION) or "") == "discipline":
+        session["state"] = STATE_WAITING_OVERLAY_TITLE_STYLE_APPROVAL
+        session[OVERLAY_TITLE_PENDING_NEXT_SESSION_KEY] = "editorial_scene_approval"
+        return await _ask_overlay_title_style_approval(update, session)
     await _reply_text_chunked(update, scenes["text_plan"])
     await _reply_text_with_optional_markup(
         update,
@@ -5415,6 +5425,11 @@ async def _handle_waiting_overlay_title_style_approval_state(
     session: dict,
     text: str,
 ) -> bool:
+    if str(session.get(PROJECT_KEY_SESSION) or "") == "discipline":
+        from .editorial_title_picker import handle_picker_input
+        if await handle_picker_input(update, session, text):
+            SESSIONS[chat_id] = session
+            return True
     style = _default_overlay_title_style(session)
     low = str(text or "").strip().lower()
     if low in {"ок", "ok", "okay", "approve"}:
@@ -5424,6 +5439,12 @@ async def _handle_waiting_overlay_title_style_approval_state(
             SESSIONS[chat_id] = session
             return await _ask_overlay_subtitle(update, session)
         next_step = str(session.pop(OVERLAY_TITLE_PENDING_NEXT_SESSION_KEY, "") or "").strip()
+        if next_step == "editorial_scene_approval":
+            session["state"] = STATE_WAITING_SCENE_APPROVAL
+            SESSIONS[chat_id] = session
+            await _reply_text_chunked(update, str(session.get("scenes_text") or ""))
+            await _reply_text_with_optional_markup(update, "Оформление сохранено. Проверьте сцены: «ОК» — подготовить кадры; иначе пришлите правку.", reply_markup=ok_only_markup())
+            return True
         if next_step == OVERLAY_TITLE_NEXT_SERIES_CHOICE:
             await _ask_series_choice(update, session)
             SESSIONS[chat_id] = session
