@@ -1642,6 +1642,42 @@ def _merge_post_production(existing: Any, update: dict[str, Any]) -> dict[str, A
     return merged
 
 
+def _build_visualization_translation_for_run(
+    run, session, *, language, variants, progress_callback=None,
+):
+    # Visualization RU is translated captions over the approved source master,
+    # not Russian speech. Never disable language validation for normal videos.
+    if session.get("generation_mode") != "visualization" or language != "ru":
+        return None
+    translation = GenerationArtifact.objects.filter(
+        run_id=run.id, artifact_type="visualization_subtitle_translation", language=language,
+    ).order_by("-created_at", "-id").first()
+    if translation is None:
+        return None
+    from app.visualization_localization import build_localized_visualization
+
+    payload = translation.payload_json
+    source_language = payload["source_language"]
+    if source_language == language:
+        raise ValueError("Visualization source and translation languages must differ.")
+    paths = {}
+    for variant in ("clean", "upscaled_4k"):
+        artifact = GenerationArtifact.objects.get(
+            id=payload["source_artifact_ids"][variant], run_id=run.id,
+            artifact_type=f"final_{variant}", language=source_language,
+        )
+        path = _artifact_local_path(artifact)
+        if path is None or not path.is_file():
+            raise ValueError(f"Approved visualization {variant} master is missing.")
+        paths[variant] = path
+    return build_localized_visualization(
+        clean_path=paths["clean"], upscaled_path=paths["upscaled_4k"],
+        language=language, segments=payload["segments"], duration=float(payload["duration_sec"]),
+        title=payload["title"], title_duration=float(payload["title_duration_sec"]),
+        variants=variants or list(FINAL_VIDEO_VARIANT_LABELS), progress_callback=progress_callback,
+    )
+
+
 def _build_final_videos_for_run(
     run: GenerationRun,
     *,
@@ -1655,6 +1691,22 @@ def _build_final_videos_for_run(
     synchronize_subtitles: bool = False,
 ) -> dict[str, Any]:
     chat_session, session, production = _run_session_for_admin_render(run)
+    localized = _build_visualization_translation_for_run(
+        run, session, language=target_language,
+        variants=list(target_variants) if target_variants else ([target_variant] if target_variant else None),
+        progress_callback=progress_callback,
+    )
+    if localized is not None:
+        persist_post_production_artifacts(session, localized)
+        production["post_production"] = _strip_inline_media_payloads(
+            _merge_post_production(production.get("post_production"), localized)
+        )
+        session["production"] = production
+        if chat_session is not None:
+            chat_session.session_json = _strip_inline_media_payloads(session)
+            chat_session.updated_at = timezone.now()
+            chat_session.save(update_fields=["session_json", "updated_at"])
+        return localized
     scenes = production.get("json_plan") if isinstance(production, dict) else None
     if not isinstance(scenes, list) or not scenes:
         raise RuntimeError("No production scenes are available for this run.")
