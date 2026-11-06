@@ -138,7 +138,11 @@ def _session_from_generation_run(snapshot: dict[str, Any], run_id: str) -> dict[
     production = snapshot.get("production") if isinstance(snapshot.get("production"), dict) else {}
     production["json_plan"] = json_plan
     if run_title_color:
-        style = production.get("overlay_title_style") if isinstance(production.get("overlay_title_style"), dict) else {}
+        saved_style = snapshot.get("overlay_title_style")
+        production_style = production.get("overlay_title_style")
+        style = dict(saved_style) if isinstance(saved_style, dict) else {}
+        if isinstance(production_style, dict):
+            style.update(production_style)
         style["title_color"] = run_title_color
         production["overlay_title_style"] = style
         snapshot["overlay_title_style"] = dict(style)

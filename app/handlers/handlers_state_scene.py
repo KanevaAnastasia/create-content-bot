@@ -1235,7 +1235,7 @@ def keyboard_for_session_state(session: dict):
     if state == _STATE_WAITING_FIRST_STEP_PROJECT_IMAGE_CHARACTERS:
         return project_image_character_markup(_project_image_selected_characters(session or {}))
     if state == STATE_WAITING_GENERATION_MODE:
-        return _generation_mode_markup()
+        return _generation_mode_markup(session)
     if state == STATE_WAITING_STORY_ENGLISH_CHOICE:
         return _story_english_choice_markup()
     if state == STATE_WAITING_STORY_STYLE_CHOICE:
@@ -2163,6 +2163,7 @@ async def _refine_story_voiceover(
                 source,
                 user_feedback=feedback,
                 previous_text=previous,
+                **({"discipline_mode": session["discipline_narrative_mode"]} if session.get("discipline_narrative_mode") else {}),
             ),
         )
     except ServiceUnavailableRetriesExhaustedError as e:
@@ -2228,6 +2229,9 @@ async def _generate_and_send_story_audio(
             str(session.get(PROJECT_KEY_SESSION) or ""),
             str(session.get("project_voice_id") or ""),
         )
+        from ..discipline_modes import active_mode, MALE_VOICE_ID
+        if active_mode(session):
+            project_voice_id = MALE_VOICE_ID
         if project_voice_id:
             session["project_voice_id"] = project_voice_id
         if project_voice_id:
@@ -2656,6 +2660,9 @@ async def _generate_and_send_story_english_audio(
             str(session.get(PROJECT_KEY_SESSION) or ""),
             str(session.get("project_voice_id") or ""),
         )
+        from ..discipline_modes import active_mode, MALE_VOICE_ID
+        if active_mode(session):
+            project_voice_id = MALE_VOICE_ID
         if project_voice_id:
             session["project_voice_id"] = project_voice_id
         if project_voice_id:
@@ -2942,6 +2949,7 @@ async def _approve_story_audio_and_build_scenes(
                 primary_character_id=primary_character_id,
                 project_slug=str(session.get(PROJECT_KEY_SESSION) or ""),
                 generation_mode=str(session.get(GENERATION_MODE_SESSION_KEY) or ""),
+                **({"discipline_mode": session["discipline_narrative_mode"]} if session.get("discipline_narrative_mode") else {}),
             ),
         )
     except ServiceUnavailableRetriesExhaustedError as e:
@@ -2985,12 +2993,24 @@ async def _approve_story_audio_and_build_scenes(
     title_by_lang = {"ru": title}
     if english_requested:
         title_by_lang["en"] = str(session.get(STORY_TITLE_EN_SESSION_KEY) or "Story").strip() or "Story"
+    from ..discipline_modes import active_mode, REFRAME, opening_sentence, title_word_timing
+    if active_mode(session) == REFRAME:
+        title_by_lang["ru"] = opening_sentence(voiceover)
+        if english_requested:
+            title_by_lang["en"] = opening_sentence(english_voiceover)
+        session[OVERLAY_TITLE_SESSION_KEY] = title_by_lang["ru"]
     session[OVERLAY_TITLE_BY_LANG_SESSION_KEY] = title_by_lang
     session[OVERLAY_TITLE_STYLE_SESSION_KEY] = {
         "title_color": "#fff7e8",
         "top_margin_ratio": _DEFAULT_OVERLAY_TITLE_TOP_MARGIN_RATIO,
         "side_margin_ratio": _DEFAULT_OVERLAY_TITLE_SIDE_MARGIN_RATIO,
     }
+    if active_mode(session):
+        session[OVERLAY_TITLE_STYLE_SESSION_KEY]["word_timing_by_lang"] = {
+            "ru": title_word_timing(title_by_lang["ru"], voiceover, duration, alignment),
+            **({"en": title_word_timing(title_by_lang["en"], english_voiceover, english_duration, english_alignment)}
+               if english_requested else {}),
+        }
     session[OVERLAY_SUBTITLE_DECIDED_SESSION_KEY] = True
     session["state"] = STATE_WAITING_SCENE_APPROVAL
     SESSIONS[chat_id] = session
@@ -5552,6 +5572,8 @@ async def _handle_scene_approval_refine(update: Update, context: ContextTypes.DE
                     project_characters=project_characters,
                     primary_character_id=primary_character_id,
                     project_slug=project_slug,
+                    generation_mode=str(session.get(GENERATION_MODE_SESSION_KEY) or ""),
+                    **({"discipline_mode": session["discipline_narrative_mode"]} if session.get("discipline_narrative_mode") else {}),
                 ),
             )
         except ServiceUnavailableRetriesExhaustedError as e:

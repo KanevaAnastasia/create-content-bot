@@ -21,6 +21,7 @@ from .models import Character, Project, ProjectCharacter
 from .character_catalog import GRANDMA_KITCHEN_PROJECT_SLUG
 from .constants import ELEVENLABS_VOICE_ID_ENV_NAME
 from .project_profiles import DISCIPLINE_PROJECT_SLUG, DISCIPLINE_VOICE_ID
+from .discipline_modes import MALE_VOICE_ID
 
 
 STATE_WAITING_DISCIPLINE_INTRO_CHOICE = "waiting_discipline_intro_choice"
@@ -41,7 +42,7 @@ DISCIPLINE_INTRO_APPROVED_PROVIDER_SESSION_KEY = "discipline_intro_approved_prov
 
 DISCIPLINE_INTRO_DURATION_SEC = 8
 DISCIPLINE_INTRO_TURN_DURATION_SEC = 4
-DISCIPLINE_VASILY_VOICE_ID = "loY1uopAz31XyhAEhNSa"
+DISCIPLINE_VASILY_VOICE_ID = MALE_VOICE_ID
 GRANDMA_GRANDSON_VOICE_ID_ENV_NAME = "ELEVENLABS_GRANDSON_VOICE_ID"
 INTRO_PROJECT_SLUGS = {DISCIPLINE_PROJECT_SLUG, GRANDMA_KITCHEN_PROJECT_SLUG}
 
@@ -271,7 +272,7 @@ def discipline_intro_voice_turns(
     slug = _intro_project_slug(project_slug)
     if slug == GRANDMA_KITCHEN_PROJECT_SLUG:
         grandma_voice = str(os.getenv(ELEVENLABS_VOICE_ID_ENV_NAME) or DISCIPLINE_VOICE_ID).strip()
-        grandson_voice = str(os.getenv(GRANDMA_GRANDSON_VOICE_ID_ENV_NAME) or DISCIPLINE_VASILY_VOICE_ID).strip()
+        grandson_voice = str(os.getenv(GRANDMA_GRANDSON_VOICE_ID_ENV_NAME) or "loY1uopAz31XyhAEhNSa").strip()
         return [
             {"speaker": "Внук", "text": _clean_line(dialogue.get("grandson")), "voice_id": grandson_voice},
             {"speaker": "Бабушка", "text": _clean_line(dialogue.get("grandma")), "voice_id": grandma_voice},
@@ -284,7 +285,7 @@ def discipline_intro_voice_turns(
         name = str(link.display_name or character.name or "").strip().casefold()
         meta = character.meta_json if isinstance(character.meta_json, dict) else {}
         voice_id = str(meta.get("voice_id") or "").strip()
-        if name in voices and voice_id:
+        if name in voices and name != "василий" and voice_id:
             voices[name] = voice_id
     return [
         {"speaker": "Василий", "text": _clean_line(dialogue.get("vasily")), "voice_id": voices["василий"]},

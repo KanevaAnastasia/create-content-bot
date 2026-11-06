@@ -10,10 +10,10 @@ from pathlib import Path
 from PIL import ImageFont
 
 FONT_DIR = Path(__file__).resolve().parents[1] / 'fonts'
-STYLE_IDS = ('1', '2', '3', '5', '6', '7', '9', '10')
+STYLE_IDS = ('1', '2', '3', '5', '9')
 STYLE_KEY = 'editorial_style_id'
 PARTS_KEY = 'semantic_parts_by_lang'
-DEFAULT_DIM = 0.23
+DEFAULT_DIM = 82 / 255
 # libass measures font size using Windows ascender/descender, Pillow uses em units.
 ASS_FONT_SCALE = {'Manrope': 1.366, 'Oranienbaum': 1.155, 'Oswald': 1.702,
                   'Caveat': 1.289, 'MarckScript': 1.249, 'CormorantItalic': 1.38,
@@ -142,6 +142,9 @@ def _escape(text: str) -> str:
 
 def ass_events(cue: dict, style: dict, width: int, height: int, base_style: str) -> list[str]:
     """Emit a full-frame scrim and three text units for the cue's exact lifetime."""
+    if str(style.get(STYLE_KEY)) in STYLE_IDS:
+        from .editorial_approved import ass_events as approved_events
+        return approved_events(cue, style, width, height, base_style)
     start, end = float(cue.get('start_sec') or 0), float(cue.get('end_sec') or 0)
     if end <= start:
         return []

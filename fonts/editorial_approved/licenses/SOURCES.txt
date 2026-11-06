@@ -1,0 +1,1 @@
+Per-font sources are recorded in ../../unicode_font_manifest.json. OFL source notices are preserved here. Good Vibes Pro source metadata reports freeware but includes no license text; no claim of verified redistribution/modification terms is made. This is a local design review package. Bebas Neue source files are retained in the local reference_fonts directory.

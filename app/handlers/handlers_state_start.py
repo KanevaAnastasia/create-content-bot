@@ -199,6 +199,7 @@ _SERIES_SESSION_KEYS = (
 # Continuation/resume paths do not call _start_generation_with_recipe and keep
 # their run binding intact.
 _NEW_GENERATION_STALE_KEYS = (
+    "discipline_narrative_mode",
     "generation_run_id",
     "scene_db_ids_by_index",
     "production",
@@ -373,7 +374,7 @@ def _advertising_format_choice_markup() -> object | None:
     )
 
 
-def _generation_mode_markup() -> object | None:
+def _generation_mode_markup(session: dict | None = None) -> object | None:
     try:
         from telegram import ReplyKeyboardMarkup
     except Exception:
@@ -385,6 +386,7 @@ def _generation_mode_markup() -> object | None:
             [_GENERATION_MODE_BUTTON_LONG],
             [_GENERATION_MODE_BUTTON_COPY],
             [_GENERATION_MODE_BUTTON_STORY],
+            *([["О Васе", "А что если…"]] if (session or {}).get("selected_project_key") == "discipline" else []),
             [_GENERATION_MODE_BUTTON_VISUALIZATION],
             [_GENERATION_MODE_BUTTON_ADVERTISING],
         ],
@@ -492,7 +494,7 @@ async def _ask_generation_mode(update: Update, session: dict) -> None:
     await _reply_text_with_optional_markup(
         update,
         "Выберите режим генерации.",
-        reply_markup=_generation_mode_markup(),
+        reply_markup=_generation_mode_markup(session),
     )
 
 
@@ -813,7 +815,7 @@ async def _start_generation_with_recipe(
     if selected_project_key:
         session[_PROJECT_KEY_SESSION] = selected_project_key
     SESSIONS[chat_id] = session
-    if session.get("force_story_mode") is True:
+    if session.get("force_story_mode") is True and selected_project_key != "discipline":
         await _handle_waiting_generation_mode_state(
             update,
             context,
@@ -1173,7 +1175,8 @@ async def _start_initial_story_voiceover(
             context,
             chat_id,
             "generate_story_voiceover",
-            lambda: asyncio.to_thread(generate_story_voiceover, source_story),
+            lambda: asyncio.to_thread(generate_story_voiceover, source_story,
+                **({"discipline_mode": session["discipline_narrative_mode"]} if session.get("discipline_narrative_mode") else {})),
         )
     except ServiceUnavailableRetriesExhaustedError as e:
         session["state"] = STATE_WAITING_GENERATION_MODE
@@ -1472,7 +1475,17 @@ async def _handle_waiting_generation_mode_state(
         low in {_STORY_REGENERATE_BUTTON.lower(), "перегенерировать историю"}
         and normalize_generation_mode(session.get(GENERATION_MODE_SESSION_KEY)) == GENERATION_MODE_STORY
     )
-    if retry_story:
+    from ..discipline_modes import MODE_KEY, VASYA, REFRAME, LABELS
+    requested_format = {"о васе": VASYA, "а что если…": REFRAME, "а что если": REFRAME,
+                        "а что если...": REFRAME}.get(low)
+    if requested_format and session.get(_PROJECT_KEY_SESSION) != "discipline":
+        await update.message.reply_text("Этот режим доступен в проекте «Дисциплина».")
+        return True
+    if requested_format:
+        session[MODE_KEY] = requested_format
+        session[DISCIPLINE_INTRO_ENABLED_SESSION_KEY] = False
+        mode = GENERATION_MODE_STORY
+    elif retry_story:
         mode = GENERATION_MODE_STORY
     elif low in {"совет", "advice"}:
         mode = GENERATION_MODE_ADVICE
@@ -1505,12 +1518,14 @@ async def _handle_waiting_generation_mode_state(
         await _reply_text_with_optional_markup(
             update,
             "Выберите «Обычный», «Совет», «Silence», «Длинный», «Копия», «История», «Визуализация» или «Реклама».",
-            reply_markup=_generation_mode_markup(),
+            reply_markup=_generation_mode_markup(session),
         )
         return True
     if mode == GENERATION_MODE_ADVICE and str(session.get(_PROJECT_KEY_SESSION) or "grandma_kitchen") != "grandma_kitchen":
         await update.message.reply_text("Формат «Совет» доступен для проекта бабушки. Выберите проект бабушки и начните снова.")
         return True
+    if not requested_format and not retry_story:
+        session.pop(MODE_KEY, None)
     session[GENERATION_MODE_SESSION_KEY] = normalize_generation_mode(mode)
     session["target_languages"] = target_languages_for_generation_mode(
         mode,
@@ -1542,6 +1557,9 @@ async def _handle_waiting_generation_mode_state(
         )
     else:
         message = "Ок, запускаю обычный режим."
+    if requested_format:
+        message = (f"Режим «{LABELS[requested_format]}»: раскладываем вашу тему на проблему, поворот и решение. "
+                   "Сначала согласуем сценарий, затем озвучку и наглядный видеоряд. Оформление заголовка выберете по карточкам.")
     await update.message.reply_text(message)
     if mode == GENERATION_MODE_VISUALIZATION:
         session["state"] = STATE_WAITING_VISUALIZATION_MEDIA

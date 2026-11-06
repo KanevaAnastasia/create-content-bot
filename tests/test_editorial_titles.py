@@ -60,15 +60,15 @@ def test_picker_does_not_approve_without_explicit_style(monkeypatch):
     assert asyncio.run(picker.handle_picker_input(update, session, 'ОК')) is True
     send = AsyncMock()
     monkeypatch.setattr(picker, '_send_card', send)
-    assert asyncio.run(picker.handle_picker_input(update, session, 'Стиль 7')) is True
-    assert session['overlay_title_style'][titles.STYLE_KEY] == '7'
+    assert asyncio.run(picker.handle_picker_input(update, session, 'Стиль 9')) is True
+    assert session['overlay_title_style'][titles.STYLE_KEY] == '9'
     assert asyncio.run(picker.handle_picker_input(update, session, 'ОК')) is False
     assert send.await_count == 1
 
 
 def test_picker_rejects_missing_words_and_preserves_style(monkeypatch):
     update = SimpleNamespace(message=SimpleNamespace(reply_text=AsyncMock()))
-    session = {'overlay_title_by_lang': {'ru':'У меня нет энергии'}, 'overlay_title_style': {titles.STYLE_KEY:'7'}}
+    session = {'overlay_title_by_lang': {'ru':'У меня нет энергии'}, 'overlay_title_style': {titles.STYLE_KEY:'9'}}
     send = AsyncMock()
     monkeypatch.setattr(picker, '_send_card', send)
     asyncio.run(picker.handle_picker_input(update, session, 'У меня | нет | сил'))
@@ -89,7 +89,7 @@ def test_discipline_style_approval_resumes_scene_review(monkeypatch):
         'selected_project_key': 'discipline',
         'overlay_title': 'У меня нет энергии',
         'overlay_title_by_lang': {'ru':'У меня нет энергии'},
-        'overlay_title_style': {titles.STYLE_KEY:'7'},
+        'overlay_title_style': {titles.STYLE_KEY:'9'},
         scene.OVERLAY_SUBTITLE_DECIDED_SESSION_KEY: True,
         scene.OVERLAY_TITLE_PENDING_NEXT_SESSION_KEY: 'editorial_scene_approval',
         'scenes_text': 'План сцен',
@@ -100,5 +100,5 @@ def test_discipline_style_approval_resumes_scene_review(monkeypatch):
     monkeypatch.setattr(scene, '_reply_text_with_optional_markup', AsyncMock())
     asyncio.run(scene._handle_waiting_overlay_title_style_approval_state(update, None, chat_id=1, session=session, text='ОК'))
     assert session['state'] == scene.STATE_WAITING_SCENE_APPROVAL
-    assert session['overlay_title_style'][titles.STYLE_KEY] == '7'
+    assert session['overlay_title_style'][titles.STYLE_KEY] == '9'
     assert scene.OVERLAY_TITLE_PENDING_NEXT_SESSION_KEY not in session

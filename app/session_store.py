@@ -88,6 +88,7 @@ _CHAT_SESSION_CACHE_KEYS = {
     "visualization_source_media",
     "visualization_transcript_segments",
     "visualization_input_kind",
+    "discipline_narrative_mode",
     "discipline_intro_enabled",
     "discipline_intro_dialogue",
     "discipline_intro_dialogue_versions",

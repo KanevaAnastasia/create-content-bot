@@ -1,0 +1,117 @@
+{
+  "1": [
+    {
+      "role": 0,
+      "font": "CF Reviewed 1 1.ttf",
+      "source": "/opt/content_fabric/artifacts/editorial_titles/style1_letters_v3/CF Brush One.ttf",
+      "coverage_missing": [],
+      "status": "user_approved"
+    },
+    {
+      "role": 1,
+      "font": "CF Reviewed 1 2.ttf",
+      "source": "/opt/content_fabric/fonts/CF-Manrope.ttf",
+      "coverage_missing": [],
+      "status": "user_approved"
+    },
+    {
+      "role": 2,
+      "font": "CF Reviewed 1 3.ttf",
+      "source": "/opt/content_fabric/fonts/CF-Oswald.ttf",
+      "coverage_missing": [],
+      "status": "user_approved"
+    }
+  ],
+  "2": [
+    {
+      "role": 0,
+      "font": "CF Reviewed 2 1.ttf",
+      "source": "/opt/content_fabric/artifacts/editorial_titles/reference_fonts/good-vibes-pro.ttf",
+      "coverage_missing": [],
+      "status": "user_approved"
+    },
+    {
+      "role": 1,
+      "font": "CF Reviewed 2 2.ttf",
+      "source": "/opt/content_fabric/fonts/CF-Manrope.ttf",
+      "coverage_missing": [],
+      "status": "user_approved"
+    },
+    {
+      "role": 2,
+      "font": "CF Reviewed 2 3.ttf",
+      "source": "/opt/content_fabric/fonts/CF-Oswald.ttf",
+      "coverage_missing": [],
+      "status": "user_approved"
+    }
+  ],
+  "3": [
+    {
+      "role": 0,
+      "font": "CF Reviewed 3 1.ttf",
+      "source": "/opt/content_fabric/artifacts/editorial_titles/reference_fonts/BebasNeue-BebasNeueBold.ttf",
+      "coverage_missing": [],
+      "status": "user_approved"
+    },
+    {
+      "role": 1,
+      "font": "CF Reviewed 3 2.ttf",
+      "source": "/opt/content_fabric/fonts/CF-CormorantItalic.ttf",
+      "coverage_missing": [],
+      "status": "user_approved"
+    },
+    {
+      "role": 2,
+      "font": "CF Reviewed 3 3.ttf",
+      "source": "/opt/content_fabric/fonts/CF-MarckScript.ttf",
+      "coverage_missing": [],
+      "status": "user_approved"
+    }
+  ],
+  "5": [
+    {
+      "role": 0,
+      "font": "CF Reviewed 5 1.ttf",
+      "source": "/opt/content_fabric/fonts/CF-CormorantItalic.ttf",
+      "coverage_missing": [],
+      "status": "user_approved"
+    },
+    {
+      "role": 1,
+      "font": "CF Reviewed 5 2.ttf",
+      "source": "/opt/content_fabric/artifacts/editorial_titles/reference_fonts/good-vibes-pro.ttf",
+      "coverage_missing": [],
+      "status": "user_approved"
+    },
+    {
+      "role": 2,
+      "font": "CF Reviewed 5 3.ttf",
+      "source": "/opt/content_fabric/artifacts/editorial_titles/reference_fonts/Prata.ttf",
+      "coverage_missing": [],
+      "status": "user_approved"
+    }
+  ],
+  "9": [
+    {
+      "role": 0,
+      "font": "CF Reviewed 9 1.ttf",
+      "source": "/opt/content_fabric/artifacts/editorial_titles/reference_fonts/BebasNeue-BebasNeueRegular.ttf",
+      "coverage_missing": [],
+      "status": "user_approved"
+    },
+    {
+      "role": 1,
+      "font": "CF Reviewed 9 2.ttf",
+      "source": "/opt/content_fabric/fonts/CF-CormorantItalic.ttf",
+      "coverage_missing": [],
+      "status": "user_approved"
+    },
+    {
+      "role": 2,
+      "font": "CF Reviewed 9 3.ttf",
+      "source": "/opt/content_fabric/artifacts/editorial_titles/reference_fonts/good-vibes-pro.ttf",
+      "coverage_missing": [],
+      "status": "user_approved"
+    }
+  ]
+}

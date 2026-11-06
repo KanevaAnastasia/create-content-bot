@@ -1,0 +1,572 @@
+{
+  "1": {
+    "ru": [
+      {
+        "text": "Почему",
+        "box": [
+          71,
+          559,
+          555,
+          230
+        ],
+        "color": [
+          255,
+          154,
+          104
+        ],
+        "font": "CF Reference 1 Part 1.ttf",
+        "codepoint": 57344,
+        "kind": "reference_word_outlines",
+        "head_occluded_in_source": false
+      },
+      {
+        "text": "не",
+        "box": [
+          105,
+          766,
+          91,
+          48
+        ],
+        "color": [
+          245,
+          240,
+          234
+        ],
+        "font": "CF Reference 1 Part 2.ttf",
+        "codepoint": 57344,
+        "kind": "reference_word_outlines",
+        "head_occluded_in_source": false
+      },
+      {
+        "text": "ТЫ?",
+        "box": [
+          195,
+          718,
+          348,
+          284
+        ],
+        "color": [
+          245,
+          240,
+          234
+        ],
+        "font": "CF Reference 1 Part 3.ttf",
+        "codepoint": 57344,
+        "kind": "reference_word_outlines",
+        "head_occluded_in_source": false
+      }
+    ],
+    "en": [
+      {
+        "text": "Why",
+        "box": [
+          132,
+          538,
+          437,
+          249
+        ],
+        "color": [
+          255,
+          154,
+          104
+        ],
+        "font": "CF Reference 1 Part 1.ttf",
+        "codepoint": 57345,
+        "kind": "reference_word_outlines",
+        "head_occluded_in_source": false
+      },
+      {
+        "text": "not",
+        "box": [
+          96,
+          756,
+          103,
+          56
+        ],
+        "color": [
+          245,
+          239,
+          233
+        ],
+        "font": "CF Reference 1 Part 2.ttf",
+        "codepoint": 57345,
+        "kind": "reference_word_outlines",
+        "head_occluded_in_source": false
+      },
+      {
+        "text": "YOU?",
+        "box": [
+          209,
+          717,
+          390,
+          290
+        ],
+        "color": [
+          245,
+          240,
+          234
+        ],
+        "font": "CF Reference 1 Part 3.ttf",
+        "codepoint": 57345,
+        "kind": "reference_word_outlines",
+        "head_occluded_in_source": false
+      }
+    ]
+  },
+  "2": {
+    "ru": [
+      {
+        "text": "Почему",
+        "box": [
+          31,
+          197,
+          598,
+          273
+        ],
+        "color": [
+          252,
+          194,
+          56
+        ],
+        "font": "CF Reference 2 Part 1.ttf",
+        "codepoint": 57344,
+        "kind": "reference_word_outlines",
+        "head_occluded_in_source": false
+      },
+      {
+        "text": "не",
+        "box": [
+          252,
+          598,
+          156,
+          76
+        ],
+        "color": [
+          250,
+          244,
+          226
+        ],
+        "font": "CF Reference 2 Part 2.ttf",
+        "codepoint": 57344,
+        "kind": "reference_word_outlines",
+        "head_occluded_in_source": false
+      },
+      {
+        "text": "ТЫ?",
+        "box": [
+          127,
+          698,
+          424,
+          351
+        ],
+        "color": [
+          252,
+          248,
+          243
+        ],
+        "font": "CF Reference 2 Part 3.ttf",
+        "codepoint": 57344,
+        "kind": "reference_word_outlines",
+        "head_occluded_in_source": false
+      }
+    ],
+    "en": [
+      {
+        "text": "Why",
+        "box": [
+          84,
+          177,
+          526,
+          301
+        ],
+        "color": [
+          252,
+          195,
+          57
+        ],
+        "font": "CF Reference 2 Part 1.ttf",
+        "codepoint": 57345,
+        "kind": "reference_word_outlines",
+        "head_occluded_in_source": false
+      },
+      {
+        "text": "not",
+        "box": [
+          243,
+          583,
+          190,
+          94
+        ],
+        "color": [
+          250,
+          244,
+          225
+        ],
+        "font": "CF Reference 2 Part 2.ttf",
+        "codepoint": 57345,
+        "kind": "reference_word_outlines",
+        "head_occluded_in_source": false
+      },
+      {
+        "text": "YOU?",
+        "box": [
+          90,
+          698,
+          495,
+          355
+        ],
+        "color": [
+          252,
+          248,
+          243
+        ],
+        "font": "CF Reference 2 Part 3.ttf",
+        "codepoint": 57345,
+        "kind": "reference_word_outlines",
+        "head_occluded_in_source": false
+      }
+    ]
+  },
+  "3": {
+    "ru": [
+      {
+        "text": "ПОЧЕМУ",
+        "box": [
+          90,
+          247,
+          515,
+          208
+        ],
+        "color": [
+          250,
+          247,
+          244
+        ],
+        "font": "CF Reference 3 Part 1.ttf",
+        "codepoint": 57344,
+        "kind": "reference_word_outlines",
+        "head_occluded_in_source": true
+      },
+      {
+        "text": "не",
+        "box": [
+          202,
+          614,
+          143,
+          87
+        ],
+        "color": [
+          249,
+          246,
+          244
+        ],
+        "font": "CF Reference 3 Part 2.ttf",
+        "codepoint": 57344,
+        "kind": "reference_word_outlines",
+        "head_occluded_in_source": false
+      },
+      {
+        "text": "ты?",
+        "box": [
+          60,
+          657,
+          578,
+          324
+        ],
+        "color": [
+          252,
+          50,
+          89
+        ],
+        "font": "CF Reference 3 Part 3.ttf",
+        "codepoint": 57344,
+        "kind": "reference_word_outlines",
+        "head_occluded_in_source": false
+      }
+    ],
+    "en": [
+      {
+        "text": "WHY",
+        "box": [
+          171,
+          249,
+          354,
+          215
+        ],
+        "color": [
+          250,
+          247,
+          244
+        ],
+        "font": "CF Reference 3 Part 1.ttf",
+        "codepoint": 57345,
+        "kind": "reference_word_outlines",
+        "head_occluded_in_source": true
+      },
+      {
+        "text": "not",
+        "box": [
+          208,
+          611,
+          196,
+          100
+        ],
+        "color": [
+          249,
+          246,
+          244
+        ],
+        "font": "CF Reference 3 Part 2.ttf",
+        "codepoint": 57345,
+        "kind": "reference_word_outlines",
+        "head_occluded_in_source": false
+      },
+      {
+        "text": "you?",
+        "box": [
+          93,
+          657,
+          547,
+          372
+        ],
+        "color": [
+          252,
+          50,
+          88
+        ],
+        "font": "CF Reference 3 Part 3.ttf",
+        "codepoint": 57345,
+        "kind": "reference_word_outlines",
+        "head_occluded_in_source": false
+      }
+    ]
+  },
+  "5": {
+    "ru": [
+      {
+        "text": "ПОЧЕМУ",
+        "box": [
+          52,
+          566,
+          572,
+          104
+        ],
+        "color": [
+          248,
+          225,
+          192
+        ],
+        "font": "CF Reference 5 Part 1.ttf",
+        "codepoint": 57344,
+        "kind": "reference_word_outlines",
+        "head_occluded_in_source": false
+      },
+      {
+        "text": "не",
+        "box": [
+          104,
+          676,
+          393,
+          102
+        ],
+        "color": [
+          231,
+          104,
+          48
+        ],
+        "font": "CF Reference 5 Part 2.ttf",
+        "codepoint": 57344,
+        "kind": "reference_word_outlines",
+        "head_occluded_in_source": false
+      },
+      {
+        "text": "ТЫ?",
+        "box": [
+          59,
+          769,
+          508,
+          208
+        ],
+        "color": [
+          248,
+          226,
+          193
+        ],
+        "font": "CF Reference 5 Part 3.ttf",
+        "codepoint": 57344,
+        "kind": "reference_word_outlines",
+        "head_occluded_in_source": false
+      }
+    ],
+    "en": [
+      {
+        "text": "WHY",
+        "box": [
+          139,
+          565,
+          404,
+          117
+        ],
+        "color": [
+          249,
+          226,
+          192
+        ],
+        "font": "CF Reference 5 Part 1.ttf",
+        "codepoint": 57345,
+        "kind": "reference_word_outlines",
+        "head_occluded_in_source": false
+      },
+      {
+        "text": "not",
+        "box": [
+          65,
+          642,
+          408,
+          121
+        ],
+        "color": [
+          229,
+          103,
+          47
+        ],
+        "font": "CF Reference 5 Part 2.ttf",
+        "codepoint": 57345,
+        "kind": "reference_word_outlines",
+        "head_occluded_in_source": false
+      },
+      {
+        "text": "YOU?",
+        "box": [
+          38,
+          768,
+          582,
+          216
+        ],
+        "color": [
+          248,
+          226,
+          192
+        ],
+        "font": "CF Reference 5 Part 3.ttf",
+        "codepoint": 57345,
+        "kind": "reference_word_outlines",
+        "head_occluded_in_source": false
+      }
+    ]
+  },
+  "9": {
+    "ru": [
+      {
+        "text": "ПОЧЕМУ",
+        "box": [
+          138,
+          258,
+          451,
+          264
+        ],
+        "color": [
+          253,
+          249,
+          246
+        ],
+        "font": "CF Reference 9 Part 1.ttf",
+        "codepoint": 57344,
+        "kind": "reference_word_outlines",
+        "head_occluded_in_source": true
+      },
+      {
+        "text": "не",
+        "box": [
+          109,
+          611,
+          117,
+          63
+        ],
+        "color": [
+          250,
+          248,
+          245
+        ],
+        "font": "CF Reference 9 Part 2.ttf",
+        "codepoint": 57344,
+        "kind": "reference_word_outlines",
+        "head_occluded_in_source": false
+      },
+      {
+        "text": "Ты?",
+        "box": [
+          70,
+          645,
+          573,
+          369
+        ],
+        "color": [
+          83,
+          195,
+          252
+        ],
+        "font": "CF Reference 9 Part 3.ttf",
+        "codepoint": 57344,
+        "kind": "reference_word_outlines",
+        "head_occluded_in_source": false
+      }
+    ],
+    "en": [
+      {
+        "text": "WHY",
+        "box": [
+          190,
+          254,
+          319,
+          266
+        ],
+        "color": [
+          253,
+          249,
+          246
+        ],
+        "font": "CF Reference 9 Part 1.ttf",
+        "codepoint": 57345,
+        "kind": "reference_word_outlines",
+        "head_occluded_in_source": true
+      },
+      {
+        "text": "not",
+        "box": [
+          87,
+          596,
+          163,
+          83
+        ],
+        "color": [
+          251,
+          248,
+          246
+        ],
+        "font": "CF Reference 9 Part 2.ttf",
+        "codepoint": 57345,
+        "kind": "reference_word_outlines",
+        "head_occluded_in_source": false
+      },
+      {
+        "text": "you?",
+        "box": [
+          39,
+          641,
+          604,
+          398
+        ],
+        "color": [
+          82,
+          194,
+          252
+        ],
+        "font": "CF Reference 9 Part 3.ttf",
+        "codepoint": 57345,
+        "kind": "reference_word_outlines",
+        "head_occluded_in_source": false
+      }
+    ]
+  }
+}

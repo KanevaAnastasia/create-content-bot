@@ -1,4 +1,4 @@
-"""Visual selection of the eight approved Discipline title presets."""
+"""Visual selection of the approved Discipline title presets."""
 from __future__ import annotations
 
 import asyncio
@@ -15,8 +15,7 @@ from .handlers_generation_utils import OVERLAY_TITLE_BY_LANG_SESSION_KEY, OVERLA
 
 def picker_markup():
     return ReplyKeyboardMarkup([
-        ['Стиль 1', 'Стиль 2', 'Стиль 3'], ['Стиль 5', 'Стиль 6', 'Стиль 7'],
-        ['Стиль 9', 'Стиль 10'], ['Все стили', 'ОК'], ['В начало'],
+        ['Стиль 1', 'Стиль 2', 'Стиль 3'], ['Стиль 5', 'Стиль 9'], ['Все стили', 'ОК'], ['В начало'],
     ], resize_keyboard=True)
 
 
@@ -31,9 +30,9 @@ def render_card(titles: dict, style: dict) -> bytes:
     draw.text((20, 14), f'{style_id}. {STYLES[style_id].name}', font=font, fill='#24282a')
     for index, language in enumerate(languages):
         # The first video frame does not exist at title selection time.
-        # A neutral light background makes typography and 23% scrim comparable.
+        # A neutral light background makes typography and 32% scrim comparable.
         background = Image.new('RGB', (width, height), '#8b9698')
-        data = render_title_overlay_preview(background, language=language, title=titles[language], title_style=style)
+        data = render_title_overlay_preview(background, language=language, title=titles[language], title_style={**style, "word_timing_by_lang": {}})
         card.paste(Image.open(io.BytesIO(data)), (index * width, 82))
         draw.text((index * width + 20, 48), language.upper(), font=font, fill='#42484a')
     stream = io.BytesIO()
@@ -60,13 +59,13 @@ async def ask_picker(update, session, *, all_styles=True):
         parts = await propose_parts(titles)
     style.update({PARTS_KEY: parts, 'dim_opacity': style.get('dim_opacity', DEFAULT_DIM)})
     session[OVERLAY_TITLE_STYLE_SESSION_KEY] = style
-    await update.message.reply_text('Выберите оформление заголовка. На карточках ваш текст; фон условный, затемнение всего кадра 23%.')
-    for style_id in STYLE_IDS if all_styles else (str(style.get(STYLE_KEY) or '7'),):
+    await update.message.reply_text('Выберите оформление заголовка. На карточках ваш текст; фон условный, затемнение всего кадра 32%.')
+    for style_id in STYLE_IDS if all_styles else (str(style.get(STYLE_KEY) or '1'),):
         await _send_card(update, titles, {**style, STYLE_KEY: style_id})
     await update.message.reply_text(
         'Нажмите номер стиля. Смысловые части:\n' + '\n'.join(f'{lang.upper()}: ' + ' | '.join(value) for lang, value in parts.items())
         + '\nМожно исправить: RU: У меня | нет | энергии (или EN: I have | no | energy). '
-        'Затемнение: «затемнение 23%». После выбора нажмите «ОК».', reply_markup=picker_markup())
+        'Затемнение: «затемнение 32%». После выбора нажмите «ОК».', reply_markup=picker_markup())
     return True
 
 
@@ -76,13 +75,13 @@ async def handle_picker_input(update, session, text):
     style = dict(session.get(OVERLAY_TITLE_STYLE_SESSION_KEY) or {})
     titles = session.get(OVERLAY_TITLE_BY_LANG_SESSION_KEY) or {}
     if low in {'ок', 'ok', 'okay', 'approve'}:
-        if str(style.get(STYLE_KEY)) not in STYLES:
+        if str(style.get(STYLE_KEY)) not in STYLE_IDS:
             await update.message.reply_text('Сначала выберите стиль по номеру.', reply_markup=picker_markup())
             return True
         return False
     if low == 'все стили':
         return await ask_picker(update, session)
-    choice = re.fullmatch(r'(?:стиль\s*)?(1|2|3|5|6|7|9|10)', low)
+    choice = re.fullmatch(r'(?:стиль\s*)?(1|2|3|5|9)', low)
     if choice:
         style[STYLE_KEY] = choice.group(1)
     elif '|' in text:
@@ -96,7 +95,7 @@ async def handle_picker_input(update, session, text):
     else:
         dim = re.fullmatch(r'затемнение\s+(\d{1,2})\s*%', low)
         if not dim or not 0 <= int(dim.group(1)) <= 60:
-            await update.message.reply_text('Выберите стиль, измените смысловые части через | или напишите «затемнение 23%».', reply_markup=picker_markup())
+            await update.message.reply_text('Выберите стиль, измените смысловые части через | или напишите «затемнение 32%».', reply_markup=picker_markup())
             return True
         style['dim_opacity'] = int(dim.group(1)) / 100
     session[OVERLAY_TITLE_STYLE_SESSION_KEY] = style

@@ -701,9 +701,11 @@ def rebuild_production_session(
         for row in link_rows:
             message_links_by_scene_id[str(row.scene_id)].append(row)
     if run is not None and str(run.title_color or "").strip():
-        style = production.get("overlay_title_style")
-        if not isinstance(style, dict):
-            style = {}
+        saved_style = session.get("overlay_title_style")
+        production_style = production.get("overlay_title_style")
+        style = dict(saved_style) if isinstance(saved_style, dict) else {}
+        if isinstance(production_style, dict):
+            style.update(production_style)
         style["title_color"] = str(run.title_color).strip()
         production["overlay_title_style"] = style
         session["overlay_title_style"] = dict(style)

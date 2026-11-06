@@ -1,0 +1,14 @@
+{
+  "5:1": [
+    {
+      "char": "н",
+      "when": "initial",
+      "codepoint": 57600
+    },
+    {
+      "char": "е",
+      "when": "final",
+      "codepoint": 57601
+    }
+  ]
+}

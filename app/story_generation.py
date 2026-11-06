@@ -414,6 +414,7 @@ def generate_story_voiceover(
     *,
     user_feedback: str | None = None,
     previous_text: str | None = None,
+    discipline_mode: str | None = None,
 ) -> dict[str, Any]:
     """Turn a supplied story into an approvable narration of up to two minutes."""
     payload = {
@@ -435,12 +436,18 @@ def generate_story_voiceover(
         "без сложных аббревиатур. Если дан feedback, перепиши previous_voiceover по нему, сохранив факты источника.\n\n"
         + json.dumps(payload, ensure_ascii=False, indent=2)
     )
+    from .discipline_modes import script_direction, REFRAME, opening_sentence
+    direction = script_direction(discipline_mode)
+    if direction:
+        prompt += "\nПриоритетная структура выбранного формата:\n" + direction
     raw = gemini_generate_sync(prompt, model_profile=GEMINI_MODEL_PROFILE_CREATIVE)
     data = extract_json_object(raw)
     title = _clean_title(data.get("title"))
     voiceover = _clean_voiceover(data.get("voiceover_text"))
     if not voiceover:
         raise ValueError("Gemini не вернул текст озвучки для истории.")
+    if discipline_mode == REFRAME:
+        title = opening_sentence(voiceover)
     word_count = len(re.findall(r"[\wЁёА-Яа-я-]+", voiceover, flags=re.UNICODE))
     return {
         "title": title or "История",
@@ -1379,6 +1386,7 @@ def generate_story_scene_plan(
     primary_character_id: str | None = None,
     project_slug: str | None = None,
     generation_mode: str | None = None,
+    discipline_mode: str | None = None,
 ) -> dict[str, Any]:
     style_key = normalize_story_visual_style(story_visual_style)
     style_config = story_visual_style_config(style_key)
@@ -1405,6 +1413,8 @@ def generate_story_scene_plan(
         else {}
     )
     discipline_project = normalized_project_slug == "discipline"
+    from .discipline_modes import LABELS, visual_direction
+    narrative_format = discipline_mode if discipline_project and discipline_mode in LABELS else ""
     grandma_project = normalized_project_slug in {"grandma_kitchen", "grandma_cat_cooking"}
     fixed_project_characters = _normalize_story_character_bible(project_characters or [])
     fixed_character_ids = {item["id"] for item in fixed_project_characters}
@@ -1469,7 +1479,7 @@ def generate_story_scene_plan(
         )
     else:
         project_character_direction = ""
-    if discipline_project and discipline_anastasia_id:
+    if discipline_project and discipline_anastasia_id and not narrative_format:
         project_character_direction += (
             f"Особое правило первого лица: если narration_excerpt содержит отдельное русское местоимение «я», "
             f"во всех clip_visuals этого смыслового эпизода показывай Анастасию ({discipline_anastasia_id}) как главную героиню-рассказчицу. "
@@ -1480,6 +1490,8 @@ def generate_story_scene_plan(
             "например визуальными отсылками к Atomic Habits, Getting Things Done, Deep Work и The 7 Habits; "
             "обложки узнаются по цвету и композиции, но без читаемых названий, имён авторов и логотипов. "
         )
+    if narrative_format:
+        project_character_direction = visual_direction(narrative_format)
     if project_final_scene_rule:
         project_character_direction += (
             " Обязательное постоянное правило финальной сцены этого проекта: "
@@ -1703,7 +1715,7 @@ def generate_story_scene_plan(
             or STORY_CLIP_DURATION_SEC
         )
         final_scene["visualization_output_policy"] = dict(visualization_output_policy)
-    if discipline_project:
+    if discipline_project and not narrative_format:
         present_scenes = [item for item in normalized if str(item.get("time_period") or "present") == "present"]
         first_person_scenes = [
             item

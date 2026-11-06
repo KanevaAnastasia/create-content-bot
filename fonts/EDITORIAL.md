@@ -1,3 +1,11 @@
+# Current approved titles
+
+Styles 1/2/3/5/9 now use the frozen `editorial_approved/` assets via
+`app/editorial_approved.py`. These override the legacy ASS font presets below.
+See `docs/discipline-formats.md` for timing and foreground-mask limitations.
+
+# Legacy presets (kept for older drafts)
+
 # Discipline title fonts
 
 The eight presets (1, 2, 3, 5, 6, 7, 9, 10) use local static fonts so preview

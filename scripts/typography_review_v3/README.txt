@@ -29,3 +29,6 @@ Revision 4: tighter/heavier style 5, directional stroke contrast in style 9,
 connected-component body glyph extraction in styles 6/10. Outputs: review_v4.
 
 The before/after comparison additionally reads retained review_v3 rendered images.
+
+Approval 2026-11-07: styles 1/2/3/5/9 are frozen in fonts/editorial_approved
+and used by the bot. See docs/discipline-formats.md for runtime scope.
