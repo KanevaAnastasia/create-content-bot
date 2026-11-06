@@ -5689,8 +5689,16 @@ class PublicationJobAdmin(admin.ModelAdmin):
             project_choices[0][0] if project_choices else ""
         )
         initial_language = "ru"
+        # A destination-specific URL must survive the login redirect and POST.
+        destination_project = request.GET.get("project_slug", "")
+        destination_language = request.GET.get("language", "")
+        pinned = (destination_project in {key for key, _ in project_choices}
+                  and destination_language in {"ru", "en"})
+        if pinned:
+            initial_project = destination_project
+            initial_language = destination_language
         initial_client_id = (
-            project_env(initial_project, "YOUTUBE_CLIENT_ID_RU")
+            project_env(initial_project, f"YOUTUBE_CLIENT_ID_{initial_language.upper()}")
             or project_env(initial_project, "YOUTUBE_CLIENT_ID")
             if initial_project
             else ""
@@ -5704,6 +5712,10 @@ class PublicationJobAdmin(admin.ModelAdmin):
                 "client_id": initial_client_id,
             },
         )
+        if pinned:
+            # Disabled Django fields use initial values, ignoring conflicting POST data.
+            form.fields["project_slug"].disabled = True
+            form.fields["language"].disabled = True
         callback_url = request.build_absolute_uri(
             reverse("admin:pipeline_admin_publicationjob_youtube_oauth_callback")
         )

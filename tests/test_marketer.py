@@ -192,3 +192,22 @@ def test_homepage_marketer_link_matches_registered_route(page):
     assert url == f'/{settings.ADMIN_URL_PATH}/marketer/'
     assert resolve(url).url_name == 'marketer'
     assert Template("{% url 'marketer' %}").render(Context()) == url
+
+
+def test_youtube_destination_link_pins_en_even_with_ru_post(page, monkeypatch):
+    from django.contrib import admin
+    from django.test import RequestFactory
+    from pipeline_admin import admin as module
+    from pipeline_admin.models import PublicationJob
+    monkeypatch.setattr(module, '_publication_project_choices', lambda: [('grandma_kitchen', 'Grandma')])
+    monkeypatch.setattr(module, 'project_env', lambda *a: 'client')
+    captured = []
+    monkeypatch.setattr(module, '_save_youtube_oauth_flow', lambda request, flow: captured.append(flow) or 'state')
+    monkeypatch.setattr(module, 'set_project_secrets', lambda *a: None)
+    request = RequestFactory().post('/admin/pipeline_admin/publicationjob/youtube-oauth/?project_slug=grandma_kitchen&language=en',
+        {'project_slug': 'grandma_kitchen', 'language': 'ru', 'client_id': 'client', 'client_secret': 'secret'},
+        HTTP_HOST='127.0.0.1:8000')
+    response = admin.site._registry[PublicationJob].youtube_oauth_view(request)
+    assert response.status_code == 302
+    assert captured[0]['language'] == 'en'
+    assert captured[0]['project_slug'] == 'grandma_kitchen'
