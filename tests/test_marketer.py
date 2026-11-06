@@ -155,3 +155,13 @@ def test_marketer_queue_cannot_receive_publication_routes(page):
     queue = app.amqp.queues['marketer']
     assert queue.exchange.name == 'marketer'
     assert queue.routing_key == 'marketer'
+
+
+def test_homepage_marketer_link_matches_registered_route(page):
+    from django.conf import settings
+    from django.template import Context, Template
+    from django.urls import resolve, reverse
+    url = reverse('marketer')
+    assert url == f'/{settings.ADMIN_URL_PATH}/marketer/'
+    assert resolve(url).url_name == 'marketer'
+    assert Template("{% url 'marketer' %}").render(Context()) == url
