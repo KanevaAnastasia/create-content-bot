@@ -7,7 +7,7 @@ from fontTools.pens.transformPen import TransformPen
 from fontTools.pens.recordingPen import DecomposingRecordingPen
 from fontTools.pens.cu2quPen import Cu2QuPen
 from PIL import ImageFont,Image,ImageDraw
-root=Path('/opt/content_fabric');out=root/'artifacts/editorial_titles/review_v3';out.mkdir(exist_ok=True)
+root=Path('/opt/content_fabric');out=root/'artifacts/editorial_titles/review_v4';out.mkdir(parents=True,exist_ok=True)
 f=TTFont(root/'fonts/CF-Oswald.ttf');cmap=f.getBestCmap();gs=f.getGlyphSet();changed={}
 # Narrow, heavy uprights with flared tips; keep the source's substantial crossbars.
 for n in f.getGlyphOrder():

@@ -5,7 +5,7 @@ sys.path[:0]=['/tmp/advice-font-tools','/opt/content_fabric']
 from fontTools.ttLib import TTFont
 from PIL import Image
 from app.ai_approval_service import _resolve_ffmpeg
-R=Path('/opt/content_fabric');O=R/'artifacts/editorial_titles/review_v3';B=O.parent
+R=Path('/opt/content_fabric');O=R/'artifacts/editorial_titles/review_v4';B=O.parent
 manifest=json.loads((O/'unicode_font_manifest.json').read_text());alphabet='АБВГДЕЁЖЗИЙКЛМНОПРСТУФХЦЧШЩЪЫЬЭЮЯабвгдеёжзийклмнопрстуфхцчшщъыьэюяABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789?!'
 report={'fonts':[],'videos':[],'images':0,'visual_status':'reviewed_comparisons_available_not_exact_match_certified'}
 for n,roles in manifest.items():
@@ -19,6 +19,17 @@ for a,b in [('Н','H')]:
  ga=f['glyf'][cmap[ord(a)]];gb=f['glyf'][cmap[ord(b)]]
  assert abs((ga.xMax-ga.xMin)-(gb.xMax-gb.xMin))<=2 and (ga.yMin,ga.yMax)==(gb.yMin,gb.yMax),(a,b)
 report['shared_glyph_transform_regression']='pass'
+
+# The high-contrast heading must retain its fine crossbar rather than reverting to monoline.
+from PIL import ImageDraw,ImageFont
+font=ImageFont.truetype(str(O/'unicode_fonts/CF Reviewed 9 1.ttf'),1000);bb=font.getbbox('П');mask=Image.new('L',(bb[2]-bb[0]+10,bb[3]-bb[1]+10));ImageDraw.Draw(mask).text((5-bb[0],5-bb[1]),'П',font=font,fill=255);mask=mask.crop(mask.getbbox())
+bar=0
+for y in range(mask.height):
+ if mask.getpixel((mask.width//2,y))>128:bar+=1
+ else:break
+assert .02<bar/mask.height<.055,('heading contrast',bar,mask.height)
+report['style9_crossbar_to_cap_height']=round(bar/mask.height,4)
+
 for n in manifest:
  for lang in ['ru','en']:
   for i in range(1,6):

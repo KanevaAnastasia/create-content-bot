@@ -6,7 +6,7 @@ from fontTools.ttLib import TTFont
 from fontTools.pens.ttGlyphPen import TTGlyphPen
 from fontTools.pens.transformPen import TransformPen
 from fontTools.pens.recordingPen import DecomposingRecordingPen
-R=Path('/opt/content_fabric');B=R/'artifacts/editorial_titles';O=B/'review_v3';D=O/'unicode_fonts';D.mkdir(exist_ok=True)
+R=Path('/opt/content_fabric');B=R/'artifacts/editorial_titles';O=B/'review_v4';D=O/'unicode_fonts';D.mkdir(parents=True,exist_ok=True)
 from review_utils import contours_from_mask
 F=R/'fonts';RF=B/'reference_fonts';catalog={}
 def derive(n,role,path,sx=1,sy=1,shear=0):
@@ -129,6 +129,27 @@ for n in [5,6,7,10]:
   mask=Image.new('L',im.size);mp=mask.load()
   for x,y in pts:mp[x,y]=255
   bb=mask.getbbox();set_mask(f,ch,mask,bb[0],im.height,cap/im.height,bb[2]-bb[0]+10)
+
+# Reconstruct Cyrillic serif/display bodies from connected components, not rectangular cuts.
+# Rectangular cuts had included neighbouring serifs and damaged the T in style 10.
+for n in [6,10]:
+ f=fonts[n,2];im=Image.open(O/f'style_{n}/ru_part3_mask.png');parts=components(im)
+ major=sorted(sorted(parts,key=len,reverse=True)[:4],key=lambda pts:min(x for x,y in pts))
+ cap=f['glyf'][f.getBestCmap()[ord('T')]].yMax
+ for ch,pts in [('Т',major[0]),('Ы',major[1]+major[2])]:
+  mask=Image.new('L',im.size);mp=mask.load()
+  for x,y in pts:mp[x,y]=255
+  bb=mask.getbbox();set_mask(f,ch,mask,bb[0],bb[3],cap/(bb[3]-bb[1]),bb[2]-bb[0]+10)
+# Style 9: retain the full question-mark curve and its separate dot.
+f=fonts[9,2];im=Image.open(O/'style_9/ru_part3_mask.png');parts=components(im)
+pts=[pt for component in parts if min(x for x,y in component)>460 for pt in component]
+mask=Image.new('L',im.size);mp=mask.load()
+for x,y in pts:mp[x,y]=255
+set_mask(f,'?',mask,479,250,2.3,110)
+# Source ы has a restrained sloping bowl, unlike the ornate substituted base glyph.
+x0,y0,_,_=rec['9']['ru'][2]['box']
+mask=segment(9,'ru',2,[(x-x0,y-y0) for x,y in [(306,743),(539,743),(539,900),(241,900),(241,860),(290,800)]])
+set_mask(f,'ы',mask,285-x0,895-y0,2.3,240)
 
 # Keep the small connective words optically light; references govern fixed headline sizes.
 for (n,role),f in fonts.items():

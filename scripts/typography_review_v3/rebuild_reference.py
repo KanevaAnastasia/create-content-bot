@@ -4,7 +4,7 @@ from PIL import Image,ImageDraw,ImageFont,ImageChops,ImageFilter
 sys.path.insert(0,'/tmp/advice-font-tools')
 from fontTools.ttLib import TTFont
 from fontTools.pens.ttGlyphPen import TTGlyphPen
-R=Path('/opt/content_fabric');B=R/'artifacts/editorial_titles';O=B/'review_v3';FD=O/'fonts';FD.mkdir(exist_ok=True)
+R=Path('/opt/content_fabric');B=R/'artifacts/editorial_titles';O=B/'review_v4';FD=O/'fonts';FD.mkdir(parents=True,exist_ok=True)
 # Reference boxes in the original 1330 x 1182 image; independent RU/EN geometry.
 BOX={
 1:[[(45,530,650,815),(95,750,197,825),(195,710,560,1018)],[(775,510,1270,815),(760,745,875,825),(875,710,1310,1018)]],
@@ -31,7 +31,7 @@ def select(c,kind):
  return min(r,g,b)>190 and max(r,g,b)-min(r,g,b)<65 and r>=g*.99
 records={};audits=[]
 for n in BOX:
- src=Image.open(B/f'eight_real_drafts/original_{n}.png').convert('RGB');d=O/f'style_{n}';d.mkdir(exist_ok=True)
+ src=Image.open(B/f'eight_real_drafts/original_{n}.png').convert('RGB');d=O/f'style_{n}';d.mkdir(parents=True,exist_ok=True)
  records[str(n)]={}
  for role,base in enumerate(BASES[n]):
   family=f'CF Reference {n} Part {role+1}';font=TTFont(R/f'fonts/CF-{base}.ttf');upem=font['head'].unitsPerEm;order=list(font.getGlyphOrder())

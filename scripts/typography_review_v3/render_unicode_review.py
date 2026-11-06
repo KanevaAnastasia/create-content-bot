@@ -1,7 +1,7 @@
 from pathlib import Path
 import json,sys,math,re
 from PIL import Image,ImageDraw,ImageFont,ImageChops,ImageFilter,ImageOps
-R=Path('/opt/content_fabric');B=R/'artifacts/editorial_titles';OUT=B/'review_v3';W,H=720,1280
+R=Path('/opt/content_fabric');B=R/'artifacts/editorial_titles';OUT=B/'review_v4';W,H=720,1280
 rec=json.loads((OUT/'reference_geometry.json').read_text());manifest=json.loads((OUT/'unicode_font_manifest.json').read_text());FD=OUT/'unicode_fonts'
 BG=Image.open(B/'eight_styles_v2/video_frames/001.png').convert('RGBA');BG=Image.alpha_composite(BG,Image.new('RGBA',(W,H),(0,0,0,82)))
 from review_utils import headmask
@@ -27,6 +27,11 @@ def layer(n,lang,i,text=None):
 
 def ornament(n,lang,role,poly):
  r=rec[str(n)][lang][role];x,y,w,h=r['box'];mask=Image.open(OUT/f'style_{n}/{lang}_part{role+1}_mask.png');gate=Image.new('L',mask.size);ImageDraw.Draw(gate).polygon([(px-x,py-y) for px,py in poly],fill=255);mask=ImageChops.multiply(mask,gate)
+ if n==9 and role==2:
+  # The underline is one disconnected component: keep it whole, without nearby letter fragments.
+  source=Image.open(OUT/f'style_{n}/{lang}_part{role+1}_mask.png').copy()
+  seed=next((x,y) for y in range(source.height-1,-1,-1) for x in range(source.width) if source.getpixel((x,y)))
+  ImageDraw.floodfill(source,seed,128,thresh=0);mask=source.point(lambda v:255 if v==128 else 0)
  a=Image.new('RGBA',mask.size,tuple(r['color']));a.putalpha(mask);a=a.resize((round(w*W/660),round(h*H/1182)),Image.Resampling.LANCZOS);l=Image.new('RGBA',(W,H));l.alpha_composite(a,(round(x*W/660),round(y*H/1182)));return l
 ALL={}
 for n in [1,2,3,5,6,7,9,10]:
@@ -36,7 +41,7 @@ for n in [1,2,3,5,6,7,9,10]:
   else:layers=[layer(n,lang,i) for i in range(3)]
   if n==3 and lang=='ru':layers[1].alpha_composite(ornament(n,lang,2,[(180,690),(420,690),(420,750),(180,750)]))
   if n==7 and lang=='ru':layers[1].alpha_composite(ornament(n,lang,1,[(225,745),(310,715),(390,703),(500,699),(510,720),(380,733),(285,759),(225,775)]))
-  if n==9 and lang=='ru':layers[2].alpha_composite(ornament(n,lang,2,[(70,900),(650,900),(650,1040),(70,1040)]))
+  if n==9 and lang=='ru':layers[2].alpha_composite(ornament(n,lang,2,[(70,900),(340,850),(520,850),(650,900),(650,1040),(70,1040)]))
   im=BG.copy()
   for i,l in enumerate(layers):
    im.alpha_composite(l)

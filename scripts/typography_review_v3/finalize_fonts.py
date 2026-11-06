@@ -9,7 +9,7 @@ from fontTools.pens.recordingPen import DecomposingRecordingPen
 def draw_flat(gs,name,pen,matrix):
  record=DecomposingRecordingPen(gs);gs[name].draw(record);record.replay(TransformPen(pen,matrix))
 from fontTools.feaLib.builder import addOpenTypeFeaturesFromString
-R=Path('/opt/content_fabric');O=R/'artifacts/editorial_titles/review_v3';D=O/'unicode_fonts';manifest=json.loads((O/'unicode_font_manifest.json').read_text());alt_records={}
+R=Path('/opt/content_fabric');O=R/'artifacts/editorial_titles/review_v4';D=O/'unicode_fonts';manifest=json.loads((O/'unicode_font_manifest.json').read_text());alt_records={}
 # Full architectural alphabet: flared stem terminals on every capital, not only on ПОЧЕМУ.
 p=D/'CF Reviewed 7 1.ttf';f=TTFont(p);cmap=f.getBestCmap();gs=f.getGlyphSet();pf=ImageFont.truetype(str(p),1000)
 known=set('ПОЧЕМУOEMWHYHN');caps='АБВГДЕЁЖЗИЙКЛМНОПРСТУФХЦЧШЩЪЫЬЭЮЯ'+string.ascii_uppercase
@@ -81,3 +81,37 @@ for n in [5,10]:
  for name,g in changed.items():
   f['glyf'][name]=g;g.recalcBounds(f['glyf']);a,_=f['hmtx'][name];f['hmtx'][name]=(a+10,g.xMin)
  f.save(path)
+
+# Style 5: tighter spacing and stronger strokes across all three roles.
+for role,dx,dy,tracking in [(0,12,2,32),(1,5,1,10),(2,10,1,22)]:
+ path=D/manifest['5'][role]['font'];f=TTFont(path);gs=f.getGlyphSet();changed={}
+ for cp,name in f.getBestCmap().items():
+  if not (chr(cp).isalpha() or cp>=0xe100 or chr(cp)=='?') or name in changed:continue
+  pen=TTGlyphPen(None)
+  for x,y in [(-dx,0),(dx,0),(0,-dy),(0,dy)]:draw_flat(gs,name,pen,(1,0,0,1,x,y))
+  changed[name]=pen.glyph()
+ for name,g in changed.items():
+  f['glyf'][name]=g;g.recalcBounds(f['glyf']);advance,_=f['hmtx'][name];f['hmtx'][name]=(max(advance-tracking,100),g.xMin)
+ f.save(path)
+
+# Style 9 has strong verticals and fine crossbars/round joins, not a monoline sans.
+# Erode only in the vertical direction, then restore the original glyph height.
+from PIL import ImageChops
+from review_utils import contours_from_mask
+path=D/manifest['9'][0]['font'];f=TTFont(path);pf=ImageFont.truetype(str(path),1000);changed={}
+for cp,name in f.getBestCmap().items():
+ if name in changed or not (0x41<=cp<=0x7a or 0x400<=cp<=0x45f) or not chr(cp).isalpha():continue
+ g=f['glyf'][name];bb=pf.getbbox(chr(cp));mask=Image.new('L',(bb[2]-bb[0]+100,bb[3]-bb[1]+100));ImageDraw.Draw(mask).text((50-bb[0],50-bb[1]),chr(cp),font=pf,fill=255)
+ mask=mask.point(lambda v:255 if v>=128 else 0)
+ # The measured П crossbar is 71 units: 22 units per side leaves a fine 27-unit bar.
+ for shift in [1,2,4,8,7]:
+  up=Image.new('L',mask.size);up.paste(mask,(0,-shift));down=Image.new('L',mask.size);down.paste(mask,(0,shift));mask=ImageChops.darker(mask,ImageChops.darker(up,down))
+ bounds=mask.getbbox()
+ if bounds is None:raise ValueError(('empty contrast glyph',chr(cp)))
+ mask=mask.crop(bounds);pen=TTGlyphPen(None);sx=(g.xMax-g.xMin)/mask.width;sy=(g.yMax-g.yMin)/mask.height
+ for contour in contours_from_mask(mask):
+  points=[(round(g.xMin+x*sx),round(g.yMax-y*sy)) for x,y in contour];pen.moveTo(points[0]);[pen.lineTo(pt) for pt in points[1:]];pen.closePath()
+ changed[name]=pen.glyph()
+for name,g in changed.items():
+ f['glyf'][name]=g;g.recalcBounds(f['glyf']);advance,_=f['hmtx'][name];f['hmtx'][name]=(advance,g.xMin)
+f.save(path)

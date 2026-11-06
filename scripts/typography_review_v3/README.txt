@@ -14,8 +14,8 @@ Run from /opt/content_fabric, in order:
   .venv/bin/python scripts/typography_review_v3/build_delivery.py --video
   .venv/bin/python scripts/typography_review_v3/validate_delivery.py
 
-Reference word outlines in review_v3/fonts are measurement assets, not full
-alphabets. Actual adapted alphabets are in review_v3/unicode_fonts. Style 1's
+Reference word outlines in review_v4/fonts are measurement assets, not full
+alphabets. Actual adapted alphabets are in review_v4/unicode_fonts. Style 1's
 approved first title keeps its previous contours; other phrases use font letters.
 Every transformed glyph is decomposed before transforming: retaining components
 would apply scale/shear twice when their shared bases are transformed as well.
@@ -24,3 +24,8 @@ Contextual swashes affect single initial/final letters, not complete words.
 Visual comparison remains required. Unicode coverage and successful video decode
 do not prove an exact stylistic match to the generated sketch. These fonts and
 the shot-specific foreground mask are not installed in the Telegram bot.
+
+Revision 4: tighter/heavier style 5, directional stroke contrast in style 9,
+connected-component body glyph extraction in styles 6/10. Outputs: review_v4.
+
+The before/after comparison additionally reads retained review_v3 rendered images.
