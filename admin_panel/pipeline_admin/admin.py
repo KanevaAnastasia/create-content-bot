@@ -1642,6 +1642,39 @@ def _merge_post_production(existing: Any, update: dict[str, Any]) -> dict[str, A
     return merged
 
 
+def _build_visualization_restore_for_run(run, session, *, language, variants, progress_callback=None):
+    if session.get("generation_mode") != "visualization" or not language:
+        return None
+    restore = GenerationArtifact.objects.filter(
+        run_id=run.id, artifact_type="visualization_master_restore", language=language,
+    ).order_by("-created_at", "-id").first()
+    if restore is None or not restore.payload_json.get("active"):
+        return None
+    from app.visualization_localization import build_restored_visualization
+
+    payload = restore.payload_json
+    sources = {}
+    for variant in ("clean", "upscaled_4k", "subtitled_music"):
+        artifact = GenerationArtifact.objects.get(
+            id=payload["source_artifact_ids"][variant], run_id=run.id,
+            artifact_type=f"final_{variant}", language=language,
+        )
+        path = _artifact_local_path(artifact)
+        if path is None or not path.is_file():
+            raise ValueError(f"Approved {variant} master for restoration is missing.")
+        sources[variant] = path
+    render_variants = variants or list(FINAL_VIDEO_VARIANT_LABELS)
+    title_style = (
+        _apply_pending_overlay_title_style_for_build(session, session.get("production") or {}, run=run)
+        if "titled_subtitled_music" in render_variants else {}
+    )
+    return build_restored_visualization(
+        sources=sources, language=language, duration=float(payload["duration_sec"]),
+        title=payload["title"], title_duration=float(payload["title_duration_sec"]),
+        title_style=title_style, variants=render_variants, progress_callback=progress_callback,
+    )
+
+
 def _build_visualization_translation_for_run(
     run, session, *, language, variants, progress_callback=None,
 ):
@@ -1698,11 +1731,17 @@ def _build_final_videos_for_run(
     synchronize_subtitles: bool = False,
 ) -> dict[str, Any]:
     chat_session, session, production = _run_session_for_admin_render(run)
-    localized = _build_visualization_translation_for_run(
+    localized = _build_visualization_restore_for_run(
         run, session, language=target_language,
         variants=list(target_variants) if target_variants else ([target_variant] if target_variant else None),
         progress_callback=progress_callback,
     )
+    if localized is None:
+        localized = _build_visualization_translation_for_run(
+            run, session, language=target_language,
+            variants=list(target_variants) if target_variants else ([target_variant] if target_variant else None),
+            progress_callback=progress_callback,
+        )
     if localized is not None:
         persist_post_production_artifacts(session, localized)
         production["post_production"] = _strip_inline_media_payloads(

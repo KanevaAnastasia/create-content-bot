@@ -5,6 +5,50 @@ import pytest
 from app import visualization_localization as vl
 
 
+def test_restoration_copies_saved_masters_and_only_renders_title(tmp_path, monkeypatch):
+    sources = {}
+    for variant in ("clean", "upscaled_4k", "subtitled_music"):
+        sources[variant] = tmp_path / f"{variant}.mp4"
+        sources[variant].write_bytes(f"approved {variant}".encode())
+    monkeypatch.setattr(vl.pp, "post_production_artifacts_dir", lambda: tmp_path / "out")
+    monkeypatch.setattr(vl.pp, "_media_duration", lambda path: 14.8)
+    monkeypatch.setattr(vl.pp, "_video_dimensions", lambda path: (2160, 3840))
+    monkeypatch.setattr(vl.pp, "_resolve_ffmpeg", lambda: "ffmpeg")
+    calls = []
+    def render(**kwargs):
+        calls.append(kwargs)
+        kwargs["dest_path"].write_bytes(b"new title over saved video")
+        return True
+    monkeypatch.setattr(vl.pp, "_render_subtitled_music_master", render)
+    post = vl.build_restored_visualization(
+        sources=sources, language="en", duration=14.8, title="Why Not You?",
+        title_duration=3, title_style={"title_color": "#ffc766"},
+        variants=["clean", "upscaled_4k", "subtitled_music", "titled_subtitled_music"],
+    )
+    renders = post["renders_by_language"]["en"]
+    for variant, source in sources.items():
+        assert Path(renders[variant]["video_path"]).read_bytes() == source.read_bytes()
+    assert len(calls) == 1
+    assert calls[0]["clean_path"] == sources["subtitled_music"]
+    assert calls[0]["music_path"] is None
+    ass = calls[0]["subtitles_path"].read_text()
+    assert r"Why\hNot\hYou?" in ass
+    assert "&H0066C7FF" in ass
+    assert "0:00:03.00,TitleOverlayEN" in ass
+    assert ass.count("Dialogue:") == 1  # Saved subtitles are already in the source.
+
+
+def test_restoration_rejects_changed_source_before_writing(tmp_path, monkeypatch):
+    source = tmp_path / "source.mp4"
+    source.write_bytes(b"old edit")
+    monkeypatch.setattr(vl.pp, "_media_duration", lambda path: 20)
+    with pytest.raises(ValueError, match="duration changed"):
+        vl.build_restored_visualization(
+            sources={"subtitled_music": source}, language="en", duration=14.8,
+            title="Why Not You?", title_duration=3, title_style={}, variants=["titled_subtitled_music"],
+        )
+
+
 def test_translation_retains_source_intervals_and_pauses():
     segments = [
         {"start_sec": 0.449, "end_sec": 2.509, "text": "Почему не ты?"},
