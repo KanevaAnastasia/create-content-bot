@@ -185,7 +185,15 @@ async def quiet_mode_stats_command(update, context) -> None:
         text,
         reply_markup=_admin_keyboard_for_current_session(update, identity, enabled),
     )
-    await send_instagram_stats(message)
+
+
+async def instagram_stats_command(update, context) -> None:
+    _ = context
+    if not is_quiet_mode_owner(_identity_for_update(update)):
+        return
+    message = getattr(update, "effective_message", None) or getattr(update, "message", None)
+    if message is not None:
+        await send_instagram_stats(message)
 
 
 async def instagram_stats_callback(update, context) -> None:
@@ -447,6 +455,7 @@ def build_application(token: str) -> Application:
     app.add_handler(CommandHandler("stop_quiet", quiet_mode_command))
     app.add_handler(CommandHandler("status_quiet", quiet_mode_command))
     app.add_handler(CommandHandler(["stat", "stats"], quiet_mode_stats_command, block=False))
+    app.add_handler(CommandHandler("inst", instagram_stats_command, block=False))
     app.add_handler(CallbackQueryHandler(instagram_stats_callback, pattern=r"^igstat:", block=False))
     app.add_handler(CommandHandler("check_env", check_env))
     app.add_handler(CommandHandler("cancel", cancel))

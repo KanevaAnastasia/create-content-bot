@@ -220,7 +220,7 @@ def test_stat_command_reports_guest_generation_usage_to_owner(monkeypatch):
             current_markup,
         )
     ]
-    instagram.assert_awaited_once()
+    instagram.assert_not_awaited()
 
 
 def test_stat_command_is_silent_for_non_owner(monkeypatch):
@@ -237,6 +237,24 @@ def test_stat_command_is_silent_for_non_owner(monkeypatch):
     asyncio.run(bot_app.quiet_mode_stats_command(SimpleNamespace(message=Message()), SimpleNamespace()))
 
     assert sent == []
+    instagram.assert_not_awaited()
+
+
+def test_inst_command_reports_instagram_to_owner(monkeypatch):
+    instagram = AsyncMock()
+    monkeypatch.setattr(bot_app, "send_instagram_stats", instagram)
+    monkeypatch.setattr(bot_app, "_identity_for_update", lambda *_: SimpleNamespace(role="admin", normalized_username="a_kaneva"))
+    message = SimpleNamespace(reply_text=AsyncMock())
+    asyncio.run(bot_app.instagram_stats_command(SimpleNamespace(effective_message=message), SimpleNamespace()))
+    instagram.assert_awaited_once_with(message)
+    message.reply_text.assert_not_awaited()
+
+
+def test_inst_command_is_silent_for_non_owner(monkeypatch):
+    instagram = AsyncMock()
+    monkeypatch.setattr(bot_app, "send_instagram_stats", instagram)
+    monkeypatch.setattr(bot_app, "_identity_for_update", lambda *_: SimpleNamespace(role="guest", normalized_username="guest"))
+    asyncio.run(bot_app.instagram_stats_command(SimpleNamespace(message=object()), SimpleNamespace()))
     instagram.assert_not_awaited()
 
 

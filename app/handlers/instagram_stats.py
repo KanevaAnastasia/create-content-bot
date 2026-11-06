@@ -1,4 +1,4 @@
-"""Owner-only /stat Instagram report and inline date picker."""
+"""Owner-only /inst Instagram report and inline date picker."""
 
 from __future__ import annotations
 
@@ -101,7 +101,7 @@ async def send_instagram_stats(message, start: date | None = None) -> None:
     except Exception as exc:
         # Network exceptions may contain credentials; log only their type.
         logger.warning("instagram.stats_failed type=%s", type(exc).__name__)
-        chunks = ["Не удалось загрузить статистику Instagram. Попробуйте /stat ещё раз."]
+        chunks = ["Не удалось загрузить статистику Instagram. Попробуйте /inst ещё раз."]
     for index, chunk in enumerate(chunks):
         kwargs = {
             "reply_markup": date_markup(start) if index == len(chunks) - 1 else None,
