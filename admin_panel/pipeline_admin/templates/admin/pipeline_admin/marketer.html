@@ -20,7 +20,17 @@
 {% if pending %}<p class="warning">Сбор в очереди или выполняется. <a href="?project={{ project.id }}">Обновить страницу</a>. Ниже пока предыдущий отчёт.</p>{% endif %}
 {% if stale %}<p class="warning">Задача не завершилась за 20 минут. Проверьте Celery и запустите сбор заново.</p>{% endif %}
 {% if report.error %}<p class="warning">{{ report.error }}</p>{% endif %}
-<section class="mk-card"><h2>AI-план на неделю</h2>{% if brief_stale %}<p class="warning">После этого разбора данные обновились. Составьте новый план по актуальному срезу.</p>{% endif %}{% if report.brief %}<div style="white-space:pre-wrap;line-height:1.7">{{ report.brief }}</div><p><small>AI может ошибаться. Проверяйте цифры по карточкам ниже. Этот план ничего не меняет в генерациях и публикациях.</small></p>{% else %}<p>Соберите статистику и/или примеры из ниши, затем нажмите «Составить AI-план»: получите приоритеты, новые хуки, оригинальные идеи и измеримые эксперименты.</p>{% endif %}</section>
+<section class="mk-card"><h2>Подписчики аккаунтов</h2><div class="mk-grid">
+{% for account in report.accounts %}<div><h3>{{ account.platform }} · {{ account.language|upper }}</h3><p style="font-size:24px">{{ account.followers|default_if_none:"—" }}</p>
+{% if account.approximate %}<small>YouTube округляет число подписчиков; небольшие изменения могут быть не видны.</small>{% endif %}
+{% if account.delta != None %}<p>Изменение: {{ account.delta }} с {{ account.previous_at }}.</p>{% endif %}
+{% if account.warning %}<p class="warning">{{ account.warning }}</p>{% endif %}<small>Срез: {{ account.fetched_at|default:"нет данных" }}</small></div>
+{% empty %}<p>Нажмите «Обновить статистику»: соберём доступные числа подписчиков YouTube и Instagram.</p>{% endfor %}</div>
+<p>Это аудитория аккаунта, не результат отдельного ролика. Изменение между срезами не доказывает, какой ролик привёл подписчика.</p></section>
+<section class="mk-card"><h2>Поведение зрителей</h2><p>Подписки от ролика, среднее время просмотра и удержание YouTube появятся после подключения YouTube Analytics. Сбор — отдельной кнопкой, максимум для первых 30 публикаций отчёта, период 90 дней. Подключения и разрешения автоматически не меняются.</p>
+{% if can_change and project %}<form method="post">{% csrf_token %}<input type="hidden" name="project" value="{{ project.id }}"><input type="hidden" name="language" value="ru"><button name="action" value="behaviour">Проверить удержание YouTube</button></form>{% endif %}
+<p>Момент лайка и точная секунда пролистывания из общего числа лайков и просмотров не вычисляются. Спад удержания — не список ушедших людей и не доказательство причины ухода. Для ответа «что было в кадре» нужен просмотр соответствующего фрагмента; автоматический анализ видео пока не подключён.</p></section>
+<section class="mk-card"><h2>AI-план на неделю</h2>{% if brief_stale %}<p class="warning">После этого разбора данные обновились. Составьте новый план по актуальному срезу.</p>{% endif %}{% if report.brief %}<div style="line-height:1.7">{{ brief_html }}</div><p><small>AI может ошибаться. Проверяйте цифры по карточкам ниже. Этот план ничего не меняет в генерациях и публикациях.</small></p>{% else %}<p>Соберите статистику и/или примеры из ниши, затем нажмите «Составить AI-план»: получите приоритеты, новые хуки, оригинальные идеи и измеримые эксперименты.</p>{% endif %}</section>
 <section class="mk-card"><h2>Как читать отчёт</h2><p>«—» означает нет данных, а не ноль. Просмотры разных платформ не суммируются. Сравнение — только внутри проекта, языка, аккаунта и возрастной группы, минимум с тремя другими роликами. Даже такое сравнение не доказывает причину успеха.</p><p>Это объяснимый диагностический разбор по правилам, не просмотр видео нейросетью. Советы — гипотезы для теста, не выводы о монтаже, который система не видела.</p></section>
 {% for notice in report.history_notices %}<p class="warning">{{ notice }}</p>{% endfor %}
 <h2>Ваши ролики · {{ video_groups|length }} карточек / {{ rows|length }} публикаций</h2>
@@ -38,6 +48,14 @@
 {% if row.relative != None %}<p>К медиане группы: <strong>{{ row.relative }}×</strong> · медиана {{ row.baseline }}, других роликов {{ row.cohort_count }}.</p>{% endif %}
 {% for warning in row.warnings %}<p class="warning">{{ warning }}</p>{% endfor %}
 <h3>Что делать дальше</h3><ul>{% for tip in row.advice %}<li>{{ tip }}</li>{% endfor %}</ul>
+<h3>Подписки и просмотр этого ролика</h3>
+<p>Период: {{ row.behaviour_display.period }} · Срез: {{ row.behaviour_display.fetched_at|default:"ещё нет" }}</p>
+<p>Подписались: {{ row.behaviour_display.subscribers_gained|default_if_none:"—" }} · Отписались: {{ row.behaviour_display.subscribers_lost|default_if_none:"—" }} · Средний просмотр: {{ row.behaviour_display.average_view_seconds|default_if_none:"—" }} сек. / {{ row.behaviour_display.average_view_percentage|default_if_none:"—" }}%.</p>
+{% if row.behaviour_display.warning %}<p class="warning">{{ row.behaviour_display.warning }}</p>{% endif %}
+{% if row.behaviour_display.retention_available %}
+<h4>Наибольшие спады удержания</h4><ul>{% for drop in row.behaviour_display.drops %}<li>От {{ drop.start }}% до {{ drop.end }}% длительности: снижение на {{ drop.drop }} процентного пункта. {% if drop.url %}<a href="{{ drop.url }}" target="_blank" rel="noopener noreferrer">Посмотреть с {{ drop.seconds }} сек.</a>{% endif %} Проверьте смену сцены, паузу и ясность текста. Это гипотеза, не установленная причина.</li>{% empty %}<li>Спадов между полученными точками не обнаружено.</li>{% endfor %}</ul>
+<details><summary>Все точки удержания</summary><table><tr><th>% длительности</th><th>Относительная частота просмотра, %</th></tr>{% for point in row.behaviour_display.points %}<tr><td>{{ point.position }}</td><td>{{ point.watch_ratio }}</td></tr>{% endfor %}</table><p>Повторные просмотры могут давать значения выше 100%.</p></details>
+{% else %}<p><small>Кривая удержания ещё не получена. Секунды ухода и содержание проблемных кадров не определены.</small></p>{% endif %}
 <p><strong>Идея эксперимента:</strong> {{ row.experiment }} Меняйте один параметр, фиксируйте результат через одинаковый срок.</p></section>{% endfor %}</details></article>
 {% empty %}<div class="mk-card">Нажмите «Обновить статистику». Если публикаций ещё нет, начните с 3–5 роликов одной рубрики и сравните их на 7-й день.</div>{% endfor %}
 <section class="mk-card"><h2>Радар ниши</h2><p>Запрос: <strong>{{ report.niche_query|default:"ещё не задан" }}</strong> · язык: {{ report.niche_language|default:"—" }}.</p><p>Выборка популярных коротких видео YouTube, не рейтинг всей ниши. Фильтр short означает видео до 4 минут, не обязательно Shorts; язык — предпочтение поиска. Просмотры в день — среднее за жизнь ролика, не текущая скорость роста.</p>

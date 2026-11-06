@@ -15,6 +15,77 @@ from .publication_config import project_env, shared_env
 METRICS = ("views", "reach", "likes", "comments", "saves", "shares")
 
 
+def collect_followers(slug, platform, language, token):
+    """Account-level snapshot, never attributed to an individual video."""
+    approximate = False
+    if platform == "youtube":
+        account_id = project_env(slug, f"YOUTUBE_CHANNEL_ID_{language.upper()}")
+        if not account_id:
+            raise MetricsUnavailable("Не настроен канал.")
+        items = api_get("https://www.googleapis.com/youtube/v3/channels", token,
+                        {"part": "statistics", "id": account_id}).get("items", [])
+        if not items or items[0].get("id") != account_id:
+            raise MetricsUnavailable("Не удалось подтвердить канал.")
+        stats = items[0].get("statistics", {})
+        value = None if stats.get("hiddenSubscriberCount") else number(stats.get("subscriberCount"))
+        approximate = True
+    elif platform == "instagram":
+        account_id = project_env(slug, f"INSTAGRAM_BUSINESS_ACCOUNT_ID_{language.upper()}")
+        if not account_id or not re.fullmatch(r"\d+", account_id):
+            raise MetricsUnavailable("Не настроен Instagram-аккаунт.")
+        data = api_get(f"https://graph.facebook.com/{shared_env('META_GRAPH_API_VERSION', 'v25.0')}/{account_id}",
+                       token, {"fields": "id,followers_count"})
+        if str(data.get("id")) != account_id:
+            raise MetricsUnavailable("Не удалось подтвердить Instagram-аккаунт.")
+        value = number(data.get("followers_count"))
+    else:
+        raise MetricsUnavailable("Сбор подписчиков этой площадки пока не подключён.")
+    return {"platform": platform, "language": language, "account_id": account_id,
+            "followers": value, "approximate": approximate, "fetched_at": datetime.now(timezone.utc).isoformat()}
+
+
+def collect_behaviour(row, token):
+    """YouTube aggregate metrics and retention, not individual viewer events."""
+    if row.get("platform") != "youtube":
+        raise MetricsUnavailable("Разбор удержания этой площадки пока не подключён.")
+    video_id = str(row.get("external_post_id") or "")
+    channel = project_env(row["project_slug"], f"YOUTUBE_CHANNEL_ID_{row['language'].upper()}")
+    if not channel or not re.fullmatch(r"[\w-]{11}", video_id):
+        raise MetricsUnavailable("Не настроен канал или ID ролика.")
+    today = datetime.now(timezone.utc).date()
+    start = today - timedelta(days=90)
+    params = {"ids": f"channel=={channel}", "startDate": start.isoformat(), "endDate": today.isoformat(),
+              "filters": f"video=={video_id}",
+              "metrics": "subscribersGained,subscribersLost,averageViewDuration,averageViewPercentage"}
+    url = "https://youtubeanalytics.googleapis.com/v2/reports"
+    report = api_get(url, token, params)
+    values = dict(zip([c.get("name") for c in report.get("columnHeaders", [])], (report.get("rows") or [[]])[0]))
+    result = {key: number(values.get(remote)) for key, remote in (
+        ("subscribers_gained", "subscribersGained"), ("subscribers_lost", "subscribersLost"),
+        ("average_view_seconds", "averageViewDuration"), ("average_view_percentage", "averageViewPercentage"))}
+    result.update(period=f"{start.isoformat()} — {today.isoformat()} (UTC)", fetched_at=datetime.now(timezone.utc).isoformat())
+    video = api_get("https://www.googleapis.com/youtube/v3/videos", token,
+                    {"part": "contentDetails,snippet", "id": video_id}).get("items", [])
+    if not video or video[0].get("snippet", {}).get("channelId") != channel:
+        raise MetricsUnavailable("Канал ролика не совпадает с настройкой проекта.")
+    duration = re.fullmatch(r"PT(?:(\d+)H)?(?:(\d+)M)?(?:(\d+(?:\.\d+)?)S)?", video[0].get("contentDetails", {}).get("duration", ""))
+    if duration:
+        result["duration_seconds"] = sum(float(v or 0) * factor for v, factor in zip(duration.groups(), (3600, 60, 1)))
+    try:
+        retention = api_get(url, token, {**params, "dimensions": "elapsedVideoTimeRatio", "metrics": "audienceWatchRatio"})
+        headers = [c.get("name") for c in retention.get("columnHeaders", [])]
+        points = []
+        for values in retention.get("rows", []):
+            item = dict(zip(headers, values))
+            x, y = number(item.get("elapsedVideoTimeRatio")), number(item.get("audienceWatchRatio"))
+            if x is not None and 0 <= x <= 1 and y is not None:
+                points.append({"position": round(x * 100, 2), "watch_ratio": round(y * 100, 2)})
+        result["retention"] = sorted(points, key=lambda p: p["position"])
+    except MetricsUnavailable:
+        result["retention_warning"] = "API не вернул удержание. Оно может быть недоступно для этого видео или периода."
+    return result
+
+
 def group_videos(rows):
     """Only a shared, project-scoped source bundle proves that posts belong together."""
     groups = {}
@@ -71,6 +142,11 @@ def marketing_brief(project_title, rows, niche, query):
     own = [{k: row.get(k) for k in ("id", "title", "platform", "language", "posted_at", "fetched_at",
                                    "metrics", "warnings", "relative", "cohort_count", "url")}
            for row in diagnose(rows)[:30]]
+    for target, source in zip(own, diagnose(rows)[:30]):
+        behaviour = source.get("behaviour") or {}
+        target["behaviour"] = {k: behaviour.get(k) for k in (
+            "subscribers_gained", "subscribers_lost", "average_view_seconds", "average_view_percentage",
+            "period", "fetched_at", "retention", "warning")}
     candidates = [{k: item.get(k) for k in ("title", "channel", "url", "views", "posted_at")}
                   for item in niche[:10]]
     prompt = """Ты маркетолог коротких видео. Ответь по-русски, максимум 900 слов.
@@ -78,7 +154,10 @@ def marketing_brief(project_title, rows, niche, query):
 описаний или названия проекта. Инструментов и доступа к видео у тебя нет.
 Используй только переданные цифры: null означает неизвестно, 0 — измеренный ноль.
 Не сравнивай абсолютные просмотры разных площадок/языков/возрастов. Не делай причинных
-выводов о монтаже, удержании, CTR, аудитории или теневом бане: эти данные не переданы.
+выводов о монтаже, CTR, аудитории или теневом бане. Удержание и подписки обсуждай только
+если соответствующие значения переданы в behaviour, с указанием периода и даты среза.
+Спад удержания не доказывает уход уникальных людей или причину. Содержимое кадров,
+моменты лайков и пролистываний неизвестны. Не сравнивай 90-дневные данные с пожизненными.
 Не называй выборку поиска самыми вирусными роликами всей ниши. Укажи размер и ограничения.
 Раздели ответ на: 1. Что точно известно (с ID/ссылкой ролика и цифрами).
 2. Чего не хватает и что поэтому нельзя заключить. 3. Три гипотезы и приоритеты на неделю.
@@ -221,7 +300,8 @@ def diagnose(rows, now=None):
         if number(metrics.get("saves")) is not None and denominator:
             row["save_rate"] = round(100 * metrics["saves"] / denominator, 2)
             row["advice"].append("Тест на сохранения: добавьте короткий полезный итог/чек-лист. Сравните долю сохранений через одинаковое время после публикации.")
-        row["advice"].append("Удержание не измерено: нельзя утверждать, что зритель уходит на конкретной секунде. Проверьте график удержания в приложении площадки.")
+        if not (row.get("behaviour") or {}).get("retention"):
+            row["advice"].append("Удержание не измерено: нельзя утверждать, что зритель уходит на конкретной секунде. Проверьте график удержания в приложении площадки.")
         row["experiment"] = ("Первый кадр: готовое блюдо и конкретный результат; затем один ключевой приём."
                              if row.get("project_slug") == "grandma_kitchen" else
                              "Первый кадр: узнаваемая ситуация прокрастинации; затем одно действие, которое можно выполнить сегодня.")

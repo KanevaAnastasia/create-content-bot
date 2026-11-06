@@ -21,6 +21,8 @@ from app.marketer import METRICS, MetricsUnavailable, collect_metrics, diagnose,
 from app.publication_config import project_env
 from app.social_publishers import _youtube_access_token
 from .models import Project, PublicationJob
+from .marketer_display import format_brief, behaviour_summary
+from app.marketer import collect_followers, collect_behaviour
 
 
 REPORT_DIR = Path(__file__).resolve().parents[2] / "runtime" / "marketer"
@@ -101,6 +103,21 @@ def run_report(project_id, task_id, action, query="", language="ru"):
             brief = marketing_brief(project.title, existing.get("rows", []), existing.get("niche", []), existing.get("niche_query", ""))
             update_report(project_id, task_id, brief=brief, brief_at=time.time(),
                           brief_data_at=existing.get("fetched_at"), brief_niche_at=existing.get("niche_fetched"))
+        elif action == "behaviour":
+            existing = read_report(project_id)
+            rows = existing.get("rows", [])
+            tokens = {}
+            for row in rows[:30]:
+                if row.get("platform") != "youtube":
+                    continue
+                try:
+                    lang = row["language"]
+                    if lang not in tokens:
+                        tokens[lang] = _youtube_access_token(project.slug, lang)
+                    row["behaviour"] = collect_behaviour(row, tokens[lang])
+                except Exception:
+                    row["behaviour"] = {**row.get("behaviour", {}), "warning": "Не удалось обновить: проверьте доступ YouTube Analytics и доступность данных ролика. Если ниже есть цифры, это прежний срез."}
+            update_report(project_id, task_id, rows=rows, fetched_at=time.time())
         elif action == "niche":
             token = _youtube_access_token(project.slug, language)
             candidates = discover_niche(query, language, token)
@@ -148,12 +165,27 @@ def run_report(project_id, task_id, action, query="", language="ru"):
 
             with ThreadPoolExecutor(max_workers=4) as pool:
                 collected = list(pool.map(collect, rows))
+            accounts = []
+            old_accounts = {(a["platform"], a["language"]): a for a in existing.get("accounts", [])}
+            for (platform, lang), token in tokens.items():
+                try:
+                    account = collect_followers(project.slug, platform, lang, token)
+                    previous = old_accounts.get((platform, lang), {})
+                    before, after = previous.get("followers"), account.get("followers")
+                    same_account = previous.get("account_id") == account.get("account_id")
+                    account["delta"] = after - before if same_account and before is not None and after is not None else None
+                    account["previous_at"] = previous.get("fetched_at") if same_account else None
+                except MetricsUnavailable as exc:
+                    account = {"platform": platform, "language": lang, "followers": None, "warning": str(exc)}
+                accounts.append(account)
             # Keep one preceding snapshot to show real deltas on the next refresh.
             old = {r["id"]: r for r in read_report(project_id).get("rows", [])}
             for row in collected:
                 previous = old.get(row["id"], {})
+                if previous.get("behaviour"):
+                    row["behaviour"] = previous["behaviour"]
                 row["previous"] = {"metrics": previous.get("metrics", {}), "fetched_at": previous.get("fetched_at")}
-            update_report(project_id, task_id, rows=collected, fetched_at=time.time())
+            update_report(project_id, task_id, rows=collected, accounts=accounts, fetched_at=time.time())
         update_report(project_id, task_id, state="done", finished=time.time())
     except Exception:
         update_report(project_id, task_id, state="error", finished=time.time(),
@@ -165,7 +197,7 @@ class MarketerForm(forms.Form):
     language = forms.ChoiceField(choices=(("ru", "Русский"), ("en", "English")), label="Язык исследования")
     query = forms.CharField(max_length=160, required=False, label="Тема / запрос для поиска",
                            widget=forms.TextInput(attrs={"placeholder": "Например: привычки, прокрастинация"}))
-    action = forms.ChoiceField(choices=(("refresh", "Статистика"), ("history", "История YouTube"), ("niche", "Ниша"), ("brief", "AI-разбор")), required=False)
+    action = forms.ChoiceField(choices=(("refresh", "Статистика"), ("history", "История YouTube"), ("behaviour", "Удержание YouTube"), ("niche", "Ниша"), ("brief", "AI-разбор")), required=False)
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
@@ -210,6 +242,7 @@ def marketer_view(request):
         form = MarketerForm(initial={"project": project, "language": "ru", "query": report.get("niche_query", "")})
     rows = diagnose(report.get("rows", []))
     for row in rows:
+        row["behaviour_display"] = behaviour_summary(row)
         row["metric_cells"] = [row.get("metrics", {}).get(m) for m in METRICS]
         current = row.get("metrics", {}).get("views")
         prev = row.get("previous", {}).get("metrics", {}).get("views")
@@ -217,6 +250,7 @@ def marketer_view(request):
     pending = report.get("state") in {"queued", "running"}
     stale = pending and time.time() - report.get("started", 0) >= 1200
     context = {**admin.site.each_context(request), "title": "Маркетолог", "form": form,
+               "brief_html": format_brief(report.get("brief")),
                "project": project, "projects": projects, "report": report, "rows": rows, "video_groups": group_videos(rows),
                "brief_stale": bool(report.get("brief")) and (report.get("brief_data_at") != report.get("fetched_at") or report.get("brief_niche_at") != report.get("niche_fetched")),
                "pending": pending and not stale, "stale": stale,

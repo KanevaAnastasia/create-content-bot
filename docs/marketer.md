@@ -30,6 +30,22 @@ AI не смотрит видео; адаптации по названиям п
 Meta Instagram API: https://www.postman.com/meta/instagram/documentation/6yqw8pt/instagram-api
 # Grouped cards and history
 
+## Audience and retention
+
+Refresh collects account-level YouTube/Instagram follower snapshots for accounts
+represented in the report. YouTube counts can be rounded or hidden. Deltas are
+only computed for the same account ID and are not attributed to individual posts.
+The separate behaviour action reads YouTube Analytics for up to the first 30
+report publications over the last 90 days. It needs a separately granted Analytics
+scope; this change does not alter OAuth scopes or reconnect accounts.
+It collects attributed subscriptions, mean viewing duration/percentage and
+audienceWatchRatio by elapsedVideoTimeRatio. Largest adjacent drops have video
+timestamp links, not causal labels. Ratios can exceed 100% due to rewatches.
+There is no second-by-second like/swipe telemetry or automatic video understanding.
+Failures retain older behavioural data with an explicit warning and timestamp.
+AI text uses an escaped Markdown subset (headings, bold, lists); arbitrary HTML
+and executable links are never rendered.
+
 Cards group only by project and publication bundle, never by title. Expand a card
 to inspect individual language/platform metrics, links and advice. YouTube-backed
 cards use its public thumbnail. Missing metrics remain distinct from measured zero.
