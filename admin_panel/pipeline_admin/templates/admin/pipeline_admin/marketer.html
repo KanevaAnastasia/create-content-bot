@@ -1,0 +1,39 @@
+{% extends "admin/base_site.html" %}
+{% block extrastyle %}{{ block.super }}
+<style>
+.mk{max-width:1400px}.mk-hero{padding:28px;border-radius:18px;background:linear-gradient(120deg,#152d41,#245953);color:white;margin-bottom:24px}.mk-hero h1{color:white;font-size:32px;margin:0 0 10px}.mk-hero p{color:#e0efec}.mk-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(280px,1fr));gap:16px}.mk-card{border:1px solid var(--hairline-color);background:var(--body-bg);padding:22px;border-radius:14px;margin-bottom:18px}.mk label{display:block;font-weight:600;margin:12px 0 6px}.mk input,.mk select{max-width:100%;box-sizing:border-box}.mk input[type=text]{width:100%}.mk-actions{display:flex;gap:12px;flex-wrap:wrap;margin-top:20px}.mk button{padding:12px 18px;border:0;border-radius:9px;background:#245953;color:#fff;cursor:pointer}.mk small{color:var(--body-quiet-color)}.mk-table{overflow:auto}.mk table{width:100%}.mk td,.mk th{padding:12px;white-space:nowrap}.mk summary{cursor:pointer;font-size:17px;font-weight:650;line-height:1.5}.mk li{margin-bottom:9px;line-height:1.6}.mk .warning{border-left:4px solid #d39432;padding:12px;background:var(--darkened-bg)}.mk .pill{display:inline-block;border:1px solid var(--hairline-color);border-radius:20px;padding:4px 10px;margin-right:5px}.mk pre{white-space:pre-wrap}.mk .source{overflow-wrap:anywhere}
+</style>{% endblock %}
+{% block breadcrumbs %}<div class="breadcrumbs"><a href="{% url 'admin:index' %}">Главная</a> › Маркетолог</div>{% endblock %}
+{% block content %}<div class="mk">
+<section class="mk-hero"><h1>Маркетолог</h1><p>От цифр — к следующему эксперименту. Без выдуманных причин и обещаний вирусности.</p><span class="pill">Только чтение API</span><span class="pill">Ничего не публикует</span><span class="pill">Instagram · YouTube</span></section>
+<div class="mk-grid"><section class="mk-card"><h2>Рабочее пространство</h2>
+<form method="get"><label for="project-view">Показать проект</label><select name="project" id="project-view">{% for p in projects %}<option value="{{ p.id }}" {% if project.id == p.id %}selected{% endif %}>{{ p.title }}</option>{% endfor %}</select> <button>Открыть</button></form>
+<p>Сейчас: <strong>{{ project.title|default:"Нет активных проектов" }}</strong></p>
+<p>В отчёте — последние 30 опубликованных заданий из админки. Более старые и загруженные вручную на площадках ролики пока не импортируются.</p>
+</section><section class="mk-card"><h2>Собрать данные</h2>
+{% if can_change %}<form method="post">{% csrf_token %}{{ form.non_field_errors }}
+{{ form.project.label_tag }}{{ form.project }}{{ form.project.errors }}
+{{ form.language.label_tag }}{{ form.language }}{{ form.language.errors }}
+{{ form.query.label_tag }}{{ form.query }}{{ form.query.errors }}
+<div class="mk-actions"><button name="action" value="refresh">Обновить статистику</button><button name="action" value="niche">Исследовать нишу</button><button name="action" value="brief">Составить AI-план</button></div></form>{% else %}<p>Для запуска сбора нужны права изменения публикаций.</p>{% endif %}
+<p><small>Сбор работает в фоне. Поиск использует квоту YouTube API: максимум 10 кандидатов за 90 дней. «AI-план» отправляет названия, метрики и результаты поиска в уже настроенный Gemini / Vertex AI и расходует его квоту/бюджет. Автоматически AI не вызывается.</small></p></section></div>
+{% if pending %}<p class="warning">Сбор в очереди или выполняется. <a href="?project={{ project.id }}">Обновить страницу</a>. Ниже пока предыдущий отчёт.</p>{% endif %}
+{% if stale %}<p class="warning">Задача не завершилась за 20 минут. Проверьте Celery и запустите сбор заново.</p>{% endif %}
+{% if report.error %}<p class="warning">{{ report.error }}</p>{% endif %}
+<section class="mk-card"><h2>AI-план на неделю</h2>{% if brief_stale %}<p class="warning">После этого разбора данные обновились. Составьте новый план по актуальному срезу.</p>{% endif %}{% if report.brief %}<div style="white-space:pre-wrap;line-height:1.7">{{ report.brief }}</div><p><small>AI может ошибаться. Проверяйте цифры по карточкам ниже. Этот план ничего не меняет в генерациях и публикациях.</small></p>{% else %}<p>Соберите статистику и/или примеры из ниши, затем нажмите «Составить AI-план»: получите приоритеты, новые хуки, оригинальные идеи и измеримые эксперименты.</p>{% endif %}</section>
+<section class="mk-card"><h2>Как читать отчёт</h2><p>«—» означает нет данных, а не ноль. Просмотры разных платформ не суммируются. Сравнение — только внутри проекта, языка, аккаунта и возрастной группы, минимум с тремя другими роликами. Даже такое сравнение не доказывает причину успеха.</p><p>Это объяснимый диагностический разбор по правилам, не просмотр видео нейросетью. Советы — гипотезы для теста, не выводы о монтаже, который система не видела.</p></section>
+<h2>Ваши ролики · {{ rows|length }}</h2>
+{% for row in rows %}<article class="mk-card"><details open><summary>{{ row.title }}</summary>
+<p><span class="pill">{{ row.platform }} · {{ row.language|upper }}</span><span class="pill">{{ row.age_band }}</span>{% if row.url %}<a href="{{ row.url }}" target="_blank" rel="noopener noreferrer">Открыть ролик ↗</a>{% endif %}</p>
+<small>Опубликован: {{ row.posted_at|default:"неизвестно" }} · Срез: {{ row.fetched_at|default:"не получен" }}</small>
+<div class="mk-table"><table><thead><tr><th>Просмотры</th><th>Охват</th><th>Лайки</th><th>Комментарии</th><th>Сохранения</th><th>Репосты</th></tr></thead><tbody><tr>{% for value in row.metric_cells %}<td>{{ value|default_if_none:"—" }}</td>{% endfor %}</tr></tbody></table></div>
+{% if row.delta != None %}<p>Изменение просмотров с предыдущего среза: {{ row.delta }} ({{ row.previous.fetched_at }}).</p>{% endif %}
+{% if row.interaction_rate != None %}<p>{{ row.rate_label }}: <strong>{{ row.interaction_rate }}%</strong>. Это доля действий, не уникальных людей.</p>{% endif %}
+{% if row.relative != None %}<p>К медиане группы: <strong>{{ row.relative }}×</strong> · медиана {{ row.baseline }}, других роликов {{ row.cohort_count }}.</p>{% endif %}
+{% for warning in row.warnings %}<p class="warning">{{ warning }}</p>{% endfor %}
+<h3>Что делать дальше</h3><ul>{% for tip in row.advice %}<li>{{ tip }}</li>{% endfor %}</ul>
+<p><strong>Идея эксперимента:</strong> {{ row.experiment }} Меняйте один параметр, фиксируйте результат через одинаковый срок.</p></details></article>
+{% empty %}<div class="mk-card">Нажмите «Обновить статистику». Если публикаций ещё нет, начните с 3–5 роликов одной рубрики и сравните их на 7-й день.</div>{% endfor %}
+<section class="mk-card"><h2>Радар ниши</h2><p>Запрос: <strong>{{ report.niche_query|default:"ещё не задан" }}</strong> · язык: {{ report.niche_language|default:"—" }}.</p><p>Выборка популярных коротких видео YouTube, не рейтинг всей ниши. Фильтр short означает видео до 4 минут, не обязательно Shorts; язык — предпочтение поиска. Просмотры в день — среднее за жизнь ролика, не текущая скорость роста.</p>
+{% for item in report.niche %}<article class="mk-card"><h3><a href="{{ item.url }}" target="_blank" rel="noopener noreferrer">{{ item.title }}</a></h3><p>{{ item.channel }} · {{ item.views|default_if_none:"—" }} просмотров · ~{{ item.views_per_day|default_if_none:"—" }} в день · {{ item.posted_at }}</p><p>{{ item.adaptation }}</p><small>Идея по теме/заголовку. Содержание и монтаж не просмотрены; сначала проверьте ролик по ссылке. Не копируйте чужое видео или текст.</small></article>{% empty %}<p>Введите тему и нажмите «Исследовать нишу». Для «Бабушки»: конкретное блюдо или приём. Для «Дисциплины»: конкретная проблема и действие.</p>{% endfor %}</section>
+</div>{% endblock %}
