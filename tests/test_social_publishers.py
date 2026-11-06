@@ -255,6 +255,7 @@ def test_instagram_readiness_accepts_language_token_without_legacy(monkeypatch) 
 def test_instagram_resumable_uploads_local_video_without_public_url(
     monkeypatch, tmp_path: Path
 ) -> None:
+    monkeypatch.setattr("app.social_publishers._verify_instagram_publish_identity", lambda *args: {"account_id": "account"})
     monkeypatch.setenv("PUBLISH_GRANDMA_KITCHEN_INSTAGRAM_ACCESS_TOKEN", "token")
     monkeypatch.setenv("PUBLISH_GRANDMA_KITCHEN_INSTAGRAM_ACCESS_TOKEN_RU", "token")
     monkeypatch.setenv("PUBLISH_GRANDMA_KITCHEN_INSTAGRAM_BUSINESS_ACCOUNT_ID_RU", "account")
@@ -318,6 +319,7 @@ def test_instagram_resumable_uploads_local_video_without_public_url(
 def test_instagram_ru_trial_uses_manual_trial_params_without_share_to_feed(
     monkeypatch, tmp_path: Path
 ) -> None:
+    monkeypatch.setattr("app.social_publishers._verify_instagram_publish_identity", lambda *args: {"account_id": "account"})
     monkeypatch.setenv("PUBLISH_GRANDMA_KITCHEN_INSTAGRAM_ACCESS_TOKEN", "token")
     monkeypatch.setenv("PUBLISH_GRANDMA_KITCHEN_INSTAGRAM_BUSINESS_ACCOUNT_ID_RU", "account")
     video_path = tmp_path / "trial.mp4"
@@ -364,6 +366,7 @@ def test_instagram_ru_trial_uses_manual_trial_params_without_share_to_feed(
 
 
 def test_instagram_rejects_non_meta_resumable_upload_uri(monkeypatch, tmp_path: Path) -> None:
+    monkeypatch.setattr("app.social_publishers._verify_instagram_publish_identity", lambda *args: {"account_id": "account"})
     monkeypatch.setenv("PUBLISH_GRANDMA_KITCHEN_INSTAGRAM_ACCESS_TOKEN", "token")
     monkeypatch.setenv("PUBLISH_GRANDMA_KITCHEN_INSTAGRAM_BUSINESS_ACCOUNT_ID_RU", "account")
     video_path = tmp_path / "reel.mp4"

@@ -9,6 +9,7 @@ and publication destinations always remain project-scoped.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import math
 import mimetypes
@@ -427,11 +428,95 @@ def refresh_expiring_instagram_tokens(
     return results
 
 
-def _publish_instagram(job: PublicationJob, project_slug: str) -> str:
+def _verify_instagram_publish_identity(base_url: str, access_token: str, account_id: str) -> dict[str, str]:
+    """Reading an IG account does not prove that a Page token can publish to it."""
+
+    def get(path: str, params: dict[str, str]) -> dict[str, Any]:
+        try:
+            response = requests.get(
+                f"{base_url}/{path}", params=params,
+                headers={"Authorization": f"Bearer {access_token}"},
+                timeout=DEFAULT_REQUEST_TIMEOUT,
+            )
+            payload = response.json()
+        except (requests.RequestException, ValueError) as exc:
+            # requests exceptions can contain input_token in the debug URL.
+            raise PublicationDeliveryError(f"Instagram identity check failed ({type(exc).__name__}).") from exc
+        if not response.ok or not isinstance(payload, dict):
+            error = payload.get("error", {}) if isinstance(payload, dict) else {}
+            code = error.get("code") if isinstance(error, dict) else None
+            raise PublicationNeedsReview(f"Instagram identity check denied (HTTP {response.status_code}, code {code}); reconnect this account.")
+        return payload
+
+    debug = get("debug_token", {"input_token": access_token}).get("data") or {}
+    if debug.get("is_valid") is not True or "instagram_content_publish" not in (debug.get("scopes") or []):
+        raise PublicationNeedsReview("Instagram token is invalid or lacks instagram_content_publish; reconnect this account.")
+    token_type = str(debug.get("type") or "").upper()
+    if token_type == "PAGE":
+        page = get("me", {"fields": "id,name,instagram_business_account"})
+        linked_id = str((page.get("instagram_business_account") or {}).get("id") or "")
+        if linked_id != account_id:
+            raise PublicationNeedsReview(
+                f"Instagram Page token belongs to '{page.get('name') or page.get('id')}' "
+                f"(linked Instagram {linked_id or 'none'}), not configured account {account_id}. "
+                "Connect the correct Page token or an authorized user token for this project/language."
+            )
+    for grant in (debug.get("granular_scopes") or []) if token_type != "PAGE" else []:
+        if grant.get("scope") == "instagram_content_publish" and "target_ids" in grant:
+            targets = {str(value) for value in grant.get("target_ids") or []}
+            authorized = account_id in targets
+            # Facebook Login grants can list Page IDs, while Business Login can
+            # list IG IDs. Resolve the linked IG account before rejecting a grant.
+            if not authorized:
+                for target in targets:
+                    try:
+                        page = get(target, {"fields": "id,instagram_business_account"})
+                    except PublicationNeedsReview:
+                        continue
+                    if str((page.get("instagram_business_account") or {}).get("id") or "") == account_id:
+                        authorized = True
+                        break
+            if not authorized:
+                raise PublicationNeedsReview("Instagram publishing permission does not include the configured account; reconnect this account.")
+    account = get(account_id, {"fields": "id,username"})
+    if str(account.get("id") or "") != account_id:
+        raise PublicationNeedsReview("Instagram returned an unexpected account; reconnect before publishing.")
+    return {"account_id": account_id, "username": str(account.get("username") or ""), "token_type": token_type}
+
+
+def _publish_instagram(
+    job: PublicationJob, project_slug: str, persist: Callable[[], None] | None = None
+) -> str:
     version = shared_env("META_GRAPH_API_VERSION", "v25.0")
     account_id = project_env(project_slug, f"INSTAGRAM_BUSINESS_ACCOUNT_ID_{job.language.upper()}")
     access_token = _instagram_access_token(project_slug, job.language)
     base_url = f"https://graph.facebook.com/{version}"
+    state = dict((job.payload_json or {}).get("instagram_upload") or {})
+
+    def save(**values: Any) -> None:
+        state.update(values)
+        job.payload_json = {**(job.payload_json or {}), "instagram_upload": dict(state)}
+        if persist:
+            persist()
+
+    def container_status() -> str:
+        response = requests.get(
+            f"{base_url}/{state['creation_id']}",
+            params={"fields": "status_code,status"},
+            headers={"Authorization": f"Bearer {access_token}"},
+            timeout=DEFAULT_REQUEST_TIMEOUT,
+        )
+        payload = _response_json(response, "Instagram container status")
+        status = str(payload.get("status_code") or "").upper()
+        save(status_code=status, status_detail=str(payload.get("status") or "")[:1000])
+        return status
+
+    if state and state.get("account_id") != account_id:
+        raise PublicationNeedsReview("Instagram account changed after upload; reconcile the saved container first.")
+    if state.get("media_id"):
+        return str(state["media_id"])
+    identity = _verify_instagram_publish_identity(base_url, access_token, account_id)
+    save(**identity)
     video_path = Path(job.video_path)
     if not video_path.is_file():
         raise PublicationDeliveryError(f"Instagram video does not exist: {video_path}")
@@ -439,6 +524,8 @@ def _publish_instagram(job: PublicationJob, project_slug: str) -> str:
     file_size = video_path.stat().st_size
     if file_size > 1_000_000_000:
         raise PublicationDeliveryError("Instagram Reels video exceeds the 1 GB API limit.")
+    if len(str(job.description or "")) > 2200:
+        raise PublicationDeliveryError("Instagram caption exceeds 2200 characters; shorten it before publishing.")
 
     # Facebook Login for Business supports Meta's resumable upload flow.  It lets
     # us send the local MP4 directly instead of exposing the admin or media through
@@ -446,7 +533,7 @@ def _publish_instagram(job: PublicationJob, project_slug: str) -> str:
     create_data = {
         "media_type": "REELS",
         "upload_type": "resumable",
-        "caption": str(job.description or "")[:2200],
+        "caption": str(job.description or ""),
         "access_token": access_token,
     }
     is_trial_reel = (
@@ -460,71 +547,126 @@ def _publish_instagram(job: PublicationJob, project_slug: str) -> str:
         )
     else:
         create_data["share_to_feed"] = "true"
-    create_response = requests.post(
-        f"{base_url}/{account_id}/media",
-        data=create_data,
-        timeout=DEFAULT_REQUEST_TIMEOUT,
-    )
-    create_payload = _response_json(create_response, "Instagram reel container")
-    creation_id = str(create_payload.get("id") or "")
-    upload_url = str(create_payload.get("uri") or "")
-    if not creation_id or not upload_url:
-        raise PublicationDeliveryError("Instagram did not return a creation id and upload URI.")
-    parsed_upload_url = urlparse(upload_url)
-    if parsed_upload_url.scheme != "https" or parsed_upload_url.hostname != "rupload.facebook.com":
-        raise PublicationDeliveryError("Instagram returned an unsafe resumable upload URI.")
+    fingerprint = hashlib.sha256(json.dumps({
+        "path": str(video_path.resolve()), "size": file_size,
+        "mtime": video_path.stat().st_mtime_ns,
+        "caption": create_data["caption"], "trial": is_trial_reel,
+    }, sort_keys=True).encode()).hexdigest()
+    status = ""
+    if state.get("creation_id"):
+        if state.get("fingerprint") != fingerprint:
+            raise PublicationNeedsReview("Instagram video or caption changed after upload; reconcile the saved container first.")
+        status = container_status()
+        if status == "PUBLISHED" or state.get("publish_ambiguous"):
+            raise PublicationNeedsReview("Instagram publish may have succeeded. Check the account before retrying; the saved container was preserved.")
+        if status in {"ERROR", "EXPIRED"}:
+            # Only a terminal, unpublished container may be replaced. Keep its ID
+            # for diagnosis; never create another container after a lost publish reply.
+            previous = list(state.get("previous_containers") or [])
+            previous.append({"creation_id": state["creation_id"], "status_code": status,
+                             "status_detail": state.get("status_detail", "")})
+            state = {"previous_containers": previous[-5:]}
 
-    mime_type = mimetypes.guess_type(video_path.name)[0] or "video/mp4"
-    with video_path.open("rb") as handle:
-        upload_response = requests.post(
-            upload_url,
-            headers={
-                "Authorization": f"OAuth {access_token}",
-                "offset": "0",
-                "file_size": str(file_size),
-                "Content-Type": mime_type,
-            },
-            data=handle,
+    if not state.get("creation_id"):
+        create_response = requests.post(
+            f"{base_url}/{account_id}/media",
+            data=create_data,
             timeout=DEFAULT_REQUEST_TIMEOUT,
         )
-    _response_json(upload_response, "Instagram resumable video upload")
+        create_payload = _response_json(create_response, "Instagram reel container")
+        creation_id = str(create_payload.get("id") or "")
+        upload_url = str(create_payload.get("uri") or "")
+        if not creation_id or not upload_url:
+            raise PublicationDeliveryError("Instagram did not return a creation id and upload URI.")
+        parsed_upload_url = urlparse(upload_url)
+        if (parsed_upload_url.scheme != "https" or parsed_upload_url.hostname != "rupload.facebook.com"
+                or parsed_upload_url.username or parsed_upload_url.password):
+            raise PublicationDeliveryError("Instagram returned an unsafe resumable upload URI.")
+        # Do not persist the upload URL (it can contain credentials). A crash before
+        # upload is reconciled through the saved container, not a blind new upload.
+        save(creation_id=creation_id, account_id=account_id, fingerprint=fingerprint,
+             stage="upload_started", publish_ambiguous=False)
+
+        mime_type = mimetypes.guess_type(video_path.name)[0] or "video/mp4"
+        try:
+            with video_path.open("rb") as handle:
+                upload_response = requests.post(
+                    upload_url,
+                    headers={
+                        "Authorization": f"OAuth {access_token}",
+                        "offset": "0",
+                        "file_size": str(file_size),
+                        "Content-Type": mime_type,
+                    },
+                    data=handle,
+                    timeout=DEFAULT_REQUEST_TIMEOUT,
+                )
+            _response_json(upload_response, "Instagram resumable video upload")
+            save(stage="processing")
+        except (requests.RequestException, PublicationDeliveryError):
+            # Even an upload error may have accepted the bytes. Inspect the same
+            # container rather than immediately creating another one.
+            status = container_status()
+            if status != "FINISHED":
+                raise
 
     deadline = time.monotonic() + 600
     while time.monotonic() < deadline:
-        status_response = requests.get(
-            f"{base_url}/{creation_id}",
-            params={"fields": "status_code,status", "access_token": access_token},
-            timeout=DEFAULT_REQUEST_TIMEOUT,
-        )
-        status_payload = _response_json(status_response, "Instagram container status")
-        status = str(status_payload.get("status_code") or "").upper()
+        status = container_status()
         if status == "FINISHED":
             break
+        if status == "PUBLISHED":
+            raise PublicationNeedsReview("Instagram container is already published; reconcile its media ID before retrying.")
         if status in {"ERROR", "EXPIRED"}:
-            raise PublicationDeliveryError(f"Instagram container failed: {status_payload.get('status') or status}.")
+            raise PublicationDeliveryError(f"Instagram container failed: {state.get('status_detail') or status}.")
         time.sleep(5)
     else:
         raise PublicationDeliveryError("Instagram reel processing timed out.")
-    publish_response = requests.post(
-        f"{base_url}/{account_id}/media_publish",
-        data={"creation_id": creation_id, "access_token": access_token},
-        timeout=DEFAULT_REQUEST_TIMEOUT,
-    )
-    media_id = str(_response_json(publish_response, "Instagram reel publish").get("id") or "")
-    if not media_id:
-        raise PublicationDeliveryError("Instagram publish completed without a media id.")
+    for attempt in range(3):
+        # Persist BEFORE sending: a lost response must never cause a new Reel.
+        save(stage="publishing", publish_ambiguous=True)
+        try:
+            publish_response = requests.post(
+                f"{base_url}/{account_id}/media_publish",
+                data={"creation_id": state["creation_id"], "access_token": access_token},
+                timeout=DEFAULT_REQUEST_TIMEOUT,
+            )
+            publish_payload = publish_response.json()
+        except (requests.RequestException, ValueError) as exc:
+            raise PublicationNeedsReview("Instagram publish response was lost; check the saved container before retrying.") from exc
+        if publish_response.ok and isinstance(publish_payload, dict) and publish_payload.get("id"):
+            media_id = str(publish_payload["id"])
+            save(media_id=media_id, stage="published", publish_ambiguous=False)
+            break
+        error = publish_payload.get("error", {}) if isinstance(publish_payload, dict) else {}
+        if not isinstance(error, dict) or not error.get("code"):
+            raise PublicationNeedsReview("Instagram publish returned no media ID; reconcile the saved container before retrying.")
+        # Meta sometimes rejects a just-processed Reel with 2207085. Retry only
+        # this explicit rejection, only on the SAME ready container, with a bound.
+        save(stage="publish_rejected", publish_ambiguous=False,
+             error_code=error.get("code"), error_subcode=error.get("error_subcode"))
+        if error.get("error_subcode") == 2207085 and attempt < 2:
+            time.sleep(10 * (attempt + 1))
+            if container_status() == "FINISHED":
+                continue
+            raise PublicationNeedsReview("Instagram publish was rejected and its container is no longer ready; inspect before retrying.")
+        _response_json(publish_response, "Instagram reel publish")
+        raise PublicationDeliveryError("Instagram publish rejected the saved container.")
     # A permalink makes the admin monitor useful after delivery.  Do not turn a
     # successful publish into a failure if Meta delays or withholds the field.
     try:
         permalink_response = requests.get(
             f"{base_url}/{media_id}",
-            params={"fields": "permalink", "access_token": access_token},
+            params={"fields": "permalink"},
+            headers={"Authorization": f"Bearer {access_token}"},
             timeout=DEFAULT_REQUEST_TIMEOUT,
         )
         permalink_payload = _response_json(permalink_response, "Instagram media permalink")
         permalink = str(permalink_payload.get("permalink") or "").strip()
         if permalink.startswith("https://"):
             job.payload_json = {**(job.payload_json or {}), "external_post_url": permalink}
+            if persist:
+                persist()
     except Exception:
         pass
     return media_id
@@ -1239,10 +1381,11 @@ def publish_publication_job(job_id: str | uuid.UUID) -> dict[str, Any]:
                 external_post_id = zernio_publisher.publish(job, job.project.slug, session.commit)
             elif job.platform == "vk":
                 external_post_id = _publish_vk(job, job.project.slug, session.commit)
+            elif job.platform == "instagram":
+                external_post_id = _publish_instagram(job, job.project.slug, session.commit)
             else:
                 external_post_id = {
                     "youtube": _publish_youtube,
-                    "instagram": _publish_instagram,
                     "tiktok": _publish_tiktok,
                 }[job.platform](job, job.project.slug)
         except (PublicationNeedsReview, zernio_publisher.ZernioPending, zernio_publisher.ZernioNeedsReview) as exc:

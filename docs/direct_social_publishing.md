@@ -16,7 +16,8 @@ RuTube из проекта исключён. Поддерживаются YouTub
 ## Исполнение
 
 - YouTube: отдельный OAuth refresh для RU/EN, проверка ожидаемого channel ID, resumable upload.
-- Instagram: Reels container по подписанному HTTPS URL, ожидание обработки, `media_publish`.
+- Instagram: resumable-загрузка локального MP4 в Reels container, ожидание `FINISHED`, затем `media_publish`. ID контейнера, аккаунт, отпечаток видео/описания и подтверждённый media ID сохраняются в `payload_json.instagram_upload` на каждом этапе. Повтор задания использует прежний контейнер; новый создаётся только после подтверждённого `ERROR`/`EXPIRED` без неопределённого результата публикации. Ошибка Meta `2207085` повторяется не более трёх раз за запуск на том же готовом контейнере. Потерянный ответ публикации требует сверки аккаунта (`needs_manual_action`), а не создания дубля. Описания длиннее 2200 символов отклоняются, а не обрезаются молча.
+  Перед загрузкой проверяются действительность токена, `instagram_content_publish` и целевой аккаунт. Для Page token поле `/me.instagram_business_account.id` должно совпасть с `INSTAGRAM_BUSINESS_ACCOUNT_ID_<LANG>`; доступ к чтению чужого Instagram сам по себе недостаточен. Для user token проверяются ограничения `granular_scopes`, если они заданы. Токен «Бабушки» нельзя подставлять в «Дисциплину» только потому, что запрос профиля проходит.
 - TikTok: автоматический OAuth refresh, creator info, Direct Post init и chunked `FILE_UPLOAD`.
 - VK: `video.save` и загрузка MP4 на выданный URL.
 
