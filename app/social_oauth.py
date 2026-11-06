@@ -17,6 +17,7 @@ YOUTUBE_TOKEN_URL = "https://oauth2.googleapis.com/token"
 YOUTUBE_SCOPES = (
     "https://www.googleapis.com/auth/youtube.upload",
     "https://www.googleapis.com/auth/youtube.readonly",
+    "https://www.googleapis.com/auth/yt-analytics.readonly",
 )
 TIKTOK_AUTHORIZE_URL = "https://www.tiktok.com/v2/auth/authorize/"
 TIKTOK_TOKEN_URL = "https://open.tiktokapis.com/v2/oauth/token/"

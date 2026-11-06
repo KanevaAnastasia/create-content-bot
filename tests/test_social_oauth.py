@@ -28,6 +28,7 @@ def test_youtube_oauth_url_and_code_exchange(monkeypatch) -> None:
     assert query["prompt"] == ["consent select_account"]
     assert "https://www.googleapis.com/auth/youtube.upload" in query["scope"][0]
     assert "https://www.googleapis.com/auth/youtube.readonly" in query["scope"][0]
+    assert "https://www.googleapis.com/auth/yt-analytics.readonly" in query["scope"][0]
 
     response = Mock(ok=True, status_code=200)
     response.json.return_value = {
