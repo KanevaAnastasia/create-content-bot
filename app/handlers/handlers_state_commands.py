@@ -216,12 +216,17 @@ async def _reply_text_chunked(update: Update, text: str, *, separator: str = "\n
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """
-    Команда ``/start``: проверка живости бота, без изменения сессии.
+    Команда ``/start``: возврат в главное меню с сохранением материалов сессии.
     """
     if update.message is not None:
         effective_chat = getattr(update, "effective_chat", None)
         chat_id = effective_chat.id if effective_chat is not None else None
         session = SESSIONS.get(chat_id) if chat_id is not None else None
+        if chat_id is not None:
+            session = session if session is not None else {}
+            session["state"] = ""
+            SESSIONS[chat_id] = session
+            _bump_debounce_generation(chat_id)
         current_project = _project_label_by_key(
             str((session or {}).get(PROJECT_KEY_SESSION) or PROJECT_KEY_GRANDMA_CAT_COOKING)
         )
