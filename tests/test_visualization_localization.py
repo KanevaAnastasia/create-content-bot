@@ -30,7 +30,8 @@ def test_invalid_or_untranslated_captions_are_rejected(segments):
         vl.translated_cues(segments, duration=14.8, language="ru")
 
 
-def test_localization_reuses_masters_without_music_or_audio_replacement(tmp_path, monkeypatch):
+@pytest.mark.parametrize("color", ["#ffc766", "#c72638"])
+def test_localization_reuses_masters_without_music_or_audio_replacement(tmp_path, monkeypatch, color):
     clean, upscale = tmp_path / "clean.mp4", tmp_path / "upscale.mp4"
     clean.write_bytes(b"original clean")
     upscale.write_bytes(b"original 4k")
@@ -53,6 +54,7 @@ def test_localization_reuses_masters_without_music_or_audio_replacement(tmp_path
         segments=[{"start_sec": .449, "end_sec": 2.509, "text": "Почему не ты?"}],
         duration=14.8, title="Почему не ты?", title_duration=3,
         variants=["clean", "upscaled_4k", "subtitled_music", "titled_subtitled_music"],
+        title_style={"title_color": color, "top_margin_ratio": 0.06},
     )
     renders = post["renders_by_language"]["ru"]
     assert Path(renders["clean"]["video_path"]).read_bytes() == clean.read_bytes()
@@ -61,6 +63,11 @@ def test_localization_reuses_masters_without_music_or_audio_replacement(tmp_path
     assert all(c["clean_path"] == upscale and c["music_path"] is None for c in render_calls)
     assert not ass_calls[0][1]["title_cues"]
     assert ass_calls[1][1]["title_cues"][0]["text"] == "Почему не ты?"
+    assert ass_calls[1][1]["title_style"] == {"title_color": color, "top_margin_ratio": 0.06}
+    assert post["title_overlay_style"] == ass_calls[1][1]["title_style"]
+    assert post["title_overlay_by_language"]["ru"] == {
+        "title": "Почему не ты?", "start_sec": 0, "end_sec": 3,
+    }
     assert list(post["renders_by_language"]) == ["ru"]
 
 
@@ -119,3 +126,13 @@ def test_admin_localization_is_scoped_to_visualization_ru(tmp_path, monkeypatch)
     assert all(row["run_id"] == run.id and row["language"] == "en" for row in gets)
     assert [row["artifact_type"] for row in gets] == ["final_clean", "final_upscaled_4k"]
     assert builds[0]["segments"] == payload["segments"]
+    assert builds[0]["title_style"] is None
+
+    run.title_color = "#ffc766"
+    session = {"generation_mode": "visualization", "production": {
+        "overlay_title_style": {"title_color": "#fff7e8", "top_margin_ratio": 0.06},
+    }}
+    admin._build_visualization_translation_for_run(
+        run, session, language="ru", variants=["titled_subtitled_music"],
+    )
+    assert builds[-1]["title_style"] == {"title_color": "#ffc766", "top_margin_ratio": 0.06}

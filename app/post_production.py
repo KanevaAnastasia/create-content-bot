@@ -1132,6 +1132,12 @@ def _measure_title_series_counter(
     return width, height
 
 
+def _title_overlay_shadow(layout: SubtitleLayout) -> int:
+    # ASS shadow units follow PlayRes: a 4K canvas needs twice the HD offset.
+    scale = min(layout.width, layout.height) / float(TARGET_WIDTH)
+    return max(1, int(round(TITLE_OVERLAY_SHADOW * scale)))
+
+
 def _fit_title_overlay_ass_text(
     text: str,
     *,
@@ -1153,7 +1159,7 @@ def _fit_title_overlay_ass_text(
             (
                 layout.width
                 - (margin_h * 2)
-                - TITLE_OVERLAY_SHADOW
+                - _title_overlay_shadow(layout)
                 - (TITLE_OVERLAY_OUTLINE * 2)
             )
             * _title_overlay_ass_safe_width_ratio(language)
@@ -1931,7 +1937,7 @@ def _write_burned_subtitle_ass(
                         "bold": TITLE_OVERLAY_BOLD,
                         "spacing": TITLE_OVERLAY_SPACING,
                         "outline": TITLE_OVERLAY_OUTLINE,
-                        "shadow": TITLE_OVERLAY_SHADOW,
+                        "shadow": _title_overlay_shadow(layout),
                         "margin_v": main_title_margin_v,
                         "margin_l": title_margin_h,
                         "margin_r": title_margin_h,

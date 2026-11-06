@@ -42,7 +42,8 @@ def translated_cues(segments: list[dict], *, duration: float, language: str) -> 
 def build_localized_visualization(
     *, clean_path: Path, upscaled_path: Path, language: str,
     segments: list[dict], duration: float, title: str,
-    title_duration: float, variants: list[str], progress_callback=None,
+    title_duration: float, variants: list[str], title_style: dict | None = None,
+    progress_callback=None,
 ) -> dict:
     if language != "ru":
         raise ValueError("This localization path is for Russian translated subtitles only.")
@@ -85,7 +86,7 @@ def build_localized_visualization(
                 )]
             ass = output / f"{variant}_{language}.ass"
             pp._write_burned_subtitle_ass(
-                ass, cues, title_cues=title_cues, title_style={"title_color": "#fff7e8"},
+                ass, cues, title_cues=title_cues, title_style=title_style,
                 video_width=width, video_height=height,
             )
             pp._render_subtitled_music_master(
@@ -101,8 +102,14 @@ def build_localized_visualization(
             "background_music_included": False,
             "subtitle_fingerprint": pp.subtitle_entries_fingerprint(entries),
         }
-    return {
+    result = {
         "languages": [language], "renders_by_language": {language: renders},
         "artifact_bundle_key": bundle, "subtitle_entries_by_language": {language: entries},
         "original_audio_preserved_by_language": {language: True},
     }
+    if "titled_subtitled_music" in variants:
+        result["title_overlay_style"] = dict(title_style or {})
+        result["title_overlay_by_language"] = {
+            language: {"title": title, "start_sec": 0.0, "end_sec": title_duration},
+        }
+    return result

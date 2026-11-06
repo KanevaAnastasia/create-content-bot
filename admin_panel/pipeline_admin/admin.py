@@ -1670,11 +1670,18 @@ def _build_visualization_translation_for_run(
         if path is None or not path.is_file():
             raise ValueError(f"Approved visualization {variant} master is missing.")
         paths[variant] = path
+    render_variants = variants or list(FINAL_VIDEO_VARIANT_LABELS)
+    production = session.get("production") or {}
+    title_style = (
+        _apply_pending_overlay_title_style_for_build(session, production, run=run)
+        if "titled_subtitled_music" in render_variants
+        else None
+    )
     return build_localized_visualization(
         clean_path=paths["clean"], upscaled_path=paths["upscaled_4k"],
         language=language, segments=payload["segments"], duration=float(payload["duration_sec"]),
         title=payload["title"], title_duration=float(payload["title_duration_sec"]),
-        variants=variants or list(FINAL_VIDEO_VARIANT_LABELS), progress_callback=progress_callback,
+        variants=render_variants, title_style=title_style, progress_callback=progress_callback,
     )
 
 

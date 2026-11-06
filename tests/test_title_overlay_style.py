@@ -7,18 +7,23 @@ from app import post_production as production
 
 
 @pytest.mark.parametrize("language,title", [("ru", "БОРЩ"), ("en", "BUTTERBEER")])
-def test_reference_title_has_heavy_fill_without_outline_and_keeps_admin_color(tmp_path, language, title):
+@pytest.mark.parametrize("width,height,shadow", [
+    (1080, 1920, "12"), (2160, 3840, "24"), (3840, 2160, "24"),
+])
+def test_reference_title_has_heavy_fill_without_outline_and_keeps_admin_color(
+    tmp_path, language, title, width, height, shadow,
+):
     path = tmp_path / "title.ass"
     production._write_burned_subtitle_ass(
         path, [],
         title_cues=[production._build_title_overlay_cue({language: title}, language=language, duration_sec=6)],
-        title_style={"title_color": "#FF4F7B"}, video_width=1080, video_height=1920,
+        title_style={"title_color": "#FF4F7B"}, video_width=width, video_height=height,
     )
     style = next(line for line in path.read_text().splitlines() if line.startswith("Style: TitleOverlay"))
     fields = style.removeprefix("Style: ").split(",")
     assert fields[3] == "&H007B4FFF"  # Admin RGB converted to ASS BGR.
     assert fields[7] == "-1"  # Heavy letters, not a thin face with a black contour.
-    assert fields[15:18] == ["1", "0", "12"]
+    assert fields[15:18] == ["1", "0", shadow]
     assert fields[6] == "&H00000000"  # Opaque hard black shadow.
 
 
