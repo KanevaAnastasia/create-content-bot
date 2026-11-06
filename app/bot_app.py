@@ -59,6 +59,7 @@ from .state import SESSIONS
 from .session_store import recover_interrupted_guest_syntax_sessions
 from .speech_usage import format_speech_alignment_remaining, speech_alignment_monthly_usage
 from .handlers.instagram_stats import handle_calendar, send_instagram_stats
+from .bot_commands import configure_owner_commands
 
 logger = logging.getLogger("bot")
 _QUIET_MODE_MIDNIGHT_TASK_KEY = "quiet_mode_midnight_task"
@@ -403,6 +404,10 @@ async def _quiet_mode_midnight_loop() -> None:
 
 
 async def _post_init(application: Application) -> None:
+    try:
+        await configure_owner_commands(application.bot)
+    except Exception as exc:
+        logger.warning("bot.command_menu_setup_failed type=%s", type(exc).__name__)
     try:
         await asyncio.to_thread(ensure_automatic_quiet_mode_cycle)
     except Exception:
