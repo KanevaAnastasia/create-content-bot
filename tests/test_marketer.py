@@ -148,3 +148,10 @@ def test_background_report_keeps_project_scope(page, monkeypatch):
     page.run_report(project_id, t, "refresh")
     assert calls == [{"project": project, "status": "published"}]
     assert page.read_report(project_id)["state"] == "done"
+
+
+def test_marketer_queue_cannot_receive_publication_routes(page):
+    from cf_admin.celery import app
+    queue = app.amqp.queues['marketer']
+    assert queue.exchange.name == 'marketer'
+    assert queue.routing_key == 'marketer'
