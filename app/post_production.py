@@ -106,6 +106,7 @@ TITLE_OVERLAY_MAX_HEIGHT_RATIO = 0.08
 TITLE_OVERLAY_BOLD = -1
 # The reference has solid, heavy letters and a hard offset shadow, no contour.
 TITLE_OVERLAY_OUTLINE = 0
+TITLE_OVERLAY_EN_OUTLINE = 5
 TITLE_OVERLAY_SHADOW = 12
 TITLE_OVERLAY_SPACING = 0
 TITLE_OVERLAY_ASS_SAFE_WIDTH_RATIO = 1.0
@@ -1038,8 +1039,11 @@ def _wrap_title_overlay_text(text: str, *, max_chars: int) -> str:
     return "\n".join(merged)
 
 
-def _measure_title_line(draw: ImageDraw.ImageDraw, line: str, font: ImageFont.FreeTypeFont) -> int:
-    bbox = draw.textbbox((0, 0), line or " ", font=font, stroke_width=TITLE_OVERLAY_OUTLINE)
+def _measure_title_line(
+    draw: ImageDraw.ImageDraw, line: str, font: ImageFont.FreeTypeFont,
+    *, stroke_width: int = TITLE_OVERLAY_OUTLINE,
+) -> int:
+    bbox = draw.textbbox((0, 0), line or " ", font=font, stroke_width=stroke_width)
     return max(0, int(round(bbox[2] - bbox[0])))
 
 
@@ -1072,6 +1076,7 @@ def _measure_title_block(
     font: ImageFont.FreeTypeFont,
     *,
     spacing: int,
+    stroke_width: int = TITLE_OVERLAY_OUTLINE,
 ) -> tuple[int, int]:
     if not lines:
         return 0, 0
@@ -1080,9 +1085,9 @@ def _measure_title_block(
         "\n".join(lines),
         font=font,
         spacing=spacing,
-        stroke_width=TITLE_OVERLAY_OUTLINE,
+        stroke_width=stroke_width,
     )
-    width = max(_measure_title_line(draw, line, font) for line in lines)
+    width = max(_measure_title_line(draw, line, font, stroke_width=stroke_width) for line in lines)
     height = max(0, int(round(bbox[3] - bbox[1])))
     return width, height
 
@@ -1132,7 +1137,14 @@ def _measure_title_series_counter(
     return width, height
 
 
-def _title_overlay_shadow(layout: SubtitleLayout) -> int:
+def _title_overlay_outline(language: str) -> int:
+    # Keep the established Taller treatment for English titles.
+    return TITLE_OVERLAY_EN_OUTLINE if str(language).strip().lower() == "en" else TITLE_OVERLAY_OUTLINE
+
+
+def _title_overlay_shadow(layout: SubtitleLayout, language: str = "ru") -> int:
+    if str(language).strip().lower() == "en":
+        return TITLE_OVERLAY_SHADOW
     # ASS shadow units follow PlayRes: a 4K canvas needs twice the HD offset.
     scale = min(layout.width, layout.height) / float(TARGET_WIDTH)
     return max(1, int(round(TITLE_OVERLAY_SHADOW * scale)))
@@ -1153,14 +1165,15 @@ def _fit_title_overlay_ass_text(
         return None
 
     margin_h = int(layout.width * side_margin_ratio)
+    outline = _title_overlay_outline(language)
     max_width = max(
         1,
         int(
             (
                 layout.width
                 - (margin_h * 2)
-                - _title_overlay_shadow(layout)
-                - (TITLE_OVERLAY_OUTLINE * 2)
+                - _title_overlay_shadow(layout, language)
+                - (outline * 2)
             )
             * _title_overlay_ass_safe_width_ratio(language)
         ),
@@ -1176,11 +1189,13 @@ def _fit_title_overlay_ass_text(
         font = ImageFont.truetype(str(font_path), size=size)
         lines = [clean]
         spacing = max(8, int(size * 0.10))
-        width, height = _measure_title_block(draw, lines, font, spacing=spacing)
+        width, height = _measure_title_block(draw, lines, font, spacing=spacing, stroke_width=outline)
         if width <= max_width and height <= max_height:
             return TitleOverlayFit("\n".join(lines), size, width, height)
     font = ImageFont.truetype(str(font_path), size=min_size)
-    width, height = _measure_title_block(draw, [clean], font, spacing=max(8, int(min_size * 0.10)))
+    width, height = _measure_title_block(
+        draw, [clean], font, spacing=max(8, int(min_size * 0.10)), stroke_width=outline,
+    )
     return TitleOverlayFit(clean, min_size, width, height)
 
 
@@ -1934,10 +1949,10 @@ def _write_burned_subtitle_ass(
                         "primary_colour": title_primary_colour,
                         "outline_colour": TITLE_OVERLAY_OUTLINE_COLOUR,
                         "shadow_colour": TITLE_OVERLAY_SHADOW_COLOUR,
-                        "bold": TITLE_OVERLAY_BOLD,
+                        "bold": 0 if language == "en" else TITLE_OVERLAY_BOLD,
                         "spacing": TITLE_OVERLAY_SPACING,
-                        "outline": TITLE_OVERLAY_OUTLINE,
-                        "shadow": _title_overlay_shadow(layout),
+                        "outline": _title_overlay_outline(language),
+                        "shadow": _title_overlay_shadow(layout, language),
                         "margin_v": main_title_margin_v,
                         "margin_l": title_margin_h,
                         "margin_r": title_margin_h,
