@@ -2,7 +2,9 @@
 
 Secrets are strictly project-scoped.  For example, project
 ``grandma_kitchen`` reads only
-``PUBLISH_GRANDMA_KITCHEN_YOUTUBE_REFRESH_TOKEN``.
+``PUBLISH_GRANDMA_KITCHEN_YOUTUBE_REFRESH_TOKEN``. VK user OAuth can be
+explicitly shared by projects with the same pinned user ID; community keys
+and publication destinations always remain project-scoped.
 """
 
 from __future__ import annotations
@@ -28,6 +30,7 @@ from .db import SessionLocal
 from .models import Project, PublicationJob
 from .publication_config import project_env, project_env_name, shared_env
 from .publish_secret_store import set_project_secrets
+from .vk_credentials import locked_vk_credentials
 from . import zernio_publisher
 from .publications import (
     PUBLICATION_STATUS_APPROVED,
@@ -117,12 +120,16 @@ def platform_readiness(project_slug: str, platform: str, language: str) -> Platf
             or project_env(project_slug, "VK_USER_SCREEN_NAME")
         ):
             missing.append(project_env_name(project_slug, "VK_USER_ID"))
-        if not project_env(project_slug, "VK_ACCESS_TOKEN"):
+        try:
+            credentials_project = _vk_credentials_project(project_slug)
+        except PublicationDeliveryError as exc:
+            return PlatformReadiness(normalized_platform, normalized_language, False, (), str(exc))
+        if not project_env(credentials_project, "VK_ACCESS_TOKEN"):
             oauth_keys = ("VK_CLIENT_ID", "VK_REFRESH_TOKEN", "VK_DEVICE_ID", "VK_REDIRECT_URI")
             missing.extend(
-                project_env_name(project_slug, key)
+                project_env_name(credentials_project, key)
                 for key in oauth_keys
-                if not project_env(project_slug, key)
+                if not project_env(credentials_project, key)
             )
     supported = normalized_platform in SUPPORTED_DIRECT_PLATFORMS
     return PlatformReadiness(
@@ -797,7 +804,25 @@ def _vk_error_message(payload: dict[str, Any], context: str) -> None:
     raise PublicationDeliveryError(f"{context}: {message}{suffix}")
 
 
+def _vk_credentials_project(project_slug: str) -> str:
+    source = project_env(project_slug, "VK_USER_CREDENTIALS_PROJECT")
+    if not source or source == project_slug:
+        return project_slug
+    expected = project_env(project_slug, "VK_USER_ID")
+    if not expected.isdigit() or expected != project_env(source, "VK_USER_ID"):
+        raise PublicationDeliveryError("Shared VK OAuth requires the same explicit VK_USER_ID in both projects.")
+    if project_env(source, "VK_USER_CREDENTIALS_PROJECT") not in ("", source):
+        raise PublicationDeliveryError("Chained VK OAuth sharing is not supported.")
+    return source
+
+
 def _vk_access_token(project_slug: str) -> str:
+    source = _vk_credentials_project(project_slug)
+    with locked_vk_credentials(source):
+        return _vk_access_token_locked(source)
+
+
+def _vk_access_token_locked(project_slug: str) -> str:
     client_id = project_env(project_slug, "VK_CLIENT_ID")
     refresh_token = project_env(project_slug, "VK_REFRESH_TOKEN")
     device_id = project_env(project_slug, "VK_DEVICE_ID")

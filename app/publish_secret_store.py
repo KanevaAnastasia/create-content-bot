@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import fcntl
 import re
 import tempfile
 from pathlib import Path
@@ -25,6 +26,20 @@ def _quoted_env_value(value: str) -> str:
 
 def set_env_values(path: Path, values: Mapping[str, str]) -> None:
     """Atomically update several .env values without exposing them in output."""
+    if not values:
+        return
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd = os.open(path.with_name(path.name + ".write.lock"), os.O_CREAT | os.O_RDWR, 0o600)
+    try:
+        # Atomic rename alone does not protect simultaneous read-modify-writes.
+        fcntl.flock(fd, fcntl.LOCK_EX)
+        _set_env_values_locked(path, values)
+    finally:
+        fcntl.flock(fd, fcntl.LOCK_UN)
+        os.close(fd)
+
+
+def _set_env_values_locked(path: Path, values: Mapping[str, str]) -> None:
     normalized = {str(name).strip(): str(value).strip() for name, value in values.items()}
     if not normalized:
         return

@@ -1,5 +1,6 @@
 import base64
 import json
+import os
 import uuid
 from pathlib import Path
 from unittest.mock import Mock, call
@@ -34,6 +35,15 @@ from app.vk_oauth import (
     new_pkce_pair,
     validate_redirect_uri,
 )
+
+
+@pytest.fixture(autouse=True)
+def isolated_publishing_config(monkeypatch):
+    # Tests must not read live publishing credentials from the developer's .env.
+    monkeypatch.setattr("app.publication_config.load_env_file", lambda: None)
+    for key in tuple(os.environ):
+        if key.startswith("PUBLISH_"):
+            monkeypatch.delenv(key)
 
 
 def test_project_scoped_publish_env_never_falls_back_to_global_tokens(monkeypatch) -> None:
@@ -501,6 +511,8 @@ def test_vk_readiness_accepts_refresh_credentials_without_static_token(monkeypat
 
 
 def test_vk_access_token_refreshes_and_persists_rotated_values(monkeypatch) -> None:
+    from contextlib import nullcontext
+    monkeypatch.setattr("app.social_publishers.locked_vk_credentials", lambda _project: nullcontext())
     for key, value in {
         "VK_CLIENT_ID": "54871992",
         "VK_REFRESH_TOKEN": "old-refresh",
