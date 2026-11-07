@@ -29,6 +29,19 @@ def _empty_copy() -> dict[str, str]:
     return {key: "" for key, _label in admin_module.SOCIAL_COPY_FIELD_LABELS}
 
 
+def test_marketer_keeps_trial_identity_separate():
+    from pipeline_admin.marketer import job_dict
+    job = SimpleNamespace(id=uuid.uuid4(), project_id=uuid.uuid4(),
+        project=SimpleNamespace(slug="grandma_kitchen"), bundle_key="bundle-trial",
+        platform="instagram", language="ru", account_key="instagram:ru",
+        title="Trial", description="Trial text", published_at=None,
+        external_post_id="trial-id", payload_json={"instagram_trial": True})
+    row = job_dict(job)
+    assert row["instagram_trial"] is True
+    assert row["external_post_id"] == "trial-id"
+    assert row["bundle_key"] == "bundle-trial"
+
+
 def test_missing_copy_never_duplicates_source_script_into_en(monkeypatch):
     monkeypatch.setattr(admin_module, "_latest_chat_session_for_run", lambda run: (None, {}))
     monkeypatch.setattr(admin_module, "_publication_copy_from_draft", lambda run: {})

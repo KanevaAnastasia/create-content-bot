@@ -56,3 +56,18 @@ def test_feedback_and_approval_append_history_without_losing_original(monkeypatc
     assert read(third)["status"] == "approved"
     assert read(third)["parent_revision_id"] == second
     assert len(list(tmp_path.glob("*.json"))) == 3
+
+
+def test_trial_has_its_own_admin_artifact(monkeypatch, tmp_path):
+    monkeypatch.setattr(store, "COPY_HISTORY_DIR", tmp_path)
+    manager = MagicMock()
+    db = manager.__enter__.return_value
+    monkeypatch.setattr(store, "SessionLocal", lambda: manager)
+    store.save_bot_publication_copy({"generation_run_id": str(uuid.uuid4())}, {
+        "origin": "production_final", "copy": {"instagram_ru": "Normal"},
+        "instagram_ru_trial_description": "Trial #tag",
+    })
+    artifacts = [call.args[0] for call in db.add.call_args_list]
+    assert len(artifacts) == 2
+    assert artifacts[1].artifact_type == "publication_trial_copy_draft"
+    assert artifacts[1].payload_json["description"] == "Trial #tag"

@@ -37,10 +37,10 @@
 <p><small>Исторические загрузки показаны отдельно: одинаковое название не доказывает, что это одно видео. Превью берётся из YouTube, если он есть в карточке.</small></p>
 {% for group in video_groups %}<article class="mk-card">
 <div class="mk-grid">{% if group.thumbnail %}<img src="{{ group.thumbnail }}" alt="Превью ролика" loading="lazy" referrerpolicy="no-referrer" style="width:240px;max-width:100%;border-radius:12px">{% endif %}<div><h3>{{ group.title }}</h3>
-{% for row in group.rows %}<span class="pill">{{ row.platform }} {{ row.language|upper }}: {{ row.metrics.views|default_if_none:"—" }} просмотров</span>{% endfor %}</div></div>
+{% for row in group.rows %}<span class="pill">{{ row.platform }} {{ row.language|upper }}{% if row.instagram_trial %} · Пробный{% endif %}: {{ row.metrics.views|default_if_none:"—" }} просмотров</span>{% endfor %}</div></div>
 <details><summary>Подробности, ссылки и рекомендации</summary>
 {% for row in group.rows %}<section><h3>{{ row.title }}</h3>
-<p><span class="pill">{{ row.platform }} · {{ row.language|upper }}</span><span class="pill">{{ row.age_band }}</span>{% if row.url %}<a href="{{ row.url }}" target="_blank" rel="noopener noreferrer">Открыть ролик ↗</a>{% endif %}</p>
+<p><span class="pill">{{ row.platform }} · {{ row.language|upper }}{% if row.instagram_trial %} · Пробный Reel{% endif %}</span><span class="pill">{{ row.age_band }}</span>{% if row.url %}<a href="{{ row.url }}" target="_blank" rel="noopener noreferrer">Открыть ролик ↗</a>{% endif %}</p>
 <small>Опубликован: {{ row.posted_at|default:"неизвестно" }} · Срез: {{ row.fetched_at|default:"не получен" }}</small>
 <div class="mk-table"><table><thead><tr><th>Просмотры</th><th>Охват</th><th>Лайки</th><th>Комментарии</th><th>Сохранения</th><th>Репосты</th></tr></thead><tbody><tr>{% for value in row.metric_cells %}<td>{{ value|default_if_none:"—" }}</td>{% endfor %}</tr></tbody></table></div>
 {% if row.delta != None %}<p>Изменение просмотров с предыдущего среза: {{ row.delta }} ({{ row.previous.fetched_at }}).</p>{% endif %}

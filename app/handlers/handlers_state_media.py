@@ -3258,6 +3258,11 @@ async def _send_social_copy_for_approval(
         await _reply_text_with_optional_markup(update, mapping)
     for title, body in _social_copy_messages(copy):
         await _send_copyable_message(update, title, body)
+    if isinstance(pending, dict) and pending.get("instagram_ru_trial_description"):
+        await _send_copyable_message(update, "Instagram RU пробный Reel, скопировать отдельно",
+                                     pending["instagram_ru_trial_description"])
+    elif isinstance(pending, dict) and pending.get("trial_generation_failed"):
+        await _reply_text_with_optional_markup(update, "Пробное описание не удалось сгенерировать. Основные тексты сохранены; повторите генерацию пробного перед публикацией.")
     if isinstance(pending, dict):
         await _reply_text_with_optional_markup(update, _social_publication_selection_summary(pending))
     await _reply_text_with_optional_markup(
@@ -3374,6 +3379,24 @@ async def _refine_social_copy_from_feedback(
     return out
 
 
+async def _prepare_trial_copy_for_pending(session: dict, pending: dict) -> None:
+    from ..publication_trial_copy import generate_trial_copy
+    from ..publication_copy_store import save_bot_publication_copy
+
+    pending.pop("instagram_ru_trial_description", None)
+    pending.pop("trial_generation_failed", None)
+    try:
+        pending["instagram_ru_trial_description"] = await generate_trial_copy(
+            recipe=pending["recipe"], normal_copy=pending["copy"],
+            feedback=pending.get("last_feedback", ""),
+            project_slug=pending.get("project_slug") or session.get("selected_project_key"),
+        )
+    except Exception:
+        logger.exception("Trial caption generation failed; normal copy is preserved")
+        pending["trial_generation_failed"] = True
+    save_bot_publication_copy(session, pending)
+
+
 async def _start_social_descriptions_approval(
     update: Update,
     *,
@@ -3402,6 +3425,7 @@ async def _start_social_descriptions_approval(
     from ..publication_copy_store import save_bot_publication_copy
 
     save_bot_publication_copy(session, pending)
+    await _prepare_trial_copy_for_pending(session, pending)
     await _send_social_copy_for_approval(update, copy, video_targets=video_targets, pending=pending)
 
 
@@ -3796,10 +3820,12 @@ async def _handle_waiting_social_descriptions_approval_state(
         "copy": copy,
         "last_feedback": feedback,
     }
+    next_pending.pop("instagram_ru_trial_description", None)
     session[SOCIAL_DESCRIPTIONS_PENDING_KEY] = next_pending
     from ..publication_copy_store import save_bot_publication_copy
 
     save_bot_publication_copy(session, next_pending)
+    await _prepare_trial_copy_for_pending(session, next_pending)
     await _send_social_copy_for_approval(update, copy, video_targets=pending.get("video_targets"), pending=next_pending)
     return True
 

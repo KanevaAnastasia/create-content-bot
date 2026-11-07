@@ -86,6 +86,7 @@ def job_dict(job):
     return {"id": str(job.id), "project_id": str(job.project_id), "project_slug": job.project.slug,
             "bundle_key": str(job.bundle_key or ""),
             "platform": job.platform, "language": job.language, "account_key": job.account_key,
+            "instagram_trial": bool(payload.get("instagram_trial")),
             "title": job.title or (job.description or "Без названия")[:140],
             "posted_at": job.published_at.isoformat() if job.published_at else None,
             "external_post_id": job.external_post_id, "url": url}

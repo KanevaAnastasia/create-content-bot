@@ -34,6 +34,7 @@ def save_bot_publication_copy(session: dict, pending: dict, *, approved: bool = 
         "feedback": pending.get("last_feedback", ""),
         "origin": "telegram", "source_mode": pending.get("origin", ""),
         "status": "approved" if approved else "draft",
+        "instagram_ru_trial_description": pending.get("instagram_ru_trial_description", ""),
     }
     COPY_HISTORY_DIR.mkdir(parents=True, exist_ok=True, mode=0o700)
     # Exclusive creation, unique revision filename, private permissions.
@@ -52,6 +53,15 @@ def save_bot_publication_copy(session: dict, pending: dict, *, approved: bool = 
                 uri=f"db://generation_runs/{run_id}/publication_copy/bot/{revision_id}",
                 mime_type="application/json", payload_json=payload,
             ))
+            if payload["instagram_ru_trial_description"]:
+                db.add(GenerationArtifact(
+                    run_id=run_id, artifact_type="publication_trial_copy_draft",
+                    label="Telegram Instagram RU Trial copy",
+                    uri=f"db://generation_runs/{run_id}/publication_copy/trial/{revision_id}",
+                    language="ru", mime_type="application/json",
+                    payload_json={"description": payload["instagram_ru_trial_description"],
+                                  "revision_id": revision_id},
+                ))
             db.commit()
     pending["copy_revision_id"] = revision_id
     return revision_id
