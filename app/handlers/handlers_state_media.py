@@ -3399,6 +3399,9 @@ async def _start_social_descriptions_approval(
         SOCIAL_PUBLISH_VIDEO_VARIANT_KEY: DEFAULT_PUBLICATION_VIDEO_VARIANT,
     }
     session[SOCIAL_DESCRIPTIONS_PENDING_KEY] = pending
+    from ..publication_copy_store import save_bot_publication_copy
+
+    save_bot_publication_copy(session, pending)
     await _send_social_copy_for_approval(update, copy, video_targets=video_targets, pending=pending)
 
 
@@ -3785,6 +3788,9 @@ async def _handle_waiting_social_descriptions_approval_state(
         "last_feedback": feedback,
     }
     session[SOCIAL_DESCRIPTIONS_PENDING_KEY] = next_pending
+    from ..publication_copy_store import save_bot_publication_copy
+
+    save_bot_publication_copy(session, next_pending)
     await _send_social_copy_for_approval(update, copy, video_targets=pending.get("video_targets"), pending=next_pending)
     return True
 

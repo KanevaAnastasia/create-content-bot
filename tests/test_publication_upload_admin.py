@@ -29,6 +29,35 @@ def _empty_copy() -> dict[str, str]:
     return {key: "" for key, _label in admin_module.SOCIAL_COPY_FIELD_LABELS}
 
 
+def test_missing_copy_never_duplicates_source_script_into_en(monkeypatch):
+    monkeypatch.setattr(admin_module, "_latest_chat_session_for_run", lambda run: (None, {}))
+    monkeypatch.setattr(admin_module, "_publication_copy_from_draft", lambda run: {})
+    monkeypatch.setattr(admin_module, "_publication_copy_from_latest_jobs", lambda run: {})
+    result = upload_admin._original_publication_copy_from_run(
+        SimpleNamespace(script="Русский рецепт, не описание для площадок"))
+    assert result == _empty_copy()
+
+
+def test_copy_reads_bot_pending_run_artifact(monkeypatch):
+    class Query(list):
+        def filter(self, **kwargs):
+            return Query(x for x in self if x.artifact_type == kwargs.get("artifact_type"))
+        def order_by(self, *args):
+            return self
+        def first(self):
+            return self[0] if self else None
+    pending = SimpleNamespace(
+        artifact_type="run_pending_input", created_at=datetime.now(timezone.utc),
+        payload_json={"session_key": "social_descriptions_pending", "pending": {
+            "copy": {"instagram_en": "Bot English #recipe", "vk_ru": "Бот ВК #рецепт"}}})
+    monkeypatch.setattr(upload_admin.GenerationArtifact, "objects", Query([pending]))
+    monkeypatch.setattr(upload_admin.ChatSession, "objects", Query())
+    monkeypatch.setattr(upload_admin.PublicationJob, "objects", Query())
+    result = upload_admin._freshest_publication_copy_from_run(SimpleNamespace(id=uuid.uuid4()))
+    assert result["instagram_en"] == "Bot English #recipe"
+    assert result["vk_ru"] == "Бот ВК #рецепт"
+
+
 def test_custom_upload_form_requires_copy_for_each_selected_target() -> None:
     form = PublicationUploadForm(
         data={

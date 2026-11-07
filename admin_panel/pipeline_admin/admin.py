@@ -3109,18 +3109,9 @@ def _publication_copy_from_run(run: GenerationRun) -> dict[str, str]:
     latest_job_copy = _publication_copy_from_latest_jobs(run)
     if latest_job_copy:
         return latest_job_copy
-    title = _title_from_run(run) or _short(run.script, 80)
-    description = str(run.script or "").strip()
-    return {
-        "youtube_ru_title": title,
-        "youtube_ru_description": description,
-        "instagram_ru": description,
-        "vk_ru": description,
-        "tiktok_ru": description,
-        "instagram_en": description,
-        "youtube_en_title": title,
-        "youtube_en_description": description,
-    }
+    # A source script is not platform copy (and may be in a different language).
+    # Missing copy must remain visibly missing, never silently publish the script.
+    return {key: "" for key, _label in SOCIAL_COPY_FIELD_LABELS}
 
 
 def _looks_like_url_text(value: str) -> bool:

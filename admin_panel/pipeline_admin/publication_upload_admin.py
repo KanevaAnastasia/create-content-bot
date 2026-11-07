@@ -520,6 +520,24 @@ def _freshest_publication_copy_from_run(run: GenerationRun) -> dict[str, str]:
     except Exception:
         pass
     try:
+        pending_rows = GenerationArtifact.objects.filter(
+            run_id=run.id, artifact_type="run_pending_input",
+            payload_json__session_key="social_descriptions_pending",
+        ).order_by("-created_at")[:20]
+        for artifact in pending_rows:
+            payload = artifact.payload_json or {}
+            if payload.get("session_key") != "social_descriptions_pending":
+                continue
+            pending = payload.get("pending") or {}
+            copy = pending.get("copy") if isinstance(pending, dict) else None
+            if isinstance(copy, dict) and any(copy.values()):
+                candidates.append((_copy_timestamp(artifact.created_at), {
+                    key: str(copy.get(key) or "") for key, _label in legacy.SOCIAL_COPY_FIELD_LABELS
+                }))
+                break
+    except Exception:
+        pass
+    try:
         draft = (
             GenerationArtifact.objects.filter(
                 run_id=run.id,
@@ -851,6 +869,13 @@ def generation_upload_view(self, request, object_id):
         default_project,
         legacy._publication_copy_from_run(run),
     )
+    if request.method == "GET" and not any(copy_payload.values()):
+        self.message_user(
+            request,
+            "Описания для этого запуска не сохранены. Вставьте тексты из бота или "
+            "сгенерируйте описания кнопкой ниже. Исходный сценарий не подставляется вместо них.",
+            level=messages.WARNING,
+        )
     trial_description = (
         str(request.POST.get("instagram_ru_trial_description") or "")
         if request.method == "POST"
