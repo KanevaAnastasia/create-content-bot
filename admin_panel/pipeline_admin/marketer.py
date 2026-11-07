@@ -19,7 +19,7 @@ from django.urls import reverse
 
 from app.marketer import METRICS, MetricsUnavailable, collect_metrics, diagnose, discover_niche, marketing_brief, group_videos, youtube_history
 from app.publication_config import project_env
-from app.social_publishers import _youtube_access_token
+from app.social_publishers import _youtube_access_token, _vk_access_token as _vk_marketer_token
 from .models import Project, PublicationJob
 from .marketer_display import format_brief, behaviour_summary
 from app.marketer import collect_followers, collect_behaviour
@@ -151,7 +151,8 @@ def run_report(project_id, task_id, action, query="", language="ru"):
                 try:
                     tokens[key] = (_youtube_access_token(project.slug, row["language"]) if key[0] == "youtube"
                                    else project_env(project.slug, f"INSTAGRAM_ACCESS_TOKEN_{key[1].upper()}")
-                                   if key[0] == "instagram" else "")
+                                   if key[0] == "instagram" else _vk_marketer_token(project.slug)
+                                   if key[0] == "vk" else "")
                 except Exception:
                     tokens[key] = ""
 

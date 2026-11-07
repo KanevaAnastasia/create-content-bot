@@ -38,6 +38,9 @@ def collect_followers(slug, platform, language, token):
         if str(data.get("id")) != account_id:
             raise MetricsUnavailable("Не удалось подтвердить Instagram-аккаунт.")
         value = number(data.get("followers_count"))
+    elif platform == "vk":
+        from .marketer_vk import followers
+        account_id, value = followers(slug, token)
     else:
         raise MetricsUnavailable("Сбор подписчиков этой площадки пока не подключён.")
     return {"platform": platform, "language": language, "account_id": account_id,
@@ -219,7 +222,7 @@ def collect_metrics(job, token):
         stats = item.get("statistics", {})
         for key, remote in (("views", "viewCount"), ("likes", "likeCount"), ("comments", "commentCount")):
             values[key] = number(stats.get(remote))
-        warnings.append("Удержание и CTR не входят в этот сбор: нужен отдельный доступ YouTube Analytics.")
+        warnings.append("Удержание обновляется отдельным сбором YouTube Analytics; CTR этим сбором не запрашивается.")
     elif job["platform"] == "instagram":
         base = f"https://graph.facebook.com/{shared_env('META_GRAPH_API_VERSION', 'v25.0')}"
         basic = api_get(f"{base}/{post_id}", token, {"fields": "id,like_count,comments_count"})
@@ -236,6 +239,10 @@ def collect_metrics(job, token):
                     warnings.append(f"{metric}: API пока не вернул значение.")
             except MetricsUnavailable as exc:
                 warnings.append(f"{metric}: {exc}")
+    elif job["platform"] == "vk":
+        from .marketer_vk import video_metrics
+        values = video_metrics(job, token)
+        warnings.append("Показатели относятся к видео VK, не к записи на стене или сториз. Охват и сохранения не возвращены этим API.")
     else:
         raise MetricsUnavailable("Автосбор этой площадки пока не подключён. Это не означает нулевые просмотры.")
     return {"metrics": values, "warnings": warnings, "fetched_at": datetime.now(timezone.utc).isoformat()}
