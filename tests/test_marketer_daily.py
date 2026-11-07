@@ -49,6 +49,19 @@ def test_empty_dashboard():
     assert dashboard({}, [])["days"] == 0
 
 
+def test_intraday_change_is_separate_from_daily_comparison():
+    a = {**account(70401), "delta": 112, "previous_at": "2026-11-07T16:39:27+00:00", "fetched_at": "2026-11-07T18:43:47+00:00"}
+    result = dashboard({"accounts": [a], "fetched_at": stamp(7, 22)}, [])["accounts"][0]
+    assert result["refresh_delta"] == 112
+    assert result["daily_delta"] is None
+    assert result["previous_time"].hour == 19
+    assert result["observed_time"].hour == 21
+    a["delta"] = 0
+    assert dashboard({"accounts": [a]}, [])["accounts"][0]["refresh_delta"] == 0
+    a["previous_at"] = None
+    assert dashboard({"accounts": [a]}, [])["accounts"][0]["refresh_delta"] is None
+
+
 def test_trial_and_normal_share_source_not_metrics():
     from app.marketer import group_videos
     rows = [{"id": "1", "project_id": "p", "bundle_key": "source", "metrics": {"views": 10}},

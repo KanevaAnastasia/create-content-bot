@@ -6,6 +6,14 @@ from copy import deepcopy
 MOSCOW = ZoneInfo("Europe/Moscow")
 
 
+def observation_time(value):
+    try:
+        result = datetime.fromisoformat(value)
+        return result.astimezone(MOSCOW) if result.tzinfo else None
+    except (TypeError, ValueError):
+        return None
+
+
 def day_key(timestamp):
     return datetime.fromtimestamp(timestamp, MOSCOW).date().isoformat()
 
@@ -33,6 +41,9 @@ def dashboard(report, rows):
     old = {key(a): a for a in previous.get("accounts", [])}
     for source in report.get("accounts", []):
         a = dict(source)
+        a["observed_time"] = observation_time(a.get("fetched_at"))
+        a["previous_time"] = observation_time(a.get("previous_at"))
+        a["refresh_delta"] = a.get("delta") if a["previous_time"] and a["observed_time"] else None
         current, before = a.get("followers"), old.get(key(a), {}).get("followers")
         a["daily_delta"] = current - before if current is not None and before is not None else None
         a["trend"] = []
