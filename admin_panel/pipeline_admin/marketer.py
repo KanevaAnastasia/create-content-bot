@@ -261,7 +261,8 @@ def marketer_view(request):
     groups = group_videos(rows)
     video_page = Paginator(groups, 12).get_page(request.GET.get("page"))
     context = {**admin.site.each_context(request), "title": "Маркетолог", "form": form, "overview": overview,
-               "brief_html": format_brief(report.get("brief")),
+               "brief_html": format_brief(report.get("brief")) if isinstance(report.get("brief"), str) else "",
+               "brief_plan": report.get("brief") if isinstance(report.get("brief"), dict) else None,
                "project": project, "projects": projects, "report": report, "rows": rows, "video_groups": groups,
                "visible_groups": video_page.object_list, "video_page": video_page,
                "brief_stale": bool(report.get("brief")) and (report.get("brief_data_at") != report.get("fetched_at") or report.get("brief_niche_at") != report.get("niche_fetched")),

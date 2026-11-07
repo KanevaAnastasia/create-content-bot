@@ -155,11 +155,28 @@ def test_niche_empty_results_does_not_call_videos(monkeypatch):
 def test_ai_only_sends_allowlisted_report_fields(monkeypatch):
     import app.llm_utils
     seen = []
-    monkeypatch.setattr(app.llm_utils, "gemini_generate_sync", lambda prompt, **kw: seen.append(prompt) or "План")
+    plan = {"summary": "План", "actions": [{"title": "Тест", "action": "Хук", "evidence": "Нет данных", "check": "Через 7 дней"}] * 3}
+    monkeypatch.setattr(app.llm_utils, "gemini_generate_sync", lambda prompt, **kw: seen.append(prompt) or __import__('json').dumps(plan))
     data = row("a", 10, access_token="DO_NOT_SEND", payload_json={"secret": "DO_NOT_SEND"})
-    assert m.marketing_brief("Проект", [data], [], "") == "План"
+    assert m.marketing_brief("Проект", [data], [], "")["summary"] == "План"
     assert "DO_NOT_SEND" not in seen[0]
     assert "недоверенные" in seen[0]
+
+
+def test_plan_rejects_unstructured_response():
+    with pytest.raises(m.MetricsUnavailable):
+        m.parse_marketing_plan("Обычный длинный текст")
+
+
+def test_plan_cards_and_subscribers_render_safely(page):
+    from django.template.loader import render_to_string
+    html = render_to_string("admin/pipeline_admin/marketer.html", {
+        "brief_plan": {"summary": "Решение", "actions": [{"priority": "now", "title": "<script>x</script>", "action": "Снять", "evidence": "Факт", "check": "7 дней"}]},
+        "visible_groups": [{"rows": [{"metrics": {"views": 0}, "behaviour_display": {"subscribers_gained": 0, "period": "90 дней"}}]}],
+    })
+    assert "plan-now" in html and "&lt;script&gt;" in html
+    assert "Подписались с ролика: <b>0</b>" in html
+    assert "90 дней" in html
 
 
 def test_background_report_keeps_project_scope(page, monkeypatch):
