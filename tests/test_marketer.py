@@ -202,6 +202,27 @@ def test_marketer_queue_cannot_receive_publication_routes(page):
     assert queue.routing_key == 'marketer'
 
 
+def test_refresh_collects_new_youtube_behaviour(page, monkeypatch):
+    pid = uuid.uuid4()
+    task = page.reserve_report(pid, "refresh")
+    project = SimpleNamespace(id=pid, slug="discipline")
+    monkeypatch.setattr(page.Project.objects, "get", lambda **kw: project)
+    class Query:
+        def select_related(self, *a): return self
+        def order_by(self, *a): return self
+        def __getitem__(self, key): return [object()]
+    monkeypatch.setattr(page.PublicationJob.objects, "filter", lambda **kw: Query())
+    monkeypatch.setattr(page, "job_dict", lambda job: {"id": "new", "platform": "youtube", "language": "ru", "external_post_id": "abcdefghijk"})
+    monkeypatch.setattr(page, "_youtube_access_token", lambda *a: "token")
+    monkeypatch.setattr(page, "collect_metrics", lambda *a: {"metrics": {"views": 4}})
+    monkeypatch.setattr(page, "collect_followers", lambda *a: {"platform": "youtube", "language": "ru", "account_id": "c", "followers": 2})
+    monkeypatch.setattr(page, "collect_behaviour", lambda *a: {"subscribers_gained": 1})
+    page.run_report(pid, task, "refresh")
+    result = page.read_report(pid)
+    assert result["state"] == "done"
+    assert result["rows"][0]["behaviour"]["subscribers_gained"] == 1
+
+
 def test_homepage_marketer_link_matches_registered_route(page):
     from django.conf import settings
     from django.template import Context, Template

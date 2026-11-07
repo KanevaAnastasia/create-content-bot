@@ -159,14 +159,22 @@ def run_report(project_id, task_id, action, query="", language="ru"):
                 except Exception:
                     tokens[key] = ""
 
+            previous_rows = {r["id"]: r for r in existing.get("rows", [])}
             def collect(row):
+                result = dict(row)
                 try:
                     token = tokens[(row["platform"], row["language"])]
                     if not token and row["platform"] in {"youtube", "instagram", "vk", "tiktok"}:
                         raise MetricsUnavailable("Нет действующего токена этого проекта/языка. Переподключите аккаунт.")
-                    return {**row, **collect_metrics(row, token)}
+                    result.update(collect_metrics(row, token))
                 except MetricsUnavailable as exc:
-                    return {**row, "metrics": dict.fromkeys(METRICS), "warnings": [str(exc)]}
+                    result.update(metrics=dict.fromkeys(METRICS), warnings=[str(exc)])
+                if row["platform"] == "youtube":
+                    try:
+                        result["behaviour"] = collect_behaviour(row, tokens[("youtube", row["language"])])
+                    except Exception:
+                        result["behaviour"] = {**(previous_rows.get(row["id"], {}).get("behaviour") or {}), "warning": "Ошибка обновления YouTube Analytics. Если показаны значения, это предыдущий срез; проверьте его дату."}
+                return result
 
             with ThreadPoolExecutor(max_workers=4) as pool:
                 collected = list(pool.map(collect, rows))
@@ -187,7 +195,7 @@ def run_report(project_id, task_id, action, query="", language="ru"):
             old = {r["id"]: r for r in read_report(project_id).get("rows", [])}
             for row in collected:
                 previous = old.get(row["id"], {})
-                if previous.get("behaviour"):
+                if previous.get("behaviour") and "behaviour" not in row:
                     row["behaviour"] = previous["behaviour"]
                 row["previous"] = {"metrics": previous.get("metrics", {}), "fetched_at": previous.get("fetched_at")}
             stamp = time.time()

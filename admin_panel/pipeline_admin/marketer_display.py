@@ -38,6 +38,13 @@ def behaviour_summary(row):
                 "average_view_seconds": round(metrics["average_watch_ms"] / 1000, 2) if metrics.get("average_watch_ms") is not None else None,
                 "period": "За всё время (Instagram lifetime)", "fetched_at": row.get("fetched_at")}
     points = data.get("retention") or []
+    if row.get("platform") == "youtube":
+        subscriber_status = ("Ошибка обновления YouTube Analytics — см. подробности" if data.get("warning") else
+                             "YouTube пока не вернул подписки за выбранный период" if data else "Ещё не запрошено — обновите данные")
+    elif row.get("platform") == "instagram":
+        subscriber_status = (row.get("metric_errors") or {}).get("subscribers_gained") or "Instagram пока не вернул подписки"
+    else:
+        subscriber_status = "Подписки с ролика не доступны в подключённом API"
     drops = sorted([{"start": a["position"], "end": b["position"],
                      "drop": round(a["watch_ratio"] - b["watch_ratio"], 2)}
                     for a, b in zip(points, points[1:]) if a["watch_ratio"] > b["watch_ratio"]],
@@ -47,6 +54,7 @@ def behaviour_summary(row):
             drop["seconds"] = round(drop["start"] * data["duration_seconds"] / 100, 1)
             drop["url"] = f"https://www.youtube.com/watch?v={row['external_post_id']}&t={int(drop['seconds'])}s"
     return {
+        "subscriber_status": subscriber_status,
         "subscribers_gained": data.get("subscribers_gained"),
         "subscribers_lost": data.get("subscribers_lost"),
         "average_view_seconds": data.get("average_view_seconds"),

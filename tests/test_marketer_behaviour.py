@@ -3,6 +3,13 @@ from types import SimpleNamespace
 from app import marketer as m
 
 
+def test_subscriber_status_separates_missing_and_error():
+    from admin_panel.pipeline_admin.marketer_display import behaviour_summary
+    assert "Ещё не запрошено" in behaviour_summary({"platform": "youtube"})["subscriber_status"]
+    assert "Ошибка" in behaviour_summary({"platform": "youtube", "behaviour": {"warning": "failed"}})["subscriber_status"]
+    assert "пока не вернул" in behaviour_summary({"platform": "youtube", "behaviour": {"subscribers_gained": None, "period": "90 days"}})["subscriber_status"]
+
+
 def test_instagram_extended_metrics_partial_failure(monkeypatch):
     def get(url, token, params):
         if url.endswith("/comments"):
