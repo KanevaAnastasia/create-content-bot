@@ -38,6 +38,10 @@ def collect_followers(slug, platform, language, token):
         if str(data.get("id")) != account_id:
             raise MetricsUnavailable("Не удалось подтвердить Instagram-аккаунт.")
         value = number(data.get("followers_count"))
+    elif platform == "tiktok":
+        from .marketer_tiktok import account
+        user = account(slug, token, stats=True)
+        account_id, value = user["open_id"], number(user.get("follower_count"))
     elif platform == "vk":
         from .marketer_vk import followers
         account_id, value = followers(slug, token)
@@ -239,6 +243,10 @@ def collect_metrics(job, token):
                     warnings.append(f"{metric}: API пока не вернул значение.")
             except MetricsUnavailable as exc:
                 warnings.append(f"{metric}: {exc}")
+    elif job["platform"] == "tiktok":
+        from .marketer_tiktok import video_metrics
+        values = video_metrics(job, token)
+        warnings.append("TikTok Display API не возвращает охват, сохранения и посекундное удержание.")
     elif job["platform"] == "vk":
         from .marketer_vk import video_metrics
         values = video_metrics(job, token)
