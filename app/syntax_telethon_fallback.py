@@ -1466,6 +1466,29 @@ def _submit_syntax_veo_generate_sync(page: Any, *, timeout_ms: int) -> str:
         )
 
 
+def _open_syntax_veo_page_sync(playwright: Any, url: str, timeout_ms: int) -> tuple[Any, Any]:
+    """Retry a broken bundled browser before any generation can be submitted."""
+    for channel in (None, "chrome"):
+        browser = None
+        try:
+            kwargs = {"headless": True}
+            if channel:
+                kwargs["channel"] = channel
+            browser = playwright.chromium.launch(**kwargs)
+            page = browser.new_page(viewport={"width": 430, "height": 932}, is_mobile=True)
+            page.goto(url, wait_until="commit", timeout=min(timeout_ms, 60_000))
+            return browser, page
+        except Exception as exc:
+            launch_failed = browser is None
+            if browser is not None:
+                with contextlib.suppress(Exception):
+                    browser.close()
+            if channel is not None or (not launch_failed and "ERR_SOCKET_NOT_CONNECTED" not in str(exc)):
+                raise
+            logger.warning("syntax.veo.webapp_retry_system_chrome err=%s", _sanitize_syntax_webview_error(exc))
+    raise RuntimeError("Syntax Veo webview did not open.")
+
+
 def _fill_syntax_veo_webapp_sync(
     *,
     url: str,
@@ -1492,13 +1515,8 @@ def _fill_syntax_veo_webapp_sync(
 
     timeout_ms = max(30_000, int(timeout_sec) * 1000)
     with sync_playwright() as p:
+        browser, page = _open_syntax_veo_page_sync(p, url, timeout_ms)
         try:
-            browser = p.chromium.launch(headless=True)
-        except Exception:
-            browser = p.chromium.launch(channel="chrome", headless=True)
-        try:
-            page = browser.new_page(viewport={"width": 430, "height": 932}, is_mobile=True)
-            page.goto(url, wait_until="commit", timeout=min(timeout_ms, 60_000))
             with contextlib.suppress(Exception):
                 page.wait_for_load_state("networkidle", timeout=min(timeout_ms, 30_000))
 

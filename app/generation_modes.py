@@ -86,8 +86,7 @@ def is_advertising_generation(value: Any) -> bool:
 
 def target_languages_for_generation_mode(value: Any, default: list[str]) -> list[str]:
     if (
-        normalize_generation_mode(value.get(GENERATION_MODE_SESSION_KEY) if isinstance(value, dict) else value) == GENERATION_MODE_ADVICE
-        or is_silence_generation(value)
+        is_silence_generation(value)
         or is_long_generation(value)
         or is_copy_generation(value)
         or is_story_generation(value)

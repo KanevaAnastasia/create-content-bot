@@ -3233,7 +3233,7 @@ async def generate_full_production(
     mode = normalize_generation_mode(generation_mode)
     if mode == GENERATION_MODE_ADVICE:
         comment = (comment + "\n\n" + ADVICE_SCENE_RULE).strip()
-    target_languages = ["ru"] if mode in {GENERATION_MODE_ADVICE, GENERATION_MODE_SILENCE, GENERATION_MODE_LONG} else list(target_languages or target_languages_from_env())
+    target_languages = ["ru"] if mode in {GENERATION_MODE_SILENCE, GENERATION_MODE_LONG} else list(target_languages or target_languages_from_env())
     silence_prompt_rule = ""
     if mode == GENERATION_MODE_SILENCE:
         silence_prompt_rule = (

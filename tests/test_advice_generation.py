@@ -9,15 +9,18 @@ from app.generation_modes import (
 from app.handlers import handlers_state_start as start
 
 
-def test_advice_uses_normal_video_provider_and_only_russian():
+def test_advice_uses_normal_video_provider_and_configured_languages():
     assert normalize_generation_mode('Совет') == 'advice'
-    assert target_languages_for_generation_mode({'generation_mode': 'advice'}, ['ru', 'en']) == ['ru']
+    assert target_languages_for_generation_mode({'generation_mode': 'advice'}, ['ru', 'en']) == ['ru', 'en']
+    assert target_languages_for_generation_mode('advice', ['ru']) == ['ru']
+    assert target_languages_for_generation_mode('advice', ['ru', 'en', 'es']) == ['ru', 'en', 'es']
     assert aspect_ratio_for_generation_mode('advice') == '9:16'
     assert syntax_provider_for_scene_generation({}, 'advice') == SYNTAX_PROVIDER_VEO
 
 
 def test_advice_direct_recipe_still_offers_questions_and_keeps_choice(monkeypatch):
-    sessions = {987654: {'generation_mode': 'advice', 'target_languages': ['ru']}}
+    monkeypatch.setattr(start, 'target_languages_from_env', lambda: ['ru', 'en'])
+    sessions = {987654: {'generation_mode': 'advice', 'target_languages': ['ru', 'en']}}
     monkeypatch.setattr(start, 'SESSIONS', sessions)
     monkeypatch.setattr(start, '_try_parse_direct_recipe_from_user_text', lambda _: ['Обжарить свёклу'])
     question = 'Ма, как ты делаешь такой яркий борщ?'
@@ -30,7 +33,7 @@ def test_advice_direct_recipe_still_offers_questions_and_keeps_choice(monkeypatc
     asyncio.run(start._continue_generation_with_recipe(update, None, recipe='Свёкла, капуста. Обжарить свёклу, сварить борщ.', prefer_vertex_api=False))
     session = sessions[987654]
     assert session['state'] == start.STATE_WAITING_CONCEPT
-    assert session['target_languages'] == ['ru']
+    assert session['target_languages'] == ['ru', 'en']
     assert 'вопросов-проблем' in concepts.call_args.args[0]
     recipe = AsyncMock(return_value='Свёкла, капуста. Обжарить свёклу, сварить борщ.')
     monkeypatch.setattr(start, 'generate_recipe_full_text', recipe)
@@ -72,3 +75,35 @@ def test_advice_not_enabled_for_other_projects():
     ))
     assert session['generation_mode'] == 'normal'
     assert 'проект' in update.message.reply_text.call_args.args[0]
+
+
+def test_advice_production_translates_both_speakers_and_following_scene(monkeypatch):
+    import json
+    from app import pipeline
+
+    monkeypatch.setattr(pipeline, 'gemini_generate_sync', lambda *a, **kw: json.dumps({'prompts': [
+        {'video_prompt_en': 'The daughter asks her mother.'},
+        {'video_prompt_en': 'Grandma slices the chicken.'},
+    ]}))
+    translations = {'Мам, почему сухо?': 'Mom, why is it dry?',
+                    'Сейчас покажу!': 'Let me show you!', 'Режем курицу.': 'Slice the chicken.'}
+    async def translate(text, language):
+        return translations.get(text, text) if language == 'en' else text
+    monkeypatch.setattr(pipeline, '_translate_scene_text', translate)
+    scenes = [
+        {'scene': 1, 'model': 'veo3_fast', 'duration_sec': 8, 'text': 'Мам, почему сухо? Сейчас покажу!',
+         'characters': ['daughter', 'grandma', 'cat'], 'dialogue_mode': 'multi',
+         'dialogue': [{'speaker': 'daughter', 'text': 'Мам, почему сухо?'},
+                      {'speaker': 'grandma', 'text': 'Сейчас покажу!'}]},
+        {'scene': 2, 'model': 'veo3_fast', 'duration_sec': 8, 'text': 'Режем курицу.', 'characters': ['grandma']},
+    ]
+    frames = [{'start_frame_prompt_ru': 'Бабушка на кухне', 'end_frame_prompt_ru': 'пусто'}] * 2
+    result = asyncio.run(pipeline.generate_full_production(scenes, frames, generation_mode='advice', target_languages=['ru', 'en']))
+    first, second = result['json_plan']
+    assert [x['speaker'] for x in first['dialogue_by_lang']['en']] == ['daughter', 'grandma']
+    assert first['dialogue_by_lang']['en'][0]['text'] == 'Mom, why is it dry?'
+    assert 'Let me show you!' in first['video_prompt_by_lang']['en']
+    assert 'English language' in first['video_prompt_by_lang']['en']
+    assert 'Russian language' not in first['video_prompt_by_lang']['en']
+    assert second['speech_by_lang']['en'] == 'Slice the chicken.'
+    assert set(second['video_prompt_by_lang']) == {'ru', 'en'}

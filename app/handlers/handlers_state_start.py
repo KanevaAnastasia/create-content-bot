@@ -1532,7 +1532,7 @@ async def _handle_waiting_generation_mode_state(
         target_languages_from_env(),
     )
     if mode == GENERATION_MODE_ADVICE:
-        message = "Формат «Совет», только RU: предложу вопросы дочери на выбор. В первом клипе дочь задаёт вопрос, бабушка сразу отвечает; дальше показываем решение."
+        message = "Формат «Совет»: предложу вопросы дочери на выбор. В первом клипе дочь задаёт вопрос, бабушка сразу отвечает; дальше показываем решение. Языки: " + ", ".join(lang.upper() for lang in session["target_languages"]) + "."
     elif mode == GENERATION_MODE_SILENCE:
         message = "Ок, запускаю silence-режим: один RU-формат, Kling, короткие динамичные кадры."
     elif mode == GENERATION_MODE_LONG:
