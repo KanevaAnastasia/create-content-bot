@@ -54,6 +54,10 @@ def visual_direction(mode):
         'или книг в руках при любом слове «я». Первый кадр уже содержит действие; без пустого вступления. '
         + ('Главный герой — утверждённый Василий; показывай его проблему и действия, сохраняя референс. '
            if mode == VASYA else 'Подбирай героев по смыслу, первое лицо само по себе не требует Анастасию с книгами. ')
+        + ('Первые слова и «А что если?» (EN: «What if?») оформляются крупными субтитрами только на финальном рендере по таймингу речи. '
+           'На фразе-повороте видеоряд и звук продолжаются: не создавай ради титра отдельную сцену, стоп-кадр, склейку или музыкальную паузу. '
+           'Все остальные субтитры стандартные. '
+           if mode == REFRAME else '')
         + 'Финал — реалистичный первый шаг или прогресс по озвучке; не приписывай мгновенное решение всей проблемы.'
     )
 
@@ -73,3 +77,23 @@ def title_word_timing(title, text, duration, alignment):
     if len(rows) < len(tokens) or [clean(w) for w in tokens] != [clean(r[0]) for r in rows[:len(tokens)]]:
         return []
     return [{'text': word, 'start': start, 'end': end} for word, start, end in rows[:len(tokens)]]
+
+
+def reframe_title_cues(text, duration, alignment, language='ru'):
+    """Locate the spoken turn using real alignment; never guess its timestamp."""
+    from .story_generation import _word_timing_rows
+    if not alignment:
+        return []
+    phrase = ['What', 'if?'] if language == 'en' else ['А', 'что', 'если?']
+    clean = lambda value: re.sub(r'[^\w]+', '', value).casefold()
+    rows = _word_timing_rows(text, duration, alignment)
+    target = list(map(clean, phrase))
+    for i in range(len(rows) - len(phrase) + 1):
+        match = rows[i:i+len(phrase)]
+        if [clean(row[0]) for row in match] != target:
+            continue
+        timing = [{'text': word, 'start': row[1], 'end': row[2]} for word, row in zip(phrase, match)]
+        return [{'text': ' '.join(phrase), 'language': language,
+                 'start_sec': timing[0]['start'], 'end_sec': min(duration, timing[-1]['end'] + .6),
+                 'word_timing': timing}]
+    return []

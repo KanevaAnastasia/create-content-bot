@@ -2171,6 +2171,78 @@ def test_django_admin_titled_only_build_uses_subtitled_source_fast_path(monkeypa
     assert "pending_overlay_title_style" not in production
 
 
+def test_django_admin_spoken_title_rebuilds_captions_from_clean_scenes(monkeypatch):
+    admin_dir = Path(__file__).resolve().parents[1] / "admin_panel"
+    sys.path.insert(0, str(admin_dir))
+    os.environ.setdefault("DJANGO_SETTINGS_MODULE", "cf_admin.settings")
+
+    import django
+
+    django.setup()
+
+    import pipeline_admin.admin as admin_module
+
+    run_id = uuid.uuid4()
+    production = {
+        "json_plan": [{"duration_sec": 8, "text": "scene"}],
+        "overlay_title_by_lang": {"ru": "Борщ"},
+        "overlay_subtitle_by_lang": {"ru": "КБЖУ на 100 гр: 126/10/4/24"},
+        "overlay_title_style": {"title_color": "#c72638", "top_margin_ratio": 0.05},
+        "pending_overlay_title_style": {"title_color": "#1a2b3c", "replace_subtitle_phrases": True},
+    }
+    session = {
+        "production": production,
+        "overlay_title_style": {"title_color": "#c72638", "top_margin_ratio": 0.05},
+        "pending_overlay_title_style": {"title_color": "#1a2b3c", "replace_subtitle_phrases": True},
+    }
+    calls = []
+
+    class RunStub(SimpleNamespace):
+        def save(self, **_kwargs):
+            pass
+
+    def fake_fast_path(scenes, **kwargs):
+        calls.append({"scenes": scenes, **kwargs})
+        return {"renders_by_language": {"ru": {"titled_subtitled_music": {"video_path": "/tmp/titled.mp4"}}}}
+
+    monkeypatch.setattr(admin_module, "_run_session_for_admin_render", lambda _run: (None, session, production))
+    monkeypatch.setattr(admin_module, "_subtitled_artifact_matches_current_subtitles", lambda *_args, **_kwargs: True)
+    monkeypatch.setattr(admin_module, "build_post_production", fake_fast_path)
+    monkeypatch.setattr(
+        admin_module,
+        "build_titled_post_production_from_subtitled_master",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("burned captions cannot be reused for replacement")),
+    )
+    monkeypatch.setattr(admin_module, "persist_post_production_artifacts", lambda _session, _post: None)
+    monkeypatch.setattr(
+        admin_module,
+        "_ensure_approved_candidate_word_timings",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("title-only build must never call Speech-to-Text")
+        ),
+    )
+
+    out = admin_module._build_final_videos_for_run(
+        RunStub(id=run_id, human_title=""),
+        target_language="ru",
+        target_variants=["titled_subtitled_music"],
+        source_subtitled_video_path=Path("/tmp/source_subtitled.mp4"),
+        synchronize_subtitles=True,
+    )
+
+    assert out["renders_by_language"]["ru"]["titled_subtitled_music"]["video_path"] == "/tmp/titled.mp4"
+    assert "subtitled_video_path" not in calls[0]
+    assert calls[0]["target_languages"] == ["ru"]
+    assert calls[0]["overlay_title_style"]["replace_subtitle_phrases"] is True
+    assert calls[0]["use_candidate_subtitle_snapshot"] is True
+    assert calls[0]["overlay_subtitle_by_lang"] == {"ru": "КБЖУ на 100 гр: 126/10/4/24"}
+    assert calls[0]["overlay_title_style"]["title_color"] == "#1a2b3c"
+    assert session["overlay_title_style"]["title_color"] == "#1a2b3c"
+    assert production["overlay_title_style"]["title_color"] == "#1a2b3c"
+    assert "pending_overlay_title_style" not in session
+    assert "pending_overlay_title_style" not in production
+
+
 def test_django_admin_first_subtitle_build_does_not_call_speech_to_text(monkeypatch):
     admin_dir = Path(__file__).resolve().parents[1] / "admin_panel"
     sys.path.insert(0, str(admin_dir))

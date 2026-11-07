@@ -139,14 +139,16 @@ def ass_events(cue,style,width,height,base_style):
         parts=fallback_parts(title)
     roles=[0,1,2] if len(parts)==3 else ([0,2] if len(parts)==2 else [2])
     start=float(cue.get('start_sec') or 0);end=float(cue.get('end_sec') or 0)
-    timing=(style.get('word_timing_by_lang') or {}).get(lang) or []
+    timing=cue.get('word_timing') if 'word_timing' in cue else (style.get('word_timing_by_lang') or {}).get(lang)
+    timing=timing or []
     clean=lambda s: re.sub(r'[^\w]+','',s).casefold()
     if [clean(row.get('text','')) for row in timing] != [clean(word) for word in title.split()]:
         timing=[]
     if timing:
         start=max(start,float(timing[0]['start']))
         # Keep the completed headline briefly, then return to the undimmed video.
-        end=max(start+.01,float(timing[-1]['end'])+.35)
+        timed_end=max(start+.01,float(timing[-1]['end'])+.35)
+        end=min(end,timed_end) if 'word_timing' in cue else timed_end
     if end<=start:
         return []
     try:

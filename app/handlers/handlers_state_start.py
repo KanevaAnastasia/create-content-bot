@@ -54,6 +54,7 @@ from .handlers_generation_utils import (
 )
 from .handlers_keyboards import DRAFT_BUTTON_SAVE, reply_text_without_keyboard, safe_reply_text
 from .handlers_state_media import send_social_descriptions_for_recipe
+from ..directorial_notes import direction_for_session
 from ..dish_visuals import build_dish_visual_brief
 from ..llm_utils import GEMINI_MODEL_PROFILE_EDIT, extract_json_object
 from ..advertising_generation import (
@@ -682,6 +683,8 @@ def _copy_series_context(source: dict, target: dict) -> None:
 
 
 def _copy_generation_mode_context(source: dict, target: dict) -> None:
+    if source.get("directorial_notes"):
+        target["directorial_notes"] = list(source["directorial_notes"])
     mode = normalize_generation_mode(source.get(GENERATION_MODE_SESSION_KEY))
     target[GENERATION_MODE_SESSION_KEY] = mode
     target["target_languages"] = target_languages_for_generation_mode(
@@ -1939,6 +1942,7 @@ async def _continue_silence_after_recipe_approval(
                 full_recipe_text=full_recipe,
                 on_attempt_failure=on_scene_plan_fail,
                 generation_mode=GENERATION_MODE_SILENCE,
+                generation_comment=direction_for_session(session),
             ),
         )
         dish_visual_brief = build_dish_visual_brief(
@@ -2037,6 +2041,7 @@ async def _continue_after_recipe_approval_plan(
                 brand_context=session.get("brand_context"),
                 analytics_feedback=session.get("analytics_feedback"),
                 generation_mode=session.get(GENERATION_MODE_SESSION_KEY, GENERATION_MODE_NORMAL),
+                generation_comment=direction_for_session(session),
             ),
         )
     except ServiceUnavailableRetriesExhaustedError as e:

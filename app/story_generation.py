@@ -405,7 +405,8 @@ def _clean_title(value: Any) -> str:
 
 
 def _clean_voiceover(value: Any) -> str:
-    text = " ".join(str(value or "").replace("[пауза]", " ").split())
+    from .directorial_notes import spoken_text
+    text = " ".join(spoken_text(value).replace("[пауза]", " ").split())
     return text.strip()
 
 
@@ -440,6 +441,8 @@ def generate_story_voiceover(
     direction = script_direction(discipline_mode)
     if direction:
         prompt += "\nПриоритетная структура выбранного формата:\n" + direction
+    from .directorial_notes import RULE
+    prompt = RULE + prompt
     raw = gemini_generate_sync(prompt, model_profile=GEMINI_MODEL_PROFILE_CREATIVE)
     data = extract_json_object(raw)
     title = _clean_title(data.get("title"))
@@ -499,6 +502,8 @@ def generate_story_english_voiceover(
         "timestamps, lists, Markdown or service notes.\n\n"
         + json.dumps(payload, ensure_ascii=False, indent=2)
     )
+    from .directorial_notes import RULE
+    prompt = RULE + prompt
     raw = gemini_generate_sync(prompt, model_profile=GEMINI_MODEL_PROFILE_CREATIVE)
     data = extract_json_object(raw)
     title = _clean_title(data.get("title"))
@@ -1551,6 +1556,8 @@ def generate_story_scene_plan(
         "Если дан feedback, измени previous_scenes по нему, не меняя утверждённый voiceover и тайминг окон.\n\n"
         + json.dumps(payload, ensure_ascii=False, indent=2)
     )
+    from .directorial_notes import RULE
+    prompt = RULE + prompt
     raw = gemini_generate_sync(prompt, model_profile=GEMINI_MODEL_PROFILE_CREATIVE)
     data = extract_json_object(raw)
     generated_character_bible = _normalize_story_character_bible(data.get("characters"))
@@ -2026,6 +2033,8 @@ def generate_story_production(
         "If feedback is present, revise previous_prompts literally without changing scene count, order, generation_duration_sec or narration excerpts.\n\n"
         + json.dumps(payload, ensure_ascii=False, indent=2)
     )
+    from .directorial_notes import RULE
+    prompt = RULE + prompt
     raw = gemini_generate_sync(prompt, model_profile=GEMINI_MODEL_PROFILE_CREATIVE)
     data = extract_json_object(raw)
     prompts = data.get("prompts") if isinstance(data.get("prompts"), list) else []

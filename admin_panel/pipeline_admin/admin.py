@@ -1881,6 +1881,7 @@ def _build_final_videos_for_run(
         source_subtitled_video_path
         and target_language
         and requested_variants == ["titled_subtitled_music"]
+        and not (overlay_title_style or {}).get("replace_subtitle_phrases")
     ):
         post = build_titled_post_production_from_subtitled_master(
             scenes,

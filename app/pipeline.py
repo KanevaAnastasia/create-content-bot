@@ -2441,7 +2441,8 @@ async def generate_scenes_plan(
         raise ValueError("Пустой full_recipe_text для сценария.")
     concept = concept.strip()
     fb = (user_feedback or "").strip()
-    comment = (generation_comment or "").strip()
+    from .directorial_notes import RULE
+    comment = RULE + (generation_comment or "").strip()
     mode = normalize_generation_mode(generation_mode)
     if mode == GENERATION_MODE_ADVICE:
         comment = (comment + "\n\n" + ADVICE_SCENE_RULE).strip()
@@ -3228,7 +3229,8 @@ async def generate_full_production(
         if str(value).isdigit() and 1 <= int(value) <= len(scenes)
     }
     viral_brief = viral_concept_brief if isinstance(viral_concept_brief, dict) else {}
-    comment = (generation_comment or "").strip()
+    from .directorial_notes import RULE
+    comment = RULE + (generation_comment or "").strip()
     dish_brief = str(dish_visual_brief or "").strip()
     mode = normalize_generation_mode(generation_mode)
     if mode == GENERATION_MODE_ADVICE:

@@ -1609,6 +1609,23 @@ def _overlay_value_for_language(value_by_lang: dict[str, Any] | None, language: 
     return fallback
 
 
+def _extra_title_cues(style: dict | None, language: str, duration: float) -> list[dict]:
+    raw = ((style or {}).get("extra_title_cues_by_lang") or {}).get(language) or []
+    result = []
+    for cue in raw:
+        if not isinstance(cue, dict) or not str(cue.get("text") or "").strip():
+            continue
+        try:
+            start = max(0.0, float(cue.get("start_sec", 0)))
+            end = min(duration, float(cue.get("end_sec", 0)))
+        except (TypeError, ValueError):
+            continue
+        if end > start:
+            result.append({**cue, "start_sec": start, "end_sec": end,
+                           "language": language, "kind": "title"})
+    return result
+
+
 def _build_title_overlay_cue(
     overlay_title_by_lang: dict[str, Any] | None,
     *,
@@ -1768,6 +1785,61 @@ def _story_fixed_block_ass_text(cue: dict[str, Any], layout: SubtitleLayout) -> 
         "}"
     )
     return prefix + body
+
+
+def _without_large_title_words(cues, title_cues, style, language):
+    """Remove caption words replaced by aligned titles, including later block echoes."""
+    if not style.get("replace_subtitle_phrases"):
+        return cues
+    normalize = lambda text: re.sub(r"[^\w]+", "", str(text)).casefold()
+    replacements = []
+    for title in title_cues:
+        if (title.get("kind") or "title") != "title":
+            continue
+        timing = title.get("word_timing", (style.get("word_timing_by_lang") or {}).get(language)) or []
+        if [normalize(w.get("text")) for w in timing] == [normalize(w) for w in title.get("text", "").split()]:
+            replacements.extend(timing)
+
+    def replaced(word, start):
+        return any(normalize(word) == normalize(row.get("text"))
+                   and float(row["start"]) - .08 <= start < float(row["end"]) + .08
+                   for row in replacements)
+
+    result = []
+    group = []
+
+    def flush():
+        if not group:
+            return
+        words = group[0]["fixed_block_words"]
+        removed = {int(c["visible_word_count"]) - 1 for c in group
+                   if 0 < int(c["visible_word_count"]) <= len(words)
+                   and replaced(words[int(c["visible_word_count"]) - 1], float(c["start_sec"]))}
+        kept = [w for i, w in enumerate(words) if i not in removed]
+        for cue in group:
+            count = int(cue["visible_word_count"])
+            if count - 1 in removed:
+                continue
+            visible = count - sum(i < count for i in removed)
+            if kept and visible:
+                result.append({**cue, "fixed_block_words": kept,
+                               "visible_word_count": visible, "text": " ".join(kept[:visible])})
+        group.clear()
+
+    for cue in cues:
+        words = cue.get("fixed_block_words")
+        if words:
+            if group and (words != group[-1]["fixed_block_words"]
+                          or int(cue.get("visible_word_count", 0)) <= int(group[-1]["visible_word_count"])):
+                flush()
+            group.append(cue)
+        else:
+            flush()
+            # Legacy single-word captions can also be replaced without hiding neighbours.
+            if not replaced(cue.get("text", ""), float(cue["start_sec"])):
+                result.append(cue)
+    flush()
+    return result
 
 
 def _write_burned_subtitle_ass(
@@ -4078,8 +4150,9 @@ def build_post_production(
             titled_subtitled_path: Path | None = None
             titled_render_preserved_source_audio: bool | None = None
             title_cues = [cue for cue in (series_cue, title_cue, subtitle_cue) if cue]
+            title_cues.extend(_extra_title_cues(overlay_title_style, language, _media_duration(render_base_path) or 0.0))
             if "titled_subtitled_music" in requested_variants and title_cues:
-                if subtitled_path is None:
+                if subtitled_path is None and not (overlay_title_style or {}).get("replace_subtitle_phrases"):
                     ass_path = tmp_path / f"subtitles_{language}.ass"
                     _write_burned_subtitle_ass(
                         ass_path,
@@ -4109,7 +4182,8 @@ def build_post_production(
                 titled_ass_path = tmp_path / f"title_overlay_{language}.ass"
                 _write_burned_subtitle_ass(
                     titled_ass_path,
-                    [],
+                    _without_large_title_words(subtitle_cues, title_cues, overlay_title_style, language)
+                    if (overlay_title_style or {}).get("replace_subtitle_phrases") else [],
                     title_cues=title_cues,
                     title_style=overlay_title_style,
                     video_width=render_base_w,
@@ -4119,10 +4193,10 @@ def build_post_production(
                 emit_progress(language, "title_building", "Burning title overlay")
                 titled_render_preserved_source_audio = _render_subtitled_music_master(
                     ffmpeg=ffmpeg,
-                    clean_path=subtitled_path,
+                    clean_path=render_base_path if (overlay_title_style or {}).get("replace_subtitle_phrases") else subtitled_path,
                     subtitles_path=titled_ass_path,
-                    music_path=None,
-                    music_volume=0.0,
+                    music_path=music_path if (overlay_title_style or {}).get("replace_subtitle_phrases") else None,
+                    music_volume=music_volume if (overlay_title_style or {}).get("replace_subtitle_phrases") else 0.0,
                     dest_path=titled_subtitled_path,
                 )
                 emit_progress(language, "title_ready", "Title overlay master ready")
@@ -4200,7 +4274,7 @@ def build_post_production(
                 titled_original_audio_preserved = (
                     bool(titled_render_preserved_source_audio)
                     if titled_render_preserved_source_audio is not None
-                    else _has_audio_stream(subtitled_path) and _has_audio_stream(titled_subtitled_path)
+                    else _has_audio_stream(subtitled_path or render_base_path) and _has_audio_stream(titled_subtitled_path)
                 )
                 titled_artifact_path = _persist_render_artifact(
                     titled_subtitled_path,
@@ -4604,6 +4678,7 @@ def build_titled_post_production_from_subtitled_master(
         duration_sec=title_duration,
     )
     title_cues = [cue for cue in (series_cue, title_cue, subtitle_cue) if cue]
+    title_cues.extend(_extra_title_cues(overlay_title_style, lang, source_duration))
     if not title_cues:
         raise RuntimeError("No title overlay text is available for titled final render.")
 

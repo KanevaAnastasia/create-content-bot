@@ -110,6 +110,8 @@ def generate_advertising_campaigns(
         "Все поля — на русском языке. Не добавляй медицинские утверждения, неподтверждённые характеристики и сравнения с конкурентами.\n\n"
         + json.dumps(payload, ensure_ascii=False, indent=2)
     )
+    from .directorial_notes import RULE
+    prompt = RULE + prompt
     raw = gemini_generate_sync(prompt, model_profile=GEMINI_MODEL_PROFILE_CREATIVE)
     data = extract_json_object(raw)
     source = data.get("campaigns") if isinstance(data.get("campaigns"), list) else []
@@ -161,6 +163,8 @@ def generate_advertising_post_package(
         "Не называй изображение или карусель, не давай медицинских обещаний.\n\n"
         + json.dumps(payload, ensure_ascii=False, indent=2)
     )
+    from .directorial_notes import RULE
+    prompt = RULE + prompt
     raw = gemini_generate_sync(prompt, model_profile=GEMINI_MODEL_PROFILE_CREATIVE)
     data = extract_json_object(raw)
     product_lock = advertising_product_lock_ru(product_brief)
@@ -337,6 +341,8 @@ def generate_advertising_scene_plan(
         "Если есть feedback, отредактируй previous_scenes, сохраняя ровно 6 сцен и товар в каждой.\n\n"
         + json.dumps(payload, ensure_ascii=False, indent=2)
     )
+    from .directorial_notes import RULE
+    prompt = RULE + prompt
     raw = gemini_generate_sync(prompt, model_profile=GEMINI_MODEL_PROFILE_CREATIVE)
     data = extract_json_object(raw)
     source_scenes = data.get("scenes") if isinstance(data.get("scenes"), list) else []
@@ -445,6 +451,8 @@ def generate_advertising_production(
         "speech after CHARACTERS SPEAKS:. Do not invent product claims. If feedback is present, revise previous prompts without changing scene count.\n\n"
         + json.dumps(payload, ensure_ascii=False, indent=2)
     )
+    from .directorial_notes import RULE
+    prompt = RULE + prompt
     raw = gemini_generate_sync(prompt, model_profile=GEMINI_MODEL_PROFILE_CREATIVE)
     data = extract_json_object(raw)
     prompts = data.get("prompts") if isinstance(data.get("prompts"), list) else []

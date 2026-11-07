@@ -24,7 +24,8 @@ SPEECH_MAX_CHARS_BY_LANG_DURATION = {
 
 def normalize_speech_phrase_for_voice(text: str) -> str:
     """Normalize spoken phrases while preserving punctuation."""
-    raw = str(text or "").strip()
+    from .directorial_notes import spoken_text
+    raw = spoken_text(text)
     if not raw:
         return ""
     raw = SPEECH_DASH_CHARS_RE.sub(" ", raw)

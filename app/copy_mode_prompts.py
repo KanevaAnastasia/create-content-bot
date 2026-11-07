@@ -86,7 +86,12 @@ def build_copy_mode_seedance_prompt(
     if weather:
         lines.append(f"Preserve weather and atmosphere: {weather}.")
     if feedback:
-        lines.append(f"User corrections to apply in every timing range: {feedback}.")
+        from .directorial_notes import RULE, split_notes
+        if split_notes(feedback)[1]:
+            lines.append(RULE)
+            lines.append(f"User corrections: apply local directions at their matching action, not every timing range: {feedback}.")
+        else:
+            lines.append(f"User corrections to apply in every timing range: {feedback}.")
     if continuation:
         lines.append("This segment continues the previously generated video; keep motion, characters, kitchen, lighting, and food state continuous.")
     lines.append(COPY_CHARACTER_RULE)

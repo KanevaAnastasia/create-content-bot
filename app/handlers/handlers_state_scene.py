@@ -102,6 +102,7 @@ from .handlers_keyboards import (
     safe_reply_photo,
     safe_reply_text,
 )
+from ..directorial_notes import direction_for_session, remember_notes
 from ..assets import ASSETS
 from ..drafts import (
     DRAFTS_PAGE_SIZE,
@@ -1125,6 +1126,7 @@ async def _generate_production_after_overlay_title(
                     generation_mode=session.get(GENERATION_MODE_SESSION_KEY, GENERATION_MODE_NORMAL),
                     target_languages=session.get("target_languages"),
                     dish_visual_brief=session.get("dish_visual_brief"),
+                    generation_comment=direction_for_session(session),
                 ),
             )
     except ServiceUnavailableRetriesExhaustedError as e:
@@ -2940,7 +2942,7 @@ async def _approve_story_audio_and_build_scenes(
             "generate_story_scene_plan",
             lambda: asyncio.to_thread(
                 generate_story_scene_plan,
-                source_story=source,
+                source_story=source + "\n" + direction_for_session(session),
                 voiceover_text=voiceover,
                 duration_sec=visual_duration,
                 alignment=alignment if isinstance(alignment, dict) else {},
@@ -3006,9 +3008,17 @@ async def _approve_story_audio_and_build_scenes(
         "side_margin_ratio": _DEFAULT_OVERLAY_TITLE_SIDE_MARGIN_RATIO,
     }
     if active_mode(session):
+        session[OVERLAY_TITLE_STYLE_SESSION_KEY]["replace_subtitle_phrases"] = True
         session[OVERLAY_TITLE_STYLE_SESSION_KEY]["word_timing_by_lang"] = {
             "ru": title_word_timing(title_by_lang["ru"], voiceover, duration, alignment),
             **({"en": title_word_timing(title_by_lang["en"], english_voiceover, english_duration, english_alignment)}
+               if english_requested else {}),
+        }
+    if active_mode(session) == REFRAME:
+        from ..discipline_modes import reframe_title_cues
+        session[OVERLAY_TITLE_STYLE_SESSION_KEY]["extra_title_cues_by_lang"] = {
+            "ru": reframe_title_cues(voiceover, duration, alignment, "ru"),
+            **({"en": reframe_title_cues(english_voiceover, english_duration, english_alignment, "en")}
                if english_requested else {}),
         }
     session[OVERLAY_SUBTITLE_DECIDED_SESSION_KEY] = True
@@ -5028,6 +5038,7 @@ async def _handle_waiting_frame_prompts_approval_state(
                     brand_context=session.get("brand_context"),
                     generation_mode=session.get(GENERATION_MODE_SESSION_KEY, GENERATION_MODE_NORMAL),
                     target_languages=session.get("target_languages"),
+                    generation_comment=direction_for_session(session),
                 ),
             )
         except ServiceUnavailableRetriesExhaustedError as e:
@@ -5178,6 +5189,7 @@ async def _handle_waiting_production_bundle_approval_state(
                     generation_mode=session.get(GENERATION_MODE_SESSION_KEY, GENERATION_MODE_NORMAL),
                     target_languages=session.get("target_languages"),
                     dish_visual_brief=session.get("dish_visual_brief"),
+                    generation_comment=direction_for_session(session),
                 ),
             )
     except ServiceUnavailableRetriesExhaustedError as e:
@@ -5553,7 +5565,7 @@ async def _handle_scene_approval_refine(update: Update, context: ContextTypes.DE
                 "refine_story_scene_plan",
                 lambda: asyncio.to_thread(
                     generate_story_scene_plan,
-                    source_story=str(session.get(STORY_SOURCE_SESSION_KEY) or ""),
+                    source_story=str(session.get(STORY_SOURCE_SESSION_KEY) or "") + "\n" + direction_for_session(session),
                     voiceover_text=str(session.get(STORY_VOICEOVER_SESSION_KEY) or ""),
                     duration_sec=max(
                         float(session.get(STORY_AUDIO_DURATION_SESSION_KEY) or 0.0),
@@ -5693,6 +5705,7 @@ async def _handle_scene_approval_refine(update: Update, context: ContextTypes.DE
                     analytics_feedback=session.get("analytics_feedback"),
                     romantic_drama_subplot=session.get("romantic_drama_subplot"),
                     generation_mode=session.get(GENERATION_MODE_SESSION_KEY, GENERATION_MODE_NORMAL),
+                    generation_comment=direction_for_session(session),
                 ),
             )
     except ServiceUnavailableRetriesExhaustedError as e:
@@ -8287,6 +8300,7 @@ async def _on_text_impl(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         return
     state = session.get("state")
     logger.info("chat=%s incoming_state=%s text=%s", chat_id, state, text[:80])
+    remember_notes(session, text)
     if state == _STATE_WAITING_FRAME_PROMPT_REFERENCES:
         await _handle_waiting_frame_prompt_references_state(
             update,
