@@ -32,6 +32,11 @@ def format_brief(value):
 def behaviour_summary(row):
     """No inference of per-second likes/swipes from aggregate counters."""
     data = row.get("behaviour") or {}
+    if row.get("platform") == "instagram":
+        metrics = row.get("metrics") or {}
+        data = {"subscribers_gained": metrics.get("subscribers_gained"),
+                "average_view_seconds": round(metrics["average_watch_ms"] / 1000, 2) if metrics.get("average_watch_ms") is not None else None,
+                "period": "За всё время (Instagram lifetime)", "fetched_at": row.get("fetched_at")}
     points = data.get("retention") or []
     drops = sorted([{"start": a["position"], "end": b["position"],
                      "drop": round(a["watch_ratio"] - b["watch_ratio"], 2)}
@@ -50,4 +55,8 @@ def behaviour_summary(row):
         "fetched_at": data.get("fetched_at"),
         "retention_available": bool(points), "points": points, "drops": drops,
         "warning": data.get("warning") or data.get("retention_warning"),
+        "subscribers_warning": (row.get("metric_errors") or {}).get("subscribers_gained"),
+        "skip_rate": (row.get("metrics") or {}).get("skip_rate"),
+        "total_watch_hours": round(row["metrics"]["total_watch_ms"] / 3600000, 2) if (row.get("metrics") or {}).get("total_watch_ms") is not None else None,
+        "total_interactions": (row.get("metrics") or {}).get("total_interactions"),
     }
