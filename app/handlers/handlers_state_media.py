@@ -3677,6 +3677,10 @@ async def _handle_waiting_social_descriptions_approval_state(
                 reply_markup=_social_descriptions_approval_markup(pending),
             )
             return True
+        if isinstance(copy, dict):
+            from ..publication_copy_store import save_bot_publication_copy
+
+            save_bot_publication_copy(session, pending, approved=True)
         if origin == "production_final" and isinstance(copy, dict):
             production = session.get("production")
             post_production = production.get("post_production") if isinstance(production, dict) else None
@@ -3780,6 +3784,11 @@ async def _handle_waiting_social_descriptions_approval_state(
     project_slug = str(pending.get("project_slug") or session.get("selected_project_key") or "").strip()
     if _is_discipline_social_project(project_slug):
         refinement_kwargs["project_slug"] = project_slug
+    from ..publication_copy_store import save_bot_publication_copy
+
+    # Preserve even legacy pending text before replacing it with a revision.
+    if not pending.get("copy_revision_id"):
+        save_bot_publication_copy(session, pending)
     copy = await _refine_social_copy_from_feedback(**refinement_kwargs)
     session["state"] = STATE_WAITING_SOCIAL_DESCRIPTIONS_APPROVAL
     next_pending = {
