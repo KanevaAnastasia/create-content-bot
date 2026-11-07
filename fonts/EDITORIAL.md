@@ -2,7 +2,7 @@
 
 Styles 1/2/3/5/9 now use the frozen `editorial_approved/` assets via
 `app/editorial_approved.py`. These override the legacy ASS font presets below.
-See `docs/discipline-formats.md` for timing and foreground-mask limitations.
+See `docs/discipline-formats.md` for timing and automatic foreground compositing.
 
 # Legacy presets (kept for older drafts)
 

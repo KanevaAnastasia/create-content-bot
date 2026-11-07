@@ -1,7 +1,7 @@
 """Frozen approved typography, rasterized once and emitted as portable ASS drawings.
 
-Uses the same fonts, layout and contextual forms as review_v4. Foreground
-occlusion requires a mask from the actual shot; no reference-shot mask is reused.
+Uses the same fonts, layout and contextual forms as review_v4. Upper title
+parts in styles 3/9 are marked for automatic per-shot foreground occlusion.
 """
 from functools import lru_cache
 from pathlib import Path
@@ -153,8 +153,8 @@ def ass_events(cue,style,width,height,base_style):
         opacity=min(.6,max(0,float(style.get('dim_opacity',82/255))))
     except (TypeError,ValueError):
         opacity=82/255
-    def event(layer,t0,t1,tags,path):
-        return f'Dialogue: {layer},{_timestamp(t0)},{_timestamp(t1)},{base_style},,0,0,0,,{tags}{path}{{\\p0}}'
+    def event(layer,t0,t1,tags,path,name=""):
+        return f'Dialogue: {layer},{_timestamp(t0)},{_timestamp(t1)},{base_style},{name},0,0,0,,{tags}{path}{{\\p0}}'
     alpha=round(255*(1-opacity))
     output=[event(0,start,end,f'{{\\an7\\pos(0,0)\\bord0\\shad0\\1c&H000000&\\1a&H{alpha:02X}&\\p1}}',f'm 0 0 l {width} 0 {width} {height} 0 {height}')]
     offset=0
@@ -170,6 +170,8 @@ def ass_events(cue,style,width,height,base_style):
                 bgr=color[5:7]+color[3:5]+color[1:3]
                 tags=(f'{{\\an7\\pos(0,0)\\fscx{width/W*100:.5f}\\fscy{height/H*100:.5f}'
                       f'\\bord0\\shad0\\1c&H{bgr}&\\1a&H00&\\p1}}')
-                output.append(event(2,max(start,t0),t1,tags,path))
+                behind = role == 0 and sid in ('3','9')
+                output.append(event(1 if behind else 2,max(start,t0),t1,tags,path,
+                                    'CF_DEPTH_BACK' if behind else ''))
         offset+=count
     return output

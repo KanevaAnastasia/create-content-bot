@@ -3428,6 +3428,14 @@ def _render_subtitled_music_master(
     music_volume: float,
     dest_path: Path,
 ) -> bool:
+    from .title_depth import has_depth, render_background
+    if has_depth(subtitles_path):
+        with tempfile.TemporaryDirectory(prefix="cf_title_depth_") as tmp:
+            depth_video, front_ass = render_background(ffmpeg, clean_path, subtitles_path, Path(tmp))
+            return _render_subtitled_music_master(
+                ffmpeg=ffmpeg, clean_path=depth_video, subtitles_path=front_ass,
+                music_path=music_path, music_volume=music_volume, dest_path=dest_path,
+            )
     subtitle_filter = _subtitle_filter(subtitles_path)
     effective_music_volume = _apply_db_attenuation(music_volume, BACKGROUND_MUSIC_ATTENUATION_DB)
     has_source_audio = _has_audio_stream(clean_path)
