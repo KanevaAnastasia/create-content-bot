@@ -590,3 +590,31 @@ def test_runtime_notices_push_and_pop():
     notes = llm_utils.pop_runtime_notices()
     assert notes == ["switch to vertex"]
     assert llm_utils.pop_runtime_notices() == []
+
+
+@pytest.mark.parametrize('html', ['<!DOCTYPE html>', '<html lang=en>'])
+def test_gemini_html_403_stops_model_fallback(monkeypatch, html):
+    monkeypatch.setenv('GOOGLE_CLOUD_PROJECT', 'proj')
+    monkeypatch.setenv('GEMINI_MODEL', 'gemini-2.5-flash')
+    monkeypatch.setenv('GEMINI_MODEL_FALLBACKS', 'gemini-2.5-pro')
+    monkeypatch.setattr(llm_utils, '_load_vertex_generative_sdk', lambda: (None, None))
+    calls = []
+
+    def fail(_call, **kwargs):
+        calls.append(True)
+        raise RuntimeError(f'403 POST https://aiplatform.googleapis.com: {html}secret-html')
+
+    monkeypatch.setattr(llm_utils, 'safe_llm_call', fail)
+    with pytest.raises(llm_utils.GeminiAccessError, match='HTTP 403') as error:
+        llm_utils.gemini_generate_sync('hello')
+    assert len(calls) == 1
+    assert 'secret-html' not in str(error.value)
+
+
+@pytest.mark.parametrize('message', [
+    '403 PERMISSION_DENIED: model access denied',
+    '500 <!DOCTYPE html>',
+    'model 4030 <html>',
+])
+def test_html_access_denied_does_not_match_other_failures(message):
+    assert not llm_utils._is_html_access_denied(RuntimeError(message))

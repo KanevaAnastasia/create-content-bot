@@ -55,6 +55,17 @@ class GeminiQuotaError(RuntimeError):
     """Исчерпан лимит Gemini (квота / преходящий rate limit после повторов)."""
 
 
+class GeminiAccessError(RuntimeError):
+    """Общий отказ доступа к endpoint Vertex, не зависящий от модели."""
+
+
+def _is_html_access_denied(error: BaseException) -> bool:
+    text = str(error).lower()
+    return bool(re.search(r"\b403\b", text)) and (
+        "<!doctype html" in text or "<html" in text
+    )
+
+
 # Сообщение в Telegram при исчерпании дневной/проектной квоты (retry бессмысленен).
 GEMINI_QUOTA_EXHAUSTED_USER_MESSAGE = (
     "Лимит генераций на сегодня исчерпан 😅\n"
@@ -763,6 +774,15 @@ def gemini_generate_sync(
                 last_quota_error = e
                 continue
             except Exception as e:
+                if _is_html_access_denied(e):
+                    logger.warning("Vertex endpoint returned HTML 403; stopping model fallback")
+                    raise GeminiAccessError(
+                        "Google Vertex AI отклонил запрос: HTTP 403 (отказ доступа). "
+                        "Сервис вернул HTML вместо ответа API; смена модели не поможет. "
+                        "Нужно проверить сетевой доступ сервера к Google Vertex AI "
+                        "и ограничения доступа в Google Cloud. "
+                        "Точная причина в ответе Google не указана."
+                    ) from e
                 err_text = str(e).lower()
                 last_non_quota_error = e
                 err_one_line = _truncate_error_text(str(e), max_len=500)
