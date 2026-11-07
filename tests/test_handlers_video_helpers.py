@@ -3,6 +3,9 @@ import json
 import uuid
 from pathlib import Path
 from types import SimpleNamespace
+from unittest.mock import AsyncMock, MagicMock
+
+from app import publication_copy_store
 
 from app.handlers import (
     _build_concepts_session,
@@ -5924,9 +5927,12 @@ def test_finish_scene_media_production_waits_for_final_delivery_before_social_de
     assert any("Жду финальный рендер и доставку Telegram-мини-копий" in m for m in messages)
 
 
-def test_final_social_descriptions_resolve_url_recipe_before_generation(monkeypatch):
+def test_final_social_descriptions_resolve_url_recipe_before_generation(monkeypatch, tmp_path):
     captured: dict[str, str] = {}
     messages: list[str] = []
+    db = MagicMock()
+    monkeypatch.setattr(publication_copy_store, "COPY_HISTORY_DIR", tmp_path)
+    monkeypatch.setattr(publication_copy_store, "SessionLocal", lambda: db)
 
     def fake_fetch(url):
         captured["url"] = url
@@ -5951,6 +5957,7 @@ def test_final_social_descriptions_resolve_url_recipe_before_generation(monkeypa
     monkeypatch.setattr(handlers_state_media, "fetch_recipe_text_from_url", fake_fetch)
     monkeypatch.setattr(handlers_state_media, "_generate_social_copy_from_recipe", fake_generate)
     monkeypatch.setattr(handlers_state_media, "all_final_artifacts_delivered", lambda _run_id: True)
+    monkeypatch.setattr(handlers_state_media, "_prepare_trial_copy_for_pending", AsyncMock())
 
     out = asyncio.run(handlers_state_media._send_final_social_descriptions(update, session))
 
@@ -5961,6 +5968,10 @@ def test_final_social_descriptions_resolve_url_recipe_before_generation(monkeypa
     assert session["recipe_full_text"] == captured["recipe"]
     assert session["state"] == handlers_state_media.STATE_WAITING_SOCIAL_DESCRIPTIONS_APPROVAL
     assert handlers_state_media.SOCIAL_DESCRIPTIONS_PENDING_KEY in session
+    artifact = db.__enter__.return_value.add.call_args.args[0]
+    assert artifact.artifact_type == "publication_copy_draft"
+    assert artifact.payload_json["recipe"] == captured["recipe"]
+    db.__enter__.return_value.commit.assert_called_once()
     assert any("Проверьте описания." in text for text in messages)
 
 
@@ -6335,7 +6346,7 @@ def test_social_descriptions_approval_ok_finishes_production():
     assert any("Production завершён" in text for text, _ in messages)
 
 
-def test_social_approval_persists_exact_bot_copy_and_run_id(monkeypatch):
+def test_social_approval_persists_exact_bot_copy_and_run_id(monkeypatch, tmp_path):
     messages = []
     run_id = uuid.uuid4()
     jobs = [SimpleNamespace(payload_json={})]
@@ -6359,6 +6370,8 @@ def test_social_approval_persists_exact_bot_copy_and_run_id(monkeypatch):
             messages.append(text)
 
     monkeypatch.setattr(handlers_state_media, "SessionLocal", _Db)
+    monkeypatch.setattr(publication_copy_store, "SessionLocal", _Db)
+    monkeypatch.setattr(publication_copy_store, "COPY_HISTORY_DIR", tmp_path)
     monkeypatch.setattr(handlers_state_media, "queue_publication_bundle", lambda *_args, **_kwargs: jobs)
     monkeypatch.setattr(handlers_state_media, "mark_generation_run_ready", lambda _session: None)
     copy = handlers_state_media._fallback_social_copy("Картофель натереть и пожарить.")
@@ -6388,6 +6401,13 @@ def test_social_approval_persists_exact_bot_copy_and_run_id(monkeypatch):
     assert jobs[0].payload_json["run_id"] == str(run_id)
     assert added[0].artifact_type == "publication_copy_approved"
     assert added[0].payload_json["copy"] == copy
+    assert added[0].run_id == run_id
+    history = list(tmp_path.glob("*.json"))
+    assert len(history) == 1
+    saved = json.loads(history[0].read_text(encoding="utf-8"))
+    assert saved["status"] == "approved"
+    assert saved["run_id"] == str(run_id)
+    assert saved["copy"] == copy
 
 
 def test_waiting_scene_media_ok_all_languages_moves_to_next_scene():
