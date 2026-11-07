@@ -72,7 +72,7 @@ def test_tiktok_desktop_oauth_pkce_and_exchange(monkeypatch) -> None:
         code_challenge=challenge,
     )
     query = parse_qs(urlparse(url).query)
-    assert query["scope"] == ["user.info.basic,video.publish"]
+    assert query["scope"] == ["user.info.basic,video.publish,video.list,user.info.stats"]
     assert query["code_challenge_method"] == ["S256"]
     assert query["redirect_uri"] == [redirect_uri]
 

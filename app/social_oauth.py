@@ -21,7 +21,7 @@ YOUTUBE_SCOPES = (
 )
 TIKTOK_AUTHORIZE_URL = "https://www.tiktok.com/v2/auth/authorize/"
 TIKTOK_TOKEN_URL = "https://open.tiktokapis.com/v2/oauth/token/"
-TIKTOK_SCOPES = ("user.info.basic", "video.publish")
+TIKTOK_SCOPES = ("user.info.basic", "video.publish", "video.list", "user.info.stats")
 
 
 class SocialOAuthError(RuntimeError):
