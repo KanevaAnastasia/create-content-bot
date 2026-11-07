@@ -106,13 +106,14 @@ def test_page_requires_publication_permission(page):
 def test_template_renders_nulls_and_escapes_titles(page):
     from django.template.loader import render_to_string
     html = render_to_string("admin/pipeline_admin/marketer.html", {
-        "video_groups": [{"title": "<script>alert(1)</script>", "rows": [{"metric_cells": [None, 0], "advice": [], "metrics": {"views": 0}}]}],
+        "visible_groups": [{"title": "<script>alert(1)</script>", "rows": [{"metric_cells": [None, 0], "advice": [], "metrics": {"views": 0}}]}],
         "report": {}, "projects": [], "can_change": False,
     })
     assert "&lt;script&gt;" in html
     assert "<td>—</td>" in html
     assert "<td>0</td>" in html
-    assert "0 просмотров" in html
+    assert "<strong>0</strong>" in html
+    assert "нет дневного сравнения" in html
 
 
 def test_grouping_never_uses_titles_or_crosses_projects():

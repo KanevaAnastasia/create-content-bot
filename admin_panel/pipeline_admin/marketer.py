@@ -13,6 +13,7 @@ from pathlib import Path
 from django import forms
 from django.contrib import admin, messages
 from django.core.exceptions import PermissionDenied
+from django.core.paginator import Paginator
 from django.http import HttpResponseRedirect
 from django.template.response import TemplateResponse
 from django.urls import reverse
@@ -23,6 +24,7 @@ from app.social_publishers import _youtube_access_token, _vk_access_token as _vk
 from .models import Project, PublicationJob
 from .marketer_display import format_brief, behaviour_summary
 from app.marketer import collect_followers, collect_behaviour
+from app.marketer_daily import snapshot_history, dashboard
 
 
 REPORT_DIR = Path(__file__).resolve().parents[2] / "runtime" / "marketer"
@@ -118,7 +120,7 @@ def run_report(project_id, task_id, action, query="", language="ru"):
                     row["behaviour"] = collect_behaviour(row, tokens[lang])
                 except Exception:
                     row["behaviour"] = {**row.get("behaviour", {}), "warning": "Не удалось обновить: проверьте доступ YouTube Analytics и доступность данных ролика. Если ниже есть цифры, это прежний срез."}
-            update_report(project_id, task_id, rows=rows, fetched_at=time.time())
+            update_report(project_id, task_id, rows=rows, behaviour_fetched_at=time.time())
         elif action == "niche":
             token = _youtube_access_token(project.slug, language)
             candidates = discover_niche(query, language, token)
@@ -188,7 +190,10 @@ def run_report(project_id, task_id, action, query="", language="ru"):
                 if previous.get("behaviour"):
                     row["behaviour"] = previous["behaviour"]
                 row["previous"] = {"metrics": previous.get("metrics", {}), "fetched_at": previous.get("fetched_at")}
-            update_report(project_id, task_id, rows=collected, accounts=accounts, fetched_at=time.time())
+            stamp = time.time()
+            snapshots = snapshot_history(existing.get("daily_snapshots", []), accounts, collected, stamp)
+            update_report(project_id, task_id, rows=collected, accounts=accounts, fetched_at=stamp,
+                          daily_snapshots=snapshots)
         update_report(project_id, task_id, state="done", finished=time.time())
     except Exception:
         update_report(project_id, task_id, state="error", finished=time.time(),
@@ -252,9 +257,13 @@ def marketer_view(request):
         row["delta"] = current - prev if current is not None and prev is not None else None
     pending = report.get("state") in {"queued", "running"}
     stale = pending and time.time() - report.get("started", 0) >= 1200
-    context = {**admin.site.each_context(request), "title": "Маркетолог", "form": form,
+    overview = dashboard(report, rows)
+    groups = group_videos(rows)
+    video_page = Paginator(groups, 12).get_page(request.GET.get("page"))
+    context = {**admin.site.each_context(request), "title": "Маркетолог", "form": form, "overview": overview,
                "brief_html": format_brief(report.get("brief")),
-               "project": project, "projects": projects, "report": report, "rows": rows, "video_groups": group_videos(rows),
+               "project": project, "projects": projects, "report": report, "rows": rows, "video_groups": groups,
+               "visible_groups": video_page.object_list, "video_page": video_page,
                "brief_stale": bool(report.get("brief")) and (report.get("brief_data_at") != report.get("fetched_at") or report.get("brief_niche_at") != report.get("niche_fetched")),
                "pending": pending and not stale, "stale": stale,
                "can_change": request.user.has_perm("pipeline_admin.change_publicationjob")}

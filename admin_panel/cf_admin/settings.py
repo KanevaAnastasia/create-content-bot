@@ -162,6 +162,11 @@ except Exception:
     CELERY_BEAT_SCHEDULE = {}
 else:
     CELERY_BEAT_SCHEDULE = {
+        "marketer-daily-0900": {
+            "task": "pipeline_admin.marketer_daily",
+            "schedule": crontab(hour=9, minute=0),
+            "options": {"queue": "marketer", "expires": 3600},
+        },
         "scheduled-generation-nightly-0100": {
             "task": "pipeline_admin.process_due_scheduled_generations",
             "schedule": crontab(hour=1, minute=0),

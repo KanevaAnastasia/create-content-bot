@@ -26,6 +26,15 @@ def _process_scheduled_generation_item(item_id: str) -> str:
 
 if celery_app is not None:
 
+    @celery_app.task(name="pipeline_admin.marketer_daily", queue="marketer")
+    def marketer_daily_task():
+        from .models import Project
+        from .marketer import reserve_report
+        for project_id in Project.objects.filter(is_active=True).values_list("id", flat=True):
+            task_id = reserve_report(project_id, "refresh")
+            if task_id:
+                marketer_report_task.delay(str(project_id), task_id, "refresh")
+
     @celery_app.task(name="pipeline_admin.marketer_report", queue="marketer", soft_time_limit=900, time_limit=960)
     def marketer_report_task(project_id, task_id, action, query="", language="ru"):
         from .marketer import run_report
@@ -68,6 +77,7 @@ else:
     publish_due_publication_jobs_task = _UnavailableTask()
     refresh_expiring_instagram_tokens_task = _UnavailableTask()
     marketer_report_task = _UnavailableTask()
+    marketer_daily_task = _UnavailableTask()
 
 
 def dispatch_publication_jobs(job_ids: list[str]) -> list[object]:

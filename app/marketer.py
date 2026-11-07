@@ -97,7 +97,10 @@ def group_videos(rows):
     """Only a shared, project-scoped source bundle proves that posts belong together."""
     groups = {}
     for row in rows:
-        key = (row.get("project_id"), row.get("bundle_key") or row["id"])
+        bundle = row.get("bundle_key") or ""
+        if row.get("instagram_trial") and bundle.endswith("-trial"):
+            bundle = bundle[:-6]
+        key = (row.get("project_id"), bundle or row["id"])
         group = groups.setdefault(key, {"title": row.get("title"), "rows": [], "thumbnail": ""})
         group["rows"].append(row)
         if row.get("platform") == "youtube" and re.fullmatch(r"[\w-]{11}", str(row.get("external_post_id", ""))):
@@ -287,6 +290,7 @@ def diagnose(rows, now=None):
                   if r.get("id") != row.get("id") and r.get("project_id") == row.get("project_id")
                   and (r.get("platform"), r.get("language"), r.get("account_key")) ==
                   (row.get("platform"), row.get("language"), row.get("account_key"))
+                  and bool(r.get("instagram_trial")) == bool(row.get("instagram_trial"))
                   and band is not None and age_band(age_hours(r.get("posted_at"), now)) == band]
         cohort = [v for v in cohort if v is not None]
         row["cohort_count"] = len(cohort)
