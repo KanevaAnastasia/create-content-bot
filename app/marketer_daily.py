@@ -18,6 +18,29 @@ def day_key(timestamp):
     return datetime.fromtimestamp(timestamp, MOSCOW).date().isoformat()
 
 
+def daily_chart(trend):
+    valid = [p for p in trend if p.get("value") is not None]
+    if not valid:
+        return None
+    low, high = min(p["value"] for p in valid), max(p["value"] for p in valid)
+    start = datetime.fromisoformat(trend[0]["day"]).date()
+    span = (datetime.fromisoformat(trend[-1]["day"]).date() - start).days
+    points, lines, last = [], [], None
+    for p in trend:
+        day = datetime.fromisoformat(p["day"]).date()
+        if p.get("value") is None:
+            last = None
+            continue
+        point = {**p, "x": round(65 + 235 * (day-start).days / span, 2) if span else 182,
+                 "y": round(90 - 65 * (p["value"]-low)/(high-low), 2) if high != low else 55}
+        if last and (day-last[0]).days == 1:
+            lines.append({"x1": last[1]["x"], "y1": last[1]["y"], "x2": point["x"], "y2": point["y"]})
+        points.append(point)
+        last = day, point
+    return {"points": points, "lines": lines, "low": low, "high": high,
+            "start": trend[0]["day"], "end": trend[-1]["day"], "single": len(valid) == 1}
+
+
 def snapshot_history(history, accounts, rows, timestamp):
     # Last observation of each day. Failed values remain missing, never zero.
     day = day_key(timestamp)
@@ -50,6 +73,7 @@ def dashboard(report, rows):
         for p in history[-14:]:
             value = next((v.get("followers") for v in p["accounts"] if key(v) == key(a)), None)
             a["trend"].append({"day": p["day"], "value": value})
+        a["chart"] = daily_chart(a["trend"])
         accounts.append(a)
     old_rows = {r["id"]: r for r in previous.get("videos", [])}
     for row in rows:

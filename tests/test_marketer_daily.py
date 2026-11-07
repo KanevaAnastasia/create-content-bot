@@ -49,6 +49,15 @@ def test_empty_dashboard():
     assert dashboard({}, [])["days"] == 0
 
 
+def test_chart_single_point_and_missing_days():
+    from app.marketer_daily import daily_chart
+    assert daily_chart([]) is None
+    assert daily_chart([{"day": "2026-11-07", "value": 12}])["single"]
+    chart = daily_chart([{"day": "2026-11-07", "value": 12}, {"day": "2026-11-08", "value": None}, {"day": "2026-11-09", "value": 15}, {"day": "2026-11-10", "value": 15}])
+    assert len(chart["lines"]) == 1
+    assert chart["low"] == 12 and chart["high"] == 15
+
+
 def test_intraday_change_is_separate_from_daily_comparison():
     a = {**account(70401), "delta": 112, "previous_at": "2026-11-07T16:39:27+00:00", "fetched_at": "2026-11-07T18:43:47+00:00"}
     result = dashboard({"accounts": [a], "fetched_at": stamp(7, 22)}, [])["accounts"][0]
