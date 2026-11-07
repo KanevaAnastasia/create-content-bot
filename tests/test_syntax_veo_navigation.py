@@ -25,3 +25,41 @@ def test_veo_does_not_retry_unrelated_navigation_failure():
         _open_syntax_veo_page_sync(SimpleNamespace(chromium=SimpleNamespace(launch=launch)), 'https://example.test', 30000)
     launch.assert_called_once()
     broken.close.assert_called_once()
+
+
+def test_veo_form_never_selects_duration(monkeypatch):
+    from app import syntax_telethon_fallback as s
+    from playwright import sync_api
+    browser, page = Mock(), Mock()
+    context = Mock()
+    context.__enter__ = Mock(return_value=Mock())
+    context.__exit__ = Mock(return_value=False)
+    monkeypatch.setattr(sync_api, 'sync_playwright', lambda: context)
+    monkeypatch.setattr(s, '_open_syntax_veo_page_sync', lambda *a: (browser, page))
+    for name in ('_clear_syntax_veo_uploaded_references_sync', '_upload_syntax_kling_start_frame_sync',
+                 '_wait_for_syntax_veo_uploaded_count_sync', '_fill_and_commit_syntax_kling_prompt_sync',
+                 '_set_syntax_aspect_ratio_sync'):
+        monkeypatch.setattr(s, name, Mock())
+    monkeypatch.setattr(s, '_syntax_page_contains_aspect_ratio_sync', lambda *a: True)
+    select = Mock(side_effect=AssertionError('Veo must not select duration'))
+    monkeypatch.setattr(s, '_try_click_syntax_option_sync', select)
+    submit = Mock()
+    monkeypatch.setattr(s, '_submit_syntax_veo_generate_sync', submit)
+    s._fill_syntax_veo_webapp_sync(url='https://example.test', prompt='Chicken', start_image=b'png',
+                                 duration_sec=6, aspect_ratio='9:16', timeout_sec=60)
+    select.assert_not_called()
+    submit.assert_called_once()
+    browser.close.assert_called_once()
+
+
+def test_old_six_second_veo_request_uses_eight(monkeypatch):
+    import asyncio
+    from unittest.mock import AsyncMock
+    from app import syntax_telethon_fallback as s
+    monkeypatch.setattr(s, '_syntax_configure_button_webview_url', AsyncMock(return_value='https://example.test'))
+    fill = Mock()
+    monkeypatch.setattr(s, '_fill_syntax_veo_webapp_sync', fill)
+    assert asyncio.run(s._submit_syntax_veo_webview(None, None, bot_entity=None, configure_message=None,
+        configure_button=None, prompt='Chicken', start_image=b'png', duration_sec=6,
+        aspect_ratio='9:16', timeout_sec=60)) is None
+    assert fill.call_args.kwargs['duration_sec'] == 8

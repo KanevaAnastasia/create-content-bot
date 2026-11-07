@@ -7588,7 +7588,7 @@ def test_scene_media_video_ok_blocks_too_long_speech(monkeypatch):
     )
     assert out is True
     joined = " ".join(messages)
-    assert "сначала увеличила видео до 8 сек" in joined
+    assert "увеличила видео" not in joined
     assert "нейросети" in joined
     assert "Не удалось автоматически" in joined
     assert scene["duration_sec"] == 8
@@ -7696,8 +7696,8 @@ def test_scene_media_video_ok_sends_only_start_and_optional_end_frames(monkeypat
     assert calls[0]["end_image"] == b"end-frame"
     assert "reference_images" not in calls[0]
     assert "references" not in calls[0]
-    assert any("Длительность: 6 сек" in message for message in messages)
-    assert any("Длительность запуска: 6 сек" in message for message in messages)
+    assert any("Длительность: 8 сек" in message for message in messages)
+    assert any("Длительность запуска: 8 сек" in message for message in messages)
 
 
 def test_scene_media_video_ok_sends_no_end_frame_when_missing(monkeypatch):
@@ -8134,7 +8134,7 @@ def test_scene_media_video_ok_preserves_partial_syntax_batch_and_retries_missing
         _ = syntax_provider
         batch_requests_seen.extend(req.key for req in requests)
         assert model == "veo3_fast"
-        assert duration_sec == 6
+        assert duration_sec == 8
         return {"ru": b"syntax-ru-video"}
 
     async def _gen_ok(*args, **kwargs):
@@ -9485,7 +9485,7 @@ def test_scene_media_video_ok_auto_shortens_then_waits_for_phrase_approval(monke
     assert scene["text"] == "yy."
     assert scene["duration_sec"] == 8
     joined = "\n".join(messages)
-    assert "сначала увеличила видео до 8 сек" in joined
+    assert "увеличила видео" not in joined
     assert "Нейросеть сократила реплику" in joined
     assert "Новая фраза:\nyy." in joined
 
@@ -9627,9 +9627,9 @@ def test_scene_media_video_ok_boosts_english_prompt_before_shortening(monkeypatc
         "model": "veo3_fast",
         "video_prompt_by_lang": {
             "ru": "lang:ru prompt CHARACTERS SPEAKS: Коротко",
-            "en": "lang:en prompt CHARACTERS SPEAKS: " + ("a" * 70),
+            "en": "lang:en prompt CHARACTERS SPEAKS: " + ("a" * 90),
         },
-        "speech_by_lang": {"ru": "Коротко", "en": "a" * 70},
+        "speech_by_lang": {"ru": "Коротко", "en": "a" * 90},
         "start_frame_image_b64": _encode_b64(b"img"),
         "duration_sec": 6,
         "video_results_by_lang": {},
@@ -9667,7 +9667,7 @@ def test_scene_media_video_ok_shortens_only_english_phrase(monkeypatch):
         rate_limit_max_attempts: int | None = None,
     ):
         assert language == "en"
-        assert duration_sec == 6
+        assert duration_sec == 8
         assert current_text == ("old english line" * 8) + "."
         assert max_llm_attempts == 1
         assert rate_limit_max_attempts == 1
@@ -9783,14 +9783,14 @@ def test_scene_media_video_ok_english_shorten_failure_falls_back_and_continues(m
     assert scene["speech_by_lang"]["ru"] == "русская фраза"
     assert handlers_state_media.speech_chars_excluding_pauses(
         scene["speech_by_lang"]["en"]
-    ) <= handlers_state_media.max_speech_chars_for_duration(6, "en")
+    ) <= handlers_state_media.max_speech_chars_for_duration(8, "en")
     assert scene["video_results_by_lang"]["ru"]["video_b64"] == _encode_b64(b"ru-old")
     assert scene["video_results_by_lang"]["en"]["video_b64"] == _encode_b64(b"fake-mp4")
     forbidden_prefix = " ".join(["English line", "still looks", "too long"])
     assert not any(forbidden_prefix in message for message in messages)
 
 
-def test_scene_media_video_ok_extends_duration_to_8_before_shorten(monkeypatch):
+def test_scene_media_video_ok_normalizes_legacy_veo_duration_before_speech_budget(monkeypatch):
     called = {"video": False}
 
     async def _gen_ok(*args, **kwargs):
@@ -9834,7 +9834,7 @@ def test_scene_media_video_ok_extends_duration_to_8_before_shorten(monkeypatch):
     assert out is True
     assert called["video"] is True
     assert scene["duration_sec"] == 8
-    assert any("увеличила видео до 8 сек" in text for text in messages)
+    assert not any("увеличила видео" in text for text in messages)
 
 
 def test_scene_media_video_ok_user_long_phrase_offers_keep_or_shorten(monkeypatch):

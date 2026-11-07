@@ -19,6 +19,7 @@ from ..advertising_generation import (
 )
 from ..dish_visuals import append_dish_visual_brief_to_prompt, build_dish_visual_brief
 from ..generation_modes import (
+    SYNTAX_PROVIDER_VEO,
     SYNTAX_PROVIDER_KLING,
     aspect_ratio_for_generation_mode,
     is_long_generation,
@@ -7662,7 +7663,10 @@ async def _scene_media_video_ok(
     except Exception:
         duration_sec = 6
     speechless_video = _is_speechless_video_scene(scene, session)
-    if speechless_video:
+    if syntax_provider == SYNTAX_PROVIDER_VEO:
+        duration_sec = 8
+        scene["duration_sec"] = duration_sec
+    if speechless_video and syntax_provider != SYNTAX_PROVIDER_VEO:
         duration_sec = max(3, min(4, duration_sec))
         scene["duration_sec"] = duration_sec
     if not speechless_video and "ru" in languages and not any(_scene_video_prompt_raw(scene, lang) for lang in languages) and await _maybe_shorten_scene_speech_for_video_budget(
@@ -7679,7 +7683,10 @@ async def _scene_media_video_ok(
         duration_sec = int(scene.get("duration_sec", duration_sec))
     except Exception:
         pass
-    if speechless_video:
+    if syntax_provider == SYNTAX_PROVIDER_VEO:
+        duration_sec = 8
+        scene["duration_sec"] = duration_sec
+    if speechless_video and syntax_provider != SYNTAX_PROVIDER_VEO:
         duration_sec = max(3, min(4, duration_sec))
         scene["duration_sec"] = duration_sec
     if not speechless_video and "en" in languages and not any(_scene_video_prompt_raw(scene, lang) for lang in languages):

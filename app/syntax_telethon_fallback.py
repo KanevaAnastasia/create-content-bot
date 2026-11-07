@@ -1528,14 +1528,8 @@ def _fill_syntax_veo_webapp_sync(
             _wait_for_syntax_veo_uploaded_count_sync(page, 1, timeout_ms=30_000)
             _fill_and_commit_syntax_kling_prompt_sync(page, prompt)
 
-            if not _try_click_syntax_option_sync(
-                page,
-                "Длительность",
-                f"{max(1, int(duration_sec))} сек",
-            ):
-                raise RuntimeError(
-                    f"Syntax Veo duration could not be set to {max(1, int(duration_sec))} sec."
-                )
+            # Veo clips are always 8 seconds. Do not open the duration picker:
+            # old scene plans may contain 6, which is not an available option.
             _set_syntax_aspect_ratio_sync(page, aspect_ratio)
             if not _syntax_page_contains_aspect_ratio_sync(page, aspect_ratio):
                 raise RuntimeError(
@@ -1784,7 +1778,7 @@ async def _submit_syntax_veo_webview(
             url=webview_url,
             prompt=prompt,
             start_image=start_image,
-            duration_sec=duration_sec,
+            duration_sec=8,
             aspect_ratio=aspect_ratio,
             timeout_sec=max(30, int(timeout_sec)),
         )
