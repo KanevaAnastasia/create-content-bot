@@ -26,7 +26,7 @@ ADMIN_MANAGE="$ROOT_DIR/admin_panel/manage.py"
 LOCK_FILE="/tmp/content_fabric_bot.lock"
 
 usage() {
-  echo "Usage: $0 {start [-f|--follow]|launchd-foreground|stop|restart [-f|--follow]|status|logs [-f|--follow]|adopt <pid>|final-worker <run_id>|final-worker-foreground <run_id>|final-worker-status|scheduled-worker [limit]|scheduled-worker-status|celery-worker|celery-worker-foreground|celery-worker-reload|celery-worker-status|celery-beat|celery-beat-foreground|celery-beat-status}"
+  echo "Usage: $0 {start [-f|--follow]|launchd-foreground|stop|restart [-f|--follow]|status|logs [-f|--follow]|adopt <pid>|final-worker <run_id> [--no-delivery]|final-worker-foreground <run_id> [--no-delivery]|final-worker-status|scheduled-worker [limit]|scheduled-worker-status|celery-worker|celery-worker-foreground|celery-worker-reload|celery-worker-status|celery-beat|celery-beat-foreground|celery-beat-status}"
 }
 
 ensure_runtime() {
@@ -289,10 +289,17 @@ final_worker_once() {
     echo "Django manage.py not found: $ADMIN_MANAGE" >&2
     exit 1
   fi
+  local -a delivery_args=(--once)
+  if [[ "${2:-}" == "--no-delivery" ]]; then
+    delivery_args+=(--no-delivery)
+  elif [[ -n "${2:-}" ]]; then
+    echo "Unknown final worker option: $2" >&2
+    exit 2
+  fi
   local worker_id
   worker_id="botctl-$$"
   cd "$ROOT_DIR"
-  nohup "$PYTHON_BIN" "$ADMIN_MANAGE" final_build_worker --once "--run-id=$run_id" "--worker-id=$worker_id" >> "$FINAL_WORKER_LOG" 2>&1 &
+  nohup "$PYTHON_BIN" "$ADMIN_MANAGE" final_build_worker "--run-id=$run_id" "--worker-id=$worker_id" "${delivery_args[@]}" >> "$FINAL_WORKER_LOG" 2>&1 &
   local pid="$!"
   echo "$pid" > "$FINAL_WORKER_PID_FILE"
   echo "Final build worker started: pid=$pid run_id=$run_id worker_id=$worker_id"
@@ -306,10 +313,17 @@ final_worker_foreground() {
     echo "Usage: $0 final-worker-foreground <run_id>" >&2
     exit 2
   fi
+  local -a delivery_args=(--once)
+  if [[ "${2:-}" == "--no-delivery" ]]; then
+    delivery_args+=(--no-delivery)
+  elif [[ -n "${2:-}" ]]; then
+    echo "Unknown final worker option: $2" >&2
+    exit 2
+  fi
   local worker_id
   worker_id="botctl-foreground-$$"
   cd "$ROOT_DIR"
-  "$PYTHON_BIN" "$ADMIN_MANAGE" final_build_worker --once "--run-id=$run_id" "--worker-id=$worker_id"
+  "$PYTHON_BIN" "$ADMIN_MANAGE" final_build_worker "--run-id=$run_id" "--worker-id=$worker_id" "${delivery_args[@]}"
 }
 
 final_worker_status() {
@@ -582,10 +596,10 @@ case "${1:-}" in
     adopt_bot "${2:-}"
     ;;
   final-worker)
-    final_worker_once "${2:-}"
+    final_worker_once "${2:-}" "${3:-}"
     ;;
   final-worker-foreground)
-    final_worker_foreground "${2:-}"
+    final_worker_foreground "${2:-}" "${3:-}"
     ;;
   final-worker-status)
     final_worker_status

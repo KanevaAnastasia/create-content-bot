@@ -749,6 +749,14 @@ def store_story_audio(chat_id: int, result: StoryAudioResult) -> str:
     target_dir.mkdir(parents=True, exist_ok=True)
     target = target_dir / f"{uuid.uuid4()}.mp3"
     target.write_bytes(result.audio_bytes)
+    from .story_alignment import save_story_audio_metadata
+    save_story_audio_metadata(target, {
+        "alignment": result.alignment,
+        "duration_sec": result.duration_sec,
+        "request_id": result.request_id,
+        "history_item_id": result.history_item_id,
+        "model_id": result.model_id,
+    })
     return str(target.resolve())
 
 

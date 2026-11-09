@@ -2125,6 +2125,8 @@ def test_django_admin_titled_only_build_uses_subtitled_source_fast_path(monkeypa
         "pending_overlay_title_style": {"title_color": "#1a2b3c"},
     }
     calls = []
+    monkeypatch.setattr(admin_module, "apply_story_word_synced_subtitles",
+                        lambda *_a, **_kw: (_ for _ in ()).throw(AssertionError("title build must preserve subtitle timings")))
 
     class RunStub(SimpleNamespace):
         def save(self, **_kwargs):
@@ -2135,7 +2137,7 @@ def test_django_admin_titled_only_build_uses_subtitled_source_fast_path(monkeypa
         return {"renders_by_language": {"ru": {"titled_subtitled_music": {"video_path": "/tmp/titled.mp4"}}}}
 
     monkeypatch.setattr(admin_module, "_run_session_for_admin_render", lambda _run: (None, session, production))
-    monkeypatch.setattr(admin_module, "_subtitled_artifact_matches_current_subtitles", lambda *_args, **_kwargs: True)
+    monkeypatch.setattr(admin_module, "_subtitled_artifact_matches_current_subtitles", lambda *_args, **_kwargs: False)
     monkeypatch.setattr(admin_module, "build_titled_post_production_from_subtitled_master", fake_fast_path)
     monkeypatch.setattr(
         admin_module,
@@ -2171,7 +2173,7 @@ def test_django_admin_titled_only_build_uses_subtitled_source_fast_path(monkeypa
     assert "pending_overlay_title_style" not in production
 
 
-def test_django_admin_spoken_title_rebuilds_captions_from_clean_scenes(monkeypatch):
+def test_django_admin_spoken_title_preserves_existing_captions(monkeypatch):
     admin_dir = Path(__file__).resolve().parents[1] / "admin_panel"
     sys.path.insert(0, str(admin_dir))
     os.environ.setdefault("DJANGO_SETTINGS_MODULE", "cf_admin.settings")
@@ -2207,11 +2209,11 @@ def test_django_admin_spoken_title_rebuilds_captions_from_clean_scenes(monkeypat
 
     monkeypatch.setattr(admin_module, "_run_session_for_admin_render", lambda _run: (None, session, production))
     monkeypatch.setattr(admin_module, "_subtitled_artifact_matches_current_subtitles", lambda *_args, **_kwargs: True)
-    monkeypatch.setattr(admin_module, "build_post_production", fake_fast_path)
+    monkeypatch.setattr(admin_module, "build_titled_post_production_from_subtitled_master", fake_fast_path)
     monkeypatch.setattr(
         admin_module,
-        "build_titled_post_production_from_subtitled_master",
-        lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("burned captions cannot be reused for replacement")),
+        "build_post_production",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("title-only build must not change burned captions")),
     )
     monkeypatch.setattr(admin_module, "persist_post_production_artifacts", lambda _session, _post: None)
     monkeypatch.setattr(
@@ -2231,8 +2233,7 @@ def test_django_admin_spoken_title_rebuilds_captions_from_clean_scenes(monkeypat
     )
 
     assert out["renders_by_language"]["ru"]["titled_subtitled_music"]["video_path"] == "/tmp/titled.mp4"
-    assert "subtitled_video_path" not in calls[0]
-    assert calls[0]["target_languages"] == ["ru"]
+    assert calls[0]["subtitled_video_path"] == Path("/tmp/source_subtitled.mp4")
     assert calls[0]["overlay_title_style"]["replace_subtitle_phrases"] is True
     assert calls[0]["use_candidate_subtitle_snapshot"] is True
     assert calls[0]["overlay_subtitle_by_lang"] == {"ru": "КБЖУ на 100 гр: 126/10/4/24"}
@@ -3087,3 +3088,47 @@ def test_django_admin_video_candidate_form_replaces_blob():
     assert saved.video_blob == b"new-video"
     assert saved.approved_for_production is True
     assert saved.speed_coef == 1.1
+
+
+def test_title_worker_reuses_saved_subtitles_and_local_build_sends_nothing(monkeypatch, tmp_path):
+    admin_dir = Path(__file__).resolve().parents[1] / "admin_panel"
+    sys.path.insert(0, str(admin_dir))
+    os.environ.setdefault("DJANGO_SETTINGS_MODULE", "cf_admin.settings")
+    import django
+    django.setup()
+    import pipeline_admin.admin as module
+
+    source = tmp_path / "subtitled.mp4"
+    source.write_bytes(b"approved captions")
+    run = SimpleNamespace(id=uuid.uuid4())
+    artifact = SimpleNamespace(id=uuid.uuid4())
+    updates, builds, statuses = [], [], []
+    manager = SimpleNamespace(get=lambda **_: run,
+                              filter=lambda **_: SimpleNamespace(update=lambda **kw: updates.append(kw)))
+    monkeypatch.setattr(module.GenerationRun, "objects", manager)
+    monkeypatch.setattr(module, "close_old_connections", lambda: None)
+    monkeypatch.setattr(module, "_run_session_for_admin_render", lambda _: (None, {}, {"json_plan": [{"text": "edited"}]}))
+    monkeypatch.setattr(module, "_admin_final_build_scenes_from_page", lambda _run, scenes: scenes)
+    monkeypatch.setattr(module, "_latest_final_artifact", lambda *_: artifact)
+    monkeypatch.setattr(module, "_artifact_local_path", lambda _: source)
+    monkeypatch.setattr(module, "_final_artifact_matches_current_scene_videos", lambda *_: False)
+    monkeypatch.setattr(module, "_latest_final_build_statuses", lambda _: {})
+    monkeypatch.setattr(module, "_set_final_build_status", lambda *_, **kw: statuses.append(kw))
+    monkeypatch.setattr(module.threading, "Thread", lambda **_: SimpleNamespace(start=lambda: None, join=lambda **_: None))
+
+    def build(_run, **kwargs):
+        builds.append(kwargs)
+        return {}
+    monkeypatch.setattr(module, "_build_final_videos_for_run", build)
+    monkeypatch.setattr(module, "_render_video_path_from_post", lambda *_: str(source))
+    def forbidden(*_a, **_kw):
+        raise AssertionError("Local rebuild must not send or advance the series")
+    monkeypatch.setattr(module, "deliver_final_artifact_to_telegram", forbidden)
+    monkeypatch.setattr(module, "trigger_final_completion_followup", forbidden)
+    monkeypatch.setattr(module, "_advance_series_after_successful_queued_final_build", forbidden)
+    module._run_final_build_batch(str(run.id), "ru", ["titled_subtitled_music"], deliver=False)
+    assert len(builds) == 1
+    assert builds[0]["target_variants"] == ["titled_subtitled_music"]
+    assert builds[0]["source_subtitled_video_path"] == source
+    assert statuses[-1]["status"] == "success"
+    assert updates[-1]["status"] == "final_videos_built"

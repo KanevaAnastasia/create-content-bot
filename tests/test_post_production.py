@@ -3,6 +3,8 @@ import re
 import subprocess
 from pathlib import Path
 
+import pytest
+
 from app import post_production
 from app.scene_media_candidates import register_video_candidate
 
@@ -35,92 +37,47 @@ def test_story_word_synced_subtitles_follow_exact_alignment_and_preserve_case():
         duration_by_lang={"ru": 2.2},
     )
 
-    assert scenes[0]["speech_by_lang"]["ru"] == "Я читаю."
+    assert scenes[0]["speech_by_lang"]["ru"] == "Я читаю. Книги"
     assert scenes[1]["speech_by_lang"]["ru"] == "Книги здесь."
-    assert scenes[0]["speech_cues_by_lang"]["ru"] == [
-        {
-            "text": "Я",
-            "start_sec": 0.0,
-            "end_sec": 0.2,
-            "word_synced": True,
-            "preserve_case": True,
-            "fixed_block_words": ["Я", "читаю."],
-            "visible_word_count": 1,
-            "story_style_version": "metel_fixed_blocks_v2",
-            "story_timing_source": "elevenlabs_alignment",
-        },
-        {
-            "text": "Я читаю.",
-            "start_sec": 0.2,
-            "end_sec": 1.1,
-            "word_synced": True,
-            "preserve_case": True,
-            "fixed_block_words": ["Я", "читаю."],
-            "visible_word_count": 2,
-            "story_style_version": "metel_fixed_blocks_v2",
-            "story_timing_source": "elevenlabs_alignment",
-        },
-    ]
-    assert scenes[1]["speech_cues_by_lang"]["ru"][0]["text"] == "Книги"
+    first = scenes[0]["speech_cues_by_lang"]["ru"]
+    assert [cue["text"] for cue in first] == ["Я", "Я читаю.", "Книги"]
+    assert first[0]["start_sec"] == 0.0
+    assert first[1]["start_sec"] == 0.2
+    assert first[2]["start_sec"] == 0.9
+    assert first[2]["end_sec"] == 1.1
+    second = scenes[1]["speech_cues_by_lang"]["ru"]
+    assert second[0]["text"] == "Книги"
+    assert second[0]["start_sec"] == 0.0
+    assert all(cue["story_timing_source"] == "elevenlabs_alignment" for cue in first + second)
     assert scenes[1]["word_synced_subtitle_languages"] == ["ru"]
 
 
-def test_story_word_synced_subtitles_recovers_legacy_story_without_saved_alignment():
-    scenes = [
-        {"duration_sec": 2.0, "speech_by_lang": {"ru": "Первое точное предложение."}},
-        {"duration_sec": 2.0, "speech_by_lang": {"ru": "Второе предложение."}},
-    ]
+@pytest.mark.parametrize("project", ["grandma_kitchen", "discipline", "new_story_project"])
+def test_story_requires_exact_alignment_for_every_project(project):
+    scenes = [{"duration_sec": 2.0, "speech_by_lang": {"ru": "Первое предложение."}}]
+    with pytest.raises(RuntimeError, match="точные тайминги"):
+        post_production.apply_story_word_synced_subtitles(
+            scenes, project_slug=project,
+            voiceover_by_lang={"ru": "Первое предложение."},
+            alignment_by_lang={}, duration_by_lang={"ru": 2.0},
+        )
+    assert "speech_cues_by_lang" not in scenes[0]
 
+
+def test_story_word_crossing_scene_cut_keeps_its_original_start_and_end():
+    scenes = [{"duration_sec": 1}, {"duration_sec": 1}]
+    alignment = {"characters": list("Да"),
+                 "character_start_times_seconds": [0.7, 1.0],
+                 "character_end_times_seconds": [1.0, 1.3]}
     post_production.apply_story_word_synced_subtitles(
-        scenes,
-        project_slug="grandma_kitchen",
-        voiceover_by_lang={"ru": "Первое точное предложение. Второе предложение."},
-        alignment_by_lang={},
-        duration_by_lang={"ru": 4.0},
+        scenes, project_slug="another_story", voiceover_by_lang={"ru": "Да"},
+        alignment_by_lang={"ru": alignment}, duration_by_lang={"ru": 2.0},
     )
-
-    first = scenes[0]["speech_cues_by_lang"]["ru"]
-    assert [cue["text"] for cue in first] == ["Первое", "Первое точное", "Первое точное предложение."]
-    assert all(cue["word_synced"] is True for cue in first)
-    assert all(cue["story_timing_source"] == "estimated_legacy_scene" for cue in first)
-
-
-def test_story_word_synced_subtitles_recovers_legacy_language_from_voiceover_text():
-    scenes = [{"duration_sec": 2.0}, {"duration_sec": 2.0}]
-
-    post_production.apply_story_word_synced_subtitles(
-        scenes,
-        project_slug="grandma_kitchen",
-        voiceover_by_lang={"en": "First exact sentence. Second exact sentence."},
-        alignment_by_lang={},
-        duration_by_lang={"en": 4.0},
-    )
-
-    recovered = " ".join(scene["speech_by_lang"]["en"] for scene in scenes)
-    assert recovered == "First exact sentence. Second exact sentence."
-    assert scenes[0]["speech_cues_by_lang"]["en"][0]["text"] == "First"
-
-
-def test_story_word_synced_subtitles_uses_voiceover_when_visual_clips_duplicate_a_beat():
-    scenes = [
-        {"duration_sec": 2.0, "speech_by_lang": {"ru": "Первая фраза."}},
-        {"duration_sec": 2.0, "speech_by_lang": {"ru": "Первая фраза."}},
-        {"duration_sec": 2.0, "speech_by_lang": {"ru": "Вторая фраза."}},
-    ]
-
-    post_production.apply_story_word_synced_subtitles(
-        scenes,
-        project_slug="grandma_kitchen",
-        voiceover_by_lang={"ru": "Первая фраза. Вторая фраза."},
-        alignment_by_lang={},
-        duration_by_lang={"ru": 6.0},
-    )
-
-    recovered = " ".join(scene["speech_by_lang"]["ru"] for scene in scenes)
-    assert recovered == "Первая фраза. Вторая фраза."
-    cues = [cue for scene in scenes for cue in scene["speech_cues_by_lang"]["ru"]]
-    assert cues
-    assert all(cue["story_timing_source"] == "estimated_legacy_voiceover" for cue in cues)
+    first = scenes[0]["speech_cues_by_lang"]["ru"][0]
+    second = scenes[1]["speech_cues_by_lang"]["ru"][0]
+    assert (first["start_sec"], first["end_sec"]) == (0.7, 1.0)
+    assert (second["start_sec"], second["end_sec"]) == (0.0, 1.0)
+    assert first["fixed_block_words"] == second["fixed_block_words"] == ["Да"]
 
 
 def test_all_modes_word_synced_subtitles_follow_transcribed_audio_timestamps():
@@ -1979,3 +1936,24 @@ def test_dense_subtitle_entry_is_split_into_subwindows():
     assert out[1]["text"] == "шоколад и немного холодных сливок"
     assert out[1]["start_sec"] == out[0]["end_sec"]
     assert out[1]["end_sec"] == 2.0
+
+
+def test_story_narration_timings_ignore_candidate_snapshots_and_visual_speed():
+    scenes = [{"duration_sec": 1.0}, {"duration_sec": 1.0}]
+    post_production.apply_story_word_synced_subtitles(
+        scenes, project_slug="new_story", voiceover_by_lang={"ru": "Да"},
+        alignment_by_lang={"ru": {"characters": ["Д", "а"],
+                                 "character_start_times_seconds": [1.2, 1.4],
+                                 "character_end_times_seconds": [1.4, 1.6]}},
+        duration_by_lang={"ru": 2.0},
+    )
+    scene = post_production._scene_with_candidate_subtitle_snapshot(
+        scenes[1], {"speech_cues_by_lang": {"ru": [{"text": "Повтор старой фразы", "start_sec": 0, "end_sec": 8}]}}, "ru",
+    )
+    entries = post_production._scene_subtitle_entries(
+        scene, "ru", start_offset=9.0, fallback_duration=8.0,
+        speed_coef=2.0, timing_scale=1.5, narration_offset_sec=3.0,
+    )
+    assert entries[0]["text"] == "Да"
+    assert entries[0]["start_sec"] == pytest.approx(4.2)
+    assert entries[0]["end_sec"] == pytest.approx(5.0)

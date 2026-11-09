@@ -871,6 +871,7 @@ def _ensure_generation_draft_for_admin_run(run: GenerationRun) -> GenerationDraf
 
 
 ADMIN_SCENE_DERIVED_SUBTITLE_KEYS = (
+    "narration_subtitle_start_by_lang",
     "speech_cues_by_lang",
     "speech_plan_by_lang",
 )
@@ -1235,26 +1236,32 @@ def _story_narration_for_admin_render(
             run_id=run.id,
             artifact_type="story_narration_audio",
         ).order_by("-created_at", "-id")
+        from app.story_alignment import load_story_audio_metadata, valid_alignment
         for row in rows:
             language = str(row.language or "ru").strip().lower() or "ru"
-            payload = row.payload_json if isinstance(row.payload_json, dict) else {}
-            text = " ".join(str(payload.get("voiceover_text") or "").split())
-            if text and language not in voiceover:
-                voiceover[language] = text
-            try:
-                duration = float(payload.get("duration_sec") or 0.0)
-            except (TypeError, ValueError):
-                duration = 0.0
-            if duration > 0 and language not in durations:
-                durations[language] = duration
-            alignment = payload.get("alignment")
-            if isinstance(alignment, dict) and alignment and language not in alignments:
-                alignments[language] = copy.deepcopy(alignment)
             if language in paths:
                 continue
             local_path = local_path_from_media_uri(str(row.uri or ""))
-            if local_path is not None and local_path.is_file():
-                paths[language] = str(local_path)
+            if local_path is None or not local_path.is_file():
+                continue
+            # Text, duration and timestamps must belong to the same audio version.
+            payload = row.payload_json if isinstance(row.payload_json, dict) else {}
+            saved = load_story_audio_metadata(local_path)
+            paths[language] = str(local_path)
+            text = " ".join(str(payload.get("voiceover_text") or "").split())
+            if text:
+                voiceover[language] = text
+            try:
+                duration = float(payload.get("duration_sec") or saved.get("duration_sec") or 0.0)
+            except (TypeError, ValueError):
+                duration = 0.0
+            if duration > 0:
+                durations[language] = duration
+            alignment = payload.get("alignment")
+            if not valid_alignment(alignment):
+                alignment = saved.get("alignment")
+            if valid_alignment(alignment):
+                alignments[language] = copy.deepcopy(alignment)
     except Exception:
         return {}, {}, {}, {}
     return paths, voiceover, durations, alignments
@@ -1766,38 +1773,38 @@ def _build_final_videos_for_run(
         stored_alignment_by_lang,
     ) = _story_narration_for_admin_render(run)
     voiceover_by_lang = {
-        "ru": str(session.get("story_voiceover_text") or stored_voiceover_by_lang.get("ru") or ""),
-        "en": str(session.get("story_voiceover_text_en") or stored_voiceover_by_lang.get("en") or ""),
+        "ru": str(stored_voiceover_by_lang.get("ru") or session.get("story_voiceover_text") or ""),
+        "en": str(stored_voiceover_by_lang.get("en") or session.get("story_voiceover_text_en") or ""),
     }
     duration_by_lang = {
-        "ru": float(session.get("story_audio_duration_sec") or stored_duration_by_lang.get("ru") or 0.0),
-        "en": float(session.get("story_audio_duration_sec_en") or stored_duration_by_lang.get("en") or 0.0),
+        "ru": float(stored_duration_by_lang.get("ru") or session.get("story_audio_duration_sec") or 0.0),
+        "en": float(stored_duration_by_lang.get("en") or session.get("story_audio_duration_sec_en") or 0.0),
     }
-    apply_story_word_synced_subtitles(
-        scenes,
-        project_slug=project_slug,
-        voiceover_by_lang=voiceover_by_lang,
-        alignment_by_lang={
-            "ru": (
-                session.get("story_audio_alignment")
-                if isinstance(session.get("story_audio_alignment"), dict)
-                and session.get("story_audio_alignment")
-                else stored_alignment_by_lang.get("ru", {})
-            ),
-            "en": (
-                session.get("story_audio_alignment_en")
-                if isinstance(session.get("story_audio_alignment_en"), dict)
-                and session.get("story_audio_alignment_en")
-                else stored_alignment_by_lang.get("en", {})
-            ),
-        },
-        duration_by_lang=duration_by_lang,
+    requested_variants = list(target_variants) if target_variants else ([target_variant] if target_variant else None)
+    reuse_subtitled_master = bool(
+        source_subtitled_video_path and target_language
+        and requested_variants == ["titled_subtitled_music"]
     )
+    needs_subtitle_timings = requested_variants is None or bool(
+        set(requested_variants) & {"subtitled_music", "titled_subtitled_music"}
+    )
+    if not reuse_subtitled_master and needs_subtitle_timings:
+        apply_story_word_synced_subtitles(
+            scenes,
+            project_slug=project_slug,
+            voiceover_by_lang=voiceover_by_lang,
+            alignment_by_lang={
+                lang: stored_alignment_by_lang.get(lang, {})
+                if lang in narration_audio_path_by_lang
+                else session.get("story_audio_alignment" + ("_en" if lang == "en" else ""), {})
+                for lang in ("ru", "en")
+            },
+            duration_by_lang=duration_by_lang,
+        )
 
     overlay_title_by_lang = _overlay_title_for_admin_render(run, session, production)
     if not overlay_title_by_lang:
         raise RuntimeError("Set human_title or overlay_title_by_lang before rendering the titled final master.")
-    requested_variants = list(target_variants) if target_variants else ([target_variant] if target_variant else None)
     applies_title_overlay = requested_variants is None or "titled_subtitled_music" in requested_variants
     if applies_title_overlay:
         target_languages = [target_language] if target_language else production_languages_for_scenes(scenes)
@@ -1840,18 +1847,6 @@ def _build_final_videos_for_run(
                 run=run,
             )
     if (
-        source_subtitled_video_path
-        and target_language
-        and requested_variants == ["titled_subtitled_music"]
-        and not _subtitled_artifact_matches_current_subtitles(
-            run,
-            scenes,
-            target_language,
-            source_subtitled_video_path,
-        )
-    ):
-        source_subtitled_video_path = None
-    if (
         source_clean_video_path
         and target_language
         and requested_variants == ["upscaled_4k"]
@@ -1881,7 +1876,6 @@ def _build_final_videos_for_run(
         source_subtitled_video_path
         and target_language
         and requested_variants == ["titled_subtitled_music"]
-        and not (overlay_title_style or {}).get("replace_subtitle_phrases")
     ):
         post = build_titled_post_production_from_subtitled_master(
             scenes,
@@ -2336,6 +2330,7 @@ def _run_final_build_batch(
     variants: list[str] | tuple[str, ...] | set[str],
     *,
     worker_id: str = "manual",
+    deliver: bool = True,
 ) -> None:
     close_old_connections()
     normalized_variants = [
@@ -2366,7 +2361,8 @@ def _run_final_build_batch(
 
         def latest_variant_path(variant: str) -> Path | None:
             artifact = _latest_final_artifact(run.id, language, variant)
-            if reuse_scenes and not _final_artifact_matches_current_scene_videos(artifact, reuse_scenes, language):
+            title_source = requested_variants == {"titled_subtitled_music"} and variant == "subtitled_music"
+            if not title_source and reuse_scenes and not _final_artifact_matches_current_scene_videos(artifact, reuse_scenes, language):
                 return None
             path = _artifact_local_path(artifact) if artifact is not None else None
             return path if path is not None and path.exists() else None
@@ -2375,9 +2371,14 @@ def _run_final_build_batch(
             variant: latest_variant_path(variant)
             for variant in FINAL_VIDEO_VARIANT_LABELS
         }
-        for variant in required_variants:
-            if variant in requested_variants or latest_paths.get(variant) is None:
-                plan_variants.append(variant)
+        if requested_variants == {"titled_subtitled_music"}:
+            if latest_paths.get("subtitled_music") is None:
+                raise RuntimeError("Сначала соберите версию с субтитрами. Сборка титров не пересоздаёт субтитры.")
+            plan_variants = ["titled_subtitled_music"]
+        else:
+            for variant in required_variants:
+                if variant in requested_variants or latest_paths.get(variant) is None:
+                    plan_variants.append(variant)
         if not plan_variants:
             plan_variants = normalized_variants
         delivered_all = True
@@ -2469,7 +2470,7 @@ def _run_final_build_batch(
             )
             if artifact is None:
                 delivered_all = False
-            else:
+            elif deliver:
                 delivery = deliver_final_artifact_to_telegram(run.id, artifact.id)
                 if str(delivery.get("status") or "").lower() != "sent":
                     delivered_all = False
@@ -2492,15 +2493,17 @@ def _run_final_build_batch(
                             ),
                         },
                     )
-        _advance_series_after_successful_queued_final_build(run)
+        if deliver:
+            _advance_series_after_successful_queued_final_build(run)
         GenerationRun.objects.filter(id=run.id).update(
-            status="final_videos_delivered" if delivered_all else "final_video_delivery_failed",
+            status=("final_videos_delivered" if delivered_all else "final_video_delivery_failed") if deliver else "final_videos_built",
             is_active=False,
             current_scene_index=None,
             current_media_substep=None,
             current_media_language_index=None,
         )
-        trigger_final_completion_followup(run.id)
+        if deliver:
+            trigger_final_completion_followup(run.id)
         stop_event.set()
         if heartbeat_thread is not None:
             heartbeat_thread.join(timeout=5)
@@ -2525,7 +2528,8 @@ def _run_final_build_batch(
                         "progress": _final_build_progress_payload("failed", "Final build failed", percent=100),
                     },
                 )
-            trigger_final_completion_followup(run.id)
+            if deliver:
+                trigger_final_completion_followup(run.id)
         except Exception:
             pass
     finally:

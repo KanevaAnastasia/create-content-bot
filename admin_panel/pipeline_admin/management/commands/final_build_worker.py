@@ -17,6 +17,7 @@ class Command(BaseCommand):
     help = "Process queued final video build jobs."
 
     def add_arguments(self, parser):
+        parser.add_argument("--no-delivery", action="store_true", help="Build local artifacts without Telegram delivery or completion messages.")
         parser.add_argument("--once", action="store_true", help="Process available jobs once, then exit.")
         parser.add_argument("--run-id", default="", help="Only process jobs for this generation run id.")
         parser.add_argument("--sleep", type=float, default=5.0, help="Seconds to sleep when the queue is empty.")
@@ -54,6 +55,7 @@ class Command(BaseCommand):
                 str(first["language"]),
                 variants,
                 worker_id=worker_id,
+                **({"deliver": False} if options.get("no_delivery") else {}),
             )
             processed += len(variants)
             if limit and processed >= limit:

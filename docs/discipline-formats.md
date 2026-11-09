@@ -57,3 +57,33 @@ Verification: mode selection/resume/reset, scenario/refinement prompts, independ
 RU/EN voice and word timing, old intro and ordinary Story regression tests,
 font asset hashes, and real ffmpeg preview rendering. No new paid generation is
 required for these checks.
+
+## Сохранение таймингов и повторная сборка
+
+Тайминги Google Speech-to-Text сохраняются в `video_speech_qa_by_lang`
+видеокандидата вместе с распознанным текстом и используются повторно без
+нового запроса. Тайминги ElevenLabs сохраняются в артефакте утверждённой
+озвучки и в файле `*.alignment.json` рядом с MP3. Файл содержит SHA-256
+аудио, поэтому тайминги другой версии озвучки не подставляются.
+
+Если тайминги старой истории потеряны, используется чтение существующей
+истории ElevenLabs, а не повторный TTS или STT:
+
+```sh
+.venv/bin/python scripts/recover_story_alignments.py --run-id UUID
+.venv/bin/python scripts/recover_story_alignments.py --run-id UUID --apply
+```
+
+Без `--apply` команда только проверяет возможность восстановления. Уже
+сохранённые тайминги не запрашиваются заново. Для чтения истории ключу
+нужно разрешение `speech_history_read`. Восстановление требует совпадения
+текста и декодированного звука. Архивные ответы с длительностями вместо
+конечных отметок нормализуются только при согласованности всей последовательности.
+
+Сборка титров использует готовый мастер с субтитрами и не пересобирает их,
+даже если изменились сценарий или видеокандидаты. Обновление субтитров —
+отдельная сборка. Для локальной сборки без Telegram-отправки:
+
+```sh
+scripts/botctl.sh final-worker-foreground UUID --no-delivery
+```

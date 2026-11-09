@@ -2441,60 +2441,6 @@ def _story_scene_intervals(
     return intervals
 
 
-def _estimated_story_word_rows_from_scenes(
-    scenes: list[dict[str, Any]],
-    *,
-    language: str,
-    intervals: list[tuple[float, float]],
-) -> list[tuple[str, float, float]]:
-    """Recover readable progressive captions for legacy Story runs.
-
-    Early Story runs stored the narration MP3 and its exact transcript but not
-    ElevenLabs' character-level alignment.  Their scene text is already split
-    against the narration, so distribute each scene's words over that scene as
-    a backwards-compatible fallback. New runs always use the exact alignment.
-    """
-    if len(scenes) != len(intervals):
-        return []
-    words: list[tuple[str, float, float]] = []
-    for scene, (scene_start, scene_end) in zip(scenes, intervals, strict=True):
-        speech_by_lang = scene.get("speech_by_lang")
-        text = speech_by_lang.get(language) if isinstance(speech_by_lang, dict) else None
-        tokens = str(text or scene.get("text") or "").split()
-        if not tokens or scene_end <= scene_start:
-            continue
-        weights = [max(1, len(re.sub(r"[^\\w]+", "", token, flags=re.UNICODE))) for token in tokens]
-        total_weight = sum(weights)
-        cursor = scene_start
-        for index, (token, weight) in enumerate(zip(tokens, weights, strict=True)):
-            end = scene_end if index == len(tokens) - 1 else cursor + ((scene_end - scene_start) * weight / total_weight)
-            if end > cursor:
-                words.append((token, cursor, end))
-            cursor = end
-    return words
-
-
-def _estimated_story_word_rows_from_voiceover(
-    voiceover_text: str,
-    *,
-    duration_sec: float,
-) -> list[tuple[str, float, float]]:
-    """Last-resort caption recovery for legacy language tracks without scene text."""
-    tokens = str(voiceover_text or "").split()
-    if not tokens or duration_sec <= 0:
-        return []
-    weights = [max(1, len(re.sub(r"[^\\w]+", "", token, flags=re.UNICODE))) for token in tokens]
-    total_weight = sum(weights)
-    rows: list[tuple[str, float, float]] = []
-    cursor = 0.0
-    for index, (token, weight) in enumerate(zip(tokens, weights, strict=True)):
-        end = duration_sec if index == len(tokens) - 1 else cursor + (duration_sec * weight / total_weight)
-        if end > cursor:
-            rows.append((token, cursor, end))
-        cursor = end
-    return rows
-
-
 def apply_story_word_synced_subtitles(
     scenes: list[dict[str, Any]],
     *,
@@ -2503,14 +2449,14 @@ def apply_story_word_synced_subtitles(
     alignment_by_lang: dict[str, dict[str, Any]] | None,
     duration_by_lang: dict[str, float] | None,
 ) -> list[dict[str, Any]]:
-    """Attach progressive, exact word-timed captions to Discipline/Kitchen Story scenes.
+    """Attach progressive, exact word-timed captions to every Story project.
 
     Each caption grows by one spoken word.  Timing and spelling come from the
     approved ElevenLabs alignment, so final rendering does not have to infer
     timings from scene length or restore language text from a video candidate.
     """
     slug = str(project_slug or "").strip().lower()
-    if slug not in STORY_WORD_SYNC_PROJECT_SLUGS or not scenes:
+    if not scenes:
         return scenes
     alignments = alignment_by_lang if isinstance(alignment_by_lang, dict) else {}
     durations = duration_by_lang if isinstance(duration_by_lang, dict) else {}
@@ -2529,100 +2475,40 @@ def apply_story_word_synced_subtitles(
         if duration <= 0 and words:
             duration = float(words[-1][2])
         intervals = _story_scene_intervals(scenes, language=lang, narration_duration_sec=duration)
-        legacy_timing_source = ""
-        if not words and str(voiceovers.get(lang) or "").strip() and intervals:
-            has_scene_language_text = all(
-                bool(
-                    str(
-                        (
-                            (scene.get("speech_by_lang") or {}).get(lang)
-                            if isinstance(scene.get("speech_by_lang"), dict)
-                            else ""
-                        )
-                        or ""
-                    ).strip()
-                )
-                for scene in scenes
+        from .story_alignment import valid_alignment
+        if (str(voiceovers.get(lang) or "").strip() or alignment) and not valid_alignment(alignment):
+            raise RuntimeError(
+                f"Для субтитров истории ({lang}) отсутствуют точные тайминги озвучки. "
+                "Восстановите alignment ElevenLabs для утверждённого аудио; "
+                "приблизительные тайминги по длине текста больше не используются."
             )
-            voiceover_text = str(voiceovers.get(lang) or "").strip()
-            scene_text = " ".join(
-                str((scene.get("speech_by_lang") or {}).get(lang) or "").strip()
-                for scene in scenes
-                if isinstance(scene.get("speech_by_lang"), dict)
-            ).strip()
-
-            def comparable_story_text(value: str) -> str:
-                return " ".join(re.findall(r"\w+", value.lower(), flags=re.UNICODE))
-
-            # A semantic Story beat may be split into several visual clips. In
-            # legacy runs every clip then contains the whole beat transcript,
-            # so concatenating scene speech duplicates narration phrases. Use
-            # per-scene timing only when it reconstructs the approved narration
-            # exactly; otherwise distribute the canonical voiceover transcript.
-            use_scene_text = (
-                has_scene_language_text
-                and comparable_story_text(scene_text) == comparable_story_text(voiceover_text)
-            )
-            if use_scene_text:
-                words = _estimated_story_word_rows_from_scenes(scenes, language=lang, intervals=intervals)
-                legacy_timing_source = "estimated_legacy_scene"
-            else:
-                words = _estimated_story_word_rows_from_voiceover(
-                    voiceover_text,
-                    duration_sec=duration,
-                )
-                legacy_timing_source = "estimated_legacy_voiceover"
-        if not words or len(intervals) != len(scenes):
+        if not words:
             continue
-        words_by_scene: list[list[tuple[str, float, float]]] = [[] for _ in scenes]
-        scene_index = 0
-        for word, word_start, word_end in words:
-            midpoint = (word_start + word_end) / 2.0
-            while scene_index + 1 < len(intervals) and midpoint >= intervals[scene_index][1]:
-                scene_index += 1
-            words_by_scene[scene_index].append((word, word_start, word_end))
+        if len(intervals) != len(scenes):
+            raise RuntimeError(f"Не удалось привязать точные субтитры истории ({lang}) к длительности сцен.")
+        global_cues = build_word_synced_subtitle_cues(
+            words, window_end_sec=duration, timing_source="elevenlabs_alignment",
+        )
         for index, scene in enumerate(scenes):
             interval_start, interval_end = intervals[index]
-            assigned = words_by_scene[index]
-            tokens = [word for word, _start, _end in assigned]
+            tokens = [word for word, start, end in words if start < interval_end and end > interval_start]
             speech_map = dict(scene.get("speech_by_lang") or {}) if isinstance(scene.get("speech_by_lang"), dict) else {}
             speech_map[lang] = " ".join(tokens).strip()
             scene["speech_by_lang"] = speech_map
-            duration_map = (
-                dict(scene.get("timeline_duration_by_lang") or {})
-                if isinstance(scene.get("timeline_duration_by_lang"), dict)
-                else {}
-            )
+            duration_map = dict(scene.get("timeline_duration_by_lang") or {})
             duration_map[lang] = max(0.0, interval_end - interval_start)
             scene["timeline_duration_by_lang"] = duration_map
-            cues: list[dict[str, Any]] = []
-            blocks = _story_caption_word_blocks(assigned)
-            for block_index, block in enumerate(blocks):
-                block_tokens = [word for word, _start, _end in block]
-                next_block_start = (
-                    blocks[block_index + 1][0][1]
-                    if block_index + 1 < len(blocks)
-                    else interval_end
-                )
-                for word_index, (_word, word_start, word_end) in enumerate(block):
-                    visible_text = " ".join(block_tokens[: word_index + 1]).strip()
-                    next_start = block[word_index + 1][1] if word_index + 1 < len(block) else next_block_start
-                    local_start = max(0.0, min(interval_end, word_start) - interval_start)
-                    local_end = max(local_start, min(interval_end, max(word_end, next_start)) - interval_start)
-                    if visible_text and local_end > local_start:
-                        cues.append(
-                            {
-                                "text": visible_text,
-                                "start_sec": local_start,
-                                "end_sec": local_end,
-                                "word_synced": True,
-                                "preserve_case": True,
-                                "fixed_block_words": block_tokens,
-                                "visible_word_count": word_index + 1,
-                                "story_style_version": STORY_WORD_SYNC_STYLE_VERSION,
-                                "story_timing_source": legacy_timing_source or "elevenlabs_alignment",
-                            }
-                        )
+            narration_starts = dict(scene.get("narration_subtitle_start_by_lang") or {})
+            narration_starts[lang] = interval_start
+            scene["narration_subtitle_start_by_lang"] = narration_starts
+            # Keep a spoken word visible on both sides of a visual scene cut.
+            cues = [
+                {**cue,
+                 "start_sec": max(interval_start, cue["start_sec"]) - interval_start,
+                 "end_sec": min(interval_end, cue["end_sec"]) - interval_start}
+                for cue in global_cues
+                if cue["start_sec"] < interval_end and cue["end_sec"] > interval_start
+            ]
             cues_map = (
                 dict(scene.get("speech_cues_by_lang") or {})
                 if isinstance(scene.get("speech_cues_by_lang"), dict)
@@ -2751,6 +2637,7 @@ def _scene_subtitle_entries(
     fallback_duration: float,
     speed_coef: float,
     timing_scale: float = 1.0,
+    narration_offset_sec: float = 0.0,
 ) -> list[dict[str, Any]]:
     if bool(scene.get("guest_mode")):
         return []
@@ -2760,6 +2647,13 @@ def _scene_subtitle_entries(
     safe_speed = max(0.01, float(speed_coef or 1.0))
     safe_scale = max(0.01, float(timing_scale or 1.0))
     safe_duration = max(0.0, float(fallback_duration or 0.0))
+    narration_starts = scene.get("narration_subtitle_start_by_lang")
+    narration_start = narration_starts.get(language) if isinstance(narration_starts, dict) else None
+    if narration_start is not None:
+        # The narration track is continuous and is not retimed with visual clips.
+        safe_speed = safe_scale = 1.0
+        safe_duration = 0.0
+        start_offset = float(narration_start) + float(narration_offset_sec)
     if isinstance(raw_cues, list):
         normalized_cues: list[dict[str, Any]] = []
         for cue in raw_cues:
@@ -2952,6 +2846,10 @@ def _scene_with_candidate_subtitle_snapshot(
     if not use_candidate_subtitle_snapshot or not isinstance(selected, dict):
         return scene
     lang = str(language or "").strip().lower()
+    if lang in (scene.get("narration_subtitle_start_by_lang") or {}):
+        # A visual candidate may contain an old, repeated beat transcript.
+        # It must never overwrite captions aligned to the approved narration.
+        return scene
     out = dict(scene)
     for key in ("speech_by_lang", "speech_cues_by_lang", "speech_plan_by_lang", "video_prompt_by_lang"):
         snapshot = selected.get(key)
@@ -4060,6 +3958,7 @@ def build_post_production(
                         fallback_duration=actual_duration,
                         speed_coef=float(item["speed_coef"]),
                         timing_scale=timing_scale,
+                        narration_offset_sec=intro_duration,
                     )
                     for entry in scene_entries:
                         entry["scene"] = int(item["scene_index"]) + 1

@@ -795,10 +795,35 @@ async def _build_post_production_with_retries(
         overlay_series_counter_by_lang = session.get(SERIES_COUNTER_BY_LANG_SESSION_KEY)
     if not isinstance(overlay_series_counter_by_lang, dict) or not overlay_series_counter_by_lang:
         overlay_series_counter_by_lang = None
+    from ..post_production import apply_story_word_synced_subtitles
+    from ..story_alignment import load_story_audio_metadata, valid_alignment
+    narration_paths = {}
+    narration_alignments = {}
+    narration_texts = {}
+    narration_durations = {}
+    for language, suffix in (("ru", ""), ("en", "_en")):
+        audio_path = str(session.get("story_audio_path" + suffix) or "")
+        if not audio_path or not Path(audio_path).is_file():
+            continue
+        saved = load_story_audio_metadata(audio_path)
+        narration_paths[language] = audio_path
+        alignment = session.get("story_audio_alignment" + suffix)
+        narration_alignments[language] = alignment if valid_alignment(alignment) else saved.get("alignment", {})
+        narration_texts[language] = str(session.get("story_voiceover_text" + suffix) or "")
+        narration_durations[language] = float(session.get("story_audio_duration_sec" + suffix) or saved.get("duration_sec") or 0)
+    if narration_paths:
+        apply_story_word_synced_subtitles(
+            scenes, project_slug=project_slug,
+            voiceover_by_lang=narration_texts, alignment_by_lang=narration_alignments,
+            duration_by_lang=narration_durations,
+        )
     last_exc: Exception | None = None
     for attempt in range(1, _POST_PRODUCTION_RETRY_ATTEMPTS + 1):
         try:
             post_kwargs = {"project_slug": project_slug}
+            if narration_paths:
+                post_kwargs["narration_audio_path_by_lang"] = narration_paths
+                post_kwargs["include_background_music"] = False
             if overlay_title_by_lang:
                 post_kwargs["overlay_title_by_lang"] = overlay_title_by_lang
             if overlay_title_style:
