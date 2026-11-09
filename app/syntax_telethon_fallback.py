@@ -2225,6 +2225,18 @@ def _first_message_from_get_messages(got: Any) -> Any | None:
         return None
 
 
+async def _capture_syntax_submission_status(client: Any, target: Any, *, after_id: int) -> set[int]:
+    """Bind the status while this request still owns the Syntax webview."""
+    latest = _first_message_from_get_messages(await client.get_messages(target, limit=1))
+    if latest is None or getattr(latest, "out", False) or _message_looks_like_video(latest):
+        return set()
+    mid = int(getattr(latest, "id", 0) or 0)
+    text = _extract_text(latest)
+    if mid <= after_id or not _text_looks_like_syntax_pending_status(text):
+        return set()
+    return {mid}
+
+
 def _batch_message_candidate_keys(message: Any, pending_states: dict[str, dict[str, Any]]) -> list[str]:
     """Route a batch reply to the request it can actually be correlated with."""
     mid = int(getattr(message, "id", 0) or 0)
@@ -2244,7 +2256,8 @@ def _batch_message_candidate_keys(message: Any, pending_states: dict[str, dict[s
     edited_status_matches = [
         key
         for key, state in pending_states.items()
-        if mid in state["pending_refetch"] or mid in state.get("processed_revisions", {})
+        if mid in state.get("submission_status_ids", set())
+        or mid in state["pending_refetch"] or mid in state.get("processed_revisions", {})
     ]
     if edited_status_matches:
         return edited_status_matches
@@ -2876,6 +2889,7 @@ async def _run_batch_fallback_async(
 
         target = await client.get_entity(bot_username)
         request_runtime: list[tuple[_BatchRequestState, int, set[int], str]] = []
+        submission_status_ids: dict[str, set[int]] = {}
         for request in ready:
             await _send_syntax_video_preflight(
                 client,
@@ -2943,6 +2957,11 @@ async def _run_batch_fallback_async(
                     attempt_id=request.attempt_id,
                 )
                 continue
+            submission_status_ids[request.key] = await _capture_syntax_submission_status(
+                client, target, after_id=max(sent_ids),
+            )
+            logger.info("syntax_batch.status_bound key=%s message_ids=%s",
+                        request.key, sorted(submission_status_ids[request.key]))
             logger.info("syntax_batch.veo_submitted key=%s attempt_id=%s", request.key, request.attempt_id)
             request_runtime.append((request, reply_anchor, sent_ids, last_info))
 
@@ -2956,7 +2975,8 @@ async def _run_batch_fallback_async(
                 "sent_ids": sent_ids,
                 "processed": set(sent_ids),
                 "processed_revisions": {},
-                "pending_refetch": set(),
+                "pending_refetch": set(submission_status_ids.get(request.key, set())),
+                "submission_status_ids": submission_status_ids.get(request.key, set()),
                 "last_holder": [last_info],
             }
             for request, reply_anchor, sent_ids, last_info in request_runtime
