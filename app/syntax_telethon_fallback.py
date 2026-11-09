@@ -2131,6 +2131,18 @@ async def _process_bot_message(
     return None, None, "", False, False
 
 
+def _syntax_message_revision(message: Any) -> tuple[Any, ...]:
+    """A Telegram message ID is stable when Syntax edits a status into a result."""
+    document = getattr(message, "document", None)
+    return (
+        str(getattr(message, "edit_date", "") or ""),
+        _extract_text(message),
+        tuple(_collect_urls_from_message(message)),
+        _message_looks_like_video(message),
+        getattr(document, "id", None),
+    )
+
+
 async def _syntax_dispatch_bot_reply(
     client: Any,
     msg: Any,
@@ -2142,11 +2154,14 @@ async def _syntax_dispatch_bot_reply(
     attempt_id: str,
     last_holder: list[str],
     expected_lang_token: str | None,
+    processed_revisions: dict[int, tuple[Any, ...]] | None = None,
 ) -> Any | None:
     """Apply one bot ``Message``; on success returns ``FallbackResult``."""
     mid = int(getattr(msg, "id", 0) or 0)
     if mid <= reply_anchor:
         return None
+    if processed_revisions is not None:
+        processed_revisions[mid] = _syntax_message_revision(msg)
     out = await _process_bot_message(
         client,
         message=msg,
@@ -2229,7 +2244,7 @@ def _batch_message_candidate_keys(message: Any, pending_states: dict[str, dict[s
     edited_status_matches = [
         key
         for key, state in pending_states.items()
-        if mid in state["pending_refetch"]
+        if mid in state["pending_refetch"] or mid in state.get("processed_revisions", {})
     ]
     if edited_status_matches:
         return edited_status_matches
@@ -2278,6 +2293,14 @@ async def _poll_syntax_bot_until_video(
 ) -> Any:
     """Scan bot replies every ``poll`` seconds; re-fetch edited status messages by id."""
     processed: set[int] = set(sent_ids)
+    processed_revisions: dict[int, tuple[Any, ...]] = {}
+
+    def needs_processing(message: Any) -> bool:
+        mid = int(getattr(message, "id", 0) or 0)
+        return mid not in sent_ids and (
+            mid not in processed or processed_revisions.get(mid) != _syntax_message_revision(message)
+        )
+
     pending_refetch: set[int] = set()
     last_holder = [initial_last_info]
 
@@ -2295,13 +2318,14 @@ async def _poll_syntax_bot_until_video(
         latest = _first_message_from_get_messages(latest_raw)
         if latest is not None and not getattr(latest, "out", False):
             lmid = int(getattr(latest, "id", 0) or 0)
-            if lmid > our_high and lmid not in processed:
+            if lmid > our_high and needs_processing(latest):
                 done = await _syntax_dispatch_bot_reply(
                     client,
                     latest,
                     reply_anchor=reply_anchor,
                     sent_ids=sent_ids,
                     processed=processed,
+                processed_revisions=processed_revisions,
                     pending_refetch=pending_refetch,
                     attempt_id=attempt_id,
                     last_holder=last_holder,
@@ -2311,7 +2335,7 @@ async def _poll_syntax_bot_until_video(
                     return done
         async for msg in client.iter_messages(target, limit=40):
             mid = int(getattr(msg, "id", 0) or 0)
-            if mid <= reply_anchor or mid in processed:
+            if mid <= reply_anchor or not needs_processing(msg):
                 continue
             done = await _syntax_dispatch_bot_reply(
                 client,
@@ -2319,6 +2343,7 @@ async def _poll_syntax_bot_until_video(
                 reply_anchor=reply_anchor,
                 sent_ids=sent_ids,
                 processed=processed,
+                processed_revisions=processed_revisions,
                 pending_refetch=pending_refetch,
                 attempt_id=attempt_id,
                 last_holder=last_holder,
@@ -2341,6 +2366,7 @@ async def _poll_syntax_bot_until_video(
                 reply_anchor=reply_anchor,
                 sent_ids=sent_ids,
                 processed=processed,
+                processed_revisions=processed_revisions,
                 pending_refetch=pending_refetch,
                 attempt_id=attempt_id,
                 last_holder=last_holder,
@@ -2929,6 +2955,7 @@ async def _run_batch_fallback_async(
                 "reply_anchor": reply_anchor,
                 "sent_ids": sent_ids,
                 "processed": set(sent_ids),
+                "processed_revisions": {},
                 "pending_refetch": set(),
                 "last_holder": [last_info],
             }
@@ -2951,10 +2978,13 @@ async def _run_batch_fallback_async(
                 if state is None:
                     continue
                 mid = int(getattr(message, "id", 0) or 0)
-                if mid <= state["reply_anchor"] or mid in state["processed"]:
+                revision = _syntax_message_revision(message)
+                if mid <= state["reply_anchor"] or mid in state["sent_ids"]:
+                    continue
+                if mid in state["processed"] and state["processed_revisions"].get(mid) == revision:
                     continue
                 correlation_ids = set(state["sent_ids"]) | set(state["pending_refetch"])
-                if mid in state["pending_refetch"]:
+                if mid in state["pending_refetch"] or mid in state["processed_revisions"]:
                     correlation_ids.add(mid)
                 out = await _process_bot_message(
                     client,
@@ -2965,8 +2995,11 @@ async def _run_batch_fallback_async(
                 )
                 if out is None:
                     continue
+                state["processed_revisions"][mid] = revision
                 vbytes, vuri, pmsg, retry_later, hard_reject = out
                 if hard_reject:
+                    logger.warning("syntax_batch.hard_reject key=%s message_id=%s edited=%s",
+                                   key, mid, bool(getattr(message, "edit_date", None)))
                     state["processed"].add(mid)
                     state["pending_refetch"].discard(mid)
                     combined = (

@@ -2104,7 +2104,8 @@ def test_batch_does_not_guess_language_for_unmatched_bare_video():
     assert telethon_fallback._batch_message_candidate_keys(_Message(), states) == []
 
 
-def test_batch_routes_edited_hard_reject_to_the_right_language(monkeypatch):
+@pytest.mark.parametrize("initial_status", ["Запрос ожидает выполнения в очереди.", "Задание зарегистрировано."])
+def test_batch_routes_edited_hard_reject_to_the_right_language(monkeypatch, initial_status):
     import app.syntax_telethon_fallback as telethon_fallback
 
     class _ReplyTo:
@@ -2181,7 +2182,7 @@ def test_batch_routes_edited_hard_reject_to_the_right_language(monkeypatch):
             del _target, limit
             self._iter_count += 1
             if self._iter_count == 1:
-                yield _IncomingMessage(202, text="Запрос ожидает выполнения в очереди.")
+                yield _IncomingMessage(202, text=initial_status, reply_to=104 if initial_status == "Задание зарегистрировано." else None)
                 yield _IncomingMessage(201, text="Запрос ожидает выполнения в очереди.")
                 return
             yield _IncomingMessage(203, reply_to=201, video=True)
