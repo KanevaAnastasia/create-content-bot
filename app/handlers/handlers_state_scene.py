@@ -1079,6 +1079,26 @@ def _attach_story_english_track_to_production(production: dict, session: dict) -
         scene["tts"] = tts
 
 
+_STATE_WAITING_PRODUCTION_RETRY = "state_waiting_production_retry"
+_PRODUCTION_RETRY_BUTTON = "Повторить генерацию промптов"
+
+
+def _production_retry_markup():
+    from telegram import ReplyKeyboardMarkup
+
+    return ReplyKeyboardMarkup([[_PRODUCTION_RETRY_BUTTON]], resize_keyboard=True)
+
+
+async def _offer_production_retry(update, chat_id, session, message):
+    session["state"] = _STATE_WAITING_PRODUCTION_RETRY
+    SESSIONS[chat_id] = session
+    await update.message.reply_text(
+        f"{message}\n\nПлан сохранён. Нажмите «{_PRODUCTION_RETRY_BUTTON}».",
+        reply_markup=_production_retry_markup(),
+    )
+    return True
+
+
 async def _generate_production_after_overlay_title(
     update: Update,
     context: ContextTypes.DEFAULT_TYPE,
@@ -1130,16 +1150,18 @@ async def _generate_production_after_overlay_title(
                 ),
             )
     except ServiceUnavailableRetriesExhaustedError as e:
-        await update.message.reply_text(str(e))
-        return True
+        return await _offer_production_retry(update, chat_id, session, str(e))
     except Exception as e:
         logger.exception("production failed after overlay title")
-        await update.message.reply_text(f"Ошибка генерации промптов (кадры + видео): {_user_error_message(e)}")
-        return True
+        return await _offer_production_retry(
+            update, chat_id, session,
+            f"Ошибка генерации промптов (кадры + видео): {_user_error_message(e)}",
+        )
     plan = production.get("json_plan") if isinstance(production, dict) else None
     if not isinstance(plan, list) or not plan:
-        await update.message.reply_text("Модель не вернула production-план. Попробуйте ещё раз или начните с /generate.")
-        return True
+        return await _offer_production_retry(
+            update, chat_id, session, "Модель не вернула production-план.",
+        )
     if is_story_generation(session):
         _attach_story_english_track_to_production(production, session)
         plan = production.get("json_plan")
@@ -1196,6 +1218,8 @@ def keyboard_for_session_state(session: dict):
         return _story_character_approval_markup()
     if state == STATE_WAITING_ADVERTISING_PRODUCT_IMAGE:
         return remove_keyboard_markup()
+    if state == _STATE_WAITING_PRODUCTION_RETRY:
+        return _production_retry_markup()
     if state == STATE_WAITING_ADVERTISING_CAMPAIGN_CHOICE:
         return _advertising_campaign_choice_markup()
     if state == STATE_WAITING_ADVERTISING_CUSTOM_CAMPAIGN:
@@ -7727,6 +7751,14 @@ async def _on_text_impl(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
             session = persisted
     state = str(session.get("state") or "")
     low = text.lower().strip()
+    if state == _STATE_WAITING_PRODUCTION_RETRY:
+        if low in {_PRODUCTION_RETRY_BUTTON.lower(), "повторить", "ок", "ok"}:
+            await _generate_production_after_overlay_title(
+                update, context, chat_id=chat_id, session=session,
+            )
+        else:
+            await _offer_production_retry(update, chat_id, session, "Генерация промптов не завершена.")
+        return
     if state in {
         STATE_READY_FOR_PRODUCTION,
         _STATE_WAITING_FIRST_STEP_COPY_VIDEO,

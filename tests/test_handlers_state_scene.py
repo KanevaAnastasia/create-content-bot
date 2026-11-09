@@ -2798,7 +2798,7 @@ def test_early_silence_overlay_title_style_ok_asks_for_series(monkeypatch):
     assert any("Можно привязать это видео к серии" in text for text in replies)
 
 
-def test_overlay_title_style_generation_empty_plan_keeps_style_state(monkeypatch):
+def test_overlay_title_style_generation_empty_plan_offers_retry(monkeypatch):
     replies: list[str] = []
     SESSIONS[1050] = {
         "state": "state_waiting_overlay_title_style_approval",
@@ -2825,7 +2825,7 @@ def test_overlay_title_style_generation_empty_plan_keeps_style_state(monkeypatch
     update = SimpleNamespace(message=_Message(), effective_chat=SimpleNamespace(id=1050))
     asyncio.run(on_text(update, context=None))
 
-    assert SESSIONS[1050]["state"] == "state_waiting_overlay_title_style_approval"
+    assert SESSIONS[1050]["state"] == "state_waiting_production_retry"
     assert "production" not in SESSIONS[1050]
     assert any("Модель не вернула production-план" in text for text in replies)
 
