@@ -22,6 +22,7 @@ import ssl
 import threading
 import time
 import hashlib
+from requests.exceptions import ConnectionError as RequestsConnectionError, Timeout as RequestsTimeout
 from typing import Any, Callable, TypeVar
 
 from .constants import (
@@ -188,7 +189,7 @@ def _is_retryable_with_other_key_or_model(e: BaseException) -> bool:
     """
     if isinstance(e, GeminiQuotaError):
         return False
-    if isinstance(e, LLMCallTimeoutError):
+    if isinstance(e, LLMCallTimeoutError) or _is_transient_transport_retryable(e):
         return True
     s = str(e).lower()
     # Смена имени модели обрабатывается отдельно (break на следующую модель).
@@ -252,7 +253,7 @@ def _is_transient_transport_retryable(e: BaseException) -> bool:
     """Network/SSL transport glitches where retrying the same LLM request is reasonable."""
     current: BaseException | None = e
     while current is not None:
-        if isinstance(current, (TimeoutError, ConnectionError, ssl.SSLError)):
+        if isinstance(current, (TimeoutError, ConnectionError, ssl.SSLError, RequestsConnectionError, RequestsTimeout)):
             return True
         current = current.__cause__ if isinstance(current.__cause__, BaseException) else None
 
