@@ -494,6 +494,7 @@ def _publish_instagram(
     access_token = _instagram_access_token(project_slug, job.language)
     base_url = f"https://graph.facebook.com/{version}"
     state = dict((job.payload_json or {}).get("instagram_upload") or {})
+    url_fallback_enabled = project_env(project_slug, f"INSTAGRAM_URL_FALLBACK_{job.language.upper()}", "").lower() == "zernio"
 
     def save(**values: Any) -> None:
         state.update(values)
@@ -567,11 +568,26 @@ def _publish_instagram(
             # IN_PROGRESS forever. No publish was sent for this upload. Preserve
             # diagnostics, and never replace after an ambiguous publish reply.
             previous = list(state.get("previous_containers") or [])
-            previous.append({"creation_id": state["creation_id"], "status_code": status,
-                             "status_detail": state.get("status_detail", "")})
-            state = {"previous_containers": previous[-5:]}
+            prior = {"creation_id": state["creation_id"], "status_code": status,
+                     "status_detail": state.get("status_detail", "")}
+            if state.get("upload_error"):
+                prior.update({key: state[key] for key in
+                              ("upload_error", "upload_http_status", "upload_request_id") if key in state})
+            previous.append(prior)
+            use_url = state.get("upload_transport") == "url_pull" or (
+                url_fallback_enabled and state.get("stage") == "upload_rejected"
+            )
+            state = {"account_id": account_id, "previous_containers": previous[-5:]}
+            if use_url:
+                save(upload_transport="url_pull", stage="awaiting_url_upload")
 
     if not state.get("creation_id"):
+        use_url = state.get("upload_transport") == "url_pull"
+        if use_url:
+            if not url_fallback_enabled:
+                raise PublicationNeedsReview("Instagram URL fallback is disabled for this project; enable it before retrying.")
+            create_data.pop("upload_type", None)
+            create_data["video_url"] = _instagram_hosted_video(video_path, project_slug)
         create_response = requests.post(
             f"{base_url}/{account_id}/media",
             data=create_data,
@@ -580,49 +596,60 @@ def _publish_instagram(
         create_payload = _response_json(create_response, "Instagram reel container")
         creation_id = str(create_payload.get("id") or "")
         upload_url = str(create_payload.get("uri") or "")
-        if not creation_id or not upload_url:
+        if not creation_id or (not use_url and not upload_url):
             raise PublicationDeliveryError("Instagram did not return a creation id and upload URI.")
-        parsed_upload_url = urlparse(upload_url)
-        if (parsed_upload_url.scheme != "https" or parsed_upload_url.hostname != "rupload.facebook.com"
-                or parsed_upload_url.username or parsed_upload_url.password):
-            raise PublicationDeliveryError("Instagram returned an unsafe resumable upload URI.")
+        if not use_url:
+            parsed_upload_url = urlparse(upload_url)
+            if (parsed_upload_url.scheme != "https" or parsed_upload_url.hostname != "rupload.facebook.com"
+                    or parsed_upload_url.username or parsed_upload_url.password):
+                raise PublicationDeliveryError("Instagram returned an unsafe resumable upload URI.")
         # Do not persist the upload URL (it can contain credentials). A crash before
         # upload is reconciled through the saved container, not a blind new upload.
         save(creation_id=creation_id, account_id=account_id, fingerprint=fingerprint,
-             stage="upload_started", publish_ambiguous=False)
+             stage="processing" if use_url else "upload_started", publish_ambiguous=False)
 
-        mime_type = mimetypes.guess_type(video_path.name)[0] or "video/mp4"
-        try:
-            with video_path.open("rb") as handle:
-                upload_response = requests.post(
-                    upload_url,
-                    headers={
-                        "Authorization": f"OAuth {access_token}",
-                        "offset": "0",
-                        "file_size": str(file_size),
-                        "Content-Type": mime_type,
-                    },
-                    data=handle,
-                    timeout=DEFAULT_REQUEST_TIMEOUT,
-                )
-            if not upload_response.ok:
-                try:
-                    rejected_payload = upload_response.json()
-                except ValueError:
-                    rejected_payload = {}
-                debug = rejected_payload.get("debug_info") if isinstance(rejected_payload, dict) else None
-                if (isinstance(debug, dict) and debug.get("retriable") is False
-                        and debug.get("type") == "ProcessingFailedError"):
-                    save(stage="upload_rejected", upload_error="ProcessingFailedError",
-                         upload_http_status=upload_response.status_code)
-            _response_json(upload_response, "Instagram resumable video upload")
-            save(stage="processing")
-        except (requests.RequestException, PublicationDeliveryError):
-            # Even an upload error may have accepted the bytes. Inspect the same
-            # container rather than immediately creating another one.
-            status = container_status()
-            if status != "FINISHED":
-                raise
+        if not use_url:
+            mime_type = mimetypes.guess_type(video_path.name)[0] or "video/mp4"
+            try:
+                with video_path.open("rb") as handle:
+                    upload_response = requests.post(
+                        upload_url,
+                        headers={
+                            "Authorization": f"OAuth {access_token}",
+                            "offset": "0",
+                            "file_size": str(file_size),
+                            "Content-Type": mime_type,
+                        },
+                        data=handle,
+                        timeout=DEFAULT_REQUEST_TIMEOUT,
+                    )
+                if not upload_response.ok:
+                    try:
+                        rejected_payload = upload_response.json()
+                    except ValueError:
+                        rejected_payload = {}
+                    debug = rejected_payload.get("debug_info") if isinstance(rejected_payload, dict) else None
+                    if (isinstance(debug, dict) and debug.get("retriable") is False
+                            and debug.get("type") == "ProcessingFailedError"):
+                        request_id = str(upload_response.headers.get("x-fb-request-id") or "")
+                        # Keep diagnostics, not opaque provider payloads or credentials.
+                        if not all(c.isalnum() or c in "_-:" for c in request_id):
+                            request_id = ""
+                        save(stage="upload_rejected", upload_error="ProcessingFailedError",
+                             upload_http_status=upload_response.status_code,
+                             upload_request_id=request_id[:200])
+                _response_json(upload_response, "Instagram resumable video upload")
+                save(stage="processing")
+            except (requests.RequestException, PublicationDeliveryError):
+                # Even an upload error may have accepted the bytes. Inspect the same
+                # container rather than immediately creating another one.
+                status = container_status()
+                if status != "FINISHED":
+                    if (url_fallback_enabled and state.get("stage") == "upload_rejected"
+                            and status in {"IN_PROGRESS", "ERROR", "EXPIRED"}
+                            and not state.get("publish_ambiguous")):
+                        return _publish_instagram(job, project_slug, persist)
+                    raise
 
     deadline = time.monotonic() + 600
     while time.monotonic() < deadline:
@@ -684,6 +711,34 @@ def _publish_instagram(
     except Exception:
         pass
     return media_id
+
+
+def _instagram_hosted_video(video_path: Path, project_slug: str) -> str:
+    """Use project-approved storage only after a definitive direct-upload rejection."""
+    upload_path = video_path
+    if video_path.stat().st_size > 20 * 1024 * 1024:
+        from .ai_approval_service import _resolve_ffmpeg
+
+        upload_path = video_path.with_name(f"{video_path.stem}.delivery720.mp4")
+        if not (upload_path.is_file() and upload_path.stat().st_size > 0
+                and upload_path.stat().st_mtime_ns >= video_path.stat().st_mtime_ns):
+            temp_path = upload_path.with_name(f".{upload_path.stem}.{uuid.uuid4().hex}.tmp.mp4")
+            command = [
+                _resolve_ffmpeg(), "-hide_banner", "-loglevel", "error", "-i", str(video_path),
+                "-map", "0:v:0", "-map", "0:a:0?", "-vf", "scale=w='min(720,iw)':h=-2,setsar=1",
+                "-r", "30", "-c:v", "libx264", "-profile:v", "baseline", "-pix_fmt", "yuv420p",
+                "-preset", "fast", "-b:v", "2000k", "-maxrate", "2500k", "-bufsize", "5000k",
+                "-g", "60", "-bf", "0", "-c:a", "aac", "-b:a", "128k", "-ar", "48000",
+                "-ac", "2", "-movflags", "+faststart", str(temp_path),
+            ]
+            try:
+                subprocess.run(command, check=True, capture_output=True, timeout=900)
+                os.replace(temp_path, upload_path)
+            except (OSError, subprocess.SubprocessError) as exc:
+                raise PublicationDeliveryError("Instagram fallback video preparation failed.") from exc
+            finally:
+                temp_path.unlink(missing_ok=True)
+    return zernio_publisher.ZernioClient(project_slug).upload(upload_path)
 
 
 def _instagram_compatible_video(video_path: Path) -> Path:

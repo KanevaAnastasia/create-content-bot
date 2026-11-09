@@ -288,3 +288,172 @@ def test_rejected_upload_never_replaced_after_ambiguous_publish(upload, monkeypa
     with pytest.raises(PublicationNeedsReview):
         _publish_instagram(job, 'discipline', persist)
     assert len(calls) == before
+
+
+def test_project_enabled_url_fallback_publishes_only_new_ready_container(upload, monkeypatch):
+    job, calls, _, status, persist = upload
+    monkeypatch.setenv('PUBLISH_DISCIPLINE_INSTAGRAM_URL_FALLBACK_RU', 'zernio')
+    hosted = Mock(return_value='https://media.zernio.com/test.mp4')
+    monkeypatch.setattr('app.social_publishers._instagram_hosted_video', hosted)
+    original = requests.post
+    status.update(status_code='IN_PROGRESS')
+    create_bodies = []
+
+    def post(url, **kwargs):
+        if url.endswith('/account/media'):
+            create_bodies.append(dict(kwargs['data']))
+            if 'video_url' in kwargs['data']:
+                status.update(status_code='FINISHED')
+                return response({'id': 'url-container'})
+        if 'rupload.facebook.com' in url:
+            result = response({'debug_info': {'retriable': False, 'type': 'ProcessingFailedError'}}, ok=False)
+            result.headers = {'x-fb-request-id': 'safe-request-id'}
+            return result
+        return original(url, **kwargs)
+
+    monkeypatch.setattr('app.social_publishers.requests.post', post)
+    assert _publish_instagram(job, 'discipline', persist) == 'published-media'
+    hosted.assert_called_once()
+    assert len(create_bodies) == 2
+    assert create_bodies[0]['upload_type'] == 'resumable'
+    assert create_bodies[1]['video_url'] == 'https://media.zernio.com/test.mp4'
+    assert 'upload_type' not in create_bodies[1]
+    assert create_bodies[0]['caption'] == create_bodies[1]['caption']
+    published = [kwargs['data']['creation_id'] for url, kwargs in calls if url.endswith('/media_publish')]
+    assert published == ['url-container']
+    state = job.payload_json['instagram_upload']
+    assert state['upload_transport'] == 'url_pull'
+    assert state['previous_containers'][0]['upload_request_id'] == 'safe-request-id'
+    assert 'video_url' not in str(state)
+
+
+@pytest.mark.parametrize('enabled', [False, True])
+def test_network_uncertainty_never_activates_url_fallback(upload, monkeypatch, enabled):
+    job, _, _, status, persist = upload
+    monkeypatch.setenv('PUBLISH_DISCIPLINE_INSTAGRAM_URL_FALLBACK_RU', 'zernio' if enabled else '')
+    hosted = Mock()
+    monkeypatch.setattr('app.social_publishers._instagram_hosted_video', hosted)
+    original = requests.post
+    status.update(status_code='IN_PROGRESS')
+
+    def post(url, **kwargs):
+        if 'rupload.facebook.com' in url:
+            raise requests.Timeout('upload response lost')
+        return original(url, **kwargs)
+
+    monkeypatch.setattr('app.social_publishers.requests.post', post)
+    with pytest.raises(requests.Timeout):
+        _publish_instagram(job, 'discipline', persist)
+    hosted.assert_not_called()
+    assert job.payload_json['instagram_upload']['creation_id'] == 'container'
+
+
+def test_storage_failure_resumes_url_path_without_repeating_rejected_upload(upload, monkeypatch):
+    job, calls, _, status, persist = upload
+    monkeypatch.setenv('PUBLISH_DISCIPLINE_INSTAGRAM_URL_FALLBACK_RU', 'zernio')
+    hosted = Mock(side_effect=PublicationDeliveryError('storage unavailable'))
+    monkeypatch.setattr('app.social_publishers._instagram_hosted_video', hosted)
+    original = requests.post
+    status.update(status_code='IN_PROGRESS')
+
+    def post(url, **kwargs):
+        if 'rupload.facebook.com' in url:
+            return response({'debug_info': {'retriable': False, 'type': 'ProcessingFailedError'}}, ok=False)
+        return original(url, **kwargs)
+
+    monkeypatch.setattr('app.social_publishers.requests.post', post)
+    for _ in range(2):
+        with pytest.raises(PublicationDeliveryError, match='storage unavailable'):
+            _publish_instagram(job, 'discipline', persist)
+    assert len([url for url, _ in calls if url.endswith('/account/media')]) == 1
+    assert job.payload_json['instagram_upload']['stage'] == 'awaiting_url_upload'
+    assert hosted.call_count == 2
+
+
+def test_url_fallback_is_opt_in_even_for_explicit_rejection(upload, monkeypatch):
+    job, _, _, status, persist = upload
+    monkeypatch.setenv('PUBLISH_DISCIPLINE_INSTAGRAM_URL_FALLBACK_RU', '')
+    hosted = Mock()
+    monkeypatch.setattr('app.social_publishers._instagram_hosted_video', hosted)
+    original = requests.post
+    status.update(status_code='IN_PROGRESS')
+
+    def post(url, **kwargs):
+        if 'rupload.facebook.com' in url:
+            return response({'debug_info': {'retriable': False, 'type': 'ProcessingFailedError'}}, ok=False)
+        return original(url, **kwargs)
+
+    monkeypatch.setattr('app.social_publishers.requests.post', post)
+    with pytest.raises(PublicationDeliveryError):
+        _publish_instagram(job, 'discipline', persist)
+    hosted.assert_not_called()
+
+
+def test_hosted_video_compresses_once_and_preserves_source(monkeypatch, tmp_path):
+    from pathlib import Path
+    from app.social_publishers import _instagram_hosted_video
+    source = tmp_path / 'source.mp4'
+    with source.open('wb') as f:
+        f.truncate(21 * 1024 * 1024)
+    stamp = source.stat().st_mtime_ns
+    commands = []
+
+    def encode(command, **kwargs):
+        commands.append(command)
+        Path(command[-1]).write_bytes(b'compatible')
+
+    monkeypatch.setattr('app.ai_approval_service._resolve_ffmpeg', lambda: 'ffmpeg')
+    monkeypatch.setattr('app.social_publishers.subprocess.run', encode)
+    client = Mock()
+    client.upload.return_value = 'https://media.zernio.com/file.mp4'
+    monkeypatch.setattr('app.social_publishers.zernio_publisher.ZernioClient', lambda slug: client)
+    for _ in range(2):
+        assert _instagram_hosted_video(source, 'test') == client.upload.return_value
+    assert len(commands) == 1
+    assert client.upload.call_args.args[0].read_bytes() == b'compatible'
+    assert source.stat().st_size == 21 * 1024 * 1024
+    assert source.stat().st_mtime_ns == stamp
+
+
+def test_hosted_video_encoding_failure_never_uploads_partial_file(monkeypatch, tmp_path):
+    from pathlib import Path
+    import subprocess
+    from app.social_publishers import _instagram_hosted_video
+    source = tmp_path / 'source.mp4'
+    with source.open('wb') as f:
+        f.truncate(21 * 1024 * 1024)
+
+    def fail(command, **kwargs):
+        Path(command[-1]).write_bytes(b'partial')
+        raise subprocess.CalledProcessError(1, 'ffmpeg')
+
+    monkeypatch.setattr('app.ai_approval_service._resolve_ffmpeg', lambda: 'ffmpeg')
+    monkeypatch.setattr('app.social_publishers.subprocess.run', fail)
+    client = Mock()
+    monkeypatch.setattr('app.social_publishers.zernio_publisher.ZernioClient', client)
+    with pytest.raises(PublicationDeliveryError, match='preparation failed'):
+        _instagram_hosted_video(source, 'test')
+    client.assert_not_called()
+    assert list(tmp_path.iterdir()) == [source]
+
+
+def test_ru_fallback_setting_does_not_enable_other_language(upload, monkeypatch):
+    job, _, _, status, persist = upload
+    job.language = 'en'
+    monkeypatch.setenv('PUBLISH_DISCIPLINE_INSTAGRAM_BUSINESS_ACCOUNT_ID_EN', 'account')
+    monkeypatch.setenv('PUBLISH_DISCIPLINE_INSTAGRAM_URL_FALLBACK_RU', 'zernio')
+    monkeypatch.delenv('PUBLISH_DISCIPLINE_INSTAGRAM_URL_FALLBACK_EN', raising=False)
+    hosted = Mock()
+    monkeypatch.setattr('app.social_publishers._instagram_hosted_video', hosted)
+    original = requests.post
+    status.update(status_code='IN_PROGRESS')
+
+    def post(url, **kwargs):
+        if 'rupload.facebook.com' in url:
+            return response({'debug_info': {'retriable': False, 'type': 'ProcessingFailedError'}}, ok=False)
+        return original(url, **kwargs)
+
+    monkeypatch.setattr('app.social_publishers.requests.post', post)
+    with pytest.raises(PublicationDeliveryError):
+        _publish_instagram(job, 'discipline', persist)
+    hosted.assert_not_called()
