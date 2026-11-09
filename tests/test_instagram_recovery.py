@@ -248,3 +248,43 @@ def test_identity_network_error_never_exposes_token(monkeypatch):
     with pytest.raises(PublicationDeliveryError) as error:
         _verify_instagram_publish_identity("https://graph.facebook.com/v25.0", "secret", "account")
     assert "secret" not in str(error.value)
+
+
+def test_explicit_upload_rejection_replaces_stuck_unpublished_container(upload, monkeypatch):
+    job, calls, _, status, persist = upload
+    status.update(status_code="IN_PROGRESS", status="Processing")
+    original = requests.post
+
+    def reject(url, **kwargs):
+        if "rupload.facebook.com" in url:
+            return response({"debug_info": {"type": "ProcessingFailedError", "retriable": False}}, ok=False)
+        return original(url, **kwargs)
+
+    monkeypatch.setattr("app.social_publishers.requests.post", reject)
+    with pytest.raises(PublicationDeliveryError, match="ProcessingFailedError"):
+        _publish_instagram(job, "discipline", persist)
+    assert job.payload_json["instagram_upload"]["stage"] == "upload_rejected"
+
+    def recover(url, **kwargs):
+        result = original(url, **kwargs)
+        if "rupload.facebook.com" in url:
+            status.update(status_code="FINISHED", status="Ready")
+        return result
+
+    monkeypatch.setattr("app.social_publishers.requests.post", recover)
+    assert _publish_instagram(job, "discipline", persist) == "published-media"
+    assert len([url for url, _ in calls if url.endswith('/account/media')]) == 2
+    assert job.payload_json['instagram_upload']['previous_containers'][0]['status_code'] == 'IN_PROGRESS'
+
+
+def test_rejected_upload_never_replaced_after_ambiguous_publish(upload, monkeypatch):
+    job, calls, replies, status, persist = upload
+    replies[:] = [requests.Timeout('lost')]
+    with pytest.raises(PublicationNeedsReview):
+        _publish_instagram(job, 'discipline', persist)
+    job.payload_json['instagram_upload']['stage'] = 'upload_rejected'
+    status.update(status_code='IN_PROGRESS')
+    before = len(calls)
+    with pytest.raises(PublicationNeedsReview):
+        _publish_instagram(job, 'discipline', persist)
+    assert len(calls) == before

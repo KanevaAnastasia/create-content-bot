@@ -561,9 +561,11 @@ def _publish_instagram(
         status = container_status()
         if status == "PUBLISHED" or state.get("publish_ambiguous"):
             raise PublicationNeedsReview("Instagram publish may have succeeded. Check the account before retrying; the saved container was preserved.")
-        if status in {"ERROR", "EXPIRED"}:
-            # Only a terminal, unpublished container may be replaced. Keep its ID
-            # for diagnosis; never create another container after a lost publish reply.
+        upload_rejected = state.get("stage") == "upload_rejected" and status == "IN_PROGRESS"
+        if status in {"ERROR", "EXPIRED"} or upload_rejected:
+            # An explicit non-retriable upload rejection can leave Meta reporting
+            # IN_PROGRESS forever. No publish was sent for this upload. Preserve
+            # diagnostics, and never replace after an ambiguous publish reply.
             previous = list(state.get("previous_containers") or [])
             previous.append({"creation_id": state["creation_id"], "status_code": status,
                              "status_detail": state.get("status_detail", "")})
@@ -603,6 +605,16 @@ def _publish_instagram(
                     data=handle,
                     timeout=DEFAULT_REQUEST_TIMEOUT,
                 )
+            if not upload_response.ok:
+                try:
+                    rejected_payload = upload_response.json()
+                except ValueError:
+                    rejected_payload = {}
+                debug = rejected_payload.get("debug_info") if isinstance(rejected_payload, dict) else None
+                if (isinstance(debug, dict) and debug.get("retriable") is False
+                        and debug.get("type") == "ProcessingFailedError"):
+                    save(stage="upload_rejected", upload_error="ProcessingFailedError",
+                         upload_http_status=upload_response.status_code)
             _response_json(upload_response, "Instagram resumable video upload")
             save(stage="processing")
         except (requests.RequestException, PublicationDeliveryError):
