@@ -1713,16 +1713,12 @@ def _build_title_series_overlay_cue(
     if (not series_title and not counter) or duration <= 0:
         return None
     lang = str(language or "ru").strip().lower() or "ru"
-    normalized_counter = " ".join(counter.lower().split())
     return {
         "kind": "series",
         "text": series_title,
         "counter_text": counter,
-        "layout_variant": (
-            "story"
-            if normalized_counter.startswith(("история ", "story "))
-            else "default"
-        ),
+        # Counter wording must not change the established series typography.
+        "layout_variant": "default",
         "start_sec": 0.0,
         "end_sec": duration,
         "style": _title_series_style_name(lang),

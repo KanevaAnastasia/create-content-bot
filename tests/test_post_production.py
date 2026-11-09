@@ -225,7 +225,7 @@ def test_word_synced_fixed_block_is_not_split_by_dense_subtitle_fallback():
     assert post_production._expand_dense_subtitle_entry(entry) == [entry]
 
 
-def test_story_series_title_stack_is_centered_in_three_rows(tmp_path):
+def test_story_counter_uses_standard_series_layout(tmp_path):
     target = tmp_path / "story-title.ass"
     series_cue = post_production._build_title_series_overlay_cue(
         {"ru": "Истории любимых блюд"},
@@ -240,7 +240,7 @@ def test_story_series_title_stack_is_centered_in_three_rows(tmp_path):
     )
 
     assert series_cue is not None
-    assert series_cue["layout_variant"] == "story"
+    assert series_cue["layout_variant"] == "default"
     post_production._write_burned_subtitle_ass(
         target,
         [],
@@ -254,8 +254,8 @@ def test_story_series_title_stack_is_centered_in_three_rows(tmp_path):
     series_lines = [line for line in payload.splitlines() if ",TitleSeriesRU," in line]
     title_lines = [line for line in payload.splitlines() if ",TitleOverlayRU," in line]
     assert len(series_lines) == 2
-    assert all(r"\pos(540," in line for line in series_lines)
-    assert any(r"\an8\pos(540," in line for line in title_lines)
+    assert not any(r"\an8\pos(540," in line for line in series_lines)
+    assert not any(r"\an8\pos(540," in line for line in title_lines)
     assert "история" in payload
     assert "ОЛИВЬЕ" in payload
 
