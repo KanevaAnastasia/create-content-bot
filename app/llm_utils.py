@@ -732,7 +732,10 @@ def gemini_generate_sync(
         for model_pos, model_id in enumerate(model_ids, start=1):
             logger.info("Gemini model selection: trying model %s/%s = %s", model_pos, len(model_ids), model_id)
 
+            disable_thinking_after_disconnect = False
+
             def _call() -> str:
+                nonlocal disable_thinking_after_disconnect
                 _llm_io.info(
                     "[Gemini] model=%s transport=%s ctx=%s prompt_chars=%s\n---------- PROMPT ----------\n%s\n---------- END PROMPT ----------",
                     model_id,
@@ -747,7 +750,16 @@ def gemini_generate_sync(
                 if image_payloads:
                     request = [vertex_part_from_text(project, location, prompt_snapshot)]
                     request.extend(vertex_part_from_data(project, location, image) for image in image_payloads)
-                resp = model.generate_content(request, safety_settings=safety_settings)
+                generation_kwargs: dict[str, Any] = {}
+                if disable_thinking_after_disconnect:
+                    generation_kwargs["generation_config"] = {"thinking_config": {"thinking_budget": 0}}
+                try:
+                    resp = model.generate_content(request, safety_settings=safety_settings, **generation_kwargs)
+                except Exception as error:
+                    if model_id == "gemini-2.5-flash" and _is_transient_transport_retryable(error):
+                        disable_thinking_after_disconnect = True
+                        logger.warning("Gemini Flash transport failed; next attempt will use thinking_budget=0")
+                    raise
                 text = _extract_text_from_vertex_response(resp)
                 if not text:
                     details = _summarize_empty_vertex_response(resp)
