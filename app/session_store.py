@@ -217,6 +217,9 @@ def _scene_map_for_session(session: dict[str, Any]) -> dict[int, str]:
     return out
 
 
+_SCENE_RECOVERY_KEYS = ("video_provider_choice_pending", "syntax_fallback_pending", "syntax_retry_context")
+
+
 def _sync_pending_inputs_to_artifacts(session: dict[str, Any], run_id_str: str | None) -> None:
     if not run_id_str:
         return
@@ -229,7 +232,7 @@ def _sync_pending_inputs_to_artifacts(session: dict[str, Any], run_id_str: str |
         stale_rows = db.execute(
             select(GenerationArtifact).where(
                 GenerationArtifact.run_id == run_id,
-                GenerationArtifact.artifact_type.in_(["scene_pending_input", "run_pending_input"]),
+                GenerationArtifact.artifact_type.in_(["scene_pending_input", "run_pending_input", "scene_provider_recovery"]),
             )
         ).scalars().all()
         for row in stale_rows:
@@ -262,6 +265,25 @@ def _sync_pending_inputs_to_artifacts(session: dict[str, Any], run_id_str: str |
                     },
                 )
             )
+        production = session.get("production") or {}
+        scenes = production.get("json_plan") or []
+        for idx, scene in enumerate(scenes):
+            scene_id_raw = scene_map.get(idx)
+            if not isinstance(scene, dict) or not scene_id_raw:
+                continue
+            recovery = {key: scene[key] for key in _SCENE_RECOVERY_KEYS if isinstance(scene.get(key), dict)}
+            if not recovery:
+                continue
+            scene_id = uuid.UUID(str(scene_id_raw))
+            db.add(GenerationArtifact(
+                run_id=run_id,
+                scene_id=scene_id,
+                artifact_type="scene_provider_recovery",
+                label=f"Scene {idx + 1} provider recovery",
+                uri=f"db://scenes/{scene_id}/provider_recovery",
+                mime_type="application/json",
+                payload_json=_serialize_value(recovery),
+            ))
         for key in _RUN_PENDING_SESSION_KEYS:
             pending = session.get(key)
             if not isinstance(pending, dict):
@@ -296,12 +318,24 @@ def _restore_pending_inputs_from_artifacts(session: dict[str, Any], run_id_str: 
             select(GenerationArtifact)
             .where(
                 GenerationArtifact.run_id == run_id,
-                GenerationArtifact.artifact_type.in_(["scene_pending_input", "run_pending_input"]),
+                GenerationArtifact.artifact_type.in_(["scene_pending_input", "run_pending_input", "scene_provider_recovery"]),
             )
             .order_by(GenerationArtifact.created_at.asc(), GenerationArtifact.id.asc())
         ).scalars().all()
+    scene_map = _scene_map_for_session(session)
+    scenes = (session.get("production") or {}).get("json_plan") or []
+    scenes_by_id = {str(scene_map[idx]): scene for idx, scene in enumerate(scenes)
+                    if idx in scene_map and isinstance(scene, dict)}
     for row in rows:
         payload = row.payload_json if isinstance(row.payload_json, dict) else {}
+        if row.artifact_type == "scene_provider_recovery":
+            scene = scenes_by_id.get(str(row.scene_id))
+            if scene is not None:
+                for key in _SCENE_RECOVERY_KEYS:
+                    value = _deserialize_value(payload.get(key))
+                    if isinstance(value, dict) and key not in scene:
+                        scene[key] = value
+            continue
         key = str(payload.get("session_key") or "").strip()
         if key not in (*_PENDING_SESSION_KEYS, *_RUN_PENDING_SESSION_KEYS) or key in session:
             continue

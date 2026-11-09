@@ -8983,7 +8983,7 @@ async def _handle_scene_video_provider_choice_pending(
         if choice == "syntax":
             await _safe_reply_text(
                 update.message,
-                "Повторяю эту сцену через Syntax сразу для всех языков…"
+                f"Повторяю через Syntax недостающие языки: {', '.join(languages)}…"
             )
             requests = [
                 BatchFallbackRequest(

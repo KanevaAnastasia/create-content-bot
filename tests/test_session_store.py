@@ -2005,3 +2005,51 @@ def test_video_command_pending_syntax_confirmation_is_persisted(monkeypatch):
     assert pending["source"] == "video_command"
     assert pending["original_prompt"] == "policy prompt"
     assert pending["duration_for_caption"] == 6
+
+
+def test_scene_syntax_recovery_survives_restart_and_clears_after_completion(monkeypatch):
+    _install_sqlite(monkeypatch)
+    from app.handlers import handlers_state_media as media
+
+    entry = media._scene_video_provider_choice_entry(
+        prompt="English scene", model="veo3_fast", duration_sec=6,
+        start_image=b"reference", end_image=None, quality="1080",
+        aspect_ratio="9:16", audio_enabled=True, syntax_error_message="failed",
+    )
+    pending = {"source": "scene_batch", "languages": ["en"],
+               "entries_by_lang": {"en": entry}}
+    scene = {"scene": 1, "duration_sec": 6, "text": "Scene",
+             "video_prompt_by_lang": {"en": "English scene"},
+             "video_provider_choice_pending": pending}
+    session = {"state": "waiting_scene_media", "target_languages": ["en"],
+               "production": {"json_plan": [scene]}, "image_scene_index": 0,
+               "scene_media_substep": media.SCENE_MEDIA_SUBSTEP_VIDEO}
+    session_store.save_session(991, session)
+    restored = session_store.load_session(991)
+    restored_scene = restored["production"]["json_plan"][0]
+    assert restored_scene["video_provider_choice_pending"] == pending
+    calls = []
+
+    async def batch(**kwargs):
+        calls.append([request.key for request in kwargs["requests"]])
+        assert kwargs["requests"][0].start_image == b"reference"
+        return {}
+
+    class Message:
+        async def reply_text(self, text, **kwargs):
+            assert "Ожидаю апрув" not in text
+
+    monkeypatch.setattr(media, "_attempt_syntax_video_fallback_batch", batch)
+    assert asyncio.run(media._handle_waiting_scene_media_state(
+        SimpleNamespace(message=Message()), None, chat_id=991,
+        session=restored, text="Syntax",
+    ))
+    assert calls == [["en"]]
+    session_store.save_session(991, restored)
+    restored = session_store.load_session(991)
+    assert restored["production"]["json_plan"][0]["video_provider_choice_pending"]["languages"] == ["en"]
+    for key in session_store._SCENE_RECOVERY_KEYS:
+        restored["production"]["json_plan"][0].pop(key, None)
+    session_store.save_session(991, restored)
+    reloaded = session_store.load_session(991)
+    assert "video_provider_choice_pending" not in reloaded["production"]["json_plan"][0]
