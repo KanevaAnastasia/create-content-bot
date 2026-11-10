@@ -157,10 +157,15 @@ def test_ai_only_sends_allowlisted_report_fields(monkeypatch):
     seen = []
     plan = {"summary": "План", "actions": [{"title": "Тест", "action": "Хук", "evidence": "Нет данных", "check": "Через 7 дней"}] * 3}
     monkeypatch.setattr(app.llm_utils, "gemini_generate_sync", lambda prompt, **kw: seen.append(prompt) or __import__('json').dumps(plan))
-    data = row("a", 10, access_token="DO_NOT_SEND", payload_json={"secret": "DO_NOT_SEND"})
+    data = row("a", 10, access_token="DO_NOT_SEND", payload_json={"secret": "DO_NOT_SEND"},
+               comments_sample={"count": 12, "more": True,
+                                "items": [{"text": "Покажите замену сахара", "username": "DO_NOT_SEND"}] * 12})
     assert m.marketing_brief("Проект", [data], [], "")["summary"] == "План"
     assert "DO_NOT_SEND" not in seen[0]
     assert "недоверенные" in seen[0]
+    payload = json.loads(seen[0].split("ДАННЫЕ JSON:\n")[-1])
+    assert len(payload["own_videos"][0]["comments_sample"]["items"]) == 10
+    assert "Не предлагай проверять API" in seen[0]
 
 
 def test_plan_rejects_unstructured_response():
@@ -202,10 +207,11 @@ def test_marketer_queue_cannot_receive_publication_routes(page):
     assert queue.routing_key == 'marketer'
 
 
-def test_refresh_collects_new_youtube_behaviour(page, monkeypatch):
+@pytest.mark.parametrize("action,fail_ai", [("refresh", False), ("daily", False), ("daily", True)])
+def test_refresh_collects_new_youtube_behaviour(page, monkeypatch, action, fail_ai):
     pid = uuid.uuid4()
     task = page.reserve_report(pid, "refresh")
-    project = SimpleNamespace(id=pid, slug="discipline")
+    project = SimpleNamespace(id=pid, slug="discipline", title="Discipline")
     monkeypatch.setattr(page.Project.objects, "get", lambda **kw: project)
     class Query:
         def select_related(self, *a): return self
@@ -217,10 +223,23 @@ def test_refresh_collects_new_youtube_behaviour(page, monkeypatch):
     monkeypatch.setattr(page, "collect_metrics", lambda *a: {"metrics": {"views": 4}})
     monkeypatch.setattr(page, "collect_followers", lambda *a: {"platform": "youtube", "language": "ru", "account_id": "c", "followers": 2})
     monkeypatch.setattr(page, "collect_behaviour", lambda *a: {"subscribers_gained": 1})
-    page.run_report(pid, task, "refresh")
+    seen = []
+    page.update_report(pid, task, brief={"summary": "old"})
+    def brief(title, rows, niche, query):
+        seen.append(rows)
+        if fail_ai:
+            raise RuntimeError("AI unavailable")
+        return {"summary": "new"}
+    monkeypatch.setattr(page, "marketing_brief", brief)
+    page.run_report(pid, task, action)
     result = page.read_report(pid)
     assert result["state"] == "done"
     assert result["rows"][0]["behaviour"]["subscribers_gained"] == 1
+    assert bool(seen) == (action == "daily")
+    if action == "daily":
+        assert seen[0][0]["metrics"]["views"] == 4
+        assert result["brief"]["summary"] == ("old" if fail_ai else "new")
+        assert bool(result.get("brief_error")) == fail_ai
 
 
 def test_homepage_marketer_link_matches_registered_route(page):

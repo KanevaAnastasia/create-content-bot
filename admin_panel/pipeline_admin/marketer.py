@@ -105,7 +105,7 @@ def run_report(project_id, task_id, action, query="", language="ru"):
                 raise ValueError("Collect evidence first")
             brief = marketing_brief(project.title, existing.get("rows", []), existing.get("niche", []), existing.get("niche_query", ""))
             update_report(project_id, task_id, brief=brief, brief_at=time.time(),
-                          brief_data_at=existing.get("fetched_at"), brief_niche_at=existing.get("niche_fetched"))
+                          brief_data_at=existing.get("fetched_at"), brief_niche_at=existing.get("niche_fetched"), brief_error="")
         elif action == "behaviour":
             existing = read_report(project_id)
             rows = existing.get("rows", [])
@@ -202,6 +202,14 @@ def run_report(project_id, task_id, action, query="", language="ru"):
             snapshots = snapshot_history(existing.get("daily_snapshots", []), accounts, collected, stamp)
             update_report(project_id, task_id, rows=collected, accounts=accounts, fetched_at=stamp,
                           daily_snapshots=snapshots)
+            if action == "daily":
+                # Metrics survive an AI failure; never replace a good plan with an empty one.
+                try:
+                    brief = marketing_brief(project.title, collected, [], "")
+                    update_report(project_id, task_id, brief=brief, brief_at=time.time(),
+                                  brief_data_at=stamp, brief_niche_at=existing.get("niche_fetched"), brief_error="")
+                except Exception:
+                    update_report(project_id, task_id, brief_error="Утренние данные собраны, но три совета не удалось обновить. Прежний анализ сохранён.")
         update_report(project_id, task_id, state="done", finished=time.time())
     except Exception:
         update_report(project_id, task_id, state="error", finished=time.time(),

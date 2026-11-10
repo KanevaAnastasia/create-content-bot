@@ -1,0 +1,7 @@
+<section class="mk-card" id="ai-plan"><h2>3 важных совета на сегодня</h2>
+<p class="muted">Каждый день в 09:00 МСК запускается сбор статистики, затем — анализ просмотров, реакций, удержания и доступных комментариев. Советы появляются после завершения анализа.</p>
+{% if can_change and project %}<form method="post">{% csrf_token %}<input type="hidden" name="project" value="{{ project.id }}"><input type="hidden" name="language" value="ru"><button name="action" value="brief">Обновить три совета</button><small> Использует настроенный AI и его бюджет.</small></form>{% endif %}
+{% if report.brief_error %}<p class="warning">{{ report.brief_error }}</p>{% endif %}
+{% if brief_stale %}<p class="muted">После этого анализа статистика обновлялась. Советы относятся к предыдущему срезу.</p>{% endif %}
+{% if brief_plan %}<p class="plan-summary">{{ brief_plan.summary }}</p><div class="mk-grid">{% for card in brief_plan.actions %}<article class="mk-card plan-card plan-{{ card.priority }}"><small>СОВЕТ {{ forloop.counter }}</small><h3>{{ card.title }}</h3><p>{{ card.action }}</p><div class="plan-label">ПОЧЕМУ ЭТО ВАЖНО</div><p>{{ card.evidence }}</p><div class="plan-label">КАК ОЦЕНИТЬ РЕЗУЛЬТАТ</div><p>{{ card.check }}</p></article>{% endfor %}</div><details><summary>Ограничения анализа</summary><p>{{ brief_plan.limitations }}</p></details>
+{% else %}<p>Анализ ещё не готов. Здесь появятся три конкретных рекомендации по контенту, а не технические задания.</p>{% endif %}</section>

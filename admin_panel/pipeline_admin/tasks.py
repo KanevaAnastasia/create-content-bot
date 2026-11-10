@@ -31,9 +31,9 @@ if celery_app is not None:
         from .models import Project
         from .marketer import reserve_report
         for project_id in Project.objects.filter(is_active=True).values_list("id", flat=True):
-            task_id = reserve_report(project_id, "refresh")
+            task_id = reserve_report(project_id, "daily")
             if task_id:
-                marketer_report_task.delay(str(project_id), task_id, "refresh")
+                marketer_report_task.delay(str(project_id), task_id, "daily")
 
     @celery_app.task(name="pipeline_admin.marketer_report", queue="marketer", soft_time_limit=900, time_limit=960)
     def marketer_report_task(project_id, task_id, action, query="", language="ru"):
