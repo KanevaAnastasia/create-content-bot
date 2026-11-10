@@ -130,23 +130,12 @@ def test_story_style_choice_keyboard_starts_with_primary_then_named_styles():
     markup = _story_style_choice_markup()
     labels = [button["text"] for row in markup.to_dict()["keyboard"] for button in row]
 
-    assert labels[:15] == [
-        "Основной",
-        "Сухая акварель",
-        "Ретро-мультфильм",
-        "Книжная гуашь",
-        "Пластилиновый мультфильм",
-        "Кукольный стоп-моушен",
-        "Рисованная ретро-сказка",
-        "Сумеречная акварель",
-        "Светлая анимационная пастель",
-        "Классический рисованный мультфильм",
-        "Фетровая аппликация",
-        "Народная рисованная сказка",
-        "Пастельные мелки",
-        "Вязаная иллюстрация",
-        "Минималистичный ретро-мультфильм",
+    assert labels[:5] == [
+        "1. Сухая акварель", "2. Ретро-мультфильм", "3. Книжная гуашь",
+        "4. Пластилиновый мультфильм", "5. Кукольный стоп-моушен",
     ]
+    assert "Дальше →" in labels
+    assert "Основной" in labels
 
 
 def test_primary_story_character_reference_prompt_has_no_separate_style_instruction():

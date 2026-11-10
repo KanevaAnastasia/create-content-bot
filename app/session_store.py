@@ -32,6 +32,7 @@ _RUN_PENDING_SESSION_KEYS = (
     "social_descriptions_pending",
 )
 _CHAT_SESSION_CACHE_KEYS = {
+    "story_style_preview_page",
     "pending_project_generation_mode",
     "directorial_notes",
     "state",

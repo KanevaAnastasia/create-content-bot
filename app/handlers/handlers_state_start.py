@@ -1,6 +1,9 @@
 import json
 
-from ..story_style_previews import PREVIEW_BUTTON, send_story_style_previews
+from ..story_style_previews import (
+    PREVIEW_BUTTON, NEXT_BUTTON, PREVIOUS_BUTTON, PAGE_KEY, page_index,
+    page_rows, page_description, resolve_choice, send_story_style_previews,
+)
 
 from .handlers_state_deps import (
     Any,
@@ -414,34 +417,27 @@ def _story_english_choice_markup() -> object | None:
     )
 
 
-def _story_style_choice_markup() -> object | None:
+def _story_style_choice_markup(session: dict | None = None) -> object | None:
     try:
         from telegram import ReplyKeyboardMarkup
     except Exception:
         return None
     return ReplyKeyboardMarkup(
-        [
-            ["Основной"],
-            ["Сухая акварель"],
-            ["Ретро-мультфильм"],
-            ["Книжная гуашь"],
-            ["Пластилиновый мультфильм"],
-            ["Кукольный стоп-моушен"],
-            ["Рисованная ретро-сказка"],
-            ["Сумеречная акварель"],
-            ["Светлая анимационная пастель"],
-            ["Классический рисованный мультфильм"],
-            ["Фетровая аппликация"],
-            ["Народная рисованная сказка"],
-            ["Пастельные мелки"],
-            ["Вязаная иллюстрация"],
-            ["Минималистичный ретро-мультфильм"],
-            [PREVIEW_BUTTON],
-            [NAV_BUTTON_START_OVER],
-        ],
+        page_rows(session) + [[NAV_BUTTON_START_OVER]],
         resize_keyboard=True,
         one_time_keyboard=False,
     )
+
+
+async def _show_story_style_page(update, session):
+    delivered = await send_story_style_previews(update.message, session)
+    text = page_description(session)
+    if not delivered:
+        text += "\nНе удалось загрузить все картинки. Нажмите «Показать примеры», чтобы повторить."
+    await _reply_text_with_optional_markup(
+        update, text, reply_markup=_story_style_choice_markup(session),
+    )
+
 
 
 def _story_script_approval_markup() -> object | None:
@@ -1356,29 +1352,8 @@ async def _handle_waiting_story_english_choice_state(
         return True
     session["state"] = STATE_WAITING_STORY_STYLE_CHOICE
     SESSIONS[chat_id] = session
-    await send_story_style_previews(update.message)
-    await _reply_text_with_optional_markup(
-        update,
-        "Выберите стиль кадров ролика. В альбомах — образцы с названиями; их можно открыть крупно.\n"
-        "• «Сухая акварель» — мягкая рисованная фактура и лёгкая сепия.\n"
-        "• «Ретро-мультфильм» — угловатая графика, плоские формы, оливково-горчично-коралловая палитра.\n"
-        "• «Книжная гуашь» — тёплая фактурная иллюстрация из детской книги.\n"
-        "• «Пластилиновый мультфильм» — объёмные пластилиновые герои и миниатюрные декорации.\n"
-        "• «Кукольный стоп-моушен» — мягкие войлочные куклы, ткань и ручная фактура.\n"
-        "• «Рисованная ретро-сказка» — гуашевая мультипликация в духе старых рисованных сказок.\n\n"
-        "• «Сумеречная акварель» — глубокие синие тени, бумажная фактура и тёплый свет лампы.\n"
-        "• «Светлая анимационная пастель» — чистая мягкая 2D-анимация в солнечной пастельной гамме.\n"
-        "• «Классический рисованный мультфильм» — выразительный контур, плоский цвет и живая мультипликация.\n"
-        "• «Фетровая аппликация» — весь кадр собран из фетра, ткани и декоративных швов.\n"
-        "• «Народная рисованная сказка» — гуашь, деревянный быт и славянский растительный орнамент.\n\n"
-        "• «Пастельные мелки» — яркие живые штрихи масляной пастели на белой бумаге.\n"
-        "• «Вязаная иллюстрация» — весь кадр связан из пряжи с видимыми петлями и узелками.\n"
-        "• «Минималистичный ретро-мультфильм» — тонкий контур, светлый фон и лаконичная оранжево-бирюзовая палитра.\n\n"
-        "«Основной» сохраняет внешний вид персонажей проекта.\n"
-        "Выбранная стилистика будет единой для всех персонажей и всех кадров ролика. "
-        "Если альбомы не загрузились, нажмите «Показать примеры».",
-        reply_markup=_story_style_choice_markup(),
-    )
+    session[PAGE_KEY] = 0
+    await _show_story_style_page(update, session)
     return True
 
 
@@ -1390,15 +1365,14 @@ async def _handle_waiting_story_style_choice_state(
     session: dict,
     text: str,
 ) -> bool:
-    if str(text or "").strip() == PREVIEW_BUTTON:
-        delivered = await send_story_style_previews(update.message)
-        await _reply_text_with_optional_markup(
-            update,
-            "Выберите стиль кнопкой под сообщением." if delivered else
-            "Не удалось загрузить все примеры. Нажмите «Показать примеры», чтобы повторить.",
-            reply_markup=_story_style_choice_markup(),
-        )
+    action = str(text or "").strip()
+    if action in {PREVIEW_BUTTON, NEXT_BUTTON, PREVIOUS_BUTTON}:
+        current = page_index(session)
+        session[PAGE_KEY] = current + (1 if action == NEXT_BUTTON else -1 if action == PREVIOUS_BUTTON else 0)
+        session[PAGE_KEY] = page_index(session)
+        await _show_story_style_page(update, session)
         return True
+    text = resolve_choice(text)
     low = str(text or "").strip().lower()
     if low in {"основной", "основная", "primary", "main"}:
         style_key = STORY_STYLE_PRIMARY
@@ -1448,8 +1422,8 @@ async def _handle_waiting_story_style_choice_state(
     else:
         await _reply_text_with_optional_markup(
             update,
-            "Выберите один из пятнадцати вариантов стилистики.",
-            reply_markup=_story_style_choice_markup(),
+            "Выберите стиль кнопкой под последними примерами.",
+            reply_markup=_story_style_choice_markup(session),
         )
         return True
     session[STORY_VISUAL_STYLE_SESSION_KEY] = style_key

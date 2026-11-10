@@ -15,17 +15,27 @@ def test_catalog_contains_all_fourteen_valid_references():
             image.verify()
 
 
-def test_delivers_two_albums_with_exact_style_names():
-    message=SimpleNamespace(reply_media_group=AsyncMock())
-    assert asyncio.run(previews.send_story_style_previews(message))
-    calls=message.reply_media_group.await_args_list
-    assert [len(c.kwargs['media']) for c in calls]==[7,7]
-    assert [item.caption for c in calls for item in c.kwargs['media']]==[
-        s['label'] for s in previews.STORY_VISUAL_STYLES.values() if s['reference_path']]
+def test_pages_have_matching_photos_descriptions_and_buttons():
+    all_labels=[]
+    for page, count in [(0,5),(1,5),(2,4)]:
+        session={previews.PAGE_KEY:page}
+        message=SimpleNamespace(reply_photo=AsyncMock())
+        assert asyncio.run(previews.send_story_style_previews(message,session))
+        calls=message.reply_photo.await_args_list
+        assert len(calls)==count
+        for call, (number, key, style) in zip(calls,previews.page_items(session)):
+            label=previews.choice_label(number,style)
+            caption=call.kwargs['caption']
+            assert caption==label+'\n'+previews.DESCRIPTIONS[style['label']]
+            assert [label] in previews.page_rows(session)
+            assert label in previews.page_description(session)
+            assert previews.resolve_choice(label)==style['label']
+            all_labels.append(label)
+    assert len(set(all_labels))==14
 
 
 def test_delivery_failure_keeps_style_choice_available(monkeypatch):
-    message=SimpleNamespace(reply_media_group=AsyncMock(side_effect=RuntimeError('offline')),reply_text=AsyncMock())
+    message=SimpleNamespace(reply_photo=AsyncMock(side_effect=RuntimeError('offline')),reply_text=AsyncMock())
     session={'state':start.STATE_WAITING_STORY_STYLE_CHOICE}
     result=asyncio.run(start._handle_waiting_story_style_choice_state(
         SimpleNamespace(message=message),None,chat_id=1,session=session,text=previews.PREVIEW_BUTTON))
@@ -36,9 +46,38 @@ def test_delivery_failure_keeps_style_choice_available(monkeypatch):
 
 def test_english_choice_shows_previews_before_style_menu(monkeypatch):
     monkeypatch.setattr(start,'SESSIONS',{})
-    message=SimpleNamespace(reply_media_group=AsyncMock(),reply_text=AsyncMock())
+    message=SimpleNamespace(reply_photo=AsyncMock(),reply_text=AsyncMock())
     session={}
     asyncio.run(start._handle_waiting_story_english_choice_state(
         SimpleNamespace(message=message),None,chat_id=1,session=session,text='Нет'))
-    assert message.reply_media_group.await_count==2
+    assert message.reply_photo.await_count==5
     assert session['state']==start.STATE_WAITING_STORY_STYLE_CHOICE
+
+
+def test_navigation_preserves_story_and_stays_inside_page_bounds():
+    message=SimpleNamespace(reply_photo=AsyncMock(),reply_text=AsyncMock())
+    update=SimpleNamespace(message=message)
+    session={'state':start.STATE_WAITING_STORY_STYLE_CHOICE,'user_input':'Моя история'}
+    for action, expected in [(previews.PREVIOUS_BUTTON,0),(previews.NEXT_BUTTON,1),
+                             (previews.NEXT_BUTTON,2),(previews.NEXT_BUTTON,2),
+                             (previews.PREVIOUS_BUTTON,1)]:
+        asyncio.run(start._handle_waiting_story_style_choice_state(
+            update,None,chat_id=1,session=session,text=action))
+        assert session[previews.PAGE_KEY]==expected
+        assert session['state']==start.STATE_WAITING_STORY_STYLE_CHOICE
+        assert session['user_input']=='Моя история'
+    from app.session_store import _chat_session_cache_payload
+    assert _chat_session_cache_payload(session)[previews.PAGE_KEY]==1
+    assert previews.NEXT_BUTTON not in sum(previews.page_rows({previews.PAGE_KEY:2}),[])
+
+
+def test_numbered_choice_enters_existing_generation_flow(monkeypatch):
+    proceed=AsyncMock(return_value=True)
+    monkeypatch.setattr(start,'_start_initial_story_voiceover',proceed)
+    monkeypatch.setattr(start,'SESSIONS',{})
+    update=SimpleNamespace(message=SimpleNamespace(reply_text=AsyncMock()))
+    session={}
+    asyncio.run(start._handle_waiting_story_style_choice_state(
+        update,None,chat_id=1,session=session,text='12. Пастельные мелки'))
+    assert session[start.STORY_VISUAL_STYLE_SESSION_KEY]=='oil_pastel'
+    proceed.assert_awaited_once()

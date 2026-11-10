@@ -1,42 +1,99 @@
-"""Show the same style references that guide Story image generation."""
+"""Paginated style references with matching captions and choice labels."""
 import logging
 from pathlib import Path
-
-from telegram import InputMediaPhoto
-
 from .story_generation import STORY_VISUAL_STYLES
 
 logger = logging.getLogger(__name__)
 PREVIEW_BUTTON = "Показать примеры"
+NEXT_BUTTON = "Дальше →"
+PREVIOUS_BUTTON = "← Назад"
+PAGE_KEY = "story_style_preview_page"
+PAGE_SIZE = 5
 ROOT = Path(__file__).resolve().parent.parent
+DESCRIPTIONS = {'Сухая акварель': 'мягкая рисованная фактура и лёгкая сепия.',
+ 'Ретро-мультфильм': 'угловатая графика, плоские формы, оливково-горчично-коралловая палитра.',
+ 'Книжная гуашь': 'тёплая фактурная иллюстрация из детской книги.',
+ 'Пластилиновый мультфильм': 'объёмные пластилиновые герои и миниатюрные декорации.',
+ 'Кукольный стоп-моушен': 'мягкие войлочные куклы, ткань и ручная фактура.',
+ 'Рисованная ретро-сказка': 'гуашевая мультипликация в духе старых рисованных сказок.',
+ 'Сумеречная акварель': 'глубокие синие тени, бумажная фактура и тёплый свет лампы.',
+ 'Светлая анимационная пастель': 'чистая мягкая 2D-анимация в солнечной пастельной гамме.',
+ 'Классический рисованный мультфильм': 'выразительный контур, плоский цвет и живая мультипликация.',
+ 'Фетровая аппликация': 'весь кадр собран из фетра, ткани и декоративных швов.',
+ 'Народная рисованная сказка': 'гуашь, деревянный быт и славянский растительный орнамент.',
+ 'Пастельные мелки': 'яркие живые штрихи масляной пастели на белой бумаге.',
+ 'Вязаная иллюстрация': 'весь кадр связан из пряжи с видимыми петлями и узелками.',
+ 'Минималистичный ретро-мультфильм': 'тонкий контур, светлый фон и лаконичная оранжево-бирюзовая '
+                                     'палитра.'}
 
 
-async def send_story_style_previews(message) -> bool:
-    sender = getattr(message, "reply_media_group", None)
+def catalog():
+    return [(key, style) for key, style in STORY_VISUAL_STYLES.items() if style.get("reference_path")]
+
+
+def page_index(session=None):
+    try:
+        value = int((session or {}).get(PAGE_KEY, 0))
+    except (TypeError, ValueError):
+        value = 0
+    return max(0, min(value, (len(catalog()) - 1) // PAGE_SIZE))
+
+
+def page_items(session=None):
+    offset = page_index(session) * PAGE_SIZE
+    return [(offset + i + 1, key, style) for i, (key, style) in enumerate(catalog()[offset:offset + PAGE_SIZE])]
+
+
+def choice_label(number, style):
+    return f"{number}. {style['label']}"
+
+
+def resolve_choice(text):
+    # Global numbering also accepts a button from an earlier page.
+    value = str(text or "").strip()
+    for i, (_, style) in enumerate(catalog(), 1):
+        if value in {str(i), choice_label(i, style)}:
+            return style['label']
+    return value
+
+
+def page_rows(session=None):
+    page = page_index(session)
+    rows = [[choice_label(number, style)] for number, _, style in page_items(session)]
+    navigation = []
+    if page > 0:
+        navigation.append(PREVIOUS_BUTTON)
+    if (page + 1) * PAGE_SIZE < len(catalog()):
+        navigation.append(NEXT_BUTTON)
+    if navigation:
+        rows.append(navigation)
+    return rows + [["Основной"], [PREVIEW_BUTTON]]
+
+
+def page_description(session=None):
+    page = page_index(session)
+    total = (len(catalog()) + PAGE_SIZE - 1) // PAGE_SIZE
+    lines = [f"Стили кадров · страница {page + 1} из {total}",
+             "На каждой картинке в подписи — номер, название и описание. Выберите одноимённую кнопку.", ""]
+    for number, _, style in page_items(session):
+        lines.append(f"{choice_label(number, style)} — {DESCRIPTIONS[style['label']]}")
+    lines.extend(["", "Основной — сохранить внешний вид персонажей проекта.",
+                  "Выбранная стилистика будет единой для всего ролика."])
+    return "\n".join(lines)
+
+
+async def send_story_style_previews(message, session=None) -> bool:
+    sender = getattr(message, "reply_photo", None)
     if not callable(sender):
         return False
-    media = []
     complete = True
-    for style in STORY_VISUAL_STYLES.values():
-        reference = style.get("reference_path")
-        if not reference:
-            continue  # Primary style comes from the project's own character references.
-        path = ROOT / reference
+    for number, _, style in page_items(session):
+        path = ROOT / style['reference_path']
         try:
-            media.append(InputMediaPhoto(media=path.read_bytes(), filename=path.name,
-                                         caption=style["label"]))
-        except OSError:
-            complete = False
-            logger.warning("story_style_preview_missing path=%s", path)
-    # Two manageable albums; Telegram accepts at most ten media per album.
-    for offset in range(0, len(media), 7):
-        batch = media[offset:offset + 7]
-        try:
-            if len(batch) == 1:
-                await message.reply_photo(photo=batch[0].media, caption=batch[0].caption)
-            else:
-                await sender(media=batch, read_timeout=60, write_timeout=60)
+            await sender(photo=path.read_bytes(),
+                         caption=f"{choice_label(number, style)}\n{DESCRIPTIONS[style['label']]}",
+                         read_timeout=60, write_timeout=60)
         except Exception:
             complete = False
-            logger.exception("story_style_preview_delivery_failed batch=%s", offset // 7)
-    return complete and bool(media)
+            logger.exception("story_style_preview_delivery_failed style=%s", style['label'])
+    return complete

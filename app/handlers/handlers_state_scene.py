@@ -1265,7 +1265,7 @@ def keyboard_for_session_state(session: dict):
     if state == STATE_WAITING_STORY_ENGLISH_CHOICE:
         return _story_english_choice_markup()
     if state == STATE_WAITING_STORY_STYLE_CHOICE:
-        return _story_style_choice_markup()
+        return _story_style_choice_markup(session)
     if state == STATE_WAITING_OVERLAY_TITLE_RU:
         return remove_keyboard_markup()
     if state == STATE_WAITING_OVERLAY_TITLE_EN_APPROVAL:
@@ -7159,16 +7159,10 @@ async def _handle_visualization_media_upload(
     session["state"] = STATE_WAITING_STORY_STYLE_CHOICE
     SESSIONS[chat_id] = session
     await _reply_text_chunked(update, format_visualization_transcript(transcript))
-    from ..story_style_previews import send_story_style_previews
-    await send_story_style_previews(update.message)
-    await _reply_text_with_optional_markup(
-        update,
-        (
-            f"Дорожка готова: {prepared.duration_sec:.1f} сек. Теперь выберите единую стилистику визуализации. "
-            "Проектные персонажи и правила проекта будут применены автоматически."
-        ),
-        reply_markup=_story_style_choice_markup(),
-    )
+    from ..story_style_previews import PAGE_KEY
+    from .handlers_state_start import _show_story_style_page
+    session[PAGE_KEY] = 0
+    await _show_story_style_page(update, session)
     return True
 
 
