@@ -2142,6 +2142,10 @@ def _attach_story_character_references(session: dict) -> None:
     scenes = session.get("scenes_plan")
     if not isinstance(scenes, list):
         return
+    from ..discipline_modes import active_mode
+    if active_mode(session):
+        from ..story_generation import enforce_discipline_narrative_cast
+        enforce_discipline_narrative_cast(scenes, list(bible.values()))
     for scene in scenes:
         if not isinstance(scene, dict):
             continue
@@ -2156,6 +2160,8 @@ def _attach_story_character_references(session: dict) -> None:
             character = bible.get(character_id)
             if isinstance(record, dict) and record.get("approved") and Path(str(record.get("selected_path") or "")).is_file():
                 scene_refs[character_id] = str(record["selected_path"])
+            elif active_mode(session) and isinstance(character, dict) and character.get("display_name") in {"Василий", "Кнопка"}:
+                raise ValueError(f"Не найден утверждённый референс персонажа {character['display_name']}. Генерация без него остановлена.")
             if isinstance(character, dict):
                 descriptions[character_id] = str(character.get("description") or "")
         scene["references"] = scene_refs

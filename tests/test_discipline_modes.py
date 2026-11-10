@@ -108,7 +108,7 @@ def test_partial_semantic_unit_does_not_change_full_word_positions():
 
 
 @pytest.mark.parametrize('mode',[modes.VASYA,modes.REFRAME])
-def test_new_formats_allow_graphics_without_forced_books_or_knopka(monkeypatch,mode):
+def test_new_formats_keep_project_cast_in_graphic_scenes(monkeypatch,mode):
     captured=[]
     def fake(prompt,**kwargs):
         captured.append(prompt)
@@ -120,7 +120,7 @@ def test_new_formats_allow_graphics_without_forced_books_or_knopka(monkeypatch,m
         project_characters=[{'id':'anastasia','display_name':'Анастасия','description':'героиня','is_primary':True},
                             {'id':'vasily','display_name':'Василий','description':'герой','is_primary':True},
                             {'id':'knopka','display_name':'Кнопка','description':'персонаж'}])
-    assert result['json_plan'][0]['characters']==[]
+    assert result['json_plan'][0]['characters']==['vasily','knopka']
     assert 'productivity books' not in result['json_plan'][0]['action']
     assert 'доводят начатые дела до конца' not in result['json_plan'][0]['action']
     assert 'предметные кадры без героев запрещены' not in captured[0]
@@ -172,3 +172,36 @@ def test_restoring_before_production_keeps_approved_fonts_and_timing(monkeypatch
         scene_media_store.rebuild_production_session(snapshot,run_id)
     assert snapshot['overlay_title_style']['editorial_style_id']=='9'
     assert snapshot['overlay_title_style']['word_timing_by_lang']==original['word_timing_by_lang']
+
+
+def test_narrative_cast_replaces_aliases_and_attaches_real_reference_files(tmp_path):
+    from app.handlers import handlers_state_scene as handler
+    from app.handlers.handlers_media_scene import _loaded_reference_paths
+    hero=tmp_path/'hero.jpg'; hero.write_bytes(b'hero')
+    pet=tmp_path/'pet.jpg'; pet.write_bytes(b'pet')
+    bible=[{'id':'character_real_id','display_name':'Василий','description':'approved hero'},
+           {'id':'discipline_knopka','display_name':'Кнопка','description':'approved pet'}]
+    scenes=[{'generation_mode':'story','characters':['vasiliy'] if i%2 else []} for i in range(20)]
+    session={'selected_project_key':'discipline',modes.MODE_KEY:modes.REFRAME,
+             handler.STORY_CHARACTER_BIBLE_SESSION_KEY:bible,'scenes_plan':scenes,
+             handler.STORY_CHARACTER_REFERENCES_SESSION_KEY:{
+                 'character_real_id':{'approved':True,'selected_path':str(hero)},
+                 'discipline_knopka':{'approved':True,'selected_path':str(pet)}}}
+    handler._attach_story_character_references(session)
+    assert all('character_real_id' in s['characters'] and 'vasiliy' not in s['characters'] for s in scenes)
+    assert sum('discipline_knopka' in s['characters'] for s in scenes)>=12
+    assert all(str(hero) in _loaded_reference_paths(s) for s in scenes)
+    assert sum(str(pet) in _loaded_reference_paths(s) for s in scenes)>=12
+    before=[list(s['characters']) for s in scenes]
+    handler._attach_story_character_references(session)
+    assert before==[s['characters'] for s in scenes]
+
+
+def test_narrative_cast_requires_approved_reference(tmp_path):
+    from app.handlers import handlers_state_scene as handler
+    session={'selected_project_key':'discipline',modes.MODE_KEY:modes.REFRAME,
+             handler.STORY_CHARACTER_BIBLE_SESSION_KEY:[
+                 {'id':'v','display_name':'Василий'}, {'id':'k','display_name':'Кнопка'}],
+             'scenes_plan':[{'characters':[]}],handler.STORY_CHARACTER_REFERENCES_SESSION_KEY:{}}
+    with pytest.raises(ValueError,match='референс'):
+        handler._attach_story_character_references(session)

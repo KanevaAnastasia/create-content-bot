@@ -1075,6 +1075,27 @@ def _apply_discipline_cast_policy(
         }
 
 
+def enforce_discipline_narrative_cast(scenes, project_characters):
+    """Bind narrative heroes to approved project IDs, never invented model aliases."""
+    anastasia = _discipline_anastasia_character_id(project_characters)
+    vasily = next((_story_character_id(c.get("id")) for c in project_characters
+                   if str(c.get("display_name") or "").casefold() in {"василий", "вася", "vasily", "vasiliy"}
+                   or str(c.get("id") or "").casefold() in {"vasily", "vasiliy", "discipline_vasily"}), "")
+    knopka = _discipline_knopka_character_id(project_characters)
+    if not vasily or not knopka:
+        raise ValueError("Для этого формата нужны утверждённые персонажи Василий и Кнопка в проекте.")
+    aliases = {name: vasily for name in ("vasiliy", "vasily", "vasilii", "vasya", "василий", "вася")}
+    aliases.update({"knopka": knopka, "кнопка": knopka})
+    for scene in scenes:
+        ids = [aliases.get(str(value).casefold(), str(value)) for value in scene.get("characters") or []]
+        scene["characters"] = list(dict.fromkeys([vasily, *ids]))
+    _apply_discipline_cast_policy(
+        scenes, project_characters=project_characters, primary_id=vasily, anastasia_id=anastasia,
+        character_descriptions={c["id"]: c.get("description", "") for c in project_characters},
+        character_labels={c["id"]: c.get("display_name", "") for c in project_characters},
+    )
+
+
 def _replace_anastasia_in_visual_text(value: Any, replacement: str) -> str:
     """Remove an accidental Anastasia direction from a non-first-person beat."""
     text = str(value or "")
@@ -1505,6 +1526,7 @@ def generate_story_scene_plan(
         )
     if narrative_format:
         project_character_direction = visual_direction(narrative_format)
+        project_character_direction += " Используй только точные id Василия и Кнопки из project_characters, не придумывай им новые id."
     if project_final_scene_rule:
         project_character_direction += (
             " Обязательное постоянное правило финальной сцены этого проекта: "
@@ -1730,6 +1752,8 @@ def generate_story_scene_plan(
             or STORY_CLIP_DURATION_SEC
         )
         final_scene["visualization_output_policy"] = dict(visualization_output_policy)
+    if narrative_format:
+        enforce_discipline_narrative_cast(normalized, fixed_project_characters)
     if discipline_project and not narrative_format:
         present_scenes = [item for item in normalized if str(item.get("time_period") or "present") == "present"]
         first_person_scenes = [
