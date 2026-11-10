@@ -118,8 +118,8 @@ def test_project_workspace_menu_offers_story_and_visualization_formats():
         for row in guest_handlers.guest_main_menu_markup({"project_workspace_mode": True}).keyboard
     ]
 
-    assert [guest_handlers.MENU_CREATE_STORY] in rows
-    assert [guest_handlers.MENU_CREATE_VISUALIZATION] in rows
+    assert ["История"] in rows
+    assert ["Визуализация"] in rows
 
 
 def test_guest_approval_uses_new_prompt_button():

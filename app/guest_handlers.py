@@ -48,6 +48,7 @@ from .state import SESSIONS, save_loaded_session_if_possible
 from .session_store import load_guest_run_snapshot, load_session_if_possible
 from .syntax_fallback_output import video_bytes_from_fallback_result
 from .syntax_video_fallback import try_generate_via_syntax
+from .project_modes import PENDING_MODE_KEY, project_mode_rows, project_mode_labels
 from .video_frame_extraction import extract_last_video_frame
 from .vertex_images import generate_image_vertex
 
@@ -226,8 +227,7 @@ def guest_main_menu_markup(session: dict[str, Any] | None = None) -> ReplyKeyboa
             [
                 [MENU_ADD_CHARACTER],
                 [MENU_PRIMARY_CHARACTER],
-                [MENU_CREATE_STORY],
-                [MENU_CREATE_VISUALIZATION],
+                *project_mode_rows(session.get("selected_project_key") or DISCIPLINE_PROJECT_SLUG),
                 [MENU_SAVE_DRAFT],
                 [MENU_START_OVER],
             ],
@@ -2025,6 +2025,31 @@ async def guest_start(update: Update, context: ContextTypes.DEFAULT_TYPE, identi
     save_loaded_session_if_possible(chat_id)
 
 
+async def _start_workspace_format(update, context, chat_id, session, label):
+    from .handlers.handlers_state_start import _handle_waiting_generation_mode_state, _session_for_new_generation
+
+    fresh_session = _session_for_new_generation(session)
+    session.clear()
+    session.update(fresh_session)
+    session["guest_mode"] = False
+    session["project_workspace_mode"] = False
+    session["force_story_mode"] = False
+    session.pop("discipline_narrative_mode", None)
+    session.pop(PENDING_MODE_KEY, None)
+    SESSIONS[chat_id] = session
+    if label in {"Визуализация", "Копия"}:
+        await _handle_waiting_generation_mode_state(
+            update, context, chat_id=chat_id, session=session, text=label,
+        )
+    else:
+        session[PENDING_MODE_KEY] = label
+        session["state"] = "state_waiting_first_step_generate_text"
+        await _reply(
+            update, f"Формат «{label}». Пришлите тему, проблему или готовый текст ролика.",
+            markup=ReplyKeyboardRemove(),
+        )
+
+
 async def project_workspace_start(update: Update, context: ContextTypes.DEFAULT_TYPE, identity: BotIdentity) -> None:
     _ = context
     if update.effective_chat is None:
@@ -2036,7 +2061,7 @@ async def project_workspace_start(update: Update, context: ContextTypes.DEFAULT_
         SESSIONS[chat_id] = existing
     await _reply(
         update,
-        "Проект «Дисциплина». Выберите действие.",
+        "Выберите формат ролика или действие с персонажами проекта.",
         markup=guest_main_menu_markup(existing),
     )
     save_loaded_session_if_possible(chat_id)
@@ -2845,31 +2870,12 @@ async def guest_on_text(update: Update, context: ContextTypes.DEFAULT_TYPE, iden
                     "Выберите персонажа, которого нужно добавить к основным. Звёздочками отмечены текущие основные персонажи.",
                     markup=guest_keyboard_for_session(session),
                 )
-            elif session.get("project_workspace_mode") is True and text == MENU_CREATE_STORY:
-                session["guest_mode"] = False
-                session["project_workspace_mode"] = False
-                session["state"] = "state_waiting_first_step_generate_text"
-                session["force_story_mode"] = True
-                SESSIONS[chat_id] = session
-                await _reply(
-                    update,
-                    "Пришлите тему, факты или готовый текст истории. Ролик будет создан в режиме «История» со стилистиками кулинарного проекта.",
-                    markup=ReplyKeyboardRemove(),
-                )
-            elif session.get("project_workspace_mode") is True and text == MENU_CREATE_VISUALIZATION:
-                session["guest_mode"] = False
-                session["project_workspace_mode"] = False
-                session["force_story_mode"] = False
-                session[GENERATION_MODE_SESSION_KEY] = GENERATION_MODE_VISUALIZATION
-                session["target_languages"] = ["ru"]
-                session["state"] = STATE_WAITING_VISUALIZATION_MEDIA
-                SESSIONS[chat_id] = session
-                await _reply(
-                    update,
-                    "Пришлите аудио, голосовое сообщение или видео. Из видео я отделю звук, распознаю текст "
-                    "с таймингами, затем предложу выбрать стилистику и построю визуальный ряд по правилам проекта.",
-                    markup=ReplyKeyboardRemove(),
-                )
+            elif session.get("project_workspace_mode") is True and (
+                text in project_mode_labels(session.get("selected_project_key") or DISCIPLINE_PROJECT_SLUG)
+                or text in {MENU_CREATE_STORY, MENU_CREATE_VISUALIZATION}
+            ):
+                label = {MENU_CREATE_STORY: "История", MENU_CREATE_VISUALIZATION: "Визуализация"}.get(text, text)
+                await _start_workspace_format(update, context, chat_id, session, label)
             elif session.get("project_workspace_mode") is True and text == MENU_START_OVER:
                 from .handlers.handlers_keyboards import first_step_menu_markup
 

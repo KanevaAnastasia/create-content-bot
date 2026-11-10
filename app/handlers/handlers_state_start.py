@@ -54,6 +54,7 @@ from .handlers_generation_utils import (
 )
 from .handlers_keyboards import DRAFT_BUTTON_SAVE, reply_text_without_keyboard, safe_reply_text
 from .handlers_state_media import send_social_descriptions_for_recipe
+from ..project_modes import PENDING_MODE_KEY, project_mode_rows, project_mode_labels
 from ..directorial_notes import direction_for_session
 from ..dish_visuals import build_dish_visual_brief
 from ..llm_utils import GEMINI_MODEL_PROFILE_EDIT, extract_json_object
@@ -381,16 +382,7 @@ def _generation_mode_markup(session: dict | None = None) -> object | None:
     except Exception:
         return None
     return ReplyKeyboardMarkup(
-        [
-            [_GENERATION_MODE_BUTTON_NORMAL, "Совет"],
-            [_GENERATION_MODE_BUTTON_SILENCE],
-            [_GENERATION_MODE_BUTTON_LONG],
-            [_GENERATION_MODE_BUTTON_COPY],
-            [_GENERATION_MODE_BUTTON_STORY],
-            *([["О Васе", "А что если…"]] if (session or {}).get("selected_project_key") == "discipline" else []),
-            [_GENERATION_MODE_BUTTON_VISUALIZATION],
-            [_GENERATION_MODE_BUTTON_ADVERTISING],
-        ],
+        project_mode_rows((session or {}).get("selected_project_key")),
         resize_keyboard=True,
         one_time_keyboard=False,
     )
@@ -818,7 +810,12 @@ async def _start_generation_with_recipe(
     if selected_project_key:
         session[_PROJECT_KEY_SESSION] = selected_project_key
     SESSIONS[chat_id] = session
-    if session.get("force_story_mode") is True and selected_project_key != "discipline":
+    selected_mode = session.pop(PENDING_MODE_KEY, None)
+    if selected_mode in project_mode_labels(selected_project_key):
+        await _handle_waiting_generation_mode_state(
+            update, context, chat_id=chat_id, session=session, text=selected_mode,
+        )
+    elif session.get("force_story_mode") is True and selected_project_key != "discipline":
         await _handle_waiting_generation_mode_state(
             update,
             context,
@@ -1520,7 +1517,7 @@ async def _handle_waiting_generation_mode_state(
     else:
         await _reply_text_with_optional_markup(
             update,
-            "Выберите «Обычный», «Совет», «Silence», «Длинный», «Копия», «История», «Визуализация» или «Реклама».",
+            "Выберите формат: " + ", ".join(project_mode_labels(session.get(_PROJECT_KEY_SESSION))) + ".",
             reply_markup=_generation_mode_markup(session),
         )
         return True
