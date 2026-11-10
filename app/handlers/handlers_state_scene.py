@@ -7159,6 +7159,8 @@ async def _handle_visualization_media_upload(
     session["state"] = STATE_WAITING_STORY_STYLE_CHOICE
     SESSIONS[chat_id] = session
     await _reply_text_chunked(update, format_visualization_transcript(transcript))
+    from ..story_style_previews import send_story_style_previews
+    await send_story_style_previews(update.message)
     await _reply_text_with_optional_markup(
         update,
         (

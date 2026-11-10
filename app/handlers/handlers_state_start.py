@@ -1,5 +1,7 @@
 import json
 
+from ..story_style_previews import PREVIEW_BUTTON, send_story_style_previews
+
 from .handlers_state_deps import (
     Any,
     ContextTypes,
@@ -434,6 +436,7 @@ def _story_style_choice_markup() -> object | None:
             ["Пастельные мелки"],
             ["Вязаная иллюстрация"],
             ["Минималистичный ретро-мультфильм"],
+            [PREVIEW_BUTTON],
             [NAV_BUTTON_START_OVER],
         ],
         resize_keyboard=True,
@@ -1353,9 +1356,10 @@ async def _handle_waiting_story_english_choice_state(
         return True
     session["state"] = STATE_WAITING_STORY_STYLE_CHOICE
     SESSIONS[chat_id] = session
+    await send_story_style_previews(update.message)
     await _reply_text_with_optional_markup(
         update,
-        "Выберите стиль исторических кадров:\n"
+        "Выберите стиль кадров ролика. В альбомах — образцы с названиями; их можно открыть крупно.\n"
         "• «Сухая акварель» — мягкая рисованная фактура и лёгкая сепия.\n"
         "• «Ретро-мультфильм» — угловатая графика, плоские формы, оливково-горчично-коралловая палитра.\n"
         "• «Книжная гуашь» — тёплая фактурная иллюстрация из детской книги.\n"
@@ -1370,7 +1374,9 @@ async def _handle_waiting_story_english_choice_state(
         "• «Пастельные мелки» — яркие живые штрихи масляной пастели на белой бумаге.\n"
         "• «Вязаная иллюстрация» — весь кадр связан из пряжи с видимыми петлями и узелками.\n"
         "• «Минималистичный ретро-мультфильм» — тонкий контур, светлый фон и лаконичная оранжево-бирюзовая палитра.\n\n"
-        "Выбранная стилистика будет единой для всех персонажей и всех кадров ролика.",
+        "«Основной» сохраняет внешний вид персонажей проекта.\n"
+        "Выбранная стилистика будет единой для всех персонажей и всех кадров ролика. "
+        "Если альбомы не загрузились, нажмите «Показать примеры».",
         reply_markup=_story_style_choice_markup(),
     )
     return True
@@ -1384,6 +1390,15 @@ async def _handle_waiting_story_style_choice_state(
     session: dict,
     text: str,
 ) -> bool:
+    if str(text or "").strip() == PREVIEW_BUTTON:
+        delivered = await send_story_style_previews(update.message)
+        await _reply_text_with_optional_markup(
+            update,
+            "Выберите стиль кнопкой под сообщением." if delivered else
+            "Не удалось загрузить все примеры. Нажмите «Показать примеры», чтобы повторить.",
+            reply_markup=_story_style_choice_markup(),
+        )
+        return True
     low = str(text or "").strip().lower()
     if low in {"основной", "основная", "primary", "main"}:
         style_key = STORY_STYLE_PRIMARY
