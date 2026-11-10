@@ -3004,6 +3004,13 @@ async def _approve_story_audio_and_build_scenes(
         existing_refs = _story_character_reference_map(session)
         for character in project_characters:
             character_id = str(character.get("id") or "")
+            scoped = existing_refs.get(character_id) or {}
+            if (scoped.get("scope_run_id") == session.get("generation_run_id")
+                    and scoped.get("scope_run_id") and scoped.get("approved")
+                    and Path(str(scoped.get("selected_path") or "")).is_file()):
+                character["description"] = str(scoped.get("description") or character.get("description") or "")
+                character["asset_uri"] = Path(scoped["selected_path"]).as_uri()
+                continue
             asset_uri = str(character.get("asset_uri") or "").strip()
             asset_path = asset_uri[7:] if asset_uri.startswith("file://") else asset_uri
             if character_id and asset_path and Path(asset_path).is_file():

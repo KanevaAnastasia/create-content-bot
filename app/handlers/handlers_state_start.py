@@ -206,6 +206,8 @@ _SERIES_SESSION_KEYS = (
 # Continuation/resume paths do not call _start_generation_with_recipe and keep
 # their run binding intact.
 _NEW_GENERATION_STALE_KEYS = (
+    "story_character_references",
+    "story_character_bible",
     "discipline_narrative_mode",
     "generation_run_id",
     "scene_db_ids_by_index",
