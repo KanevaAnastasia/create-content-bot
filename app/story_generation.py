@@ -1086,11 +1086,20 @@ def enforce_discipline_narrative_cast(scenes, project_characters):
         raise ValueError("Для этого формата нужны утверждённые персонажи Василий и Кнопка в проекте.")
     aliases = {name: vasily for name in ("vasiliy", "vasily", "vasilii", "vasya", "василий", "вася")}
     aliases.update({"knopka": knopka, "кнопка": knopka})
+    cast_scenes = []
     for scene in scenes:
+        # Explicit, per-scene user direction; other scenes retain the cast policy.
+        if scene.get("discipline_cast_override") == "environment_only":
+            scene["characters"] = []
+            scene["references"] = {}
+            scene["story_character_descriptions"] = {}
+            scene["story_character_labels"] = {}
+            continue
+        cast_scenes.append(scene)
         ids = [aliases.get(str(value).casefold(), str(value)) for value in scene.get("characters") or []]
         scene["characters"] = list(dict.fromkeys([vasily, *ids]))
     _apply_discipline_cast_policy(
-        scenes, project_characters=project_characters, primary_id=vasily, anastasia_id=anastasia,
+        cast_scenes, project_characters=project_characters, primary_id=vasily, anastasia_id=anastasia,
         character_descriptions={c["id"]: c.get("description", "") for c in project_characters},
         character_labels={c["id"]: c.get("display_name", "") for c in project_characters},
     )
@@ -1301,7 +1310,7 @@ def _safe_story_camera_direction(value: Any, *, default: str = STORY_SAFE_ZOOM_I
     return direction
 
 
-def ensure_story_video_camera_safety(prompt: Any) -> str:
+def ensure_story_video_camera_safety(prompt: Any, *, allow_reveal: bool = False) -> str:
     """Keep Story video motion inside the approved source frame.
 
     Existing runs may already contain ``Tilt up`` in persisted prompts, so this
@@ -1310,12 +1319,14 @@ def ensure_story_video_camera_safety(prompt: Any) -> str:
     text = str(prompt or "").strip()
     if not text:
         return text
-    for pattern in _STORY_UNSAFE_VERTICAL_CAMERA_PATTERNS:
-        text = pattern.sub(STORY_SAFE_ZOOM_IN_DIRECTION, text)
     guard = (
         "Keep the camera strictly inside the existing source-image boundaries; "
         "do not reveal or generate any area outside the frame, especially above it or the ceiling."
     )
+    if allow_reveal:
+        return re.sub(re.escape(guard), "", text, flags=re.IGNORECASE).strip()
+    for pattern in _STORY_UNSAFE_VERTICAL_CAMERA_PATTERNS:
+        text = pattern.sub(STORY_SAFE_ZOOM_IN_DIRECTION, text)
     if guard.casefold() not in text.casefold():
         text = f"{text.rstrip()} {guard}"
     return text
@@ -2090,7 +2101,7 @@ def generate_story_production(
             scene.get("camera_direction"),
             duration_sec=generation_duration,
         )
-        video_prompt = ensure_story_video_camera_safety(video_prompt)
+        video_prompt = ensure_story_video_camera_safety(video_prompt, allow_reveal=bool(scene.get("story_camera_reveal_requested")))
         excerpt = str(scene.get("narration_excerpt") or scene.get("text") or "").strip()
         scene_out = dict(scene)
         scene_out.update(

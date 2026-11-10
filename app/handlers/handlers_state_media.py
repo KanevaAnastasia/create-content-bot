@@ -4248,6 +4248,18 @@ def _advance_scene_media_after_current(session: dict, idx: int, *, total: int | 
     if isinstance(scenes, list):
         if not _draft_repair_plan(session):
             session["scene_media_substep"] = SCENE_MEDIA_SUBSTEP_START
+            if 0 <= next_idx < len(scenes):
+                following = scenes[next_idx]
+                source_id = following.get("continuation_source_video_candidate_id")
+                approved_sources = {
+                    next((c.get("candidate_id") for c in reversed(candidates)
+                          if c.get("approved_for_production")), None)
+                    for candidates in (scenes[idx].get("video_candidates_by_lang") or {}).values()
+                }
+                if source_id and source_id in approved_sources and any(
+                    c.get("approved_for_video") for c in following.get("image_candidates") or []
+                ):
+                    session["scene_media_substep"] = SCENE_MEDIA_SUBSTEP_VIDEO
             return next_idx
         return _align_draft_repair_scene_cursor(session, scenes, next_idx)
     session["scene_media_substep"] = SCENE_MEDIA_SUBSTEP_START
@@ -4314,7 +4326,7 @@ def _scene_video_prompt_for_language(scene: dict, language: str) -> str:
     value = str(mapping.get(language, "")).strip()
     if value:
         if str(scene.get("generation_mode") or "").strip().lower() == "story":
-            value = ensure_story_video_camera_safety(value)
+            value = ensure_story_video_camera_safety(value, allow_reveal=bool(scene.get("story_camera_reveal_requested")))
         if not isinstance(scene.get("video_prompt_by_lang"), dict) or str(scene["video_prompt_by_lang"].get(language, "")).strip() != value:
             scene["video_prompt_by_lang"] = {**(scene.get("video_prompt_by_lang") if isinstance(scene.get("video_prompt_by_lang"), dict) else {}), language: value}
             if language == "ru" or not str(scene.get("video_prompt") or "").strip():
@@ -4322,7 +4334,7 @@ def _scene_video_prompt_for_language(scene: dict, language: str) -> str:
         return value
     value = str(scene.get("video_prompt", "")).strip()
     if value and str(scene.get("generation_mode") or "").strip().lower() == "story":
-        value = ensure_story_video_camera_safety(value)
+        value = ensure_story_video_camera_safety(value, allow_reveal=bool(scene.get("story_camera_reveal_requested")))
         scene["video_prompt"] = value
     return value
 
