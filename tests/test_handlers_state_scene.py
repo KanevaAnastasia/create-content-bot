@@ -134,7 +134,8 @@ def test_story_style_choice_keyboard_starts_with_primary_then_named_styles():
         "1. Сухая акварель", "2. Ретро-мультфильм", "3. Книжная гуашь",
         "4. Пластилиновый мультфильм", "5. Кукольный стоп-моушен",
     ]
-    assert "Дальше →" in labels
+    assert "Дальше →" not in labels
+    assert "14. Минималистичный ретро-мультфильм" in labels
     assert "Основной" in labels
 
 

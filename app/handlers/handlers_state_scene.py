@@ -7161,8 +7161,8 @@ async def _handle_visualization_media_upload(
     await _reply_text_chunked(update, format_visualization_transcript(transcript))
     from ..story_style_previews import PAGE_KEY
     from .handlers_state_start import _show_story_style_page
-    session[PAGE_KEY] = 0
-    await _show_story_style_page(update, session)
+    session.pop(PAGE_KEY, None)
+    await _show_story_style_page(update, session, show_previews=False)
     return True
 
 

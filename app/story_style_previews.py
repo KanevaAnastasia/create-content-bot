@@ -1,4 +1,4 @@
-"""Paginated style references with matching captions and choice labels."""
+"""Style references with matching captions and choice labels."""
 import logging
 from pathlib import Path
 from .story_generation import STORY_VISUAL_STYLES
@@ -8,7 +8,6 @@ PREVIEW_BUTTON = "Показать примеры"
 NEXT_BUTTON = "Дальше →"
 PREVIOUS_BUTTON = "← Назад"
 PAGE_KEY = "story_style_preview_page"
-PAGE_SIZE = 5
 ROOT = Path(__file__).resolve().parent.parent
 DESCRIPTIONS = {'Сухая акварель': 'мягкая рисованная фактура и лёгкая сепия.',
  'Ретро-мультфильм': 'угловатая графика, плоские формы, оливково-горчично-коралловая палитра.',
@@ -31,17 +30,8 @@ def catalog():
     return [(key, style) for key, style in STORY_VISUAL_STYLES.items() if style.get("reference_path")]
 
 
-def page_index(session=None):
-    try:
-        value = int((session or {}).get(PAGE_KEY, 0))
-    except (TypeError, ValueError):
-        value = 0
-    return max(0, min(value, (len(catalog()) - 1) // PAGE_SIZE))
-
-
 def page_items(session=None):
-    offset = page_index(session) * PAGE_SIZE
-    return [(offset + i + 1, key, style) for i, (key, style) in enumerate(catalog()[offset:offset + PAGE_SIZE])]
+    return [(i, key, style) for i, (key, style) in enumerate(catalog(), 1)]
 
 
 def choice_label(number, style):
@@ -58,23 +48,13 @@ def resolve_choice(text):
 
 
 def page_rows(session=None):
-    page = page_index(session)
     rows = [[choice_label(number, style)] for number, _, style in page_items(session)]
-    navigation = []
-    if page > 0:
-        navigation.append(PREVIOUS_BUTTON)
-    if (page + 1) * PAGE_SIZE < len(catalog()):
-        navigation.append(NEXT_BUTTON)
-    if navigation:
-        rows.append(navigation)
     return rows + [["Основной"], [PREVIEW_BUTTON]]
 
 
 def page_description(session=None):
-    page = page_index(session)
-    total = (len(catalog()) + PAGE_SIZE - 1) // PAGE_SIZE
-    lines = [f"Стили кадров · страница {page + 1} из {total}",
-             "На каждой картинке в подписи — номер, название и описание. Выберите одноимённую кнопку.", ""]
+    lines = ["Выберите стиль кадров ролика.",
+             "«Показать примеры» — все 14 картинок с номером, названием и описанием. Выберите одноимённую кнопку.", ""]
     for number, _, style in page_items(session):
         lines.append(f"{choice_label(number, style)} — {DESCRIPTIONS[style['label']]}")
     lines.extend(["", "Основной — сохранить внешний вид персонажей проекта.",

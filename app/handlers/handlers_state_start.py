@@ -1,7 +1,7 @@
 import json
 
 from ..story_style_previews import (
-    PREVIEW_BUTTON, NEXT_BUTTON, PREVIOUS_BUTTON, PAGE_KEY, page_index,
+    PREVIEW_BUTTON, NEXT_BUTTON, PREVIOUS_BUTTON, PAGE_KEY,
     page_rows, page_description, resolve_choice, send_story_style_previews,
 )
 
@@ -429,8 +429,8 @@ def _story_style_choice_markup(session: dict | None = None) -> object | None:
     )
 
 
-async def _show_story_style_page(update, session):
-    delivered = await send_story_style_previews(update.message, session)
+async def _show_story_style_page(update, session, *, show_previews=True):
+    delivered = await send_story_style_previews(update.message, session) if show_previews else True
     text = page_description(session)
     if not delivered:
         text += "\nНе удалось загрузить все картинки. Нажмите «Показать примеры», чтобы повторить."
@@ -1352,8 +1352,8 @@ async def _handle_waiting_story_english_choice_state(
         return True
     session["state"] = STATE_WAITING_STORY_STYLE_CHOICE
     SESSIONS[chat_id] = session
-    session[PAGE_KEY] = 0
-    await _show_story_style_page(update, session)
+    session.pop(PAGE_KEY, None)
+    await _show_story_style_page(update, session, show_previews=False)
     return True
 
 
@@ -1367,9 +1367,7 @@ async def _handle_waiting_story_style_choice_state(
 ) -> bool:
     action = str(text or "").strip()
     if action in {PREVIEW_BUTTON, NEXT_BUTTON, PREVIOUS_BUTTON}:
-        current = page_index(session)
-        session[PAGE_KEY] = current + (1 if action == NEXT_BUTTON else -1 if action == PREVIOUS_BUTTON else 0)
-        session[PAGE_KEY] = page_index(session)
+        session.pop(PAGE_KEY, None)
         await _show_story_style_page(update, session)
         return True
     text = resolve_choice(text)

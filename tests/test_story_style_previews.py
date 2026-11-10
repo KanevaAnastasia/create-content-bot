@@ -17,7 +17,7 @@ def test_catalog_contains_all_fourteen_valid_references():
 
 def test_pages_have_matching_photos_descriptions_and_buttons():
     all_labels=[]
-    for page, count in [(0,5),(1,5),(2,4)]:
+    for page, count in [(0,14),(1,14),(2,14)]:
         session={previews.PAGE_KEY:page}
         message=SimpleNamespace(reply_photo=AsyncMock())
         assert asyncio.run(previews.send_story_style_previews(message,session))
@@ -50,25 +50,21 @@ def test_english_choice_shows_previews_before_style_menu(monkeypatch):
     session={}
     asyncio.run(start._handle_waiting_story_english_choice_state(
         SimpleNamespace(message=message),None,chat_id=1,session=session,text='Нет'))
-    assert message.reply_photo.await_count==5
+    assert message.reply_photo.await_count==0
     assert session['state']==start.STATE_WAITING_STORY_STYLE_CHOICE
 
 
-def test_navigation_preserves_story_and_stays_inside_page_bounds():
+def test_show_all_preserves_story_and_ignores_saved_page():
     message=SimpleNamespace(reply_photo=AsyncMock(),reply_text=AsyncMock())
     update=SimpleNamespace(message=message)
-    session={'state':start.STATE_WAITING_STORY_STYLE_CHOICE,'user_input':'Моя история'}
-    for action, expected in [(previews.PREVIOUS_BUTTON,0),(previews.NEXT_BUTTON,1),
-                             (previews.NEXT_BUTTON,2),(previews.NEXT_BUTTON,2),
-                             (previews.PREVIOUS_BUTTON,1)]:
-        asyncio.run(start._handle_waiting_story_style_choice_state(
-            update,None,chat_id=1,session=session,text=action))
-        assert session[previews.PAGE_KEY]==expected
-        assert session['state']==start.STATE_WAITING_STORY_STYLE_CHOICE
-        assert session['user_input']=='Моя история'
-    from app.session_store import _chat_session_cache_payload
-    assert _chat_session_cache_payload(session)[previews.PAGE_KEY]==1
-    assert previews.NEXT_BUTTON not in sum(previews.page_rows({previews.PAGE_KEY:2}),[])
+    session={'state':start.STATE_WAITING_STORY_STYLE_CHOICE,'user_input':'Моя история',previews.PAGE_KEY:2}
+    asyncio.run(start._handle_waiting_story_style_choice_state(
+        update,None,chat_id=1,session=session,text=previews.PREVIEW_BUTTON))
+    assert message.reply_photo.await_count==14
+    assert session['state']==start.STATE_WAITING_STORY_STYLE_CHOICE
+    assert session['user_input']=='Моя история'
+    assert previews.NEXT_BUTTON not in sum(previews.page_rows(session),[])
+    assert previews.PREVIOUS_BUTTON not in sum(previews.page_rows(session),[])
 
 
 def test_numbered_choice_enters_existing_generation_flow(monkeypatch):
