@@ -134,6 +134,9 @@ def ass_events(cue,style,width,height,base_style):
     from .editorial_titles import fallback_parts,valid_parts,_timestamp
     sid=str(style['editorial_style_id']);lang='en' if cue.get('language')=='en' else 'ru'
     title=str(cue.get('text') or '')
+    # The narrative pivot must remain readable even in depth-enabled presets.
+    normalized_title = ' '.join(re.findall(r'[^\W_]+', title.casefold()))
+    always_front = bool(cue.get('always_foreground')) or normalized_title in ('а что если', 'what if')
     parts=(style.get('semantic_parts_by_lang') or {}).get(lang)
     if not valid_parts(title,parts):
         parts=fallback_parts(title)
@@ -172,7 +175,7 @@ def ass_events(cue,style,width,height,base_style):
                 bgr=color[5:7]+color[3:5]+color[1:3]
                 tags=(f'{{\\an7\\pos(0,0)\\fscx{width/W*100:.5f}\\fscy{height/H*100:.5f}'
                       f'\\bord0\\shad0\\1c&H{bgr}&\\1a&H00&\\p1}}')
-                behind = role == 0 and sid in ('3','9')
+                behind = role == 0 and sid in ('3','9') and not always_front
                 output.append(event(1 if behind else 2,max(start,t0),t1,tags,path,
                                     'CF_DEPTH_BACK' if behind else ''))
         offset+=count

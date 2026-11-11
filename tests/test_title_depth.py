@@ -101,3 +101,16 @@ def test_optical_flow_follows_subject_and_rejects_scene_cuts():
     assert tracked.getpixel((68,50))>200  # The right edge followed the six-pixel motion.
     assert tracked.getpixel((26,50))<50
     assert title_depth.track_mask(Image.new('RGB',(100,100),'black'),Image.new('RGB',(100,100),'white'),mask) is None
+
+
+@pytest.mark.parametrize('sid', ['3', '9'])
+@pytest.mark.parametrize('language,text', [('ru', 'А что если?'), ('en', 'What if?')])
+def test_reframe_phrase_never_goes_behind_subject(tmp_path, sid, language, text):
+    source = tmp_path / 'pivot.ass'
+    _write_burned_subtitle_ass(source, [], title_cues=[{
+        'text': text, 'language': language, 'start_sec': 32, 'end_sec': 34,
+    }], title_style={'editorial_style_id': sid}, video_width=720, video_height=1280)
+    assert not title_depth.has_depth(source)
+    events = [line for line in source.read_text().splitlines() if line.startswith('Dialogue:')]
+    assert len(events) > 1
+    assert all(line.startswith('Dialogue: 2,') for line in events[1:])
