@@ -164,6 +164,27 @@ def test_allocated_video_is_verified_and_reused_after_lost_upload_response(confi
     assert methods == ['groups.getById', 'video.get', 'wall.post', 'wall.get']
 
 
+def test_allocated_video_waits_for_vk_processing_before_wall_post(configured, monkeypatch, job):
+    job.payload_json = {
+        'vk_upload_started_at': '2026-01-01T00:00:00+00:00',
+        'vk_allocated_video_id': '-123_42',
+    }
+    calls = setup_api(monkeypatch, job)
+    original = p.requests.post
+
+    def pending(url, **kwargs):
+        result = original(url, **kwargs)
+        if url.rsplit('/', 1)[-1] == 'video.get':
+            result.json = lambda: {'response': {'items': [{'owner_id': -123, 'id': 42, 'processing': 1}]}}
+        return result
+
+    monkeypatch.setattr(p.requests, 'post', pending)
+    with pytest.raises(p.PublicationDeliveryError, match='still processing'):
+        p._publish_vk(job, 'grandma', lambda: None)
+    assert job.payload_json['vk_video_processing'] is True
+    assert [url.rsplit('/', 1)[-1] for url, _ in calls] == ['groups.getById', 'video.get']
+
+
 def test_wall_key_required_and_never_crosses_projects_or_languages(configured):
     assert p.platform_readiness('grandma', 'vk', 'ru').ready
     assert not p.platform_readiness('discipline', 'vk', 'ru').ready

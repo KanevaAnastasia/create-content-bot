@@ -1331,9 +1331,20 @@ def _publish_vk(job: PublicationJob, project_slug: str, persist: Callable[[], No
                          and f"{value.get('owner_id')}_{value.get('id')}" == allocated_id), None)
             if item is None:
                 raise PublicationNeedsReview("Allocated VK video was not found; automatic re-upload is blocked.")
+            # `video.save` allocates an ID before VK has finished transcoding.
+            # Posting that pending asset to the wall can leave a broken or blank
+            # attachment, so retain the exact saved ID and wait for the next
+            # explicit retry instead of publishing prematurely.
+            if bool(item.get("processing")):
+                save(vk_video_processing=True, vk_video_external_id=allocated_id,
+                     external_post_url=f"https://vk.com/video{allocated_id}")
+                raise PublicationDeliveryError(
+                    "VK is still processing the uploaded video. Retry only this platform after processing completes."
+                )
             external_id = allocated_id
             job.external_post_id = external_id
-            save(vk_video_external_id=external_id, external_post_url=f"https://vk.com/video{external_id}")
+            save(vk_video_processing=False, vk_video_external_id=external_id,
+                 external_post_url=f"https://vk.com/video{external_id}")
         if payload.get("vk_upload_started_at"):
             if not external_id:
                 raise PublicationNeedsReview("Previous VK upload outcome is unknown. Check the saved video ID before retrying.")
