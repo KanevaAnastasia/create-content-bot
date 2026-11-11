@@ -443,6 +443,11 @@ def queue_publication_bundle(
         account_key = account.account_key if account else "default"
         external_account_id = account.external_account_id if account else None
         publish_policy = account.publish_policy if account else "manual_review_required"
+        account_meta = account.meta_json if account and isinstance(account.meta_json, dict) else {}
+        # Stories remain the default for existing VK destinations.  A project
+        # can opt out through its publish-account settings without changing
+        # the behaviour of other communities.
+        vk_stories = target.platform == "vk" and bool(account_meta.get("vk_stories", True))
         source_label = str((video_source_labels or {}).get(target.language) or "").strip()
         variants: list[tuple[str, bool, str]] = []
         if target.key in trial_targets:
@@ -488,7 +493,7 @@ def queue_publication_bundle(
                     "video_source_label": source_label or None,
                     "cover_path": cover_paths.get(target.language),
                     "instagram_trial": is_trial,
-                    "vk_stories": target.platform == "vk",
+                    "vk_stories": vk_stories,
                     "publish_after_job_id": str(predecessor.id) if predecessor is not None else None,
                     "scheduled_at": normalized_scheduled_at.isoformat() if normalized_scheduled_at else None,
                     "direct_api_ready": readiness.ready,

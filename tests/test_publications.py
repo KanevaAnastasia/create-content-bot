@@ -5,7 +5,7 @@ from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 
 from app.db import Base
-from app.models import Project
+from app.models import Project, ProjectPublishAccount
 from app.publications import (
     DEFAULT_PUBLICATION_VIDEO_VARIANT,
     PUBLICATION_STATUS_SCHEDULED,
@@ -289,6 +289,31 @@ def test_new_vk_jobs_include_stories_without_changing_other_platforms(monkeypatc
                 selected_target_keys=['vk:ru', 'youtube:ru'], video_variant='clean',
             )
             assert {j.platform: j.payload_json['vk_stories'] for j in jobs} == {'vk': True, 'youtube': False}
+    finally:
+        engine.dispose()
+
+
+def test_vk_account_can_opt_out_of_stories(monkeypatch, tmp_path):
+    engine, Session = _session_factory()
+    try:
+        with Session() as session:
+            project = Project(slug='wall-only', title='Wall only', is_default=True)
+            session.add(project)
+            session.flush()
+            session.add(ProjectPublishAccount(
+                project_id=project.id, platform='vk', language='ru', account_key='default',
+                external_account_id='123', is_active=True, meta_json={'vk_stories': False},
+            ))
+            session.commit()
+            monkeypatch.setenv('PUBLICATION_ARTIFACTS_DIR', str(tmp_path))
+            monkeypatch.setenv('PUBLISH_WALL_ONLY_VK_GROUP_ID_RU', '123')
+            jobs = queue_publication_bundle(
+                session, project_slug='wall-only', recipe='recipe', copy={'vk_ru': 'VK recipe'},
+                post_production={'renders_by_language': {'ru': {'clean': {'video_b64': base64.b64encode(b'video').decode()}}}},
+                selected_target_keys=['vk:ru'], video_variant='clean',
+            )
+            assert len(jobs) == 1
+            assert jobs[0].payload_json['vk_stories'] is False
     finally:
         engine.dispose()
 

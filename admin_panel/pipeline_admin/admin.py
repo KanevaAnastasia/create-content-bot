@@ -5484,6 +5484,9 @@ def _publication_monitor_context(request, *, bundle_key: str = "") -> dict[str, 
         payload = job.payload_json if isinstance(job.payload_json, dict) else {}
         is_trial = bool(payload.get("instagram_trial"))
         status = str(job.status or "draft")
+        label = publication_target_label(f"{job.platform}:{job.language}")
+        if job.platform == "vk" and not bool(payload.get("vk_stories")):
+            label = "VK RU · стена"
         # VK allocates a video ID before transcoding.  A connection loss while
         # uploading used to leave the job marked as requiring intervention even
         # when we had subsequently verified that the exact asset exists and VK
@@ -5498,11 +5501,7 @@ def _publication_monitor_context(request, *, bundle_key: str = "") -> dict[str, 
         display_error = "" if vk_processing else str(job.publish_error or "")
         rows.append(
             {
-                "label": (
-                    "Instagram RU · Trial Reel"
-                    if is_trial
-                    else publication_target_label(f"{job.platform}:{job.language}")
-                ),
+                "label": "Instagram RU · Trial Reel" if is_trial else label,
                 "status": display_status,
                 "status_label": (
                     "VK обрабатывает видео" if vk_processing
