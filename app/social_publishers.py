@@ -557,12 +557,19 @@ def _publish_instagram(
     }, sort_keys=True).encode()).hexdigest()
     status = ""
     if state.get("creation_id"):
-        if state.get("fingerprint") != fingerprint:
-            raise PublicationNeedsReview("Instagram video or caption changed after upload; reconcile the saved container first.")
         status = container_status()
         if status == "PUBLISHED" or state.get("publish_ambiguous"):
             raise PublicationNeedsReview("Instagram publish may have succeeded. Check the account before retrying; the saved container was preserved.")
         upload_rejected = state.get("stage") == "upload_rejected" and status == "IN_PROGRESS"
+        # A definitive rupload rejection is the one safe exception to the
+        # fingerprint guard.  For example, we may deliberately regenerate the
+        # MP4 with a stricter encoder profile before the operator presses the
+        # per-platform retry button.  Meta accepted neither bytes nor a publish
+        # request in this state, so archive that dead container and start one
+        # new direct upload.  Any other change remains blocked: it could create
+        # a duplicate Reel for an upload Meta may still process.
+        if state.get("fingerprint") != fingerprint and not upload_rejected:
+            raise PublicationNeedsReview("Instagram video or caption changed after upload; reconcile the saved container first.")
         if status in {"ERROR", "EXPIRED"} or upload_rejected:
             # An explicit non-retriable upload rejection can leave Meta reporting
             # IN_PROGRESS forever. No publish was sent for this upload. Preserve
