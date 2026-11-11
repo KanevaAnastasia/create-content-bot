@@ -5476,6 +5476,18 @@ def _publication_monitor_context(request) -> dict[str, Any] | None:
         payload = job.payload_json if isinstance(job.payload_json, dict) else {}
         is_trial = bool(payload.get("instagram_trial"))
         status = str(job.status or "draft")
+        # VK allocates a video ID before transcoding.  A connection loss while
+        # uploading used to leave the job marked as requiring intervention even
+        # when we had subsequently verified that the exact asset exists and VK
+        # is simply processing it.  Treat that as a live, non-retryable state:
+        # pressing retry while processing could create a bad wall attachment.
+        vk_processing = (
+            job.platform == "vk"
+            and bool(payload.get("vk_video_processing"))
+            and not bool(payload.get("vk_wall_post_verified"))
+        )
+        display_status = "vk_processing" if vk_processing else status
+        display_error = "" if vk_processing else str(job.publish_error or "")
         rows.append(
             {
                 "label": (
@@ -5483,15 +5495,18 @@ def _publication_monitor_context(request) -> dict[str, Any] | None:
                     if is_trial
                     else publication_target_label(f"{job.platform}:{job.language}")
                 ),
-                "status": status,
-                "status_label": _PUBLICATION_STATUS_LABELS.get(status, status),
+                "status": display_status,
+                "status_label": (
+                    "VK обрабатывает видео" if vk_processing
+                    else _PUBLICATION_STATUS_LABELS.get(status, status)
+                ),
                 "status_class": (
                     "success"
-                    if status == "published"
+                    if display_status == "published"
                     else "error"
-                    if status in _PUBLICATION_ERROR_STATUSES
+                    if display_status in _PUBLICATION_ERROR_STATUSES
                     else "active"
-                    if status == "publishing"
+                    if display_status in {"publishing", "vk_processing"}
                     else "waiting"
                 ),
                 "attempt_count": int(job.attempt_count or 0),
@@ -5504,19 +5519,22 @@ def _publication_monitor_context(request) -> dict[str, Any] | None:
                 ] if job.platform == "vk" else [],
                 "vk_stories_enabled": job.platform == "vk" and bool(payload.get("vk_stories")),
                 "vk_wall_verified": job.platform == "vk" and bool(payload.get("vk_wall_post_verified")),
-                "publish_error": str(job.publish_error or ""),
+                "publish_error": display_error,
                 "published_at": job.published_at,
                 "change_url": reverse("admin:pipeline_admin_publicationjob_change", args=[job.pk]),
                 "retry_url": (
                     reverse("admin:pipeline_admin_publicationjob_retry", args=[job.pk])
-                    if status in _PUBLICATION_ERROR_STATUSES
+                    if status in _PUBLICATION_ERROR_STATUSES and not vk_processing
                     else ""
                 ),
             }
         )
     published = sum(row["status"] == "published" for row in rows)
     failed = sum(row["status"] in _PUBLICATION_ERROR_STATUSES for row in rows)
-    finished = sum(row["status"] in _PUBLICATION_FINISHED_STATUSES for row in rows)
+    finished = sum(
+        row["status"] in _PUBLICATION_FINISHED_STATUSES and row["status"] != "vk_processing"
+        for row in rows
+    )
     pending = finished < len(rows)
     return {
         "bundle_key": root_bundle,

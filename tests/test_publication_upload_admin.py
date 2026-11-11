@@ -209,6 +209,54 @@ def test_publication_monitor_groups_trial_and_main_jobs(monkeypatch) -> None:
     assert 'private-result' not in str(row)
 
 
+def test_publication_monitor_shows_verified_vk_processing_without_stale_retry(monkeypatch) -> None:
+    root = "11111111-2222-3333-4444-555555555555"
+    vk_job = SimpleNamespace(
+        pk=uuid.uuid4(),
+        bundle_key=root,
+        platform="vk",
+        language="ru",
+        status="needs_manual_action",
+        payload_json={
+            "vk_video_processing": True,
+            "vk_video_external_id": "-123_42",
+            "external_post_url": "https://vkvideo.ru/video-123_42",
+        },
+        attempt_count=1,
+        external_post_id=None,
+        publish_error="VK upload not confirmed. Check the saved upload stage; automatic re-upload is blocked.",
+        published_at=None,
+    )
+
+    class FakeQuerySet:
+        def select_related(self, *_args):
+            return self
+
+        def filter(self, **_kwargs):
+            return self
+
+        def order_by(self, *_args):
+            return self
+
+        def __iter__(self):
+            return iter([vk_job])
+
+    monkeypatch.setattr(admin_module.PublicationJob, "objects", FakeQuerySet())
+    request = RequestFactory().get("/admin/pipeline_admin/publicationjob/", {"bundle": root})
+
+    monitor = admin_module._publication_monitor_context(request)
+
+    assert monitor is not None
+    row = monitor["rows"][0]
+    assert row["status"] == "vk_processing"
+    assert row["status_label"] == "VK обрабатывает видео"
+    assert row["status_class"] == "active"
+    assert row["publish_error"] == ""
+    assert row["retry_url"] == ""
+    assert monitor["failed"] == 0
+    assert monitor["pending"] is True
+
+
 def test_publication_external_url_prefers_saved_permalink() -> None:
     job = SimpleNamespace(
         payload_json={"external_post_url": "https://www.instagram.com/reel/example/"},
