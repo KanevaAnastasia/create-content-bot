@@ -764,7 +764,10 @@ def _instagram_compatible_video(video_path: Path) -> Path:
     if not width or not height or not ffmpeg:
         return video_path
 
-    output_path = video_path.with_name(f"{video_path.stem}.instagram.mp4")
+    # Bump the cached delivery variant when the encoding contract changes. This
+    # makes an already generated 4K final get the stricter encoder settings on a
+    # later retry rather than silently reusing an older derivative.
+    output_path = video_path.with_name(f"{video_path.stem}.instagram.v2.mp4")
     try:
         if (
             output_path.is_file()
@@ -796,9 +799,21 @@ def _instagram_compatible_video(video_path: Path) -> Path:
         "-c:v",
         "libx264",
         "-profile:v",
-        "high",
+        "baseline",
         "-pix_fmt",
         "yuv420p",
+        "-r",
+        "30",
+        "-fps_mode",
+        "cfr",
+        "-g",
+        "60",
+        "-keyint_min",
+        "60",
+        "-sc_threshold",
+        "0",
+        "-bf",
+        "0",
         "-preset",
         "fast",
         "-crf",
@@ -813,6 +828,8 @@ def _instagram_compatible_video(video_path: Path) -> Path:
         "128k",
         "-ar",
         "48000",
+        "-ac",
+        "2",
         "-movflags",
         "+faststart",
         str(temp_path),

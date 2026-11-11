@@ -420,10 +420,13 @@ def test_instagram_normalization_is_cached(monkeypatch, tmp_path: Path) -> None:
 
     normalized = _instagram_compatible_video(source)
 
-    assert normalized == tmp_path / "publish_ru.instagram.mp4"
+    assert normalized == tmp_path / "publish_ru.instagram.v2.mp4"
     assert normalized.read_bytes() == b"instagram-video"
     assert "scale=w='min(1080,iw)':h=-2:flags=lanczos" in commands[0]
     assert "20M" in commands[0]
+    assert commands[0][commands[0].index("-profile:v") + 1] == "baseline"
+    assert commands[0][commands[0].index("-g") + 1] == "60"
+    assert commands[0][commands[0].index("-r") + 1] == "30"
     assert _instagram_compatible_video(source) == normalized
     assert len(commands) == 1
 
