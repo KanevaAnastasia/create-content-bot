@@ -430,6 +430,11 @@ def test_instagram_normalization_is_cached(monkeypatch, tmp_path: Path) -> None:
     assert _instagram_compatible_video(source) == normalized
     assert len(commands) == 1
 
+    recovery = _instagram_compatible_video(source, recovery_profile=True)
+    assert recovery == tmp_path / "publish_ru.instagram.v3.mp4"
+    assert "scale=w='min(720,iw)':h=-2:flags=lanczos" in commands[1]
+    assert "2500k" in commands[1]
+
 
 def test_vk_readiness_requires_expected_user_identity(monkeypatch) -> None:
     monkeypatch.setenv("PUBLISH_GRANDMA_KITCHEN_VK_COMMUNITY_TOKEN_RU", "community")
@@ -460,7 +465,7 @@ def test_vk_wall_denial_is_not_success_and_retry_reuses_video(monkeypatch, tmp_p
     )
     monkeypatch.setattr("app.social_publishers._vk_access_token", lambda _project: "token")
     monkeypatch.setattr("app.social_publishers._verify_vk_identity", lambda *_args, **_kwargs: None)
-    monkeypatch.setattr("app.social_publishers._instagram_compatible_video", lambda p: p)
+    monkeypatch.setattr("app.social_publishers._instagram_compatible_video", lambda p, **_kwargs: p)
 
     def response(payload: dict) -> Mock:
         result = Mock(ok=True, status_code=200)

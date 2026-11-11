@@ -523,7 +523,14 @@ def _publish_instagram(
     video_path = Path(job.video_path)
     if not video_path.is_file():
         raise PublicationDeliveryError(f"Instagram video does not exist: {video_path}")
-    video_path = _instagram_compatible_video(video_path)
+    # A rejected direct upload is definitive (unlike a lost response), so the
+    # next explicit retry may use an even smaller delivery profile.  This stays
+    # within Meta's official direct API and avoids downgrading every normal Reel.
+    recovery_profile = (
+        state.get("stage") == "upload_rejected"
+        and not state.get("publish_ambiguous")
+    )
+    video_path = _instagram_compatible_video(video_path, recovery_profile=recovery_profile)
     file_size = video_path.stat().st_size
     if file_size > 1_000_000_000:
         raise PublicationDeliveryError("Instagram Reels video exceeds the 1 GB API limit.")
@@ -748,7 +755,7 @@ def _instagram_hosted_video(video_path: Path, project_slug: str) -> str:
     return zernio_publisher.ZernioClient(project_slug).upload(upload_path)
 
 
-def _instagram_compatible_video(video_path: Path) -> Path:
+def _instagram_compatible_video(video_path: Path, *, recovery_profile: bool = False) -> Path:
     """Create and cache a conservative Instagram-compatible MP4.
 
     Final builds are intentionally 4K for YouTube, while Instagram's publishing
@@ -773,8 +780,10 @@ def _instagram_compatible_video(video_path: Path) -> Path:
 
     # Bump the cached delivery variant when the encoding contract changes. This
     # makes an already generated 4K final get the stricter encoder settings on a
-    # later retry rather than silently reusing an older derivative.
-    output_path = video_path.with_name(f"{video_path.stem}.instagram.v2.mp4")
+    # later retry rather than silently reusing an older derivative.  v3 is only
+    # for a second direct attempt after Meta explicitly rejected v2.
+    profile = "v3" if recovery_profile else "v2"
+    output_path = video_path.with_name(f"{video_path.stem}.instagram.{profile}.mp4")
     try:
         if (
             output_path.is_file()
@@ -788,7 +797,10 @@ def _instagram_compatible_video(video_path: Path) -> Path:
     temp_path = output_path.with_name(
         f".{output_path.stem}.{uuid.uuid4().hex}.tmp.mp4"
     )
-    scale_filter = "scale=w='min(1080,iw)':h=-2:flags=lanczos"
+    max_width = 720 if recovery_profile else 1080
+    max_rate = "2500k" if recovery_profile else "20M"
+    buffer_size = "5000k" if recovery_profile else "40M"
+    scale_filter = f"scale=w='min({max_width},iw)':h=-2:flags=lanczos"
     command = [
         ffmpeg,
         "-hide_banner",
@@ -826,9 +838,9 @@ def _instagram_compatible_video(video_path: Path) -> Path:
         "-crf",
         "21",
         "-maxrate",
-        "20M",
+        max_rate,
         "-bufsize",
-        "40M",
+        buffer_size,
         "-c:a",
         "aac",
         "-b:a",

@@ -26,7 +26,7 @@ def response(payload, ok=True):
 def upload(monkeypatch, tmp_path):
     monkeypatch.setenv("PUBLISH_DISCIPLINE_INSTAGRAM_BUSINESS_ACCOUNT_ID_RU", "account")
     monkeypatch.setattr("app.social_publishers._instagram_access_token", lambda *args: "secret")
-    monkeypatch.setattr("app.social_publishers._instagram_compatible_video", lambda p: p)
+    monkeypatch.setattr("app.social_publishers._instagram_compatible_video", lambda p, **_kwargs: p)
     monkeypatch.setattr("app.social_publishers._verify_instagram_publish_identity", lambda *args: {"account_id": "account"})
     monkeypatch.setattr("app.social_publishers.time.sleep", lambda seconds: None)
     path = tmp_path / "video.mp4"
@@ -293,7 +293,7 @@ def test_explicit_upload_rejection_can_retry_regenerated_video(upload, monkeypat
 
     replacement = tmp_path / "video.instagram.v2.mp4"
     replacement.write_bytes(b"stricter-video")
-    monkeypatch.setattr("app.social_publishers._instagram_compatible_video", lambda _path: replacement)
+    monkeypatch.setattr("app.social_publishers._instagram_compatible_video", lambda _path, **_kwargs: replacement)
 
     def recover(url, **kwargs):
         result = original(url, **kwargs)
