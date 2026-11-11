@@ -3301,6 +3301,22 @@ def _publication_account_index(
     return {(row.platform, row.language): row for row in rows}
 
 
+def _default_publication_target_keys(copy_payload: dict[str, str], project_slug: str) -> list[str]:
+    """Preselect only destinations that can actually receive a direct post.
+
+    Unconfigured destinations remain visible in the preparation screen, so an
+    operator can connect them and deliberately opt in later.  They must not,
+    however, silently create an error job just because a copy field exists.
+    """
+    return [
+        target.key
+        for target in build_publication_targets(copy_payload)
+        if target.description and project_slug and platform_readiness(
+            project_slug, target.platform, target.language
+        ).ready
+    ]
+
+
 def _publication_queue_form_html(
     form: PublicationQueueAdminForm,
     run: GenerationRun,
@@ -4802,7 +4818,10 @@ class GenerationRunAdmin(admin.ModelAdmin):
                 video_source_choices=video_source_choices,
                 initial={
                     "project_slug": str(request.POST.get("project_slug") or default_project_slug),
-                    "target_keys": [target.key for target in build_publication_targets(initial_copy) if target.description],
+                    "target_keys": _default_publication_target_keys(
+                        initial_copy,
+                        str(request.POST.get("project_slug") or default_project_slug),
+                    ),
                     "video_variant": str(request.POST.get("video_variant") or DEFAULT_PUBLICATION_VIDEO_VARIANT),
                     "scheduled_at": request.POST.get("scheduled_at") or None,
                     **video_source_initials,
@@ -4820,7 +4839,7 @@ class GenerationRunAdmin(admin.ModelAdmin):
                 video_source_choices=video_source_choices,
                 initial={
                     "project_slug": default_project_slug,
-                    "target_keys": [target.key for target in build_publication_targets(initial_copy) if target.description],
+                    "target_keys": _default_publication_target_keys(initial_copy, default_project_slug),
                     "video_variant": DEFAULT_PUBLICATION_VIDEO_VARIANT,
                     **video_source_initials,
                     **initial_copy,

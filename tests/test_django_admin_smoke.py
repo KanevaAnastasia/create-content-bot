@@ -2606,6 +2606,31 @@ def test_django_publication_queue_form_renders_rich_preflight(monkeypatch):
     assert "no video" in html
 
 
+def test_default_publication_targets_skip_unconfigured_destinations(monkeypatch):
+    admin_dir = Path(__file__).resolve().parents[1] / "admin_panel"
+    sys.path.insert(0, str(admin_dir))
+    os.environ.setdefault("DJANGO_SETTINGS_MODULE", "cf_admin.settings")
+
+    import django
+
+    django.setup()
+
+    import pipeline_admin.admin as admin_module
+
+    copy_payload = {
+        "youtube_ru_title": "RU title",
+        "youtube_ru_description": "RU desc",
+        "tiktok_ru": "TT desc",
+    }
+    monkeypatch.setattr(
+        admin_module,
+        "platform_readiness",
+        lambda _project, platform, _language: SimpleNamespace(ready=platform != "tiktok"),
+    )
+
+    assert admin_module._default_publication_target_keys(copy_payload, "discipline") == ["youtube:ru"]
+
+
 def test_django_publication_form_requires_project_and_accepts_custom_mp4():
     admin_dir = Path(__file__).resolve().parents[1] / "admin_panel"
     sys.path.insert(0, str(admin_dir))
