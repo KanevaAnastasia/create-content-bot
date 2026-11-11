@@ -1244,7 +1244,23 @@ def _publish_vk_stories(job: PublicationJob, token: str, group_id: str, version:
                 raise PublicationNeedsReview("VK Stories: previous save outcome is unknown; check stories before retrying.")
             if not part.get("upload_result"):
                 if part.get("upload_started_at"):
-                    raise PublicationNeedsReview("VK Stories: previous upload outcome is unknown; automatic repeat blocked.")
+                    # Uploading to the story server alone cannot make a story
+                    # visible: that requires a subsequent `stories.save` with
+                    # the opaque upload result.  If that response was lost, we
+                    # can safely recover only after confirming that the group
+                    # has no active stories at all.  With any active story we
+                    # cannot prove it is unrelated, so remain conservative.
+                    current = _vk_call(
+                        "stories.get", token, version, owner_id=f"-{group_id}", extended=1,
+                    )
+                    if current.get("items"):
+                        raise PublicationNeedsReview(
+                            "VK Stories: previous upload outcome is unknown and active stories exist; "
+                            "automatic repeat is blocked."
+                        )
+                    part.pop("upload_started_at", None)
+                    part["upload_recovery_checked_at"] = datetime.now(timezone.utc).isoformat()
+                    save()
                 path = Path(part["path"])
                 if not path.is_file():
                     raise PublicationDeliveryError("VK Stories: prepared video part is missing.")

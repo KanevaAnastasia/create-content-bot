@@ -100,10 +100,66 @@ def test_unknown_upload_does_not_publish_or_reupload(story_job, monkeypatch):
     upload.side_effect = requests.Timeout('secret')
     with pytest.raises(p.PublicationNeedsReview):
         p._publish_vk_stories(story_job, 'community-secret', '123', '5.199', lambda: None)
+    original_api = p._vk_call
+
+    def api(method, token, version, **params):
+        if method == 'stories.get':
+            return {'count': 1, 'items': [{'id': 9}]}
+        return original_api(method, token, version, **params)
+
+    monkeypatch.setattr(p, '_vk_call', api)
     with pytest.raises(p.PublicationNeedsReview):
         p._publish_vk_stories(story_job, 'community-secret', '123', '5.199', lambda: None)
     assert not saves
     assert upload.call_count == 1
+
+
+def test_unknown_upload_recovers_only_after_empty_story_check(story_job, monkeypatch):
+    calls, saves, upload = setup_api(monkeypatch)
+    story_job.payload_json = {
+        'vk_story_parts': [{'path': str(Path(story_job.video_path)), 'upload_started_at': '2026-01-01T00:00:00+00:00'}]
+    }
+
+    original_api = p._vk_call
+
+    def api(method, token, version, **params):
+        if method == 'stories.get':
+            assert params == {'owner_id': '-123', 'extended': 1}
+            calls.append(method)
+            return {'count': 0, 'items': []}
+        return original_api(method, token, version, **params)
+
+    monkeypatch.setattr(p, '_vk_call', api)
+    p._publish_vk_stories(story_job, 'community-secret', '123', '5.199', lambda: None)
+
+    part = story_job.payload_json['vk_story_parts'][0]
+    assert part['verified'] is True
+    assert part['upload_started_at'] != '2026-01-01T00:00:00+00:00'
+    assert part['upload_recovery_checked_at']
+    assert calls[0] == 'stories.get'
+    assert upload.call_count == 1
+
+
+def test_unknown_upload_stays_blocked_when_active_story_exists(story_job, monkeypatch):
+    calls, saves, upload = setup_api(monkeypatch)
+    story_job.payload_json = {
+        'vk_story_parts': [{'path': str(Path(story_job.video_path)), 'upload_started_at': '2026-01-01T00:00:00+00:00'}]
+    }
+
+    original_api = p._vk_call
+
+    def api(method, token, version, **params):
+        if method == 'stories.get':
+            calls.append(method)
+            return {'count': 1, 'items': [{'id': 9}]}
+        return original_api(method, token, version, **params)
+
+    monkeypatch.setattr(p, '_vk_call', api)
+    with pytest.raises(p.PublicationNeedsReview, match='active stories exist'):
+        p._publish_vk_stories(story_job, 'community-secret', '123', '5.199', lambda: None)
+
+    assert calls == ['stories.get']
+    assert upload.call_count == 0
 
 
 def test_media_split_preserves_full_duration_with_safe_encoding(tmp_path, monkeypatch):
