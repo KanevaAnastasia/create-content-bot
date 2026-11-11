@@ -1032,7 +1032,7 @@ async def _start_advertising_scene_plan(
         await update.message.reply_text("Для рекламы нужен исходный текст и фотография товара. Пришлите фото товара ещё раз.")
         return True
     try:
-        await reply_text_without_keyboard(update.message, "Строю рекламный план из 6 сцен Veo, ждите.")
+        await reply_text_without_keyboard(update.message, "Строю рекламный план из 3–6 сцен Veo, ждите.")
         result = await _call_with_503_retries(
             update,
             context,
@@ -1053,8 +1053,8 @@ async def _start_advertising_scene_plan(
         await update.message.reply_text(f"Ошибка подготовки рекламного плана: {_user_error_message(e)}")
         return True
     plan = result.get("json_plan") if isinstance(result, dict) else None
-    if not isinstance(plan, list) or len(plan) != 6:
-        await update.message.reply_text("Не удалось получить полный рекламный план из 6 сцен. Попробуйте ещё раз.")
+    if not isinstance(plan, list) or not 3 <= len(plan) <= 6:
+        await update.message.reply_text("Не удалось получить полный рекламный план из 3–6 сцен. Попробуйте ещё раз.")
         return True
     title = str(result.get("title") or product_brief.get("product_name") or "Реклама товара").strip()
     session.pop(SERIES_PENDING_RECIPE_SESSION_KEY, None)
@@ -1068,7 +1068,7 @@ async def _start_advertising_scene_plan(
     session["sponsored_content"] = True
     session["viral_concept_brief"] = {
         "main_hook": str(plan[0].get("text") or ""),
-        "brand_integration_plan": "Один и тот же товар целиком виден во всех шести сценах.",
+        "brand_integration_plan": "Один и тот же товар целиком виден во всех сценах.",
         "content_type": session[ADVERTISING_CONTENT_TYPE_SESSION_KEY],
     }
     session["romantic_drama_subplot"] = {}
@@ -1091,7 +1091,7 @@ async def _start_advertising_scene_plan(
     await _reply_text_chunked(update, session["scenes_text"])
     await _reply_text_with_optional_markup(
         update,
-        "Проверьте рекламный план. Товар обязателен во всех 6 сценах. «ОК» — перейти к заголовку и production; "
+        "Проверьте рекламный план. Товар обязателен во всех сценах. «ОК» — перейти к заголовку и production; "
         "иначе пришлите правку.",
         reply_markup=ok_only_markup(),
     )

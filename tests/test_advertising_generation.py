@@ -1,5 +1,7 @@
 import json
 
+import pytest
+
 from app import advertising_generation
 from app.handlers.handlers_media_scene import _append_scene_identity_to_image_prompt
 from app.handlers.handlers_state_media import (
@@ -74,7 +76,8 @@ def test_advertising_post_package_has_three_large_product_images_and_clean_copy(
     assert "реклама" not in result["post_text"].lower()
 
 
-def test_advertising_scene_plan_for_how_to_has_six_veo_scenes_and_product_everywhere(monkeypatch):
+@pytest.mark.parametrize("source_count, expected_count", [(2, 3), (3, 3), (4, 4), (5, 5), (6, 6), (7, 6)])
+def test_advertising_scene_plan_for_how_to_has_veo_scenes_and_product_everywhere(monkeypatch, source_count, expected_count):
     monkeypatch.setattr(
         advertising_generation,
         "gemini_generate_sync",
@@ -91,7 +94,7 @@ def test_advertising_scene_plan_for_how_to_has_six_veo_scenes_and_product_everyw
                         "characters": ["grandma", "cat"],
                         "product_use": "Флакон целиком виден справа от кроссовок",
                     }
-                    for index in range(1, 7)
+                    for index in range(1, source_count + 1)
                 ],
             },
             ensure_ascii=False,
@@ -105,7 +108,8 @@ def test_advertising_scene_plan_for_how_to_has_six_veo_scenes_and_product_everyw
 
     scenes = result["json_plan"]
     assert result["content_type"] == "how_to"
-    assert len(scenes) == 6
+    assert len(scenes) == expected_count
+    assert scenes[-1]["retention_function"] == "payoff"
     assert all(scene["model"] == "veo3_fast" for scene in scenes)
     assert all(scene["duration_sec"] == 8 for scene in scenes)
     assert all(scene["advertising_product_required"] is True for scene in scenes)

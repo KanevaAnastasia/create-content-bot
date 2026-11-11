@@ -1644,7 +1644,7 @@ def test_advertising_campaign_choice_then_clip_asks_for_series(monkeypatch):
     assert session[ADVERTISING_FORMAT_SESSION_KEY] == "clip"
     assert session[SERIES_PENDING_NEXT_SESSION_KEY] == SERIES_NEXT_ADVERTISING_PLAN
     assert series_asked == [True]
-    assert any("шесть Veo-сцен" in text for text in captured)
+    assert any("от 3 до 6 Veo-сцен" in text for text in captured)
 
 
 def test_advertising_post_generates_three_images_and_copy(monkeypatch):

@@ -5658,7 +5658,7 @@ async def _handle_scene_approval_refine(update: Update, context: ContextTypes.DE
         try:
             await reply_text_without_keyboard(
                 update.message,
-                "Дорабатываю 6 рекламных Veo-сцен, сохраняя товар в каждом кадре.",
+                "Дорабатываю рекламные Veo-сцены, сохраняя товар в каждом кадре.",
             )
             scenes = await _call_with_503_retries(
                 update,
@@ -5693,7 +5693,7 @@ async def _handle_scene_approval_refine(update: Update, context: ContextTypes.DE
             if isinstance(item, dict)
         ]
         SESSIONS[chat_id] = session
-        await update.message.reply_text("Обновила рекламный план; товар сохранён во всех 6 сценах:")
+        await update.message.reply_text("Обновила рекламный план; товар сохранён во всех сценах:")
         await _reply_text_chunked(update, scenes["text_plan"])
         await _reply_text_with_optional_markup(
             update,
@@ -7219,7 +7219,7 @@ async def _ask_advertising_format(update: Update, *, chat_id: int, session: dict
     SESSIONS[chat_id] = session
     await _reply_text_with_optional_markup(
         update,
-        "Как выпускаем выбранную кампанию?\n\n«Клип» — шесть сцен Veo.\n«Пост» — три изображения с очень крупным товаром и персонажами плюс готовый рекламный текст.",
+        "Как выпускаем выбранную кампанию?\n\n«Клип» — от 3 до 6 сцен Veo.\n«Пост» — три изображения с очень крупным товаром и персонажами плюс готовый рекламный текст.",
         reply_markup=_advertising_format_choice_markup(),
     )
     return True
@@ -7431,7 +7431,7 @@ async def _handle_advertising_format_choice(
         session[ADVERTISING_FORMAT_SESSION_KEY] = "clip"
         session[SERIES_PENDING_NEXT_SESSION_KEY] = SERIES_NEXT_ADVERTISING_PLAN
         SESSIONS[chat_id] = session
-        await update.message.reply_text("Выбран формат «Клип»: подготовлю шесть Veo-сцен по утверждённой кампании.")
+        await update.message.reply_text("Выбран формат «Клип»: подготовлю от 3 до 6 Veo-сцен по утверждённой кампании.")
         await _ask_series_choice(update, session)
         SESSIONS[chat_id] = session
         return True

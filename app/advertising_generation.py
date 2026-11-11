@@ -27,7 +27,8 @@ ADVERTISING_FORMAT_SESSION_KEY = "advertising_format"
 ADVERTISING_POST_TEXT_SESSION_KEY = "advertising_post_text"
 ADVERTISING_POST_IMAGE_PATHS_SESSION_KEY = "advertising_post_image_paths"
 
-ADVERTISING_SCENE_COUNT = 6
+ADVERTISING_MIN_SCENE_COUNT = 3
+ADVERTISING_MAX_SCENE_COUNT = 6
 ADVERTISING_SCENE_DURATION_SEC = 8
 
 
@@ -328,17 +329,17 @@ def generate_advertising_scene_plan(
         "Ты режиссёр короткой вертикальной рекламы с бабушкой и рыжим котом. Строго раскрой selected_campaign как основу сюжета; "
         "source_text используй как фактический контекст. Источник может быть рецептом, бытовым how-to "
         "(например, чистка мебели или кроссовок) или небольшой историей. Верни только строгий JSON-объект с ключами title, "
-        "content_type и scenes. content_type: recipe, how_to или story. scenes: ровно 6 последовательных сцен по 8 секунд для Veo 3 Fast.\n"
-        "Каждая сцена обязана иметь: scene, speech_ru, action, visual_description, shot_type, characters, product_use, "
+        "content_type и scenes. content_type: recipe, how_to или story. scenes: от 3 до 6 последовательных сцен по 8 секунд для Veo 3 Fast.\n"
+        "Выбирай количество сцен по сюжету: достаточно 3 — не растягивай до 6. Каждая сцена обязана иметь: scene, speech_ru, action, visual_description, shot_type, characters, product_use, "
         "continuity_anchors, retention_function, micro_events. speech_ru — одна естественная русская фраза до 105 знаков.\n"
         "Если это рецепт: хук/результат, ключевые шаги, финальная подача. Если how_to: проблема, подготовка, 2–3 понятных действия, "
         "видимый результат до/после. Если story: хук, завязка, развитие, поворот и финальный вывод. Не превращай нерецептурный источник в готовку.\n"
         "ОБЯЗАТЕЛЬНО: один и тот же товар с product_brief хорошо виден ЦЕЛИКОМ в стартовом кадре и остаётся видимым всю сцену. "
         "В action, visual_description и product_use каждой сцены явно укажи положение товара и его роль. Нельзя показывать только результат "
         "без упаковки, нельзя заменять, переоформлять, обрезать, закрывать или дублировать товар.\n"
-        "Сцена 1 — сильный визуальный хук с товаром. Сцена 6 — результат, товар и мягкий CTA. Запрещены неподтверждённые свойства, "
+        "Сцена 1 — сильный визуальный хук с товаром. Последняя сцена — результат, товар и мягкий CTA. Запрещены неподтверждённые свойства, "
         "медицинские обещания и сравнения с конкурентами. Без текста и субтитров в кадре. Вертикаль 9:16.\n"
-        "Если есть feedback, отредактируй previous_scenes, сохраняя ровно 6 сцен и товар в каждой.\n\n"
+        "Если есть feedback, отредактируй previous_scenes, сохраняя от 3 до 6 сцен и товар в каждой.\n\n"
         + json.dumps(payload, ensure_ascii=False, indent=2)
     )
     from .directorial_notes import RULE
@@ -349,7 +350,8 @@ def generate_advertising_scene_plan(
     product_lock_ru = advertising_product_lock_ru(product_brief)
     product_lock_en = advertising_product_lock_en(product_brief)
     normalized: list[dict[str, Any]] = []
-    for index in range(ADVERTISING_SCENE_COUNT):
+    scene_count = max(ADVERTISING_MIN_SCENE_COUNT, min(len(source_scenes), ADVERTISING_MAX_SCENE_COUNT))
+    for index in range(scene_count):
         candidate = source_scenes[index] if index < len(source_scenes) and isinstance(source_scenes[index], dict) else {}
         action = _clean_text(candidate.get("action") or candidate.get("visual_description"), 1000)
         if not action:
@@ -376,7 +378,7 @@ def generate_advertising_scene_plan(
                 "product_use": _clean_text(candidate.get("product_use"), 500) or "товар целиком виден рядом с главным действием",
                 "continuity_anchors": list(dict.fromkeys(anchors)),
                 "continuity_state": "тот же товар и та же упаковка без изменений",
-                "retention_function": _clean_text(candidate.get("retention_function"), 120) or ("hook" if index == 0 else "payoff" if index == 5 else "progress"),
+                "retention_function": _clean_text(candidate.get("retention_function"), 120) or ("hook" if index == 0 else "payoff" if index == scene_count - 1 else "progress"),
                 "micro_events": [_clean_text(item, 180) for item in candidate.get("micro_events") or [] if _clean_text(item, 180)][:4],
                 "voice_needed": True,
                 "has_lipsync": True,
