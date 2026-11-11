@@ -1289,39 +1289,62 @@ def _publish_vk(job: PublicationJob, project_slug: str, persist: Callable[[], No
         if owner != f"-{group_id}" or not video.isdigit():
             raise PublicationNeedsReview("Saved VK video does not belong to the configured community.")
     else:
+        allocated_id = str(payload.get("vk_allocated_video_id") or "")
+        if allocated_id:
+            owner, _, video = allocated_id.partition("_")
+            if owner != f"-{group_id}" or not video.isdigit():
+                raise PublicationNeedsReview("Allocated VK video does not belong to the configured community.")
+            # An upload response can be lost after VK has already created the
+            # video. Verify the exact pre-allocated ID instead of uploading the
+            # bytes again; a second upload could become a duplicate publication.
+            token = _vk_access_token(project_slug)
+            try:
+                videos = _vk_call("video.get", token, api_version, owner_id=owner,
+                                  videos=allocated_id, extended=0).get("items", [])
+            except PublicationDeliveryError:
+                raise PublicationNeedsReview("Allocated VK video could not be checked; automatic re-upload is blocked.") from None
+            item = next((value for value in videos if isinstance(value, dict)
+                         and f"{value.get('owner_id')}_{value.get('id')}" == allocated_id), None)
+            if item is None:
+                raise PublicationNeedsReview("Allocated VK video was not found; automatic re-upload is blocked.")
+            external_id = allocated_id
+            job.external_post_id = external_id
+            save(vk_video_external_id=external_id, external_post_url=f"https://vk.com/video{external_id}")
         if payload.get("vk_upload_started_at"):
-            raise PublicationNeedsReview("Previous VK upload outcome is unknown. Check the saved video ID before retrying.")
-        token = _vk_access_token(project_slug)
-        _verify_vk_identity(project_slug, token=token, group_id=group_id, api_version=api_version)
-        video_path = _instagram_compatible_video(Path(job.video_path))
-        # Persist before the first remote write: an interruption must not re-upload.
-        save(vk_upload_started_at=datetime.now(timezone.utc).isoformat())
-        try:
-            data = _vk_call(
-                "video.save", token, api_version, group_id=group_id,
-                name=str(job.title or job.description or "Video")[:128],
-                description=str(job.description or ""), wallpost=0,
-            )
-            upload_url = str(data.get("upload_url") or "")
-            parsed = urlparse(upload_url)
-            if parsed.scheme != "https" or not parsed.hostname or parsed.username or parsed.password:
-                raise PublicationDeliveryError("VK returned an invalid upload URL.")
-            if str(data.get("owner_id")) != f"-{group_id}" or not str(data.get("video_id", "")).isdigit():
-                raise PublicationDeliveryError("VK returned an unexpected upload owner/video ID.")
-            save(vk_allocated_video_id=f"{data['owner_id']}_{data['video_id']}")
-            with video_path.open("rb") as handle:
-                response = requests.post(upload_url, files={"video_file": (video_path.name, handle, "video/mp4")},
-                                         timeout=DEFAULT_REQUEST_TIMEOUT, allow_redirects=False)
-            uploaded = response.json()
-            if not response.ok or not isinstance(uploaded, dict) or uploaded.get("error"):
-                raise PublicationDeliveryError("VK video upload was not confirmed.")
-            if str(uploaded.get("owner_id")) != f"-{group_id}" or str(uploaded.get("video_id")) != str(data["video_id"]):
-                raise PublicationDeliveryError("VK upload returned an unexpected video ID.")
-        except (PublicationDeliveryError, requests.RequestException, ValueError):
-            raise PublicationNeedsReview("VK upload not confirmed. Check the saved upload stage; automatic re-upload is blocked.") from None
-        external_id = f"{data['owner_id']}_{data['video_id']}"
-        job.external_post_id = external_id
-        save(vk_video_external_id=external_id, external_post_url=f"https://vk.com/video{external_id}")
+            if not external_id:
+                raise PublicationNeedsReview("Previous VK upload outcome is unknown. Check the saved video ID before retrying.")
+        if not external_id:
+            token = _vk_access_token(project_slug)
+            _verify_vk_identity(project_slug, token=token, group_id=group_id, api_version=api_version)
+            video_path = _instagram_compatible_video(Path(job.video_path))
+            # Persist before the first remote write: an interruption must not re-upload.
+            save(vk_upload_started_at=datetime.now(timezone.utc).isoformat())
+            try:
+                data = _vk_call(
+                    "video.save", token, api_version, group_id=group_id,
+                    name=str(job.title or job.description or "Video")[:128],
+                    description=str(job.description or ""), wallpost=0,
+                )
+                upload_url = str(data.get("upload_url") or "")
+                parsed = urlparse(upload_url)
+                if parsed.scheme != "https" or not parsed.hostname or parsed.username or parsed.password:
+                    raise PublicationDeliveryError("VK returned an invalid upload URL.")
+                if str(data.get("owner_id")) != f"-{group_id}" or not str(data.get("video_id", "")).isdigit():
+                    raise PublicationDeliveryError("VK returned an unexpected upload owner/video ID.")
+                save(vk_allocated_video_id=f"{data['owner_id']}_{data['video_id']}")
+                with video_path.open("rb") as handle:
+                    response = requests.post(upload_url, files={"video_file": (video_path.name, handle, "video/mp4")},
+                                             timeout=DEFAULT_REQUEST_TIMEOUT, allow_redirects=False)
+                uploaded = response.json()
+                if not response.ok or not isinstance(uploaded, dict) or uploaded.get("error"):
+                    raise PublicationDeliveryError("VK video upload was not confirmed.")
+                if str(uploaded.get("owner_id")) != f"-{group_id}" or str(uploaded.get("video_id")) != str(data["video_id"]):
+                    raise PublicationDeliveryError("VK upload returned an unexpected video ID.")
+            except (PublicationDeliveryError, requests.RequestException, ValueError):
+                raise PublicationNeedsReview("VK upload not confirmed. Check the saved upload stage; automatic re-upload is blocked.") from None
+            external_id = f"{data['owner_id']}_{data['video_id']}"
+            job.external_post_id = external_id
+            save(vk_video_external_id=external_id, external_post_url=f"https://vk.com/video{external_id}")
 
     payload = job.payload_json or {}
     post_id = payload.get("vk_wall_post_id")

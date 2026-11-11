@@ -47,6 +47,10 @@ def setup_api(monkeypatch, job, *, wall_effect=None, own_group=123, attachment=T
             assert kw['data']['access_token'] == 'video-secret'
             return response({'response': {'upload_url': 'https://pu.vk.com/upload',
                                           'owner_id': -123, 'video_id': 42}})
+        if method == "video.get":
+            assert kw['data']['access_token'] == 'video-secret'
+            assert kw['data']['videos'] == '-123_42'
+            return response({'response': {'items': [{'owner_id': -123, 'id': 42}]}})
         if method == "upload":
             assert 'access_token' not in kw
             return response({'owner_id': -123, 'video_id': 42})
@@ -146,6 +150,18 @@ def test_saved_target_or_unknown_upload_blocks_retry(configured, monkeypatch, jo
     with pytest.raises(p.PublicationNeedsReview):
         p._publish_vk(job, 'grandma', lambda: None)
     assert len(calls) <= 1
+
+
+def test_allocated_video_is_verified_and_reused_after_lost_upload_response(configured, monkeypatch, job):
+    job.payload_json = {
+        'vk_upload_started_at': '2026-01-01T00:00:00+00:00',
+        'vk_allocated_video_id': '-123_42',
+    }
+    calls = setup_api(monkeypatch, job)
+    assert p._publish_vk(job, 'grandma', lambda: None) == '-123_42'
+    assert job.external_post_id == '-123_42'
+    methods = [url.rsplit('/', 1)[-1] for url, _ in calls]
+    assert methods == ['groups.getById', 'video.get', 'wall.post', 'wall.get']
 
 
 def test_wall_key_required_and_never_crosses_projects_or_languages(configured):
