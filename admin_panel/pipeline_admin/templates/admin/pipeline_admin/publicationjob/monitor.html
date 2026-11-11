@@ -1,0 +1,80 @@
+{% extends "admin/base_site.html" %}
+
+{% block extrastyle %}
+  {{ block.super }}
+  <style>
+    .cf-monitor-shell { max-width:1180px; margin:28px auto; padding:0 22px; }
+    .cf-monitor-back { display:inline-block; margin-bottom:16px; }
+    .cf-publication-monitor { padding:18px; border:1px solid var(--border-color); border-radius:14px; background:var(--body-bg); box-shadow:0 8px 28px rgba(15,23,42,.07); }
+    .cf-publication-monitor h1 { margin:0; }
+    .cf-monitor-head { display:flex; justify-content:space-between; gap:16px; align-items:start; margin-bottom:14px; }
+    .cf-monitor-summary { color:var(--body-quiet-color); }
+    .cf-monitor-progress { height:9px; margin:12px 0 16px; overflow:hidden; border-radius:999px; background:color-mix(in srgb,var(--border-color) 65%,transparent); }
+    .cf-monitor-progress span { display:block; height:100%; background:linear-gradient(90deg,#7c3aed,#2563eb); }
+    .cf-monitor-table { width:100%; border-collapse:collapse; }
+    .cf-monitor-table th, .cf-monitor-table td { padding:12px 8px; border-top:1px solid var(--border-color); text-align:left; vertical-align:top; }
+    .cf-status { display:inline-flex; padding:4px 9px; border-radius:999px; font-size:12px; font-weight:750; }
+    .cf-status.success { color:#166534; background:#dcfce7; }
+    .cf-status.error { color:#991b1b; background:#fee2e2; }
+    .cf-status.active { color:#1d4ed8; background:#dbeafe; }
+    .cf-status.waiting { color:#92400e; background:#fef3c7; }
+    .cf-monitor-error { max-width:580px; color:var(--error-fg); }
+    .cf-monitor-id { font-family:var(--font-family-monospace); font-size:12px; word-break:break-all; }
+    .cf-retry-form { display:inline-block; margin:8px 0 0; }
+    .cf-retry-button { padding:6px 10px; border:0; border-radius:8px; color:#fff; background:#b91c1c; cursor:pointer; font-weight:700; }
+    @media(max-width:800px) {
+      .cf-monitor-shell { padding:0 12px; }
+      .cf-monitor-head { display:block; }
+      .cf-monitor-table th:nth-child(3), .cf-monitor-table td:nth-child(3) { display:none; }
+    }
+  </style>
+{% endblock %}
+
+{% block content %}
+  <main class="cf-monitor-shell">
+    <a class="cf-monitor-back" href="{{ publication_list_url }}">← Все публикации</a>
+    <section class="cf-publication-monitor">
+      <div class="cf-monitor-head">
+        <div>
+          <h1>Контроль публикации</h1>
+          <div class="cf-monitor-summary">
+            Завершено {{ publication_monitor.finished }} из {{ publication_monitor.total }} ·
+            опубликовано {{ publication_monitor.published }}{% if publication_monitor.failed %} · ошибок {{ publication_monitor.failed }}{% endif %}
+          </div>
+        </div>
+        <code>{{ publication_monitor.bundle_key }}</code>
+      </div>
+      <div class="cf-monitor-progress" aria-label="Прогресс {{ publication_monitor.percent }}%"><span style="width:{{ publication_monitor.percent }}%"></span></div>
+      <table class="cf-monitor-table">
+        <thead><tr><th>Площадка</th><th>Статус</th><th>Результат</th><th>Попытки</th></tr></thead>
+        <tbody>
+          {% for row in publication_monitor.rows %}
+            <tr>
+              <td><a href="{{ row.change_url }}">{{ row.label }}</a></td>
+              <td><span class="cf-status {{ row.status_class }}">{{ row.status_label }}</span></td>
+              <td>
+                {% if row.external_post_id %}
+                  {% if row.external_url %}<a href="{{ row.external_url }}" target="_blank" rel="noopener">Открыть публикацию</a> · {% endif %}
+                  <span class="cf-monitor-id">{{ row.external_post_id }}</span>
+                {% elif row.external_url %}
+                  <a href="{{ row.external_url }}" target="_blank" rel="noopener">Открыть видео</a>
+                {% else %}—{% endif %}
+                {% if row.vk_stories_enabled %}
+                  <div>Стена: {% if row.vk_wall_verified %}подтверждена{% else %}не подтверждена{% endif %}</div>
+                  <div>Сториз: {% for story in row.vk_story_results %}<a href="{{ story.url }}" target="_blank" rel="noopener">Часть {{ forloop.counter }}</a> ({% if story.verified %}подтверждена{% else %}проверяется{% endif %}){% empty %}ещё не опубликованы{% endfor %}</div>
+                {% endif %}
+                {% if row.publish_error %}<div class="cf-monitor-error">{{ row.publish_error }}</div>{% endif %}
+                {% if row.retry_url %}
+                  <form class="cf-retry-form" method="post" action="{{ row.retry_url }}">{% csrf_token %}<button class="cf-retry-button" type="submit">Повторить только эту площадку</button></form>
+                {% endif %}
+              </td>
+              <td>{{ row.attempt_count }}</td>
+            </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+      {% if publication_monitor.auto_refresh %}<p class="cf-monitor-summary">Статусы обновляются автоматически каждые 8 секунд.</p>{% endif %}
+    </section>
+  </main>
+  {% if publication_monitor.auto_refresh %}<script>window.setTimeout(()=>window.location.reload(),8000);</script>{% endif %}
+{% endblock %}

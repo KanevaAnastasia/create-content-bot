@@ -22,6 +22,7 @@ from django.db.models import Count, IntegerField, OuterRef, Subquery, Value
 from django.db.models.functions import Coalesce
 from django.http import FileResponse, Http404, HttpResponse, HttpResponseRedirect, JsonResponse, StreamingHttpResponse
 from django.middleware.csrf import get_token
+from django.template.response import TemplateResponse
 from django.urls import NoReverseMatch, path, reverse
 from django.utils import timezone
 from django.utils.dateparse import parse_datetime
@@ -5447,8 +5448,15 @@ def _publication_external_url(job: PublicationJob) -> str:
     return ""
 
 
-def _publication_monitor_context(request) -> dict[str, Any] | None:
-    requested = str(request.GET.get("bundle") or "").strip()[:128]
+def _publication_monitor_url(bundle_key: str) -> str:
+    root_bundle = _publication_root_bundle_key(bundle_key)
+    if not root_bundle:
+        return reverse("admin:pipeline_admin_publicationjob_changelist")
+    return reverse("admin:pipeline_admin_publicationjob_monitor", args=[root_bundle])
+
+
+def _publication_monitor_context(request, *, bundle_key: str = "") -> dict[str, Any] | None:
+    requested = str(bundle_key or request.GET.get("bundle") or "").strip()[:128]
     root_bundle = _publication_root_bundle_key(requested)
     if not root_bundle:
         latest = PublicationJob.objects.order_by("-created_at").only("bundle_key").first()
@@ -5561,6 +5569,7 @@ class PublicationJobAdmin(admin.ModelAdmin):
         "title_short",
         "project",
         "attempt_count",
+        "monitor_link",
     )
     list_editable = ("status",)
     list_filter = ("status", "platform", "language", "publish_policy")
@@ -5599,6 +5608,11 @@ class PublicationJobAdmin(admin.ModelAdmin):
     @admin.display(description="Title")
     def title_short(self, obj: PublicationJob) -> str:
         return _short(obj.title or obj.description, 80)
+
+    @admin.display(description="Запуск")
+    def monitor_link(self, obj: PublicationJob) -> str:
+        url = _publication_monitor_url(obj.bundle_key)
+        return format_html('<a href="{}">Открыть контроль</a>', url)
 
     def get_urls(self):
         urls = super().get_urls()
@@ -5644,6 +5658,11 @@ class PublicationJobAdmin(admin.ModelAdmin):
                 name="pipeline_admin_publicationjob_tiktok_oauth_callback",
             ),
             path(
+                "control/<str:bundle_key>/",
+                self.admin_site.admin_view(self.monitor_view),
+                name="pipeline_admin_publicationjob_monitor",
+            ),
+            path(
                 "<uuid:job_id>/retry/",
                 self.admin_site.admin_view(self.retry_publication_job_view),
                 name="pipeline_admin_publicationjob_retry",
@@ -5660,13 +5679,24 @@ class PublicationJobAdmin(admin.ModelAdmin):
         extra["publication_monitor"] = _publication_monitor_context(request)
         return super().changelist_view(request, extra_context=extra)
 
+    def monitor_view(self, request, bundle_key: str):
+        monitor = _publication_monitor_context(request, bundle_key=bundle_key)
+        if monitor is None:
+            raise Http404("Publication run not found.")
+        context = {
+            **self.admin_site.each_context(request),
+            "title": f"Контроль публикации · {monitor['bundle_key']}",
+            "publication_monitor": monitor,
+            "publication_list_url": reverse("admin:pipeline_admin_publicationjob_changelist"),
+        }
+        return TemplateResponse(request, "admin/pipeline_admin/publicationjob/monitor.html", context)
+
     def retry_publication_job_view(self, request, job_id):
         job = self.get_object(request, str(job_id))
-        changelist_url = reverse("admin:pipeline_admin_publicationjob_changelist")
         if job is None:
             raise Http404("Publication job not found.")
         root_bundle = _publication_root_bundle_key(job.bundle_key)
-        monitor_url = f"{changelist_url}?bundle={quote(root_bundle, safe='')}" if root_bundle else changelist_url
+        monitor_url = _publication_monitor_url(root_bundle)
         if request.method != "POST":
             return HttpResponseRedirect(monitor_url)
         if job.status not in _PUBLICATION_ERROR_STATUSES:

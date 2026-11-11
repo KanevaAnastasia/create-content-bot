@@ -861,6 +861,7 @@ def test_django_admin_allows_series_binding_and_day_editing():
     assert "publication_prep" in GenerationRunAdmin.readonly_fields
     assert "publication_prep" in GenerationRunAdmin.fields
     assert "status" in PublicationJobAdmin.list_editable
+    assert "monitor_link" in PublicationJobAdmin.list_display
     assert "is_active" in ProjectPublishAccountAdmin.list_editable
     publication_admin = PublicationJobAdmin(PublicationJob, AdminSite())
     custom_url_names = {url.name for url in publication_admin.get_urls() if url.name}
@@ -869,6 +870,7 @@ def test_django_admin_allows_series_binding_and_day_editing():
     assert "pipeline_admin_publicationjob_tiktok_oauth" in custom_url_names
     assert "pipeline_admin_publicationjob_tiktok_creator_info" in custom_url_names
     assert "pipeline_admin_publicationjob_tiktok_oauth_callback" in custom_url_names
+    assert "pipeline_admin_publicationjob_monitor" in custom_url_names
 
 
 def test_tiktok_oauth_callback_uses_reachable_loopback_admin_host():

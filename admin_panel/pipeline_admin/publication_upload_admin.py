@@ -475,7 +475,10 @@ def _publication_jobs_monitor_url(jobs: list[Any]) -> str:
         return base_url
     bundle_key = str(getattr(jobs[0], "bundle_key", "") or "")
     root_bundle = bundle_key[:-6] if bundle_key.endswith("-trial") else bundle_key
-    return f"{base_url}?bundle={root_bundle}" if root_bundle else base_url
+    return (
+        reverse("admin:pipeline_admin_publicationjob_monitor", args=[root_bundle])
+        if root_bundle else base_url
+    )
 
 
 def _initial_project(project_choices: tuple[tuple[str, str], ...], preferred: str = "") -> str:

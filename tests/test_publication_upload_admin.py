@@ -292,7 +292,7 @@ def test_monitor_url_uses_root_bundle_for_trial_job() -> None:
 
     url = upload_admin._publication_jobs_monitor_url(jobs)
 
-    assert url.endswith("?bundle=bundle-123")
+    assert url.endswith("/control/bundle-123/")
 
 
 def test_custom_upload_form_accepts_one_video_per_language_and_cover() -> None:
