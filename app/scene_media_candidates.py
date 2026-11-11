@@ -233,6 +233,20 @@ def resolve_latest_approved_scene_video_for_final_build(
     ]
     if approved:
         return approved[-1]
+    # Story visuals are deliberately generated once as silent Russian clips.
+    # Localized final builds add their own narration and subtitles, so an EN
+    # track must reuse the approved visual instead of requiring a duplicate
+    # paid video generation for every scene.
+    if lang != "ru" and str(scene.get("generation_mode") or "").strip().lower() == "story":
+        ru_candidates = [
+            item
+            for item in mapping.get("ru") or []
+            if isinstance(item, dict)
+            and bool(item.get("approved_for_production"))
+            and _candidate_matches_final_build_language(item, "ru")
+        ]
+        if ru_candidates:
+            return ru_candidates[-1]
     legacy = _legacy_video_candidate(scene, lang)
     if legacy is not None and bool(legacy.get("approved_for_production")):
         return legacy

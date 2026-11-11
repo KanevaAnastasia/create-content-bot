@@ -138,6 +138,14 @@ def test_resolve_latest_approved_scene_video_for_final_build_rejects_unapproved_
     assert resolve_latest_approved_scene_video_for_final_build(scene, "ru") is None
 
 
+def test_story_english_final_build_reuses_approved_silent_russian_visual():
+    scene = {"generation_mode": "story"}
+    russian = register_video_candidate(scene, language="ru", video_bytes=b"silent-visual")
+    russian["approved_for_production"] = True
+
+    assert resolve_latest_approved_scene_video_for_final_build(scene, "en") is russian
+
+
 def test_resolve_candidate_by_message_marks_target_candidate_liked():
     scene = {}
     image_candidate = register_image_candidate(scene, kind="start", image_bytes=b"img")

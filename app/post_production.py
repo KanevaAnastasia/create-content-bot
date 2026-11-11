@@ -3741,12 +3741,17 @@ def build_post_production(
         planned_track_total = sum(
             float(item.get("planned_final_duration") or 0.0) for item in selected_segments
         )
-        # English narration often runs faster than the source-language edit.
-        # Shorten every internal clip proportionally in every workflow that has
-        # an approved EN narration track.  Trimming only the master tail would
-        # leave the whole middle of the video semantically out of sync.
+        # A story timeline must end together with its approved narration.
+        # Shorten every internal clip proportionally instead of padding silence
+        # at the master tail; trimming only the last clip would leave the middle
+        # of the video semantically out of sync. This applies to both language
+        # tracks: a translation can be longer or shorter than Russian.
+        is_story_track = any(
+            str(item["scene"].get("generation_mode") or "").strip().lower() == "story"
+            for item in selected_segments
+        )
         if (
-            language == "en"
+            is_story_track
             and narration_duration > 0
             and selected_segments
             and planned_track_total - narration_duration > (1.0 / 30.0)
@@ -3760,7 +3765,7 @@ def build_post_production(
                 item["planned_final_duration"] = fitted_duration
                 item["target_duration"] = fitted_duration
             logger.info(
-                "post_production.english_narration_fit language=%s planned=%.3f narration=%.3f clips=%s",
+                "post_production.story_narration_fit language=%s planned=%.3f narration=%.3f clips=%s",
                 language,
                 planned_track_total,
                 narration_duration,

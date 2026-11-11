@@ -333,17 +333,18 @@ def test_proportional_story_durations_match_shorter_narration_without_drift():
     assert all(value < source for value, source in zip(durations, [3.0, 3.0, 3.0, 1.56]))
 
 
-def test_all_english_narrated_workflows_trim_each_internal_clip(monkeypatch, tmp_path):
+@pytest.mark.parametrize("language", ["ru", "en"])
+def test_all_narrated_story_workflows_trim_each_internal_clip(monkeypatch, tmp_path, language):
     scenes = [
-        {"scene": 1, "duration_sec": 3.0, "speech_by_lang": {"en": "First idea"}},
-        {"scene": 2, "duration_sec": 3.0, "speech_by_lang": {"en": "Second idea"}},
+        {"scene": 1, "duration_sec": 3.0, "generation_mode": "story", "speech_by_lang": {language: "First idea"}},
+        {"scene": 2, "duration_sec": 3.0, "generation_mode": "story", "speech_by_lang": {language: "Second idea"}},
     ]
     for index, scene in enumerate(scenes, start=1):
-        candidate = register_video_candidate(scene, language="en", video_bytes=f"clip-{index}".encode())
+        candidate = register_video_candidate(scene, language=language, video_bytes=f"clip-{index}".encode())
         candidate["approved_for_production"] = True
         candidate["speed_coef"] = 1.0
 
-    narration_path = tmp_path / "english.mp3"
+    narration_path = tmp_path / f"{language}.mp3"
     narration_path.write_bytes(b"approved-english-audio")
     normalized_durations: list[float] = []
 
@@ -375,9 +376,9 @@ def test_all_english_narrated_workflows_trim_each_internal_clip(monkeypatch, tmp
 
     post_production.build_post_production(
         scenes,
-        target_languages=["en"],
+        target_languages=[language],
         target_variants=["clean"],
-        narration_audio_path_by_lang={"en": narration_path},
+        narration_audio_path_by_lang={language: narration_path},
     )
 
     assert normalized_durations == [2.0, 2.0]
