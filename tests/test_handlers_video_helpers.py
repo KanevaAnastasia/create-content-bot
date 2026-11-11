@@ -988,6 +988,18 @@ def test_scene_media_markups_use_prompt_feedback_buttons_without_add_fix():
     assert "ФРАЗА en:" in video_buttons
 
 
+def test_scene_start_markup_can_offer_continue_previous_video():
+    buttons = [
+        btn.text
+        for row in handlers_media_scene.scene_image_approval_markup(
+            include_continue_previous=True,
+        ).keyboard
+        for btn in row
+    ]
+
+    assert handlers_media_scene.SCENE_MEDIA_CONTINUE_PREVIOUS_VIDEO_BUTTON in buttons
+
+
 def test_scene_language_approval_markup_contains_expected_language_commands():
     buttons = [
         btn.text

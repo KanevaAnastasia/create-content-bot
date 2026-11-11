@@ -48,6 +48,7 @@ from .handlers_state_deps import (
     SCENE_MEDIA_AUTO_APPROVE_BUTTON,
     SCENE_MEDIA_AUTO_APPROVE_SESSION_KEY,
     SCENE_MEDIA_CHANGE_SPEED_BUTTON,
+    SCENE_MEDIA_CONTINUE_PREVIOUS_VIDEO_BUTTON,
     SCENE_MEDIA_CLEAR_REFERENCE_IMAGES_BUTTON,
     SCENE_MEDIA_DONE_REFERENCE_IMAGES_BUTTON,
     SCENE_MEDIA_REQUEST_END_FRAME_BUTTON,
@@ -163,6 +164,7 @@ from ..publications import (
     queue_publication_bundle,
 )
 from ..scene_media_candidates import (
+    continuation_source_for_scene,
     default_scene_video_speed_coef,
     image_candidates_for_kind,
     latest_scene_video_candidate,
@@ -176,6 +178,7 @@ from ..scene_media_candidates import (
     resolve_scene_video_for_production,
     selected_image_bytes_for_video,
     selected_video_bytes_for_production,
+    video_candidate_bytes,
 )
 from ..scene_media_store import (
     persist_image_candidate,
@@ -184,6 +187,7 @@ from ..scene_media_store import (
     persist_video_candidate,
     persist_video_candidate_state,
 )
+from ..video_frame_extraction import extract_last_video_frame
 from ..scene_speech_budget import (
     append_prompt_timing_hints,
     build_default_speech_plan,
@@ -488,7 +492,10 @@ def scene_media_keyboard_snapshot(session: dict) -> SceneMediaKeyboardSnapshot:
     if substep == SCENE_MEDIA_SUBSTEP_START:
         return _keyboard_snapshot(
             "scene_media.start.prompt",
-            scene_image_approval_markup(session=session),
+            scene_image_approval_markup(
+                include_continue_previous=continuation_source_for_scene(session, scenes, idx) is not None,
+                session=session,
+            ),
         )
     if substep == SCENE_MEDIA_SUBSTEP_START_IMAGE_APPROVAL:
         return _keyboard_snapshot(
@@ -6053,12 +6060,80 @@ async def _apply_scene_video_feedback(
     return True
 
 
+async def _continue_scene_from_previous_video(
+    update: Update,
+    *,
+    session: dict,
+    scene: dict,
+    idx: int,
+) -> bool:
+    """Seed this Kling scene with the exact final frame of the approved prior clip."""
+    scenes, _ = _scene_media_context(session)
+    if not scenes:
+        return False
+    source_info = continuation_source_for_scene(session, scenes, idx)
+    if source_info is None:
+        await _safe_reply_text(
+            update.message,
+            "Для продолжения нужен утверждённый ролик предыдущей сцены с доступным файлом.",
+        )
+        await _send_next_scene_media_step(update, session)
+        return True
+    _language, source_candidate = source_info
+    source_bytes = video_candidate_bytes(source_candidate)
+    if not source_bytes:
+        await _safe_reply_text(
+            update.message,
+            "Не удалось прочитать утверждённый ролик предыдущей сцены. Можно сгенерировать стартовый кадр обычным способом.",
+        )
+        await _send_next_scene_media_step(update, session)
+        return True
+    await _safe_reply_text(update.message, "Беру последний кадр утверждённого предыдущего видео.")
+    try:
+        frame = await asyncio.to_thread(extract_last_video_frame, video_bytes=source_bytes)
+    except Exception:
+        logger.exception("scene_media.continuation_last_frame_failed scene_idx=%s", idx)
+        await _safe_reply_text(
+            update.message,
+            "Не удалось извлечь последний кадр. Можно сгенерировать стартовый кадр обычным способом.",
+        )
+        await _send_next_scene_media_step(update, session)
+        return True
+
+    _invalidate_scene_videos_after_frame_change(scene, _scene_target_languages(session, scene))
+    _set_end_frame_requested(scene, False)
+    scene.pop("end_frame_image_b64", None)
+    scene["start_frame_image_b64"] = _encode_b64(frame)
+    image_candidate = register_image_candidate(scene, kind="start", image_bytes=frame)
+    image_candidate["liked"] = True
+    approved = mark_image_candidate_approved(scene, str(image_candidate.get("candidate_id") or ""))
+    _persist_image_candidate_best_effort(session, scene_idx=idx, candidate=approved)
+    _persist_image_state_best_effort(approved)
+    scene["continuation_source_video_candidate_id"] = str(source_candidate.get("candidate_id") or "")
+    session["scene_media_substep"] = SCENE_MEDIA_SUBSTEP_VIDEO
+    session["scene_media_language_index"] = 0
+    await _safe_reply_text(
+        update.message,
+        "Стартовый кадр взят из предыдущего видео. Переходим к апруву генерации продолжения.",
+    )
+    await _send_next_scene_media_step(update, session)
+    return True
+
+
 async def _handle_scene_media_common_restarts(update: Update, session: dict, scene: dict, text: str) -> bool:
     has_prompt_override = _extract_prompt_override(text) is not None
     has_format_or_feedback = _extract_format_or_feedback(text) is not None
     if has_prompt_override or has_format_or_feedback:
         return False
     low = str(text or "").strip().lower()
+    if low == SCENE_MEDIA_CONTINUE_PREVIOUS_VIDEO_BUTTON.lower():
+        _scenes, idx = _scene_media_context(session)
+        return await _continue_scene_from_previous_video(
+            update,
+            session=session,
+            scene=scene,
+            idx=idx,
+        )
     if low == NAV_BUTTON_PREVIOUS_STEP.lower():
         current_substep = str(session.get("scene_media_substep") or SCENE_MEDIA_SUBSTEP_START)
         if current_substep == SCENE_MEDIA_SUBSTEP_START:

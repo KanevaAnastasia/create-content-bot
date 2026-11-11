@@ -1,5 +1,10 @@
+import asyncio
+from types import SimpleNamespace
+
 from app.story_generation import enforce_discipline_narrative_cast, ensure_story_video_camera_safety
+from app.handlers import handlers_state_media
 from app.handlers.handlers_state_media import _scene_video_prompt_for_language, _advance_scene_media_after_current
+from app.scene_media_candidates import register_video_candidate, selected_image_bytes_for_video
 
 
 def test_environment_exception_removes_cast_and_stale_refs():
@@ -41,3 +46,49 @@ def test_continuity_flags_survive_database_prompt_restore():
     scene = {}
     merge_scene_prompt_payload(scene, {'prompt_meta_json': flags})
     assert all(scene[k] == v for k, v in flags.items())
+
+
+def test_continue_previous_video_uses_exact_last_frame_and_skips_image_generation(monkeypatch):
+    previous = {}
+    source = register_video_candidate(previous, language="ru", video_bytes=b"approved-video")
+    source["approved_for_production"] = True
+    current = {
+        "model": "kling_3_0",
+        "generation_mode": "story",
+        "speech_by_lang": {"ru": "Продолжаем."},
+        "video_approvals_by_lang": {"ru": False},
+    }
+    session = {
+        "target_languages": ["ru"],
+        "image_scene_index": 1,
+        "scene_media_substep": "start_prompt",
+        "production": {"json_plan": [previous, current]},
+    }
+    extracted_from = []
+    monkeypatch.setattr(
+        handlers_state_media,
+        "extract_last_video_frame",
+        lambda *, video_bytes=None, video_path=None: extracted_from.append(video_bytes) or b"final-frame",
+    )
+    sent = []
+
+    async def fake_send_next(_update, _session):
+        sent.append(True)
+
+    monkeypatch.setattr(handlers_state_media, "_send_next_scene_media_step", fake_send_next)
+
+    class Message:
+        async def reply_text(self, text, **_kwargs):
+            return text
+
+    result = asyncio.run(handlers_state_media._continue_scene_from_previous_video(
+        SimpleNamespace(message=Message()), session=session, scene=current, idx=1,
+    ))
+
+    assert result is True
+    assert extracted_from == [b"approved-video"]
+    assert sent == [True]
+    assert session["scene_media_substep"] == "video_prompt"
+    assert current["continuation_source_video_candidate_id"] == source["candidate_id"]
+    assert selected_image_bytes_for_video(current, kind="start") == b"final-frame"
+    assert current["image_candidates"][-1]["approved_for_video"] is True

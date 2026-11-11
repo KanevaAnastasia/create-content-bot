@@ -51,6 +51,7 @@ NAV_BUTTON_PREVIOUS_STEP = "Предыдущий шаг"
 NAV_BUTTON_START_OVER = "В начало"
 PIXAR_REFERENCE_STYLE_PHRASE = "Пиксаровский стиль референса"
 SCENE_MEDIA_UPGRADE_IMAGE_MODEL_BUTTON = "ПОВЫСИТЬ МОДЕЛЬ"
+SCENE_MEDIA_CONTINUE_PREVIOUS_VIDEO_BUTTON = "Продолжи предыдущее видео"
 SCENE_MEDIA_REQUEST_END_FRAME_BUTTON = "Нужен конечный кадр"
 SCENE_MEDIA_SKIP_END_FRAME_BUTTON = "Без конечного кадра"
 SCENE_MEDIA_ADD_REFERENCE_IMAGES_BUTTON = "Добавить изображения"
@@ -109,18 +110,27 @@ def _scene_media_stop_visible(session: dict | None) -> bool:
     return _scene_media_mode_row(session) == [SCENE_MEDIA_STOP_BUTTON]
 
 
-def scene_image_approval_markup(*, session: dict | None = None) -> ReplyKeyboardMarkup:
+def scene_image_approval_markup(
+    *,
+    include_continue_previous: bool = False,
+    session: dict | None = None,
+) -> ReplyKeyboardMarkup:
     """Кнопки для шага стартового кадра."""
-    return _reply_markup_with_rows(
+    rows = [
         ["ОК"],
         ["Добавить своё изображение"],
+    ]
+    if include_continue_previous:
+        rows.append([SCENE_MEDIA_CONTINUE_PREVIOUS_VIDEO_BUTTON])
+    rows.extend([
         _scene_media_mode_row(session),
         [SCENE_MEDIA_REQUEST_END_FRAME_BUTTON, SCENE_MEDIA_SKIP_END_FRAME_BUTTON],
         [SCENE_MEDIA_ADD_REFERENCE_IMAGES_BUTTON],
         ["ПРОМПТ:"],
         ["ФИДБЕК:"],
         ["старт заново"],
-    )
+    ])
+    return _reply_markup_with_rows(*rows)
 
 
 def scene_end_approval_markup(*, session: dict | None = None) -> ReplyKeyboardMarkup:
@@ -588,10 +598,15 @@ async def _send_next_scene_media_step(update: Update, session: dict) -> None:
         sub = SCENE_MEDIA_SUBSTEP_START
     _persist_visible_scene_media_cursor(update, session)
     if sub == SCENE_MEDIA_SUBSTEP_START:
+        from ..scene_media_candidates import continuation_source_for_scene
+        can_continue = continuation_source_for_scene(session, scenes, idx) is not None
         await _reply_text_with_optional_markup(
             update,
-            _image_approval_text(scene, idx + 1, total),
-            reply_markup=scene_image_approval_markup(session=session),
+            _image_approval_text(scene, idx + 1, total, include_continue_previous=can_continue),
+            reply_markup=scene_image_approval_markup(
+                include_continue_previous=can_continue,
+                session=session,
+            ),
         )
         return
     if sub == SCENE_MEDIA_SUBSTEP_END:
@@ -1312,7 +1327,13 @@ def _end_frame_delta_instruction(scene: dict) -> str:
     )
 
 
-def _image_approval_text(scene: dict, scene_index: int, total: int) -> str:
+def _image_approval_text(
+    scene: dict,
+    scene_index: int,
+    total: int,
+    *,
+    include_continue_previous: bool = False,
+) -> str:
     shot = scene.get("shot_type", "medium")
     anchors = scene.get("continuity_anchors") or []
     anchors_text = ", ".join(str(x) for x in anchors if str(x).strip()) or "—"
@@ -1374,5 +1395,7 @@ def _image_approval_text(scene: dict, scene_index: int, total: int) -> str:
         '• «ПРОМПТ: ...» — вручную заменить промпт.\n'
         '• «ПРОМПТ: ```...```» — вставить свой многострочный prompt как код-блок; кадр сгенерируется именно по нему с персонажами этой сцены.\n'
         '• «ФИДБЕК: ...» — описать, что не так; перегенерирую промпт нейросетью.\n'
-        "• «старт заново» — то же (если вернулись с следующего шага): снова правки промпта, затем «ОК»."
+        + ('• «Продолжи предыдущее видео» — взять точный последний кадр утверждённого предыдущего клипа и перейти к video-этапу.\n'
+           if include_continue_previous else '')
+        + "• «старт заново» — то же (если вернулись с следующего шага): снова правки промпта, затем «ОК»."
     )

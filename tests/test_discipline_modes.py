@@ -33,6 +33,14 @@ def test_new_modes_are_only_offered_in_discipline():
     assert 'О Васе' in discipline and 'А что если' in discipline
 
 
+def test_vasya_visual_direction_is_schematic_2d():
+    direction = modes.visual_direction(modes.VASYA)
+
+    assert '2D-анимацию' in direction
+    assert 'плоские геометрические формы' in direction
+    assert 'фотореализм' in direction
+
+
 def test_forced_story_workspace_still_offers_discipline_modes(monkeypatch):
     session={'selected_project_key':'discipline','force_story_mode':True}
     monkeypatch.setattr(start,'SESSIONS',{1:session})

@@ -1,6 +1,7 @@
 from app.scene_media_candidates import (
     DEFAULT_SCENE_VIDEO_SPEED_COEF,
     _speech_text_from_prompt,
+    continuation_source_for_scene,
     default_scene_video_speed_coef,
     register_image_candidate,
     register_media_message_candidate,
@@ -9,6 +10,7 @@ from app.scene_media_candidates import (
     resolve_scene_image_for_video,
     resolve_latest_approved_scene_video_for_final_build,
     resolve_scene_video_for_production,
+    scene_has_narration,
 )
 from app.scene_media_store import merge_missing_scene_text_from_approved_candidate
 
@@ -144,6 +146,35 @@ def test_story_english_final_build_reuses_approved_silent_russian_visual():
     russian["approved_for_production"] = True
 
     assert resolve_latest_approved_scene_video_for_final_build(scene, "en") is russian
+
+
+def test_kling_narrated_scene_can_continue_from_only_approved_previous_video():
+    previous = {}
+    approved = register_video_candidate(previous, language="ru", video_bytes=b"approved")
+    approved["approved_for_production"] = True
+    current = {
+        "model": "kling_3_0",
+        "generation_mode": "story",
+        "speech_by_lang": {"ru": "Продолжаем мысль."},
+    }
+
+    source = continuation_source_for_scene(
+        {"target_languages": ["ru"], "scene_media_language_index": 0},
+        [previous, current],
+        1,
+    )
+
+    assert source == ("ru", approved)
+    assert continuation_source_for_scene({}, [previous, current], 0) is None
+    assert scene_has_narration(current) is True
+
+
+def test_kling_continuation_is_hidden_without_narration_or_approved_source():
+    silent = {"model": "kling_3_0", "generation_mode": "silence"}
+    previous = {}
+    register_video_candidate(previous, language="ru", video_bytes=b"not-approved")
+
+    assert continuation_source_for_scene({}, [previous, silent], 1) is None
 
 
 def test_resolve_candidate_by_message_marks_target_candidate_liked():

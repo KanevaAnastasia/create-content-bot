@@ -253,6 +253,76 @@ def resolve_latest_approved_scene_video_for_final_build(
     return None
 
 
+def scene_has_narration(scene: dict[str, Any]) -> bool:
+    """Whether a scene belongs to a narrated format, including Story's external master audio."""
+    if bool(scene.get("voice_needed")):
+        return True
+    speech = scene.get("speech_by_lang")
+    if isinstance(speech, dict) and any(str(value or "").strip() for value in speech.values()):
+        return True
+    tts = scene.get("tts")
+    if isinstance(tts, dict) and any(
+        str(tts.get(key) or "").strip()
+        for key in ("text", "text_ru", "text_en", "voiceover_text")
+    ):
+        return True
+    return (
+        str(scene.get("generation_mode") or "").strip().lower() == "story"
+        and bool(str(scene.get("text") or scene.get("narration_excerpt") or "").strip())
+    )
+
+
+def continuation_source_for_scene(
+    session: dict[str, Any],
+    scenes: list[dict[str, Any]],
+    scene_index: int,
+) -> tuple[str, dict[str, Any]] | None:
+    """Return the approved previous video that may seed this Kling narration scene."""
+    if scene_index <= 0 or scene_index >= len(scenes):
+        return None
+    scene = scenes[scene_index]
+    if not isinstance(scene, dict) or not scene_has_narration(scene):
+        return None
+    model = str(
+        scene.get("model")
+        or scene.get("video_model")
+        or scene.get("video_provider")
+        or scene.get("provider")
+        or ""
+    ).strip().lower()
+    if not model.startswith("kling"):
+        return None
+
+    languages: list[str] = []
+    requested = [str(item).strip().lower() for item in (session.get("target_languages") or []) if str(item).strip()]
+    language_index = int(session.get("scene_media_language_index", 0) or 0)
+    if 0 <= language_index < len(requested):
+        languages.append(requested[language_index])
+    languages.extend(requested)
+    for mapping_name in ("speech_by_lang", "video_prompt_by_lang"):
+        mapping = scene.get(mapping_name)
+        if isinstance(mapping, dict):
+            languages.extend(str(key).strip().lower() for key in mapping if str(key).strip())
+    languages.append("ru")
+
+    previous = scenes[scene_index - 1]
+    if not isinstance(previous, dict):
+        return None
+    for language in dict.fromkeys(languages):
+        source = resolve_latest_approved_scene_video_for_final_build(previous, language)
+        if source is not None:
+            return language, source
+    return None
+
+
+def video_candidate_bytes(candidate: dict[str, Any] | None) -> bytes | None:
+    if not isinstance(candidate, dict):
+        return None
+    return _decode_b64(str(candidate.get("video_b64") or "")) or read_media_uri_bytes(
+        str(candidate.get("media_uri") or "")
+    )
+
+
 def latest_scene_video_candidate(scene: dict[str, Any], language: str) -> dict[str, Any] | None:
     lang = str(language or "ru").strip().lower() or "ru"
     mapping = _ensure_video_candidates(scene)
@@ -472,9 +542,7 @@ def selected_image_bytes_for_video(scene: dict[str, Any], *, kind: str = "start"
 
 def selected_video_bytes_for_production(scene: dict[str, Any], language: str) -> bytes | None:
     selected = resolve_scene_video_for_production(scene, language)
-    if selected is None:
-        return None
-    return _decode_b64(str(selected.get("video_b64") or "")) or read_media_uri_bytes(str(selected.get("media_uri") or ""))
+    return video_candidate_bytes(selected)
 
 
 def parse_speed_coef(value: str | float | int | None) -> float | None:
