@@ -5,7 +5,7 @@ from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 
 from app.db import Base
-from app.models import Project, ProjectPublishAccount
+from app.models import Project, ProjectPublishAccount, PublicationJob
 from app.publications import (
     DEFAULT_PUBLICATION_VIDEO_VARIANT,
     PUBLICATION_STATUS_SCHEDULED,
@@ -240,6 +240,47 @@ def test_queue_publication_bundle_sets_scheduled_status(monkeypatch, tmp_path: P
             assert jobs[0].status == PUBLICATION_STATUS_SCHEDULED
             assert jobs[0].scheduled_at == normalize_publication_scheduled_at("2026-06-24 18:30")
             assert jobs[0].payload_json["scheduled_at"]
+    finally:
+        engine.dispose()
+
+
+def test_queue_publication_bundle_is_idempotent_for_source_run(monkeypatch, tmp_path: Path) -> None:
+    engine, Session = _session_factory()
+    try:
+        with Session() as session:
+            project = Project(slug="default-project", title="Default", is_default=True)
+            session.add(project)
+            session.commit()
+            for key in ("YOUTUBE_CLIENT_ID", "YOUTUBE_CLIENT_SECRET", "YOUTUBE_REFRESH_TOKEN"):
+                monkeypatch.setenv(f"PUBLISH_DEFAULT_PROJECT_{key}", "configured")
+            monkeypatch.setenv(
+                "PUBLISH_DEFAULT_PROJECT_YOUTUBE_CHANNEL_ID_RU", "channel-ru"
+            )
+            monkeypatch.setenv("PUBLICATION_ARTIFACTS_DIR", str(tmp_path))
+            post_production = {
+                "renders_by_language": {
+                    "ru": {"clean": {"video_b64": base64.b64encode(b"same-video").decode("ascii")}},
+                }
+            }
+            kwargs = {
+                "project_slug": "default-project",
+                "recipe": "recipe",
+                "copy": {
+                    "youtube_ru_title": "RU title",
+                    "youtube_ru_description": "RU youtube",
+                },
+                "post_production": post_production,
+                "selected_target_keys": ["youtube:ru"],
+                "video_variant": "clean",
+                "source_run_id": "run-123",
+            }
+
+            first = queue_publication_bundle(session, **kwargs)
+            second = queue_publication_bundle(session, **kwargs)
+
+            assert [job.id for job in second] == [job.id for job in first]
+            assert first[0].payload_json["run_id"] == "run-123"
+            assert session.query(PublicationJob).count() == 1
     finally:
         engine.dispose()
 

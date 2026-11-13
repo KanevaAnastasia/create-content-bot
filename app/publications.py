@@ -401,10 +401,27 @@ def queue_publication_bundle(
     trial_copy: dict[str, str] | None = None,
     trial_target_keys: Any = None,
     scheduled_at: Any = None,
+    source_run_id: str | None = None,
 ) -> list[PublicationJob]:
     from .social_publishers import platform_readiness
 
     project = resolve_project_for_publications(session, project_slug)
+    normalized_source_run_id = str(source_run_id or "").strip()
+    if normalized_source_run_id:
+        # The same production run can be opened in the admin while an older
+        # Telegram copy-approval prompt is still visible.  Approving that stale
+        # prompt must be idempotent: otherwise the identical final masters are
+        # delivered to every platform a second time under a fresh bundle UUID.
+        existing = [
+            row
+            for row in session.scalars(
+                select(PublicationJob).where(PublicationJob.project_id == project.id)
+            ).all()
+            if str((row.payload_json or {}).get("run_id") or "")
+            == normalized_source_run_id
+        ]
+        if existing:
+            return sorted(existing, key=lambda row: (row.created_at, str(row.id)))
     copy = apply_project_publication_copy_rules(project.slug, copy)
     trial_targets = normalize_publication_target_keys(trial_target_keys) & {"instagram:ru"}
     accounts = upsert_project_publish_accounts_from_env(session, project)
@@ -498,6 +515,11 @@ def queue_publication_bundle(
                     "scheduled_at": normalized_scheduled_at.isoformat() if normalized_scheduled_at else None,
                     "direct_api_ready": readiness.ready,
                     "missing_configuration": list(readiness.missing),
+                    **(
+                        {"run_id": normalized_source_run_id}
+                        if normalized_source_run_id
+                        else {}
+                    ),
                 },
             )
             if not readiness.ready:

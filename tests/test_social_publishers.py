@@ -82,6 +82,37 @@ def test_publishing_job_is_not_delivered_twice(monkeypatch) -> None:
     }
 
 
+def test_duplicate_bundle_marker_blocks_explicit_retry(monkeypatch) -> None:
+    job_id = uuid.uuid4()
+    job = Mock(
+        id=job_id,
+        status="failed",
+        payload_json={"duplicate_of_bundle": "original-bundle"},
+        publish_error="old error",
+    )
+
+    class FakeSession:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return None
+
+        def scalar(self, _query):
+            return job
+
+        def commit(self):
+            return None
+
+    monkeypatch.setattr("app.social_publishers.SessionLocal", FakeSession)
+
+    result = publish_publication_job(job_id)
+
+    assert result["status"] == "needs_manual_action"
+    assert "original-bundle" in result["error"]
+    assert job.status == "needs_manual_action"
+
+
 def test_tiktok_chunk_plan_merges_trailing_bytes_into_final_chunk() -> None:
     chunk_size, chunk_count = _tiktok_chunk_plan(135 * 1024 * 1024)
 

@@ -3755,6 +3755,7 @@ async def _handle_waiting_social_descriptions_approval_state(
                             selected_target_keys=selected_target_keys,
                             video_variant=str(pending.get(SOCIAL_PUBLISH_VIDEO_VARIANT_KEY) or ""),
                             scheduled_at=pending.get(SOCIAL_PUBLISH_SCHEDULED_AT_KEY),
+                            source_run_id=run_id or None,
                         )
                         if run_id:
                             for job in jobs:

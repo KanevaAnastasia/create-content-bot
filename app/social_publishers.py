@@ -1626,6 +1626,17 @@ def publish_publication_job(job_id: str | uuid.UUID) -> dict[str, Any]:
             return {"job_id": str(job.id), "status": job.status, "external_post_id": job.external_post_id}
         if job.status == PUBLICATION_STATUS_PUBLISHING:
             return {"job_id": str(job.id), "status": job.status}
+        duplicate_of_bundle = str(
+            (job.payload_json or {}).get("duplicate_of_bundle") or ""
+        ).strip()
+        if duplicate_of_bundle:
+            job.status = PUBLICATION_STATUS_NEEDS_MANUAL_ACTION
+            job.publish_error = (
+                f"Duplicate publication blocked: identical media already belongs to bundle "
+                f"{duplicate_of_bundle}."
+            )
+            session.commit()
+            return {"job_id": str(job.id), "status": job.status, "error": job.publish_error}
         predecessor_id = str((job.payload_json or {}).get("publish_after_job_id") or "").strip()
         if predecessor_id:
             try:
