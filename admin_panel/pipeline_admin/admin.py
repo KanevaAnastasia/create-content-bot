@@ -4871,6 +4871,7 @@ class GenerationRunAdmin(admin.ModelAdmin):
                         video_variant="clean",
                         video_source_labels=source_labels,
                         scheduled_at=form.cleaned_data.get("scheduled_at"),
+                        source_run_id=str(run.id),
                     )
                     for job in jobs:
                         job.payload_json = {**(job.payload_json or {}), "run_id": str(run.id)}

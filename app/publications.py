@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import base64
+import hashlib
 import os
 import re
 import shutil
@@ -437,6 +438,12 @@ def queue_publication_bundle(
         bundle_key=bundle_key,
         video_variant=normalized_variant,
     )
+    video_sha256_by_language: dict[str, str] = {}
+    for language, video_path in video_paths.items():
+        with Path(video_path).open("rb") as stream:
+            video_sha256_by_language[language] = hashlib.file_digest(
+                stream, "sha256"
+            ).hexdigest()
     cover_paths = export_publication_cover_assets(
         cover_sources,
         bundle_key=bundle_key,
@@ -501,6 +508,7 @@ def queue_publication_bundle(
                     "platform": target.platform,
                     "language": target.language,
                     "video_path": video_path,
+                    "video_sha256": video_sha256_by_language.get(target.language),
                     "title": target.title,
                     "description": description,
                     "hashtags": extract_hashtags(description),

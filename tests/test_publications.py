@@ -312,6 +312,9 @@ def test_queue_publication_bundle_keeps_explicit_source_label(monkeypatch, tmp_p
 
             assert jobs[0].video_label == "RU · custom upload · my-video.mp4"
             assert jobs[0].payload_json["video_source_label"] == "RU · custom upload · my-video.mp4"
+            assert jobs[0].payload_json["video_sha256"] == (
+                "6cdfd271da635d491e37a2b4a1044b306e6e9e039aeadee95bb355efadf8cb33"
+            )
     finally:
         engine.dispose()
 

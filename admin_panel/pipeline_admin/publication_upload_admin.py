@@ -422,6 +422,7 @@ def _queue_form_jobs(
                     else []
                 ),
                 scheduled_at=form.cleaned_data.get("scheduled_at"),
+                source_run_id=str(run.id) if run is not None else None,
             )
             tiktok_options = {
                 "tiktok_privacy_level": str(form.cleaned_data.get("tiktok_privacy_level") or ""),

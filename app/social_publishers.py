@@ -1637,6 +1637,55 @@ def publish_publication_job(job_id: str | uuid.UUID) -> dict[str, Any]:
             )
             session.commit()
             return {"job_id": str(job.id), "status": job.status, "error": job.publish_error}
+        payload = job.payload_json or {}
+        run_id = str(payload.get("run_id") or "").strip()
+        video_sha256 = str(payload.get("video_sha256") or "").strip()
+        if run_id or video_sha256:
+            published_candidates = session.scalars(
+                select(PublicationJob).where(
+                    PublicationJob.project_id == job.project_id,
+                    PublicationJob.platform == job.platform,
+                    PublicationJob.language == job.language,
+                    PublicationJob.account_key == job.account_key,
+                    PublicationJob.status == PUBLICATION_STATUS_PUBLISHED,
+                    PublicationJob.id != job.id,
+                )
+            ).all()
+            instagram_trial = bool(payload.get("instagram_trial"))
+            for published in published_candidates:
+                published_payload = published.payload_json or {}
+                if bool(published_payload.get("instagram_trial")) != instagram_trial:
+                    continue
+                same_run = (
+                    run_id
+                    and str(published_payload.get("run_id") or "").strip() == run_id
+                )
+                same_video = (
+                    video_sha256
+                    and str(published_payload.get("video_sha256") or "").strip()
+                    == video_sha256
+                )
+                if not (same_run or same_video):
+                    continue
+                original_bundle = str(published.bundle_key or published.id)
+                job.payload_json = {
+                    **payload,
+                    "duplicate_of_bundle": original_bundle,
+                    "duplicate_reason": (
+                        "same source run" if same_run else "identical video SHA-256"
+                    ),
+                }
+                job.status = PUBLICATION_STATUS_NEEDS_MANUAL_ACTION
+                job.publish_error = (
+                    "Duplicate publication blocked: this platform/language already "
+                    f"published the same source in bundle {original_bundle}."
+                )
+                session.commit()
+                return {
+                    "job_id": str(job.id),
+                    "status": job.status,
+                    "error": job.publish_error,
+                }
         predecessor_id = str((job.payload_json or {}).get("publish_after_job_id") or "").strip()
         if predecessor_id:
             try:

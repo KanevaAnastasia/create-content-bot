@@ -113,6 +113,55 @@ def test_duplicate_bundle_marker_blocks_explicit_retry(monkeypatch) -> None:
     assert job.status == "needs_manual_action"
 
 
+def test_published_same_video_blocks_new_bundle_before_delivery(monkeypatch) -> None:
+    project_id = uuid.uuid4()
+    job_id = uuid.uuid4()
+    job = Mock(
+        id=job_id,
+        project_id=project_id,
+        platform="youtube",
+        language="ru",
+        account_key="default",
+        status="approved",
+        payload_json={"run_id": "run-123", "video_sha256": "same-digest"},
+        publish_error=None,
+    )
+    published = Mock(
+        id=uuid.uuid4(),
+        bundle_key="original-bundle",
+        payload_json={"run_id": "run-123", "video_sha256": "same-digest"},
+    )
+
+    class ScalarRows:
+        def all(self):
+            return [published]
+
+    class FakeSession:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return None
+
+        def scalar(self, _query):
+            return job
+
+        def scalars(self, _query):
+            return ScalarRows()
+
+        def commit(self):
+            return None
+
+    monkeypatch.setattr("app.social_publishers.SessionLocal", FakeSession)
+
+    result = publish_publication_job(job_id)
+
+    assert result["status"] == "needs_manual_action"
+    assert "original-bundle" in result["error"]
+    assert job.payload_json["duplicate_of_bundle"] == "original-bundle"
+    assert job.payload_json["duplicate_reason"] == "same source run"
+
+
 def test_tiktok_chunk_plan_merges_trailing_bytes_into_final_chunk() -> None:
     chunk_size, chunk_count = _tiktok_chunk_plan(135 * 1024 * 1024)
 
