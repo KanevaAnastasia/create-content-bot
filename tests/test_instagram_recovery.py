@@ -277,6 +277,43 @@ def test_explicit_upload_rejection_replaces_stuck_unpublished_container(upload, 
     assert job.payload_json['instagram_upload']['previous_containers'][0]['status_code'] == 'IN_PROGRESS'
 
 
+def test_rejected_upload_that_later_finishes_reuses_original_profile(
+    upload, monkeypatch, tmp_path
+):
+    job, calls, _, status, persist = upload
+    status.update(status_code="IN_PROGRESS", status="Processing")
+    normal = tmp_path / "video.instagram.v2.mp4"
+    recovery = tmp_path / "video.instagram.v3.mp4"
+    normal.write_bytes(b"normal-profile")
+    recovery.write_bytes(b"recovery-profile")
+    monkeypatch.setattr(
+        "app.social_publishers._instagram_compatible_video",
+        lambda _path, **kwargs: recovery if kwargs.get("recovery_profile") else normal,
+    )
+    original = requests.post
+
+    def reject(url, **kwargs):
+        if "rupload.facebook.com" in url:
+            return response({
+                "debug_info": {
+                    "type": "ProcessingFailedError",
+                    "retriable": False,
+                }
+            }, ok=False)
+        return original(url, **kwargs)
+
+    monkeypatch.setattr("app.social_publishers.requests.post", reject)
+    with pytest.raises(PublicationDeliveryError, match="ProcessingFailedError"):
+        _publish_instagram(job, "discipline", persist)
+    saved_fingerprint = job.payload_json["instagram_upload"]["fingerprint"]
+
+    status.update(status_code="FINISHED", status="Ready")
+    monkeypatch.setattr("app.social_publishers.requests.post", original)
+    assert _publish_instagram(job, "discipline", persist) == "published-media"
+    assert len([url for url, _ in calls if url.endswith("/account/media")]) == 1
+    assert job.payload_json["instagram_upload"]["fingerprint"] == saved_fingerprint
+
+
 def test_explicit_upload_rejection_can_retry_regenerated_video(upload, monkeypatch, tmp_path):
     job, calls, _, status, persist = upload
     status.update(status_code="IN_PROGRESS", status="Processing")

@@ -562,6 +562,30 @@ def _publish_instagram(
         "mtime": video_path.stat().st_mtime_ns,
         "caption": create_data["caption"], "trial": is_trial_reel,
     }, sort_keys=True).encode()).hexdigest()
+    # A definitive rupload rejection selects the stricter recovery derivative
+    # for a *new* container.  Meta can nevertheless finish the original
+    # container after returning that rejection.  In that case the saved
+    # fingerprint still names the normal derivative, and treating the newly
+    # selected recovery path as a user content change would strand a ready
+    # container.  Check the other deterministic delivery profile before
+    # blocking; captions and trial mode remain part of both fingerprints, so a
+    # real edit is still rejected.
+    saved_fingerprint = str(state.get("fingerprint") or "")
+    if state.get("creation_id") and saved_fingerprint and saved_fingerprint != fingerprint:
+        alternate_path = _instagram_compatible_video(
+            Path(job.video_path),
+            recovery_profile=not recovery_profile,
+        )
+        alternate_size = alternate_path.stat().st_size
+        alternate_fingerprint = hashlib.sha256(json.dumps({
+            "path": str(alternate_path.resolve()), "size": alternate_size,
+            "mtime": alternate_path.stat().st_mtime_ns,
+            "caption": create_data["caption"], "trial": is_trial_reel,
+        }, sort_keys=True).encode()).hexdigest()
+        if alternate_fingerprint == saved_fingerprint:
+            video_path = alternate_path
+            file_size = alternate_size
+            fingerprint = alternate_fingerprint
     status = ""
     if state.get("creation_id"):
         status = container_status()
