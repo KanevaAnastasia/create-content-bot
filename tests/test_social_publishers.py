@@ -492,6 +492,11 @@ def test_vk_wall_denial_is_not_success_and_retry_reuses_video(monkeypatch, tmp_p
             })
         if url.startswith("https://upload.vk.example/"):
             return response({"owner_id": -238619215, "video_id": 42})
+        if url.endswith("/video.get"):
+            return response({"response": {"items": [{
+                "owner_id": -238619215,
+                "id": 42,
+            }]}})
         assert url.endswith("/wall.post")
         assert kwargs["data"]["access_token"] == "community"
         assert kwargs["data"]["guid"] == f"content-fabric-wall-{job.id}"
@@ -510,7 +515,11 @@ def test_vk_wall_denial_is_not_success_and_retry_reuses_video(monkeypatch, tmp_p
     calls.clear()
     with pytest.raises(PublicationDeliveryError, match="Access denied"):
         _publish_vk(job, "grandma_kitchen", persist)
-    assert [url.rsplit('/', 1)[-1] for url, _ in calls] == ["groups.getById", "wall.post"]
+    assert [url.rsplit('/', 1)[-1] for url, _ in calls] == [
+        "groups.getById",
+        "video.get",
+        "wall.post",
+    ]
 
 
 def test_vk_readiness_accepts_refresh_credentials_without_static_token(monkeypatch) -> None:

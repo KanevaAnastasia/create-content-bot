@@ -1183,6 +1183,48 @@ def _vk_call(method: str, token: str, api_version: str, **params) -> dict:
     return payload["response"]
 
 
+def _vk_video_item(token: str, api_version: str, external_id: str) -> dict | None:
+    owner_id, _, video_id = str(external_id or "").partition("_")
+    if not owner_id or not video_id.isdigit():
+        return None
+    items = _vk_call(
+        "video.get",
+        token,
+        api_version,
+        owner_id=owner_id,
+        videos=external_id,
+        extended=0,
+    ).get("items", [])
+    return next(
+        (
+            item
+            for item in items
+            if isinstance(item, dict)
+            and f"{item.get('owner_id')}_{item.get('id')}" == external_id
+        ),
+        None,
+    )
+
+
+def _vk_video_is_corrupt(item: dict | None) -> bool:
+    title = str((item or {}).get("title") or "").strip().casefold()
+    return any(marker in title for marker in ("повреж", "corrupt", "damaged"))
+
+
+def _vk_upload_is_stale(payload: dict, *, now: datetime | None = None) -> bool:
+    raw = str(payload.get("vk_upload_started_at") or "").strip()
+    if not raw:
+        return False
+    try:
+        started_at = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+    except ValueError:
+        return False
+    if started_at.tzinfo is None:
+        started_at = started_at.replace(tzinfo=timezone.utc)
+    current = now or datetime.now(timezone.utc)
+    return current - started_at >= timedelta(minutes=30)
+
+
 def _vk_story_files(job: PublicationJob) -> list[Path]:
     """Keep the whole video, in conservative <15s / <10MB story parts."""
     from .ai_approval_service import _resolve_ffmpeg, _video_duration_seconds
@@ -1334,13 +1376,70 @@ def _publish_vk(job: PublicationJob, project_slug: str, persist: Callable[[], No
         job.payload_json = {**(job.payload_json or {}), **values}
         persist()
 
+    def reset_failed_video(external_id: str, reason: str) -> None:
+        current = dict(job.payload_json or {})
+        failed_ids = [str(value) for value in current.get("vk_failed_video_external_ids", []) if value]
+        if external_id and external_id not in failed_ids:
+            failed_ids.append(external_id)
+        for key in (
+            "vk_allocated_video_id",
+            "vk_video_external_id",
+            "vk_upload_started_at",
+            "vk_video_processing",
+            "external_post_url",
+        ):
+            current.pop(key, None)
+        current.update(
+            {
+                "vk_failed_video_external_ids": failed_ids,
+                "vk_video_recovery_profile": True,
+                "vk_video_recovery_reason": reason,
+            }
+        )
+        job.external_post_id = None
+        job.payload_json = current
+        persist()
+
     save(vk_group_id=group_id)
+    payload = job.payload_json or {}
     external_id = str(payload.get("vk_video_external_id") or job.external_post_id or "")
+    video_ready_checked = False
     if external_id:
         owner, _, video = external_id.partition("_")
         if owner != f"-{group_id}" or not video.isdigit():
             raise PublicationNeedsReview("Saved VK video does not belong to the configured community.")
-    else:
+        # Never attach an asset which VK has not finished transcoding. Older
+        # versions checked only the lost-response recovery path, so a normal
+        # upload could reach wall.post while still pending and leave a blank or
+        # explicitly damaged attachment on the wall.
+        if not payload.get("vk_wall_post_id") and not payload.get("vk_wall_create_started_at"):
+            token = _vk_access_token(project_slug)
+            item = _vk_video_item(token, api_version, external_id)
+            if item is None:
+                raise PublicationNeedsReview(
+                    "Saved VK video could not be checked; automatic re-upload is blocked."
+                )
+            if _vk_video_is_corrupt(item):
+                reset_failed_video(external_id, "vk_reported_corrupt")
+                external_id = ""
+                payload = job.payload_json or {}
+            elif bool(item.get("processing")):
+                if _vk_upload_is_stale(payload):
+                    reset_failed_video(external_id, "processing_timeout")
+                    external_id = ""
+                    payload = job.payload_json or {}
+                else:
+                    save(
+                        vk_video_processing=True,
+                        external_post_url=f"https://vk.com/video{external_id}",
+                    )
+                    raise PublicationDeliveryError(
+                        "VK is still processing the uploaded video. Retry only this platform after processing completes."
+                    )
+            else:
+                save(vk_video_processing=False)
+                video_ready_checked = True
+    if not external_id:
         allocated_id = str(payload.get("vk_allocated_video_id") or "")
         if allocated_id:
             owner, _, video = allocated_id.partition("_")
@@ -1351,35 +1450,45 @@ def _publish_vk(job: PublicationJob, project_slug: str, persist: Callable[[], No
             # bytes again; a second upload could become a duplicate publication.
             token = _vk_access_token(project_slug)
             try:
-                videos = _vk_call("video.get", token, api_version, owner_id=owner,
-                                  videos=allocated_id, extended=0).get("items", [])
+                item = _vk_video_item(token, api_version, allocated_id)
             except PublicationDeliveryError:
                 raise PublicationNeedsReview("Allocated VK video could not be checked; automatic re-upload is blocked.") from None
-            item = next((value for value in videos if isinstance(value, dict)
-                         and f"{value.get('owner_id')}_{value.get('id')}" == allocated_id), None)
             if item is None:
                 raise PublicationNeedsReview("Allocated VK video was not found; automatic re-upload is blocked.")
             # `video.save` allocates an ID before VK has finished transcoding.
             # Posting that pending asset to the wall can leave a broken or blank
             # attachment, so retain the exact saved ID and wait for the next
             # explicit retry instead of publishing prematurely.
-            if bool(item.get("processing")):
-                save(vk_video_processing=True, vk_video_external_id=allocated_id,
-                     external_post_url=f"https://vk.com/video{allocated_id}")
-                raise PublicationDeliveryError(
-                    "VK is still processing the uploaded video. Retry only this platform after processing completes."
-                )
-            external_id = allocated_id
-            job.external_post_id = external_id
-            save(vk_video_processing=False, vk_video_external_id=external_id,
-                 external_post_url=f"https://vk.com/video{external_id}")
+            if _vk_video_is_corrupt(item):
+                reset_failed_video(allocated_id, "vk_reported_corrupt")
+                payload = job.payload_json or {}
+            elif bool(item.get("processing")):
+                if _vk_upload_is_stale(payload):
+                    reset_failed_video(allocated_id, "processing_timeout")
+                    payload = job.payload_json or {}
+                else:
+                    save(vk_video_processing=True, vk_video_external_id=allocated_id,
+                         external_post_url=f"https://vk.com/video{allocated_id}")
+                    raise PublicationDeliveryError(
+                        "VK is still processing the uploaded video. Retry only this platform after processing completes."
+                    )
+            else:
+                external_id = allocated_id
+                job.external_post_id = external_id
+                save(vk_video_processing=False, vk_video_external_id=external_id,
+                     external_post_url=f"https://vk.com/video{external_id}")
+                video_ready_checked = True
+        payload = job.payload_json or {}
         if payload.get("vk_upload_started_at"):
             if not external_id:
                 raise PublicationNeedsReview("Previous VK upload outcome is unknown. Check the saved video ID before retrying.")
         if not external_id:
             token = _vk_access_token(project_slug)
             _verify_vk_identity(project_slug, token=token, group_id=group_id, api_version=api_version)
-            video_path = _instagram_compatible_video(Path(job.video_path))
+            if payload.get("vk_video_recovery_profile"):
+                video_path = _instagram_compatible_video(Path(job.video_path), recovery_profile=True)
+            else:
+                video_path = _instagram_compatible_video(Path(job.video_path))
             # Persist before the first remote write: an interruption must not re-upload.
             save(vk_upload_started_at=datetime.now(timezone.utc).isoformat())
             try:
@@ -1408,6 +1517,31 @@ def _publish_vk(job: PublicationJob, project_slug: str, persist: Callable[[], No
             external_id = f"{data['owner_id']}_{data['video_id']}"
             job.external_post_id = external_id
             save(vk_video_external_id=external_id, external_post_url=f"https://vk.com/video{external_id}")
+
+    # A successful upload response still means only that VK accepted the
+    # bytes. Verify transcoding before wall.post; an explicit retry can resume
+    # from this exact ID without uploading another copy.
+    payload = job.payload_json or {}
+    if (
+        not payload.get("vk_wall_post_id")
+        and not payload.get("vk_wall_create_started_at")
+        and not video_ready_checked
+    ):
+        token = _vk_access_token(project_slug)
+        item = _vk_video_item(token, api_version, external_id)
+        if item is None:
+            raise PublicationNeedsReview("Uploaded VK video could not be verified; retry will not re-upload it.")
+        if _vk_video_is_corrupt(item):
+            reset_failed_video(external_id, "vk_reported_corrupt")
+            raise PublicationDeliveryError(
+                "VK rejected the uploaded video. Retry only this platform to use the safer delivery profile."
+            )
+        if bool(item.get("processing")):
+            save(vk_video_processing=True, external_post_url=f"https://vk.com/video{external_id}")
+            raise PublicationDeliveryError(
+                "VK is still processing the uploaded video. Retry only this platform after processing completes."
+            )
+        save(vk_video_processing=False)
 
     payload = job.payload_json or {}
     post_id = payload.get("vk_wall_post_id")

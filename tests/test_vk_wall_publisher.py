@@ -17,7 +17,7 @@ def configured(monkeypatch):
                         values.get(key, default) if project == "grandma" else default)
     monkeypatch.setattr(p, "_vk_access_token", lambda project: "video-secret")
     monkeypatch.setattr(p, "_verify_vk_identity", lambda *a, **kw: None)
-    monkeypatch.setattr(p, "_instagram_compatible_video", lambda path: path)
+    monkeypatch.setattr(p, "_instagram_compatible_video", lambda path, **kwargs: path)
     return values
 
 
@@ -166,7 +166,7 @@ def test_allocated_video_is_verified_and_reused_after_lost_upload_response(confi
 
 def test_allocated_video_waits_for_vk_processing_before_wall_post(configured, monkeypatch, job):
     job.payload_json = {
-        'vk_upload_started_at': '2026-01-01T00:00:00+00:00',
+        'vk_upload_started_at': p.datetime.now(p.timezone.utc).isoformat(),
         'vk_allocated_video_id': '-123_42',
     }
     calls = setup_api(monkeypatch, job)
@@ -183,6 +183,76 @@ def test_allocated_video_waits_for_vk_processing_before_wall_post(configured, mo
         p._publish_vk(job, 'grandma', lambda: None)
     assert job.payload_json['vk_video_processing'] is True
     assert [url.rsplit('/', 1)[-1] for url, _ in calls] == ['groups.getById', 'video.get']
+
+
+def test_fresh_upload_waits_for_vk_processing_before_wall_post(configured, monkeypatch, job):
+    calls = setup_api(monkeypatch, job)
+    original = p.requests.post
+
+    def pending(url, **kwargs):
+        result = original(url, **kwargs)
+        if url.rsplit('/', 1)[-1] == 'video.get':
+            result.json = lambda: {'response': {'items': [{'owner_id': -123, 'id': 42, 'processing': 1}]}}
+        return result
+
+    monkeypatch.setattr(p.requests, 'post', pending)
+    with pytest.raises(p.PublicationDeliveryError, match='still processing'):
+        p._publish_vk(job, 'grandma', lambda: None)
+    assert job.payload_json['vk_video_processing'] is True
+    assert 'wall.post' not in [url.rsplit('/', 1)[-1] for url, _ in calls]
+
+
+def test_stale_processing_video_is_reuploaded_with_recovery_profile(configured, monkeypatch, job):
+    job.payload_json = {
+        'vk_upload_started_at': '2026-01-01T00:00:00+00:00',
+        'vk_video_external_id': '-123_41',
+    }
+    calls = setup_api(monkeypatch, job)
+    original = p.requests.post
+    profiles = []
+    monkeypatch.setattr(
+        p,
+        '_instagram_compatible_video',
+        lambda path, **kwargs: profiles.append(bool(kwargs.get('recovery_profile'))) or path,
+    )
+
+    def video_state(url, **kwargs):
+        if url.rsplit('/', 1)[-1] == 'video.get' and kwargs['data']['videos'] == '-123_41':
+            calls.append((url, kwargs))
+            return response({'response': {'items': [{'owner_id': -123, 'id': 41, 'processing': 1}]}})
+        return original(url, **kwargs)
+
+    monkeypatch.setattr(p.requests, 'post', video_state)
+    assert p._publish_vk(job, 'grandma', lambda: None) == '-123_42'
+    assert profiles == [True]
+    assert job.payload_json['vk_failed_video_external_ids'] == ['-123_41']
+    assert job.payload_json['vk_video_recovery_reason'] == 'processing_timeout'
+
+
+def test_corrupt_video_is_never_attached_to_wall(configured, monkeypatch, job):
+    job.payload_json = {
+        'vk_upload_started_at': '2026-11-13T09:00:00+00:00',
+        'vk_video_external_id': '-123_41',
+    }
+    calls = setup_api(monkeypatch, job)
+    original = p.requests.post
+
+    def corrupt(url, **kwargs):
+        if (url.rsplit('/', 1)[-1] == 'video.get'
+                and kwargs['data']['videos'] == '-123_41'):
+            calls.append((url, kwargs))
+            return response({'response': {'items': [{
+                'owner_id': -123, 'id': 41, 'title': 'Файл повреждён при загрузке',
+            }]}})
+        return original(url, **kwargs)
+
+    monkeypatch.setattr(p.requests, 'post', corrupt)
+    assert p._publish_vk(job, 'grandma', lambda: None) == '-123_42'
+    wall_calls = [kwargs for url, kwargs in calls if url.rsplit('/', 1)[-1] == 'wall.post']
+    assert len(wall_calls) == 1
+    assert wall_calls[0]['data']['attachments'] == 'video-123_42'
+    assert job.payload_json['vk_video_recovery_profile'] is True
+    assert job.payload_json['vk_failed_video_external_ids'] == ['-123_41']
 
 
 def test_wall_key_required_and_never_crosses_projects_or_languages(configured):
