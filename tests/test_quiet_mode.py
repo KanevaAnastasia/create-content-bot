@@ -132,3 +132,14 @@ def test_daily_limit_increases_at_november_15_moscow_midnight(monkeypatch):
 
     later = datetime(2026, 11, 16, 21, 0, tzinfo=timezone.utc)
     assert quiet_mode.automatic_quiet_mode_status(now=later, session_factory=factory)["generation_target"] == 18
+
+
+def test_daily_minimum_increases_from_ten_to_fourteen_at_moscow_midnight(monkeypatch):
+    factory = _factory()
+    before = datetime(2026, 11, 14, 20, 59, 59, tzinfo=timezone.utc)
+    after = datetime(2026, 11, 14, 21, 0, tzinfo=timezone.utc)
+    monkeypatch.setattr(quiet_mode.random, "randint", lambda minimum, maximum: minimum)
+    quiet_mode.enable_automatic_quiet_mode_from_next_midnight(now=before, session_factory=factory)
+    quiet_mode.reset_automatic_quiet_mode_cycle(now=before, session_factory=factory)
+    assert quiet_mode.automatic_quiet_mode_status(now=before, session_factory=factory)["generation_target"] == 10
+    assert quiet_mode.automatic_quiet_mode_status(now=after, session_factory=factory)["generation_target"] == 14

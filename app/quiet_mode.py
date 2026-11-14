@@ -24,6 +24,7 @@ _MENU_BUTTON: ContextVar[str | None] = ContextVar("admin_quiet_mode_menu_button"
 QUIET_MODE_TIMEZONE = ZoneInfo("Europe/Moscow")
 QUIET_MODE_GENERATION_MIN = 10
 QUIET_MODE_GENERATION_MAX = 14
+QUIET_MODE_GENERATION_MIN_FROM_NOVEMBER_15 = 14
 QUIET_MODE_GENERATION_MAX_FROM_NOVEMBER_15 = 18
 QUIET_MODE_LIMIT_CHANGE_DATE = date(2026, 11, 15)
 
@@ -59,16 +60,21 @@ def _owner_row(db, *, lock: bool = False) -> BotUser | None:
 
 
 def _reset_cycle_row(row: BotUser, *, cycle_date: date, target: int | None = None) -> int:
+    minimum = (
+        QUIET_MODE_GENERATION_MIN_FROM_NOVEMBER_15
+        if cycle_date >= QUIET_MODE_LIMIT_CHANGE_DATE
+        else QUIET_MODE_GENERATION_MIN
+    )
     maximum = (
         QUIET_MODE_GENERATION_MAX_FROM_NOVEMBER_15
         if cycle_date >= QUIET_MODE_LIMIT_CHANGE_DATE
         else QUIET_MODE_GENERATION_MAX
     )
-    generation_target = int(target or random.randint(QUIET_MODE_GENERATION_MIN, maximum))
-    if not QUIET_MODE_GENERATION_MIN <= generation_target <= maximum:
+    generation_target = int(target or random.randint(minimum, maximum))
+    if not minimum <= generation_target <= maximum:
         raise ValueError(
             f"Quiet-mode generation target must be between "
-            f"{QUIET_MODE_GENERATION_MIN} and {maximum}."
+            f"{minimum} and {maximum}."
         )
     row.quiet_mode_enabled = False
     row.quiet_mode_auto_cycle_date = cycle_date
