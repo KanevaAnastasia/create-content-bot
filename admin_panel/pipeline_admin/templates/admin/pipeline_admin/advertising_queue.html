@@ -1,0 +1,11 @@
+{% extends "admin/change_list.html" %}
+{% block object-tools-items %}
+{% if has_add_permission %}<li><a href="{% url 'admin:advertising_product_import' %}">Импорт Excel</a></li>{% endif %}
+{{ block.super }}
+{% endblock %}
+{% block content %}
+<p>Реклама для бабушки: каждые 2 дня в 09:00 МСК, начиная с 15 ноября 2026.
+Первым готовится необработанный товар с меньшим порядковым номером.
+Сценарии поступят в Telegram после завершения активной генерации.</p>
+{{ block.super }}
+{% endblock %}

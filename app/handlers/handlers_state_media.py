@@ -3148,7 +3148,7 @@ def _social_video_variant_button_label(variant: str, selected_variant: str) -> s
 def _social_scheduled_at_label(pending: dict) -> str:
     raw = str(pending.get(SOCIAL_PUBLISH_SCHEDULED_AT_KEY) or "").strip()
     if not raw:
-        return "сразу после ОК"
+        return "после команды «Публиковать выбранное»"
     try:
         scheduled = normalize_publication_scheduled_at(raw)
     except ValueError:
@@ -3168,13 +3168,15 @@ def _social_selected_target_keys(pending: dict) -> set[str]:
     if isinstance(raw, list):
         selected = {str(item) for item in raw if str(item) in available}
     else:
-        selected = set(available)
+        selected = set()
     return selected
 
 
 def _social_descriptions_approval_markup(pending: dict | None = None) -> ReplyKeyboardMarkup:
     keyboard = [["ОК"], ["ФИДБЕК"], ["Исправь"]]
     if isinstance(pending, dict):
+        if pending.get("origin") == "production_final":
+            keyboard.insert(1, ["Публиковать выбранное"])
         copy = pending.get("copy") if isinstance(pending.get("copy"), dict) else {}
         available = _social_publish_target_keys_for_copy(copy)
         selected = _social_selected_target_keys(pending)
@@ -3301,8 +3303,9 @@ async def _send_social_copy_for_approval(
         update,
         "Проверьте описания.\n"
         "Кнопками ниже можно снять/поставить площадки и выбрать версию финального видео.\n"
-        "Время можно задать сообщением «Время 2026-06-24 18:30»; без времени публикация уйдет сразу после ОК.\n"
-        "«ОК» — утвердить.\n"
+        "Время можно задать сообщением «Время 2026-11-14 18:30».\n"
+        "«ОК» — сохранить и завершить без публикации.\n"
+        "Для публикации отдельно отметьте площадки и нажмите «Публиковать выбранное».\n"
         "«ФИДБЕК» или «Исправь» — пришлите, что поменять, и я перепишу описания.",
         reply_markup=_social_descriptions_approval_markup(pending),
     )
@@ -3450,7 +3453,7 @@ async def _start_social_descriptions_approval(
         "advertising": bool(advertising),
         "product_context": str(product_context or ""),
         "project_slug": str(project_slug or ""),
-        SOCIAL_PUBLISH_TARGETS_KEY: _social_publish_target_keys_for_copy(copy),
+        SOCIAL_PUBLISH_TARGETS_KEY: [],
         SOCIAL_PUBLISH_VIDEO_VARIANT_KEY: DEFAULT_PUBLICATION_VIDEO_VARIANT,
     }
     session[SOCIAL_DESCRIPTIONS_PENDING_KEY] = pending
@@ -3723,11 +3726,12 @@ async def _handle_waiting_social_descriptions_approval_state(
             reply_markup=_social_descriptions_approval_markup(pending),
         )
         return True
-    if low in {"ок", "ok", "okay", "approve", "утвердить"}:
+    if low in {"ок", "ok", "okay", "approve", "утвердить", "публиковать выбранное"}:
+        publish_requested = low == "публиковать выбранное"
         origin = str(pending.get("origin") or "description_mode")
         copy = pending.get("copy")
         selected_target_keys = sorted(_social_selected_target_keys(pending))
-        if origin == "production_final" and not selected_target_keys:
+        if publish_requested and (origin != "production_final" or not selected_target_keys):
             await update.message.reply_text(
                 "Не выбрана ни одна площадка. Отметьте хотя бы одну кнопку или пришлите «ФИДБЕК».",
                 reply_markup=_social_descriptions_approval_markup(pending),
@@ -3737,10 +3741,13 @@ async def _handle_waiting_social_descriptions_approval_state(
             from ..publication_copy_store import save_bot_publication_copy
 
             save_bot_publication_copy(session, pending, approved=True)
-        if origin == "production_final" and isinstance(copy, dict):
+        if publish_requested and origin == "production_final" and isinstance(copy, dict):
             production = session.get("production")
             post_production = production.get("post_production") if isinstance(production, dict) else None
             recipe = str(pending.get("recipe") or "").strip()
+            if not isinstance(post_production, dict) or not recipe:
+                await update.message.reply_text("Финальные файлы ещё не готовы к публикации. Дождитесь доставки ролика.")
+                return True
             if isinstance(post_production, dict) and recipe:
                 try:
                     run_id = str(session.get("generation_run_id") or "").strip()
@@ -3790,11 +3797,13 @@ async def _handle_waiting_social_descriptions_approval_state(
                         "Описания утвердила, но публикационные jobs в БД сохранить не удалось. "
                         "Проверьте DATABASE_URL и настройку автопостинга."
                     )
+                    return True
         if isinstance(copy, dict):
             session[SOCIAL_DESCRIPTIONS_APPROVED_KEY] = {
                 "copy": {str(k): str(v) for k, v in copy.items()},
                 "recipe": str(pending.get("recipe") or ""),
                 "origin": origin,
+                "publication_options": dict(pending),
             }
         session.pop(SOCIAL_DESCRIPTIONS_PENDING_KEY, None)
         session[SOCIAL_DESCRIPTIONS_SENT_KEY] = True
@@ -3802,8 +3811,11 @@ async def _handle_waiting_social_descriptions_approval_state(
             session["state"] = STATE_READY_FOR_PRODUCTION
             mark_generation_run_ready(session)
             await update.message.reply_text(
-                "Описания утверждены. Production завершён.\n\nВыберите первый шаг кнопкой.",
-                reply_markup=first_step_menu_markup(),
+                "Описания сохранены. Генерация завершена."
+                + ("\nПубликация поставлена в очередь." if publish_requested else "\nНичего не опубликовано. Можно отдельно выбрать публикацию."),
+                reply_markup=first_step_menu_markup() if publish_requested else ReplyKeyboardMarkup(
+                    [["Выбрать публикацию"], *first_step_menu_markup().keyboard], resize_keyboard=True,
+                ),
             )
         else:
             session["state"] = ""

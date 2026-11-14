@@ -147,22 +147,31 @@ from ..advertising_generation import (
     ADVERTISING_CAMPAIGNS_SESSION_KEY,
     ADVERTISING_CONTENT_TYPE_SESSION_KEY,
     ADVERTISING_FORMAT_SESSION_KEY,
+    ADVERTISING_POST_CURRENT_IMAGE_PATH_SESSION_KEY,
+    ADVERTISING_POST_IMAGE_INDEX_SESSION_KEY,
     ADVERTISING_POST_IMAGE_PATHS_SESSION_KEY,
+    ADVERTISING_POST_IMAGE_PROMPTS_SESSION_KEY,
     ADVERTISING_POST_TEXT_SESSION_KEY,
     ADVERTISING_PRODUCT_BRIEF_SESSION_KEY,
     ADVERTISING_PRODUCT_PATH_SESSION_KEY,
     ADVERTISING_SELECTED_CAMPAIGN_SESSION_KEY,
     ADVERTISING_SOURCE_SESSION_KEY,
     STATE_GENERATING_ADVERTISING_POST,
+    STATE_WAITING_ADVERTISING_POST_IMAGE_APPROVAL,
+    STATE_WAITING_ADVERTISING_POST_IMAGE_FEEDBACK,
+    STATE_WAITING_ADVERTISING_POST_TEXT_APPROVAL,
+    STATE_WAITING_ADVERTISING_POST_TEXT_FEEDBACK,
     STATE_WAITING_ADVERTISING_CAMPAIGN_CHOICE,
     STATE_WAITING_ADVERTISING_CUSTOM_CAMPAIGN,
     STATE_WAITING_ADVERTISING_FORMAT_CHOICE,
     STATE_WAITING_ADVERTISING_PRODUCT_IMAGE,
     advertising_product_reference_bytes,
     analyze_advertising_product,
+    ensure_advertising_post_image_prompt,
     generate_advertising_post_package,
     generate_advertising_production,
     generate_advertising_scene_plan,
+    regenerate_advertising_post_text,
     store_advertising_post_image,
     store_advertising_product_reference,
 )
@@ -1185,6 +1194,28 @@ async def _generate_production_after_overlay_title(
     return True
 
 
+_ADVERTISING_POST_APPROVE_BUTTON = "АПРУВ"
+_ADVERTISING_POST_REGENERATE_BUTTON = "ПЕРЕГЕНЕРИРОВАТЬ"
+_ADVERTISING_POST_FEEDBACK_BUTTON = "ФИДБЭК"
+
+
+def _advertising_post_approval_markup():
+    try:
+        from telegram import ReplyKeyboardMarkup
+    except Exception:
+        return None
+    return ReplyKeyboardMarkup(
+        [
+            [_ADVERTISING_POST_APPROVE_BUTTON],
+            [_ADVERTISING_POST_REGENERATE_BUTTON],
+            [_ADVERTISING_POST_FEEDBACK_BUTTON],
+            [NAV_BUTTON_START_OVER],
+        ],
+        resize_keyboard=True,
+        one_time_keyboard=False,
+    )
+
+
 def keyboard_for_session_state(session: dict):
     """Return the reply keyboard expected for the current visible state."""
     state = str((session or {}).get("state") or "")
@@ -1227,6 +1258,16 @@ def keyboard_for_session_state(session: dict):
     if state == STATE_WAITING_ADVERTISING_FORMAT_CHOICE:
         return _advertising_format_choice_markup()
     if state == STATE_GENERATING_ADVERTISING_POST:
+        return remove_keyboard_markup()
+    if state in {
+        STATE_WAITING_ADVERTISING_POST_TEXT_APPROVAL,
+        STATE_WAITING_ADVERTISING_POST_IMAGE_APPROVAL,
+    }:
+        return _advertising_post_approval_markup()
+    if state in {
+        STATE_WAITING_ADVERTISING_POST_TEXT_FEEDBACK,
+        STATE_WAITING_ADVERTISING_POST_IMAGE_FEEDBACK,
+    }:
         return remove_keyboard_markup()
     if state == STATE_WAITING_VISUALIZATION_MEDIA:
         return remove_keyboard_markup()
@@ -7216,10 +7257,12 @@ def _selected_advertising_campaign_text(campaign: dict | str | None) -> str:
 
 async def _ask_advertising_format(update: Update, *, chat_id: int, session: dict) -> bool:
     session["state"] = STATE_WAITING_ADVERTISING_FORMAT_CHOICE
+    session[ADVERTISING_FORMAT_SESSION_KEY] = "clip"
     SESSIONS[chat_id] = session
     await _reply_text_with_optional_markup(
         update,
-        "Как выпускаем выбранную кампанию?\n\n«Клип» — от 3 до 6 сцен Veo.\n«Пост» — три изображения с очень крупным товаром и персонажами плюс готовый рекламный текст.",
+        "По умолчанию выбран «Клип» — от 3 до 6 сцен Veo. Нажмите «Клип» или отправьте «ОК».\n"
+        "Можно выбрать «Пост» — одно изображение с крупным товаром и персонажами плюс рекламный текст.",
         reply_markup=_advertising_format_choice_markup(),
     )
     return True
@@ -7317,7 +7360,7 @@ async def _generate_advertising_post(
     try:
         await reply_text_without_keyboard(
             update.message,
-            "Готовлю красивый рекламный пост и три изображения 4:5. Товар будет очень крупным, рядом — бабушка и рыжий кот.",
+            "Готовлю рекламный пост с одним изображением. Сначала покажу текст на апрув, затем картинку.",
         )
         package = await _call_with_503_retries(
             update,
@@ -7332,29 +7375,9 @@ async def _generate_advertising_post(
             ),
         )
         prompts = package.get("image_prompts") if isinstance(package, dict) else None
-        if not isinstance(prompts, list) or len(prompts) != 3:
-            raise RuntimeError("модель не вернула три промпта изображений")
-        product_refs = advertising_product_reference_bytes(session)
-        if not product_refs:
-            raise RuntimeError("не удалось прочитать обязательный референс товара")
-        character_scene = {"characters": ["grandma", "cat"], "shot_type": "close-up"}
-        character_refs = _load_scene_reference_images(character_scene, include_location=False)
-        reference_images = [*product_refs, *character_refs]
-        image_payloads: list[bytes] = []
-        for index, prompt in enumerate(prompts, start=1):
-            await update.message.reply_text(f"Генерирую изображение {index}/3…")
-            effective_prompt = _append_scene_identity_to_image_prompt(
-                str(prompt),
-                character_scene,
-                include_location=False,
-            )
-            image_payloads.append(
-                await _generate_image_with_lenient_fallback(
-                    effective_prompt,
-                    reference_images=reference_images or None,
-                    aspect_ratio="4:5",
-                )
-            )
+        if not isinstance(prompts, list) or not prompts:
+            raise RuntimeError("модель не вернула промпт изображения")
+        prompts = prompts[:1]
     except ServiceUnavailableRetriesExhaustedError as e:
         session["state"] = STATE_WAITING_ADVERTISING_FORMAT_CHOICE
         SESSIONS[chat_id] = session
@@ -7371,25 +7394,119 @@ async def _generate_advertising_post(
         )
         return True
 
-    paths: list[str] = []
-    for index, image_bytes in enumerate(image_payloads, start=1):
-        path = store_advertising_post_image(chat_id, image_bytes, index=index)
-        paths.append(path)
-        bio = io.BytesIO(image_bytes)
-        bio.name = f"advertising_post_{index}.png"
-        await safe_reply_photo(
-            update.message,
-            photo=bio,
-            caption=f"Рекламный пост · изображение {index}/3",
-        )
     post_text = str(package.get("post_text") or "").strip()
     session[ADVERTISING_POST_TEXT_SESSION_KEY] = post_text
-    session[ADVERTISING_POST_IMAGE_PATHS_SESSION_KEY] = paths
+    session[ADVERTISING_POST_IMAGE_PROMPTS_SESSION_KEY] = [str(prompt) for prompt in prompts]
+    session[ADVERTISING_POST_IMAGE_PATHS_SESSION_KEY] = []
+    session[ADVERTISING_POST_IMAGE_INDEX_SESSION_KEY] = 0
+    session.pop(ADVERTISING_POST_CURRENT_IMAGE_PATH_SESSION_KEY, None)
     session["recipe_full_text"] = source_text
     session["user_input"] = source_text
     session["sponsored_content"] = True
-    session["state"] = ""
+    session["state"] = STATE_WAITING_ADVERTISING_POST_TEXT_APPROVAL
     SESSIONS[chat_id] = session
+    await _reply_text_with_optional_markup(
+        update,
+        "Текст поста на проверку:\n\n"
+        + post_text
+        + "\n\nАпрувьте, перегенерируйте без дополнительных указаний или нажмите «ФИДБЭК» и пришлите правки.",
+        reply_markup=_advertising_post_approval_markup(),
+    )
+    return True
+
+
+async def _generate_advertising_post_image_candidate(
+    update: Update,
+    *,
+    chat_id: int,
+    session: dict,
+) -> bool:
+    prompts = session.get(ADVERTISING_POST_IMAGE_PROMPTS_SESSION_KEY)
+    index = int(session.get(ADVERTISING_POST_IMAGE_INDEX_SESSION_KEY) or 0)
+    product_brief = session.get(ADVERTISING_PRODUCT_BRIEF_SESSION_KEY)
+    if not isinstance(prompts, list) or not 0 <= index < len(prompts) or not isinstance(product_brief, dict):
+        session["state"] = STATE_WAITING_ADVERTISING_FORMAT_CHOICE
+        SESSIONS[chat_id] = session
+        await _reply_text_with_optional_markup(
+            update,
+            "Не нашла данные текущего кадра. Запустите формат «Пост» ещё раз.",
+            reply_markup=_advertising_format_choice_markup(),
+        )
+        return True
+    product_refs = advertising_product_reference_bytes(session)
+    if not product_refs:
+        session["state"] = STATE_WAITING_ADVERTISING_POST_IMAGE_APPROVAL
+        SESSIONS[chat_id] = session
+        await _reply_text_with_optional_markup(
+            update,
+            "Не удалось прочитать обязательный референс товара. Восстановите фото товара и попробуйте ещё раз.",
+            reply_markup=_advertising_post_approval_markup(),
+        )
+        return True
+
+    character_scene = {"characters": ["grandma", "cat"], "shot_type": "close-up"}
+    reference_images = [
+        *product_refs,
+        *_load_scene_reference_images(character_scene, include_location=False),
+    ]
+    session["state"] = STATE_GENERATING_ADVERTISING_POST
+    SESSIONS[chat_id] = session
+    try:
+        await reply_text_without_keyboard(update.message, "Генерирую изображение…")
+        prompt = ensure_advertising_post_image_prompt(
+            str(prompts[index]),
+            product_brief=product_brief,
+        )
+        effective_prompt = _append_scene_identity_to_image_prompt(
+            prompt,
+            character_scene,
+            include_location=False,
+        )
+        image_bytes = await _generate_image_with_lenient_fallback(
+            effective_prompt,
+            reference_images=reference_images or None,
+            aspect_ratio="4:5",
+        )
+        path = store_advertising_post_image(chat_id, image_bytes, index=index + 1)
+    except Exception as e:
+        logger.exception("advertising post image generation failed index=%s", index + 1)
+        session["state"] = STATE_WAITING_ADVERTISING_POST_IMAGE_APPROVAL
+        SESSIONS[chat_id] = session
+        await _reply_text_with_optional_markup(
+            update,
+            f"Ошибка генерации изображения: {_user_error_message(e)}",
+            reply_markup=_advertising_post_approval_markup(),
+        )
+        return True
+
+    session[ADVERTISING_POST_CURRENT_IMAGE_PATH_SESSION_KEY] = path
+    session["state"] = STATE_WAITING_ADVERTISING_POST_IMAGE_APPROVAL
+    SESSIONS[chat_id] = session
+    bio = io.BytesIO(image_bytes)
+    bio.name = f"advertising_post_{index + 1}.png"
+    await safe_reply_photo(
+        update.message,
+        photo=bio,
+        caption="Рекламный пост · изображение",
+    )
+    await _reply_text_with_optional_markup(
+        update,
+        "Изображение на проверку. Апрувить, перегенерировать или дать фидбэк?",
+        reply_markup=_advertising_post_approval_markup(),
+    )
+    return True
+
+
+async def _finalize_advertising_post(
+    update: Update,
+    *,
+    chat_id: int,
+    session: dict,
+) -> bool:
+    paths = [str(path) for path in (session.get(ADVERTISING_POST_IMAGE_PATHS_SESSION_KEY) or []) if str(path)][:1]
+    session[ADVERTISING_POST_IMAGE_PATHS_SESSION_KEY] = paths
+    campaign = session.get(ADVERTISING_SELECTED_CAMPAIGN_SESSION_KEY)
+    product_brief = session.get(ADVERTISING_PRODUCT_BRIEF_SESSION_KEY)
     ensure_generation_run_for_session(session)
     product_path = str(session.get(ADVERTISING_PRODUCT_PATH_SESSION_KEY) or "").strip()
     if product_path:
@@ -7405,15 +7522,176 @@ async def _generate_advertising_post(
         persist_generation_artifact(
             session,
             artifact_type="advertising_post_image",
-            label=f"Advertising post image {index}/3",
+            label="Advertising post image",
             uri=file_uri(path),
             mime_type="image/png",
             payload={"index": index, "campaign": campaign},
         )
+    session["state"] = ""
+    session.pop(ADVERTISING_POST_CURRENT_IMAGE_PATH_SESSION_KEY, None)
+    SESSIONS[chat_id] = session
     await _reply_text_with_optional_markup(
         update,
-        "Готовый текст поста:\n\n" + post_text,
+        "Рекламный пост утверждён: текст и одно изображение сохранены. Ничего не опубликовано.",
         reply_markup=first_step_menu_markup(),
+    )
+    return True
+
+
+async def _regenerate_advertising_post_text_candidate(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+    *,
+    chat_id: int,
+    session: dict,
+    feedback: str = "",
+) -> bool:
+    session["state"] = STATE_GENERATING_ADVERTISING_POST
+    SESSIONS[chat_id] = session
+    try:
+        await reply_text_without_keyboard(update.message, "Перегенерирую текст поста по фидбэку…" if feedback else "Готовлю новый вариант текста поста…")
+        post_text = await _call_with_503_retries(
+            update,
+            context,
+            chat_id,
+            "regenerate_advertising_post_text",
+            lambda: asyncio.to_thread(
+                regenerate_advertising_post_text,
+                source_text=str(session.get(ADVERTISING_SOURCE_SESSION_KEY) or ""),
+                product_brief=session.get(ADVERTISING_PRODUCT_BRIEF_SESSION_KEY) or {},
+                campaign=session.get(ADVERTISING_SELECTED_CAMPAIGN_SESSION_KEY) or {},
+                current_text=str(session.get(ADVERTISING_POST_TEXT_SESSION_KEY) or ""),
+                feedback=feedback,
+            ),
+        )
+        if not str(post_text or "").strip():
+            raise RuntimeError("модель вернула пустой текст")
+    except Exception as e:
+        logger.exception("advertising post text regeneration failed")
+        session["state"] = STATE_WAITING_ADVERTISING_POST_TEXT_APPROVAL
+        SESSIONS[chat_id] = session
+        await _reply_text_with_optional_markup(
+            update,
+            f"Ошибка перегенерации текста: {_user_error_message(e)}",
+            reply_markup=_advertising_post_approval_markup(),
+        )
+        return True
+    session[ADVERTISING_POST_TEXT_SESSION_KEY] = str(post_text).strip()
+    session["state"] = STATE_WAITING_ADVERTISING_POST_TEXT_APPROVAL
+    SESSIONS[chat_id] = session
+    await _reply_text_with_optional_markup(
+        update,
+        "Новый текст поста на проверку:\n\n" + str(post_text).strip(),
+        reply_markup=_advertising_post_approval_markup(),
+    )
+    return True
+
+
+async def _handle_advertising_post_review(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+    *,
+    chat_id: int,
+    session: dict,
+    text: str,
+) -> bool:
+    state = str(session.get("state") or "")
+    raw = str(text or "").strip()
+    low = raw.lower()
+    approve = low in {"апрув", "approve", "ок", "ok"}
+    regenerate = low in {"перегенерировать", "переген", "regenerate"}
+    feedback_button = low in {"фидбэк", "фидбек", "feedback", "фидбэк:", "фидбек:"}
+
+    if state == STATE_WAITING_ADVERTISING_POST_TEXT_FEEDBACK:
+        if not raw:
+            await update.message.reply_text("Пришлите правки к тексту одним сообщением.")
+            return True
+        return await _regenerate_advertising_post_text_candidate(
+            update,
+            context,
+            chat_id=chat_id,
+            session=session,
+            feedback=raw,
+        )
+
+    if state == STATE_WAITING_ADVERTISING_POST_TEXT_APPROVAL:
+        if approve:
+            session[ADVERTISING_POST_IMAGE_INDEX_SESSION_KEY] = 0
+            session[ADVERTISING_POST_IMAGE_PROMPTS_SESSION_KEY] = list(session.get(ADVERTISING_POST_IMAGE_PROMPTS_SESSION_KEY) or [])[:1]
+            session[ADVERTISING_POST_IMAGE_PATHS_SESSION_KEY] = []
+            SESSIONS[chat_id] = session
+            return await _generate_advertising_post_image_candidate(update, chat_id=chat_id, session=session)
+        if regenerate:
+            return await _regenerate_advertising_post_text_candidate(
+                update,
+                context,
+                chat_id=chat_id,
+                session=session,
+            )
+        if feedback_button:
+            session["state"] = STATE_WAITING_ADVERTISING_POST_TEXT_FEEDBACK
+            SESSIONS[chat_id] = session
+            await reply_text_without_keyboard(update.message, "Пришлите фидбэк к тексту одним сообщением.")
+            return True
+
+    if state == STATE_WAITING_ADVERTISING_POST_IMAGE_FEEDBACK:
+        if not raw:
+            await update.message.reply_text("Пришлите правки к текущему изображению одним сообщением.")
+            return True
+        prompts = session.get(ADVERTISING_POST_IMAGE_PROMPTS_SESSION_KEY)
+        index = int(session.get(ADVERTISING_POST_IMAGE_INDEX_SESSION_KEY) or 0)
+        if not isinstance(prompts, list) or not 0 <= index < len(prompts):
+            session["state"] = STATE_WAITING_ADVERTISING_FORMAT_CHOICE
+            SESSIONS[chat_id] = session
+            await update.message.reply_text("Не нашла промпт текущего изображения. Запустите «Пост» ещё раз.")
+            return True
+        try:
+            await reply_text_without_keyboard(update.message, "Применяю фидбэк и перегенерирую изображение…")
+            updated_prompt = await _regenerate_image_prompt_from_feedback(
+                {"start_frame_prompt": str(prompts[index]), "shot_type": "close-up", "characters": ["grandma", "cat"]},
+                raw,
+            )
+            prompts[index] = updated_prompt
+            session[ADVERTISING_POST_IMAGE_PROMPTS_SESSION_KEY] = prompts
+        except Exception as e:
+            logger.exception("advertising post image prompt feedback failed index=%s", index + 1)
+            session["state"] = STATE_WAITING_ADVERTISING_POST_IMAGE_APPROVAL
+            SESSIONS[chat_id] = session
+            await _reply_text_with_optional_markup(
+                update,
+                f"Ошибка применения фидбэка: {_user_error_message(e)}",
+                reply_markup=_advertising_post_approval_markup(),
+            )
+            return True
+        return await _generate_advertising_post_image_candidate(update, chat_id=chat_id, session=session)
+
+    if state == STATE_WAITING_ADVERTISING_POST_IMAGE_APPROVAL:
+        if approve:
+            index = int(session.get(ADVERTISING_POST_IMAGE_INDEX_SESSION_KEY) or 0)
+            current_path = str(session.get(ADVERTISING_POST_CURRENT_IMAGE_PATH_SESSION_KEY) or "").strip()
+            if not current_path:
+                await _reply_text_with_optional_markup(
+                    update,
+                    "Нет готового кандидата для апрува. Нажмите «ПЕРЕГЕНЕРИРОВАТЬ».",
+                    reply_markup=_advertising_post_approval_markup(),
+                )
+                return True
+            session[ADVERTISING_POST_IMAGE_PATHS_SESSION_KEY] = [current_path]
+            session.pop(ADVERTISING_POST_CURRENT_IMAGE_PATH_SESSION_KEY, None)
+            return await _finalize_advertising_post(update, chat_id=chat_id, session=session)
+        if regenerate:
+            return await _generate_advertising_post_image_candidate(update, chat_id=chat_id, session=session)
+        if feedback_button:
+            session["state"] = STATE_WAITING_ADVERTISING_POST_IMAGE_FEEDBACK
+            SESSIONS[chat_id] = session
+            index = int(session.get(ADVERTISING_POST_IMAGE_INDEX_SESSION_KEY) or 0)
+            await reply_text_without_keyboard(update.message, "Пришлите фидбэк к изображению одним сообщением.")
+            return True
+
+    await _reply_text_with_optional_markup(
+        update,
+        "Используйте кнопки «АПРУВ», «ПЕРЕГЕНЕРИРОВАТЬ» или «ФИДБЭК».",
+        reply_markup=_advertising_post_approval_markup(),
     )
     return True
 
@@ -7427,7 +7705,7 @@ async def _handle_advertising_format_choice(
     text: str,
 ) -> bool:
     low = str(text or "").strip().lower()
-    if low == _ADVERTISING_FORMAT_CLIP_BUTTON.lower():
+    if low in {_ADVERTISING_FORMAT_CLIP_BUTTON.lower(), "ок", "ok"}:
         session[ADVERTISING_FORMAT_SESSION_KEY] = "clip"
         session[SERIES_PENDING_NEXT_SESSION_KEY] = SERIES_NEXT_ADVERTISING_PLAN
         SESSIONS[chat_id] = session
@@ -7760,6 +8038,20 @@ async def _on_text_impl(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
             session = persisted
     state = str(session.get("state") or "")
     low = text.lower().strip()
+    if low == "выбрать публикацию" and state == STATE_READY_FOR_PRODUCTION:
+        from .handlers_state_media import SOCIAL_DESCRIPTIONS_APPROVED_KEY, _send_social_copy_for_approval
+        approved = session.get(SOCIAL_DESCRIPTIONS_APPROVED_KEY) or {}
+        pending = approved.get("publication_options")
+        if isinstance(pending, dict) and isinstance(pending.get("copy"), dict):
+            pending = dict(pending)
+            pending["selected_target_keys"] = []
+            session[SOCIAL_DESCRIPTIONS_PENDING_KEY] = pending
+            session["state"] = STATE_WAITING_SOCIAL_DESCRIPTIONS_APPROVAL
+            SESSIONS[chat_id] = session
+            await _send_social_copy_for_approval(update, pending["copy"], pending=pending)
+        else:
+            await update.message.reply_text("Сохранённые материалы доступны на странице ролика в админке.")
+        return
     if state == _STATE_WAITING_PRODUCTION_RETRY:
         if low in {_PRODUCTION_RETRY_BUTTON.lower(), "повторить", "ок", "ok"}:
             await _generate_production_after_overlay_title(
@@ -8391,8 +8683,22 @@ async def _on_text_impl(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
             text=text,
         )
         return
+    if state in {
+        STATE_WAITING_ADVERTISING_POST_TEXT_APPROVAL,
+        STATE_WAITING_ADVERTISING_POST_TEXT_FEEDBACK,
+        STATE_WAITING_ADVERTISING_POST_IMAGE_APPROVAL,
+        STATE_WAITING_ADVERTISING_POST_IMAGE_FEEDBACK,
+    }:
+        await _handle_advertising_post_review(
+            update,
+            context,
+            chat_id=chat_id,
+            session=session,
+            text=text,
+        )
+        return
     if state == STATE_GENERATING_ADVERTISING_POST:
-        await update.message.reply_text("Рекламный пост уже генерируется. Дождитесь трёх изображений и готового текста.")
+        await update.message.reply_text("Рекламный пост уже генерируется. Дождитесь текущего текста или изображения.")
         return
     if state == STATE_WAITING_DISCIPLINE_INTRO_CHOICE:
         await _handle_waiting_discipline_intro_choice_state(

@@ -32,6 +32,10 @@ _RUN_PENDING_SESSION_KEYS = (
     "social_descriptions_pending",
 )
 _CHAT_SESSION_CACHE_KEYS = {
+    "advertising_queue_product_id",
+    "advertising_product_paths",
+    "social_descriptions_sent",
+    "social_descriptions_approved",
     "story_style_preview_page",
     "pending_project_generation_mode",
     "directorial_notes",
@@ -111,6 +115,9 @@ _CHAT_SESSION_CACHE_KEYS = {
     "advertising_format",
     "advertising_post_text",
     "advertising_post_image_paths",
+    "advertising_post_image_prompts",
+    "advertising_post_image_index",
+    "advertising_post_current_image_path",
     "sponsored_content",
     "brand_context",
     "series_pending_next",

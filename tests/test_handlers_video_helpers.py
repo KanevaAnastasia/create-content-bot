@@ -6355,7 +6355,7 @@ def test_social_descriptions_approval_ok_finishes_production():
     assert handlers_state_media.SOCIAL_DESCRIPTIONS_PENDING_KEY not in session
     assert session[handlers_state_media.SOCIAL_DESCRIPTIONS_APPROVED_KEY]["copy"]
     assert session[handlers_state_media.SOCIAL_DESCRIPTIONS_APPROVED_KEY]["recipe"] == "Картофель натереть и пожарить."
-    assert any("Production завершён" in text for text, _ in messages)
+    assert any("Генерация завершена" in text for text, _ in messages)
 
 
 def test_social_approval_persists_exact_bot_copy_and_run_id(monkeypatch, tmp_path):
@@ -6396,6 +6396,7 @@ def test_social_approval_persists_exact_bot_copy_and_run_id(monkeypatch, tmp_pat
             "recipe": "Картофель натереть и пожарить.",
             "copy": copy,
             "origin": "production_final",
+            "selected_target_keys": ["vk:ru"],
         },
     }
 
@@ -6405,7 +6406,7 @@ def test_social_approval_persists_exact_bot_copy_and_run_id(monkeypatch, tmp_pat
             context=None,
             chat_id=1,
             session=session,
-            text="ОК",
+            text="Публиковать выбранное",
         )
     )
 

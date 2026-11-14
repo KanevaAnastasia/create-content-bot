@@ -30,6 +30,50 @@ class LenientJSONField(models.JSONField):
         return super().formfield(**kwargs)
 
 
+class AdvertisingQueueSchedule(models.Model):
+    id = models.IntegerField(primary_key=True, default=1)
+    enabled = models.BooleanField("Включена", default=True)
+    next_run_at = models.DateTimeField("Следующий запуск")
+
+    class Meta:
+        managed = False
+        db_table = "advertising_queue_schedule"
+        verbose_name = "Расписание рекламы"
+        verbose_name_plural = "Расписание рекламы (каждые 2 дня, 09:00 МСК)"
+
+    def __str__(self):
+        return "Реклама для бабушки · каждые 2 дня"
+
+
+class AdvertisingProduct(models.Model):
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4)
+    title = models.TextField("Название")
+    images = LenientJSONField(default=list, blank=True)
+    comment = models.TextField("Комментарий", blank=True, default="")
+    position = models.PositiveIntegerField("Порядок", default=0)
+    status = models.CharField("Статус", max_length=32, default="pending", choices=[
+        ("pending", "В очереди"), ("preparing", "Готовятся сценарии"),
+        ("ready", "Ожидает свободного диалога"), ("offered", "На согласовании / в работе"),
+        ("completed", "Обработан"), ("failed", "Ошибка подготовки")])
+    prepared = LenientJSONField(default=dict, blank=True)
+    error = models.TextField("Ошибка", default="", blank=True)
+    claimed_at = models.DateTimeField(null=True, blank=True)
+    completed_at = models.DateTimeField(null=True, blank=True)
+    refill_notified = models.BooleanField(default=False)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        managed = False
+        db_table = "advertising_products"
+        ordering = ("position", "created_at", "id")
+        verbose_name = "Рекламный товар"
+        verbose_name_plural = "Рекламные товары"
+
+    def __str__(self):
+        return self.title
+
+
 class BotUser(models.Model):
     id = models.UUIDField(primary_key=True, default=uuid.uuid4)
     telegram_id = models.BigIntegerField(blank=True, null=True, unique=True)

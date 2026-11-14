@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from . import advertising_admin  # noqa: F401 — register the advertising queue
+
 import asyncio
 import copy
 from datetime import timedelta

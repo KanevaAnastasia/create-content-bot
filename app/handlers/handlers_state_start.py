@@ -67,7 +67,10 @@ from ..advertising_generation import (
     ADVERTISING_CAMPAIGNS_SESSION_KEY,
     ADVERTISING_CONTENT_TYPE_SESSION_KEY,
     ADVERTISING_FORMAT_SESSION_KEY,
+    ADVERTISING_POST_CURRENT_IMAGE_PATH_SESSION_KEY,
+    ADVERTISING_POST_IMAGE_INDEX_SESSION_KEY,
     ADVERTISING_POST_IMAGE_PATHS_SESSION_KEY,
+    ADVERTISING_POST_IMAGE_PROMPTS_SESSION_KEY,
     ADVERTISING_POST_TEXT_SESSION_KEY,
     ADVERTISING_PRODUCT_BRIEF_SESSION_KEY,
     ADVERTISING_PRODUCT_PATH_SESSION_KEY,
@@ -206,6 +209,12 @@ _SERIES_SESSION_KEYS = (
 # Continuation/resume paths do not call _start_generation_with_recipe and keep
 # their run binding intact.
 _NEW_GENERATION_STALE_KEYS = (
+    "social_descriptions_sent",
+    "social_descriptions_approved",
+    "social_descriptions_pending",
+    "final_social_descriptions_triggered_at",
+    "advertising_queue_product_id",
+    "advertising_product_paths",
     "story_character_references",
     "story_character_bible",
     "discipline_narrative_mode",
@@ -258,6 +267,9 @@ _NEW_GENERATION_STALE_KEYS = (
     ADVERTISING_FORMAT_SESSION_KEY,
     ADVERTISING_POST_TEXT_SESSION_KEY,
     ADVERTISING_POST_IMAGE_PATHS_SESSION_KEY,
+    ADVERTISING_POST_IMAGE_PROMPTS_SESSION_KEY,
+    ADVERTISING_POST_IMAGE_INDEX_SESSION_KEY,
+    ADVERTISING_POST_CURRENT_IMAGE_PATH_SESSION_KEY,
     *_SERIES_SESSION_KEYS,
     _SERIES_CHOICE_IDS_SESSION_KEY,
     _SERIES_TRANSLATION_PENDING_SESSION_KEY,
@@ -1000,7 +1012,7 @@ async def _start_advertising_campaign_choice(
         return True
     session[ADVERTISING_CAMPAIGNS_SESSION_KEY] = campaigns
     session.pop(ADVERTISING_SELECTED_CAMPAIGN_SESSION_KEY, None)
-    session.pop(ADVERTISING_FORMAT_SESSION_KEY, None)
+    session[ADVERTISING_FORMAT_SESSION_KEY] = "clip"
     session["state"] = STATE_WAITING_ADVERTISING_CAMPAIGN_CHOICE
     SESSIONS[chat_id] = session
     await _reply_text_chunked(update, str(result.get("text") or ""))
@@ -1033,18 +1045,14 @@ async def _start_advertising_scene_plan(
         return True
     try:
         await reply_text_without_keyboard(update.message, "Строю рекламный план из 3–6 сцен Veo, ждите.")
-        result = await _call_with_503_retries(
-            update,
-            context,
-            chat_id,
-            "generate_advertising_scene_plan",
-            lambda: asyncio.to_thread(
-                generate_advertising_scene_plan,
-                source_text=source_text,
-                product_brief=product_brief,
-                selected_campaign=session.get(ADVERTISING_SELECTED_CAMPAIGN_SESSION_KEY),
-            ),
-        )
+        campaign = session.get(ADVERTISING_SELECTED_CAMPAIGN_SESSION_KEY)
+        result = campaign.get("prepared_scene_plan") if isinstance(campaign, dict) else None
+        if not isinstance(result, dict):
+            result = await _call_with_503_retries(
+                update, context, chat_id, "generate_advertising_scene_plan",
+                lambda: asyncio.to_thread(generate_advertising_scene_plan,
+                    source_text=source_text, product_brief=product_brief, selected_campaign=campaign),
+            )
     except ServiceUnavailableRetriesExhaustedError as e:
         await update.message.reply_text(str(e))
         return True
@@ -1542,7 +1550,7 @@ async def _handle_waiting_generation_mode_state(
     elif mode == GENERATION_MODE_ADVERTISING:
         message = (
             "Ок, режим «Реклама»: после фото товара предложу 5 рекламных кампаний и дам выбрать формат «Клип» или «Пост». "
-            "Для клипа — 6 русскоязычных сцен Veo; для поста — 3 изображения и готовый текст."
+            "По умолчанию — клип из 3–6 русскоязычных сцен Veo; можно выбрать пост с одним изображением и готовым текстом."
         )
     else:
         message = "Ок, запускаю обычный режим."

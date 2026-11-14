@@ -24,6 +24,7 @@ from app.handlers.handlers_state_scene import (
     _generate_project_image,
     _generate_and_send_story_audio,
     _generate_advertising_post,
+    _handle_advertising_post_review,
     _attach_story_english_track_to_production,
     _attach_story_character_references,
     _handle_advertising_campaign_choice,
@@ -101,7 +102,10 @@ from app.story_generation import (
 from app.advertising_generation import (
     ADVERTISING_CAMPAIGNS_SESSION_KEY,
     ADVERTISING_FORMAT_SESSION_KEY,
+    ADVERTISING_POST_CURRENT_IMAGE_PATH_SESSION_KEY,
+    ADVERTISING_POST_IMAGE_INDEX_SESSION_KEY,
     ADVERTISING_POST_IMAGE_PATHS_SESSION_KEY,
+    ADVERTISING_POST_IMAGE_PROMPTS_SESSION_KEY,
     ADVERTISING_POST_TEXT_SESSION_KEY,
     ADVERTISING_PRODUCT_BRIEF_SESSION_KEY,
     ADVERTISING_PRODUCT_PATH_SESSION_KEY,
@@ -109,6 +113,10 @@ from app.advertising_generation import (
     ADVERTISING_SOURCE_SESSION_KEY,
     STATE_WAITING_ADVERTISING_CAMPAIGN_CHOICE,
     STATE_WAITING_ADVERTISING_FORMAT_CHOICE,
+    STATE_WAITING_ADVERTISING_POST_IMAGE_APPROVAL,
+    STATE_WAITING_ADVERTISING_POST_IMAGE_FEEDBACK,
+    STATE_WAITING_ADVERTISING_POST_TEXT_APPROVAL,
+    STATE_WAITING_ADVERTISING_POST_TEXT_FEEDBACK,
     STATE_WAITING_ADVERTISING_PRODUCT_IMAGE,
 )
 from app.state import SESSIONS
@@ -1597,7 +1605,8 @@ def test_advertising_product_photo_is_saved_before_campaign_choice(monkeypatch):
     assert any("Фото товара принято" in text for text in captured)
 
 
-def test_advertising_campaign_choice_then_clip_asks_for_series(monkeypatch):
+@pytest.mark.parametrize("format_choice", ["Клип", "ОК"])
+def test_advertising_campaign_choice_then_clip_asks_for_series(monkeypatch, format_choice):
     captured: list[str] = []
     series_asked: list[bool] = []
     session = {
@@ -1638,7 +1647,7 @@ def test_advertising_campaign_choice_then_clip_asks_for_series(monkeypatch):
             context=None,
             chat_id=1070,
             session=session,
-            text="Клип",
+            text=format_choice,
         )
     )
     assert session[ADVERTISING_FORMAT_SESSION_KEY] == "clip"
@@ -1647,7 +1656,7 @@ def test_advertising_campaign_choice_then_clip_asks_for_series(monkeypatch):
     assert any("от 3 до 6 Veo-сцен" in text for text in captured)
 
 
-def test_advertising_post_generates_three_images_and_copy(monkeypatch):
+def test_advertising_post_starts_with_copy_approval_before_images(monkeypatch):
     photos: list[str] = []
     texts: list[str] = []
     generated_prompts: list[str] = []
@@ -1679,16 +1688,7 @@ def test_advertising_post_generates_three_images_and_copy(monkeypatch):
         return f"image-{len(generated_prompts)}".encode()
 
     monkeypatch.setattr("app.handlers.handlers_state_scene._call_with_503_retries", fake_call)
-    monkeypatch.setattr("app.handlers.handlers_state_scene.advertising_product_reference_bytes", lambda _session: [b"product"])
-    monkeypatch.setattr("app.handlers.handlers_state_scene._load_scene_reference_images", lambda *_args, **_kwargs: [b"grandma", b"cat"])
     monkeypatch.setattr("app.handlers.handlers_state_scene._generate_image_with_lenient_fallback", fake_image)
-    monkeypatch.setattr(
-        "app.handlers.handlers_state_scene.store_advertising_post_image",
-        lambda _chat_id, _payload, *, index: f"/tmp/post-{index}.png",
-    )
-    monkeypatch.setattr("app.handlers.handlers_state_scene.ensure_generation_run_for_session", lambda _session: (None, {}))
-    monkeypatch.setattr("app.handlers.handlers_state_scene.persist_generation_artifact", lambda *_args, **_kwargs: None)
-    monkeypatch.setattr("app.handlers.handlers_state_scene.file_uri", lambda path: f"file://{path}")
 
     update = SimpleNamespace(message=_Message(), effective_chat=SimpleNamespace(id=1071))
     asyncio.run(
@@ -1700,20 +1700,149 @@ def test_advertising_post_generates_three_images_and_copy(monkeypatch):
         )
     )
 
-    assert len(generated_prompts) == 3
-    assert photos == [
-        "Рекламный пост · изображение 1/3",
-        "Рекламный пост · изображение 2/3",
-        "Рекламный пост · изображение 3/3",
-    ]
-    assert session[ADVERTISING_POST_IMAGE_PATHS_SESSION_KEY] == [
-        "/tmp/post-1.png",
-        "/tmp/post-2.png",
-        "/tmp/post-3.png",
-    ]
+    assert generated_prompts == []
+    assert photos == []
+    assert session[ADVERTISING_POST_IMAGE_PROMPTS_SESSION_KEY] == ["Кадр 1"]
+    assert session[ADVERTISING_POST_IMAGE_PATHS_SESSION_KEY] == []
     assert session[ADVERTISING_POST_TEXT_SESSION_KEY].startswith("Красивый")
+    assert session["state"] == STATE_WAITING_ADVERTISING_POST_TEXT_APPROVAL
+    assert any("Текст поста на проверку" in text for text in texts)
+
+
+def test_advertising_post_reviews_copy_and_one_image(monkeypatch):
+    photos: list[str] = []
+    texts: list[str] = []
+    generated_prompts: list[str] = []
+    stored: list[tuple[int, bytes]] = []
+    artifacts: list[str] = []
+    session = {
+        "state": STATE_WAITING_ADVERTISING_POST_TEXT_APPROVAL,
+        ADVERTISING_SOURCE_SESSION_KEY: "Как почистить белые кроссовки",
+        ADVERTISING_PRODUCT_BRIEF_SESSION_KEY: {"product_name": "CleanStep"},
+        ADVERTISING_PRODUCT_PATH_SESSION_KEY: "/tmp/product.jpg",
+        ADVERTISING_SELECTED_CAMPAIGN_SESSION_KEY: {"title": "Чистая победа"},
+        ADVERTISING_POST_TEXT_SESSION_KEY: "Исходный текст",
+        ADVERTISING_POST_IMAGE_PROMPTS_SESSION_KEY: ["Кадр 1", "Кадр 2", "Кадр 3"],
+        ADVERTISING_POST_IMAGE_PATHS_SESSION_KEY: [],
+        ADVERTISING_POST_IMAGE_INDEX_SESSION_KEY: 0,
+    }
+
+    class _Message:
+        async def reply_text(self, text, reply_markup=None):
+            _ = reply_markup
+            texts.append(text)
+
+        async def reply_photo(self, photo, caption=None, **_kwargs):
+            _ = photo
+            photos.append(str(caption or ""))
+
+    async def fake_image(prompt, **_kwargs):
+        generated_prompts.append(prompt)
+        return f"image-{len(generated_prompts)}".encode()
+
+    async def fake_rewrite(_scene, feedback):
+        return f"Промпт после фидбэка: {feedback}"
+
+    def fake_store(_chat_id, payload, *, index):
+        stored.append((index, payload))
+        return f"/tmp/post-{index}-candidate-{len(stored)}.png"
+
+    monkeypatch.setattr("app.handlers.handlers_state_scene.advertising_product_reference_bytes", lambda _session: [b"product"])
+    monkeypatch.setattr("app.handlers.handlers_state_scene._load_scene_reference_images", lambda *_args, **_kwargs: [b"grandma", b"cat"])
+    monkeypatch.setattr("app.handlers.handlers_state_scene._generate_image_with_lenient_fallback", fake_image)
+    monkeypatch.setattr("app.handlers.handlers_state_scene._regenerate_image_prompt_from_feedback", fake_rewrite)
+    monkeypatch.setattr("app.handlers.handlers_state_scene.store_advertising_post_image", fake_store)
+    monkeypatch.setattr("app.handlers.handlers_state_scene.ensure_generation_run_for_session", lambda _session: (None, {}))
+    monkeypatch.setattr(
+        "app.handlers.handlers_state_scene.persist_generation_artifact",
+        lambda _session, *, artifact_type, **_kwargs: artifacts.append(artifact_type),
+    )
+    monkeypatch.setattr("app.handlers.handlers_state_scene.file_uri", lambda path: f"file://{path}")
+
+    update = SimpleNamespace(message=_Message(), effective_chat=SimpleNamespace(id=1072))
+
+    asyncio.run(
+        _handle_advertising_post_review(
+            update, context=None, chat_id=1072, session=session, text="АПРУВ"
+        )
+    )
+    assert session["state"] == STATE_WAITING_ADVERTISING_POST_IMAGE_APPROVAL
+    assert session[ADVERTISING_POST_IMAGE_INDEX_SESSION_KEY] == 0
+    assert photos == ["Рекламный пост · изображение"]
+
+    asyncio.run(
+        _handle_advertising_post_review(
+            update, context=None, chat_id=1072, session=session, text="ПЕРЕГЕНЕРИРОВАТЬ"
+        )
+    )
+    assert photos[-1] == "Рекламный пост · изображение"
+    assert len(generated_prompts) == 2
+
+    asyncio.run(
+        _handle_advertising_post_review(
+            update, context=None, chat_id=1072, session=session, text="ФИДБЭК"
+        )
+    )
+    assert session["state"] == STATE_WAITING_ADVERTISING_POST_IMAGE_FEEDBACK
+    asyncio.run(
+        _handle_advertising_post_review(
+            update, context=None, chat_id=1072, session=session, text="Сделай фон светлее"
+        )
+    )
+    assert session["state"] == STATE_WAITING_ADVERTISING_POST_IMAGE_APPROVAL
+    assert session[ADVERTISING_POST_IMAGE_PROMPTS_SESSION_KEY][0].startswith("Промпт после фидбэка")
+    assert len(generated_prompts) == 3
+
+    asyncio.run(
+        _handle_advertising_post_review(
+            update, context=None, chat_id=1072, session=session, text="АПРУВ"
+        )
+    )
     assert session["state"] == ""
-    assert any("Готовый текст поста" in text for text in texts)
+    assert len(session[ADVERTISING_POST_IMAGE_PATHS_SESSION_KEY]) == 1
+    assert ADVERTISING_POST_CURRENT_IMAGE_PATH_SESSION_KEY not in session
+    assert photos == ["Рекламный пост · изображение"] * 3
+    assert session[ADVERTISING_POST_IMAGE_PATHS_SESSION_KEY] == ["/tmp/post-1-candidate-3.png"]
+    assert len(generated_prompts) == 3
+    assert artifacts.count("advertising_post_image") == 1
+    assert any("утверждён" in text for text in texts)
+
+
+def test_advertising_post_copy_feedback_regenerates_text(monkeypatch):
+    texts: list[str] = []
+    session = {
+        "state": STATE_WAITING_ADVERTISING_POST_TEXT_APPROVAL,
+        ADVERTISING_SOURCE_SESSION_KEY: "Исходник",
+        ADVERTISING_PRODUCT_BRIEF_SESSION_KEY: {"product_name": "CleanStep"},
+        ADVERTISING_SELECTED_CAMPAIGN_SESSION_KEY: {"title": "Кампания"},
+        ADVERTISING_POST_TEXT_SESSION_KEY: "Старый текст",
+    }
+
+    class _Message:
+        async def reply_text(self, text, reply_markup=None):
+            _ = reply_markup
+            texts.append(text)
+
+    async def fake_call(_update, _context, _chat_id, _name, _op, **_kwargs):
+        return "Новый текст с учётом правки"
+
+    monkeypatch.setattr("app.handlers.handlers_state_scene._call_with_503_retries", fake_call)
+    update = SimpleNamespace(message=_Message(), effective_chat=SimpleNamespace(id=1073))
+
+    asyncio.run(
+        _handle_advertising_post_review(
+            update, context=None, chat_id=1073, session=session, text="ФИДБЭК"
+        )
+    )
+    assert session["state"] == STATE_WAITING_ADVERTISING_POST_TEXT_FEEDBACK
+    asyncio.run(
+        _handle_advertising_post_review(
+            update, context=None, chat_id=1073, session=session, text="Сделай короче"
+        )
+    )
+    assert session["state"] == STATE_WAITING_ADVERTISING_POST_TEXT_APPROVAL
+    assert session[ADVERTISING_POST_TEXT_SESSION_KEY] == "Новый текст с учётом правки"
+    assert any("Новый текст поста на проверку" in text for text in texts)
 
 
 def test_series_skip_continues_generation(monkeypatch):

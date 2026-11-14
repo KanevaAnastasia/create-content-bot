@@ -49,7 +49,7 @@ def test_advertising_campaigns_returns_five_selectable_variants(monkeypatch):
     assert "5. Идея 5" in result["text"]
 
 
-def test_advertising_post_package_has_three_large_product_images_and_clean_copy(monkeypatch):
+def test_advertising_post_package_has_one_large_product_image_and_clean_copy(monkeypatch):
     monkeypatch.setattr(
         advertising_generation,
         "gemini_generate_sync",
@@ -68,12 +68,46 @@ def test_advertising_post_package_has_three_large_product_images_and_clean_copy(
         campaign={"title": "Чистая победа", "idea": "Кот испачкал кроссовки"},
     )
 
-    assert len(result["image_prompts"]) == 3
+    assert len(result["image_prompts"]) == 1
     assert all("35–50%" in prompt for prompt in result["image_prompts"])
     assert all("ОБЯЗАТЕЛЬНЫЙ ТОВАР В КАДРЕ" in prompt for prompt in result["image_prompts"])
     assert all("бабушка и рыжий кот" in prompt.lower() for prompt in result["image_prompts"])
     assert "#" not in result["post_text"]
     assert "реклама" not in result["post_text"].lower()
+
+
+def test_advertising_post_text_feedback_is_applied_and_hashtags_are_removed(monkeypatch):
+    captured: list[str] = []
+
+    def fake_generate(prompt, **_kwargs):
+        captured.append(prompt)
+        return "Короткий новый текст\n\n#реклама #товар"
+
+    monkeypatch.setattr(advertising_generation, "gemini_generate_sync", fake_generate)
+
+    result = advertising_generation.regenerate_advertising_post_text(
+        source_text="Как почистить белые кроссовки",
+        product_brief=PRODUCT,
+        campaign={"title": "Чистая победа"},
+        current_text="Старый длинный текст",
+        feedback="Сделай в два раза короче",
+    )
+
+    assert result == "Короткий новый текст"
+    assert "Сделай в два раза короче" in captured[0]
+    assert "Фидбэк пользователя обязателен" in captured[0]
+
+
+def test_advertising_post_image_feedback_cannot_remove_product_lock():
+    result = advertising_generation.ensure_advertising_post_image_prompt(
+        "Новый светлый фон",
+        product_brief=PRODUCT,
+    )
+
+    assert "Новый светлый фон" in result
+    assert "35–50%" in result
+    assert "ОБЯЗАТЕЛЬНЫЙ ТОВАР В КАДРЕ" in result
+    assert "Вертикаль 4:5" in result
 
 
 @pytest.mark.parametrize("source_count, expected_count", [(2, 3), (3, 3), (4, 4), (5, 5), (6, 6), (7, 6)])

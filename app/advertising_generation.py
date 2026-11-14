@@ -16,6 +16,10 @@ STATE_WAITING_ADVERTISING_CAMPAIGN_CHOICE = "waiting_advertising_campaign_choice
 STATE_WAITING_ADVERTISING_CUSTOM_CAMPAIGN = "waiting_advertising_custom_campaign"
 STATE_WAITING_ADVERTISING_FORMAT_CHOICE = "waiting_advertising_format_choice"
 STATE_GENERATING_ADVERTISING_POST = "generating_advertising_post"
+STATE_WAITING_ADVERTISING_POST_TEXT_APPROVAL = "waiting_advertising_post_text_approval"
+STATE_WAITING_ADVERTISING_POST_TEXT_FEEDBACK = "waiting_advertising_post_text_feedback"
+STATE_WAITING_ADVERTISING_POST_IMAGE_APPROVAL = "waiting_advertising_post_image_approval"
+STATE_WAITING_ADVERTISING_POST_IMAGE_FEEDBACK = "waiting_advertising_post_image_feedback"
 
 ADVERTISING_SOURCE_SESSION_KEY = "advertising_source_text"
 ADVERTISING_PRODUCT_PATH_SESSION_KEY = "advertising_product_path"
@@ -26,6 +30,9 @@ ADVERTISING_SELECTED_CAMPAIGN_SESSION_KEY = "advertising_selected_campaign"
 ADVERTISING_FORMAT_SESSION_KEY = "advertising_format"
 ADVERTISING_POST_TEXT_SESSION_KEY = "advertising_post_text"
 ADVERTISING_POST_IMAGE_PATHS_SESSION_KEY = "advertising_post_image_paths"
+ADVERTISING_POST_IMAGE_PROMPTS_SESSION_KEY = "advertising_post_image_prompts"
+ADVERTISING_POST_IMAGE_INDEX_SESSION_KEY = "advertising_post_image_index"
+ADVERTISING_POST_CURRENT_IMAGE_PATH_SESSION_KEY = "advertising_post_current_image_path"
 
 ADVERTISING_MIN_SCENE_COUNT = 3
 ADVERTISING_MAX_SCENE_COUNT = 6
@@ -47,6 +54,10 @@ def store_advertising_product_reference(chat_id: int, image_bytes: bytes) -> str
 def advertising_product_reference_bytes(session: dict[str, Any] | None) -> list[bytes]:
     if not isinstance(session, dict):
         return []
+    paths = session.get("advertising_product_paths")
+    if isinstance(paths, list) and paths:
+        from .advertising_product_files import photo_path
+        return [photo_path(str(path)).read_bytes() for path in paths]
     raw = str(session.get(ADVERTISING_PRODUCT_PATH_SESSION_KEY) or "").strip()
     if not raw:
         return []
@@ -101,7 +112,7 @@ def generate_advertising_campaigns(
     }
     prompt = (
         "Ты креативный директор рекламных кампаний. Придумай ровно 5 заметно разных рекламных концепций для указанного товара "
-        "и исходной идеи. Каждая концепция должна одинаково хорошо раскрываться как короткий вертикальный клип или как пост из трёх изображений. "
+        "и исходной идеи. Каждая концепция должна одинаково хорошо раскрываться как короткий вертикальный клип или как пост с одним изображением. "
         "Главные персонажи — бабушка и рыжий кот; можно добавить других семейных персонажей только если это действительно усиливает сюжет. "
         "Товар — главный герой рекламы: он узнаваем, показан очень крупно, но его свойства и обещания нельзя выдумывать. "
         "Не повторяй один сюжет разными словами; используй разные механики: проблема/решение, мини-история, демонстрация, юмор, эмоция или челлендж. "
@@ -145,19 +156,19 @@ def generate_advertising_post_package(
     product_brief: dict[str, Any],
     campaign: dict[str, Any] | str,
 ) -> dict[str, Any]:
-    """Build publication copy and three image prompts for an advertising carousel."""
+    """Build publication copy and one advertising image for any campaign."""
     payload = {
         "source_text": _clean_text(source_text, 12000),
         "product_brief": product_brief,
         "selected_campaign": campaign,
     }
     prompt = (
-        "Ты арт-директор и сильный русскоязычный рекламный копирайтер. По выбранной кампании подготовь публикацию и три кадра карусели. "
-        "Верни только строгий JSON-объект с ключами post_text и image_prompts. image_prompts — ровно 3 самостоятельных подробных промпта на русском. "
-        "Во всех трёх изображениях должен быть тот же товар с приложенного референса и персонажи — бабушка и рыжий кот. "
+        "Ты арт-директор и сильный русскоязычный рекламный копирайтер. По выбранной кампании подготовь публикацию и одно изображение. "
+        "Верни только строгий JSON-объект с ключами post_text и image_prompts. image_prompts — список из одного подробного промпта на русском. "
+        "На изображении должен быть тот же товар с приложенного референса и персонажи — бабушка и рыжий кот. "
         "Товар показывай ОЧЕНЬ КРУПНО: он занимает примерно 35–50% кадра, полностью помещается, не обрезан, не закрыт руками или героями, "
-        "упаковка, логотип и этикетка совпадают с референсом, второй упаковки нет. Три изображения должны составлять мини-историю: "
-        "1 — сильный хук/проблема, 2 — действие или демонстрация, 3 — красивый результат и мягкий CTA. Вертикальный формат 4:5, premium commercial photography, "
+        "упаковка, логотип и этикетка совпадают с референсом, второй упаковки нет. Один цельный кадр: "
+        "сильный визуальный хук и понятная демонстрация товара. Без коллажа и отдельных панелей. Вертикальный формат 4:5, premium commercial photography, "
         "живые эмоции персонажей, без добавленных надписей, плашек, субтитров и водяных знаков. Не выдумывай свойства товара. "
         "post_text — красивый готовый пост: цепляющий заголовок, короткая эмоциональная история, естественная роль товара и мягкий CTA. "
         "Не добавляй хэштеги, теги, служебные пометки и маркировку рекламы — система публикации добавит их отдельно. "
@@ -170,24 +181,17 @@ def generate_advertising_post_package(
     data = extract_json_object(raw)
     product_lock = advertising_product_lock_ru(product_brief)
     raw_prompts = data.get("image_prompts") if isinstance(data.get("image_prompts"), list) else []
-    stages = (
-        "Сильный визуальный хук и понятная проблема.",
-        "Бабушка демонстрирует действие, рыжий кот эмоционально участвует.",
-        "Красивый результат, радость персонажей и мягкий рекламный финал.",
-    )
-    image_prompts: list[str] = []
-    for index in range(3):
-        candidate = _clean_text(raw_prompts[index] if index < len(raw_prompts) else "", 5000)
-        if not candidate:
-            candidate = (
-                f"Вертикальная рекламная фотография 4:5. {stages[index]} "
-                "В кадре бабушка и рыжий кот, живые эмоции, выразительная композиция, premium commercial photography."
-            )
-        image_prompts.append(
-            f"{candidate}\n\nКОМПОЗИЦИЯ: товар — главный визуальный объект и занимает 35–50% площади кадра; "
-            f"бабушка и рыжий кот хорошо видны рядом и не закрывают упаковку. {product_lock} "
-            "Без добавленного текста, букв, плашек, субтитров и водяных знаков. Вертикаль 4:5."
+    candidate = _clean_text(raw_prompts[0] if raw_prompts else "", 5000)
+    if not candidate:
+        candidate = (
+            "Вертикальная рекламная фотография 4:5. Сильный визуальный хук и понятная демонстрация товара. "
+            "В кадре бабушка и рыжий кот, живые эмоции, выразительная композиция, premium commercial photography."
         )
+    image_prompts = [
+        f"{candidate}\n\nКОМПОЗИЦИЯ: товар — главный визуальный объект и занимает 35–50% площади кадра; "
+        f"бабушка и рыжий кот хорошо видны рядом и не закрывают упаковку. {product_lock} "
+        "Без добавленного текста, букв, плашек, субтитров и водяных знаков. Вертикаль 4:5."
+    ]
     post_text = str(data.get("post_text") or "").strip()
     if not post_text:
         name = _clean_text(product_brief.get("product_name"), 180) or "этот товар"
@@ -202,6 +206,63 @@ def generate_advertising_post_package(
     post_text = re.sub(r"[ \t]+\n", "\n", post_text)
     post_text = re.sub(r"\n{3,}", "\n\n", post_text).strip()
     return {"post_text": post_text, "image_prompts": image_prompts}
+
+
+def regenerate_advertising_post_text(
+    *,
+    source_text: str,
+    product_brief: dict[str, Any],
+    campaign: dict[str, Any] | str,
+    current_text: str,
+    feedback: str = "",
+) -> str:
+    """Create a new post-copy candidate while preserving the selected campaign."""
+    clean_feedback = _clean_text(feedback, 4000)
+    prompt = (
+        "Ты сильный русскоязычный рекламный копирайтер. Перепиши текст рекламного поста. "
+        "Верни только готовый текст без пояснений и Markdown-ограждений. Нужны цепляющий заголовок, "
+        "короткая эмоциональная история, естественная роль товара и мягкий CTA. Не добавляй хэштеги, "
+        "теги, служебные пометки или маркировку рекламы. Не называй изображение или карусель, не выдумывай "
+        "свойства товара и не давай медицинских обещаний. Сохрани выбранную кампанию. "
+        + (
+            "Фидбэк пользователя обязателен и имеет высший приоритет. "
+            if clean_feedback
+            else "Сделай заметно новый вариант, не копируй текущий текст дословно. "
+        )
+        + "\n\n"
+        + json.dumps(
+            {
+                "source_text": _clean_text(source_text, 12000),
+                "product_brief": product_brief,
+                "selected_campaign": campaign,
+                "current_text": str(current_text or "").strip(),
+                "user_feedback": clean_feedback,
+            },
+            ensure_ascii=False,
+            indent=2,
+        )
+    )
+    post_text = gemini_generate_sync(prompt, model_profile=GEMINI_MODEL_PROFILE_CREATIVE).strip()
+    post_text = re.sub(r"^```(?:markdown|text)?\s*|\s*```$", "", post_text, flags=re.IGNORECASE)
+    post_text = re.sub(r"(?<!\w)#[^\s#]+", "", post_text, flags=re.UNICODE)
+    post_text = re.sub(r"[ \t]+\n", "\n", post_text)
+    post_text = re.sub(r"\n{3,}", "\n\n", post_text).strip()
+    return post_text or str(current_text or "").strip()
+
+
+def ensure_advertising_post_image_prompt(
+    prompt: str,
+    *,
+    product_brief: dict[str, Any],
+) -> str:
+    """Reapply non-negotiable product and layout constraints after prompt edits."""
+    return (
+        f"{str(prompt or '').strip()}\n\n"
+        "ОБЯЗАТЕЛЬНАЯ КОМПОЗИЦИЯ: товар — главный визуальный объект и занимает 35–50% площади кадра; "
+        "он полностью помещается в кадр, не обрезан и не закрыт персонажами. Бабушка и рыжий кот хорошо видны рядом. "
+        f"{advertising_product_lock_ru(product_brief)} "
+        "Без второго экземпляра товара, добавленного текста, букв, плашек, субтитров и водяных знаков. Вертикаль 4:5."
+    ).strip()
 
 
 def analyze_advertising_product(
@@ -342,11 +403,18 @@ def generate_advertising_scene_plan(
         "Если есть feedback, отредактируй previous_scenes, сохраняя от 3 до 6 сцен и товар в каждой.\n\n"
         + json.dumps(payload, ensure_ascii=False, indent=2)
     )
+    if product_brief.get("speech_min_chars"):
+        prompt = prompt.replace("до 105 знаков", f"от {product_brief['speech_min_chars']} до {product_brief['speech_max_chars']} символов с пробелами")
     from .directorial_notes import RULE
     prompt = RULE + prompt
     raw = gemini_generate_sync(prompt, model_profile=GEMINI_MODEL_PROFILE_CREATIVE)
     data = extract_json_object(raw)
     source_scenes = data.get("scenes") if isinstance(data.get("scenes"), list) else []
+    if product_brief.get("speech_min_chars"):
+        from .advertising_speech import validate_scene_speech
+        if not 3 <= len(source_scenes) <= 6 or not all(isinstance(scene, dict) for scene in source_scenes):
+            raise ValueError("Нужен полный сценарий из 3–6 сцен.")
+        validate_scene_speech(source_scenes, product_brief)
     product_lock_ru = advertising_product_lock_ru(product_brief)
     product_lock_en = advertising_product_lock_en(product_brief)
     normalized: list[dict[str, Any]] = []
@@ -356,7 +424,7 @@ def generate_advertising_scene_plan(
         action = _clean_text(candidate.get("action") or candidate.get("visual_description"), 1000)
         if not action:
             action = f"Бабушка показывает применение товара, этап {index + 1}; товар полностью виден рядом с действием."
-        speech = _clean_text(candidate.get("speech_ru"), 105)
+        speech = _clean_text(candidate.get("speech_ru"), int(product_brief.get("speech_max_chars") or 105))
         if not speech:
             speech = "Показываю следующий шаг, а товар всё время остаётся у нас перед глазами."
         anchors = [_clean_text(item, 180) for item in candidate.get("continuity_anchors") or [] if _clean_text(item, 180)]
@@ -453,6 +521,12 @@ def generate_advertising_production(
         "speech after CHARACTERS SPEAKS:. Do not invent product claims. If feedback is present, revise previous prompts without changing scene count.\n\n"
         + json.dumps(payload, ensure_ascii=False, indent=2)
     )
+    if product_brief.get("speech_min_chars"):
+        prompt = prompt.replace(
+            "speech_by_lang values must be natural translations no longer than 105 characters.",
+            "For Russian, copy the approved input scene speech verbatim, including punctuation; do not shorten it. "
+            "Other languages must be natural translations no longer than 105 characters.",
+        )
     from .directorial_notes import RULE
     prompt = RULE + prompt
     raw = gemini_generate_sync(prompt, model_profile=GEMINI_MODEL_PROFILE_CREATIVE)
@@ -475,6 +549,8 @@ def generate_advertising_production(
         video_by_lang: dict[str, str] = {}
         for language in languages:
             speech = _clean_text(raw_speech.get(language), 105)
+            if language == "ru" and product_brief.get("speech_min_chars"):
+                speech = str(scene.get("text") or "")
             if not speech:
                 speech = _clean_text(scene.get("text"), 105)
             video = _clean_text(raw_video.get(language), 7000)
@@ -486,6 +562,9 @@ def generate_advertising_production(
                     "no watermark, no background music."
                 )
             video = clean_advertising_video_prompt(video, product_brief)
+            if language == "ru" and product_brief.get("speech_min_chars"):
+                from .advertising_speech import replace_spoken_phrase
+                video = replace_spoken_phrase(video, speech)
             if video_continuity.lower() not in video.lower():
                 video = f"{video} {video_continuity}".strip()
             speech_by_lang[language] = speech

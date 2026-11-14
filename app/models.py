@@ -17,6 +17,32 @@ from sqlalchemy.sql.sqltypes import DateTime, Uuid
 from app.db import Base
 
 
+class AdvertisingQueueSchedule(Base):
+    """Single durable cadence for the owner's advertising queue."""
+
+    __tablename__ = "advertising_queue_schedule"
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, default=1)
+    enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
+    next_run_at: Mapped[DateTime] = mapped_column(DateTime(timezone=True), nullable=False)
+
+
+class AdvertisingProduct(Base):
+    __tablename__ = "advertising_products"
+    id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
+    title: Mapped[str] = mapped_column(Text, nullable=False)
+    images: Mapped[list] = mapped_column(JSON, nullable=False, default=list)
+    comment: Mapped[str] = mapped_column(Text, nullable=False, default="")
+    position: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    status: Mapped[str] = mapped_column(String(32), nullable=False, default="pending", index=True)
+    prepared: Mapped[dict] = mapped_column(JSON, nullable=False, default=dict)
+    error: Mapped[str] = mapped_column(Text, nullable=False, default="")
+    claimed_at: Mapped[DateTime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    completed_at: Mapped[DateTime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    refill_notified: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    created_at: Mapped[DateTime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
+    updated_at: Mapped[DateTime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now(), onupdate=func.now())
+
+
 class BotUser(Base):
     """Telegram user allowed to access the bot."""
 

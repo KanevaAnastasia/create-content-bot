@@ -101,8 +101,20 @@ def _quiet_mode_blocks(identity: object | None, enabled: bool) -> bool:
 
 
 async def _run_admin(callback, update, context, identity, *, quiet_enabled: bool) -> None:
-    with quiet_mode_menu_scope(identity, quiet_enabled):
-        await callback(update, context)
+    from .advertising_queue import chat_lock, deliver_ready_product
+    chat_id = getattr(getattr(update, "effective_chat", None), "id", None)
+    if chat_id is None:
+        with quiet_mode_menu_scope(identity, quiet_enabled):
+            await callback(update, context)
+        return
+    async with chat_lock(chat_id):
+        with quiet_mode_menu_scope(identity, quiet_enabled):
+            await callback(update, context)
+    if is_quiet_mode_owner(identity):
+        try:
+            await deliver_ready_product(context.bot, chat_id)
+        except Exception:
+            logger.exception("advertising_queue.after_handler_failed")
 
 
 def _admin_project_workspace_identity(update: object, identity: object):
@@ -420,15 +432,17 @@ async def _post_init(application: Application) -> None:
         _quiet_mode_midnight_loop(),
         name="quiet-mode-midnight-moscow",
     )
+    from .advertising_queue import run_queue
+    application.bot_data["advertising_queue_task"] = asyncio.create_task(run_queue(application.bot), name="advertising-products")
 
 
 async def _post_shutdown(application: Application) -> None:
-    task = application.bot_data.pop(_QUIET_MODE_MIDNIGHT_TASK_KEY, None)
-    if task is None:
-        return
-    task.cancel()
-    with suppress(asyncio.CancelledError):
-        await task
+    for key in (_QUIET_MODE_MIDNIGHT_TASK_KEY, "advertising_queue_task"):
+        task = application.bot_data.pop(key, None)
+        if task is not None:
+            task.cancel()
+            with suppress(asyncio.CancelledError):
+                await task
 
 
 def build_application(token: str) -> Application:

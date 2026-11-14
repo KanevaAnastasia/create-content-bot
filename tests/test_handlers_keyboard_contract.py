@@ -35,6 +35,10 @@ from app.advertising_generation import (
     STATE_WAITING_ADVERTISING_CAMPAIGN_CHOICE,
     STATE_WAITING_ADVERTISING_CUSTOM_CAMPAIGN,
     STATE_WAITING_ADVERTISING_FORMAT_CHOICE,
+    STATE_WAITING_ADVERTISING_POST_IMAGE_APPROVAL,
+    STATE_WAITING_ADVERTISING_POST_IMAGE_FEEDBACK,
+    STATE_WAITING_ADVERTISING_POST_TEXT_APPROVAL,
+    STATE_WAITING_ADVERTISING_POST_TEXT_FEEDBACK,
 )
 from app.guest_handlers import STATE_MENU as GUEST_STATE_MENU, guest_keyboard_for_session
 
@@ -101,6 +105,14 @@ CUSTOM_REFERENCE_ROWS = [["больше файлов не нужно"], ["В н�
             [["1", "2", "3"], ["4", "5"], ["Другие варианты", "Усилить варианты"], ["Свой вариант"], ["В начало"]],
         ),
         (STATE_WAITING_ADVERTISING_FORMAT_CHOICE, [["Клип", "Пост"], ["В начало"]]),
+        (
+            STATE_WAITING_ADVERTISING_POST_TEXT_APPROVAL,
+            [["АПРУВ"], ["ПЕРЕГЕНЕРИРОВАТЬ"], ["ФИДБЭК"], ["В начало"]],
+        ),
+        (
+            STATE_WAITING_ADVERTISING_POST_IMAGE_APPROVAL,
+            [["АПРУВ"], ["ПЕРЕГЕНЕРИРОВАТЬ"], ["ФИДБЭК"], ["В начало"]],
+        ),
         (STATE_WAITING_OVERLAY_TITLE_EN_APPROVAL, OK_ONLY_ROWS),
         (STATE_WAITING_OVERLAY_SUBTITLE_RU, OK_ONLY_ROWS),
         (STATE_WAITING_OVERLAY_SUBTITLE_EN_APPROVAL, OK_ONLY_ROWS),
@@ -155,7 +167,12 @@ def test_keyboard_for_session_state_removes_keyboard_while_waiting_for_overlay_t
 
 @pytest.mark.parametrize(
     "state",
-    [STATE_WAITING_ADVERTISING_CUSTOM_CAMPAIGN, STATE_GENERATING_ADVERTISING_POST],
+    [
+        STATE_WAITING_ADVERTISING_CUSTOM_CAMPAIGN,
+        STATE_GENERATING_ADVERTISING_POST,
+        STATE_WAITING_ADVERTISING_POST_TEXT_FEEDBACK,
+        STATE_WAITING_ADVERTISING_POST_IMAGE_FEEDBACK,
+    ],
 )
 def test_advertising_free_text_and_generation_states_remove_keyboard(state):
     markup = handlers_state_scene.keyboard_for_session_state({"state": state})
