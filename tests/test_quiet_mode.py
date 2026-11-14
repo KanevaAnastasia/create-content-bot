@@ -113,3 +113,22 @@ def test_automatic_quiet_mode_status_reports_current_count_and_target():
     assert status["quiet_mode_enabled"] is False
     assert status["generation_count"] == 1
     assert status["generation_target"] == 12
+
+
+def test_daily_limit_increases_at_november_15_moscow_midnight(monkeypatch):
+    factory = _factory()
+    before = datetime(2026, 11, 14, 20, 59, 59, tzinfo=timezone.utc)
+    after = datetime(2026, 11, 14, 21, 0, tzinfo=timezone.utc)
+    monkeypatch.setattr(quiet_mode.random, "randint", lambda minimum, maximum: maximum)
+    quiet_mode.enable_automatic_quiet_mode_from_next_midnight(now=before, session_factory=factory)
+    quiet_mode.reset_automatic_quiet_mode_cycle(now=before, session_factory=factory)
+    assert quiet_mode.automatic_quiet_mode_status(now=before, session_factory=factory)["generation_target"] == 14
+
+    assert quiet_mode.ensure_automatic_quiet_mode_cycle(now=after, session_factory=factory)
+    assert quiet_mode.automatic_quiet_mode_status(now=after, session_factory=factory)["generation_target"] == 18
+    for count in range(1, 19):
+        result = quiet_mode.record_automatic_quiet_mode_generation(now=after, session_factory=factory)
+        assert result == {"counted": True, "count": count, "target": 18, "closed": count == 18}
+
+    later = datetime(2026, 11, 16, 21, 0, tzinfo=timezone.utc)
+    assert quiet_mode.automatic_quiet_mode_status(now=later, session_factory=factory)["generation_target"] == 18
