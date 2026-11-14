@@ -6,6 +6,7 @@
 - Before changing bot process state, run `scripts/botctl.sh status`.
 - If `scripts/botctl.sh status` reports an unmanaged bot-like process, do not kill it unless the user explicitly asks. Adopt it with `scripts/botctl.sh adopt <pid>` when needed to continue normal bot management, unless the user explicitly says not to.
 - After code changes that affect the running bot, restart it yourself through `scripts/botctl.sh restart` unless the user explicitly says not to restart.
+- After changes to the admin panel (including models, forms, templates, configuration, or admin registration), restart the admin service yourself unless the user explicitly says not to restart. Restarting the Telegram bot does not restart the admin panel. Use the existing admin service manager and verify the affected admin page after restart.
 - Start or inspect final video build workers only through `scripts/botctl.sh final-worker <run_id>`, `scripts/botctl.sh final-worker-foreground <run_id>`, and `scripts/botctl.sh final-worker-status`.
 - After every code change, review the complete task diff for correctness, regressions, security, and accidental unrelated edits; fix every issue found and run the relevant tests.
 - When the reviewed change is complete, commit only the task-related files and push the current branch to `origin` immediately, without waiting for a separate request, unless the user explicitly says not to commit or push.
