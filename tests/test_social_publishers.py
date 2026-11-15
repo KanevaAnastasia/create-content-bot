@@ -7,6 +7,7 @@ from unittest.mock import Mock, call
 from urllib.parse import parse_qs, urlparse
 
 import pytest
+import requests
 
 from app.publication_config import project_env, project_env_name
 from app.publication_media import publication_media_token, publication_media_token_is_valid
@@ -16,11 +17,13 @@ from app.social_publishers import (
     _instagram_access_token,
     _instagram_compatible_video,
     _publish_instagram,
+    _publish_youtube,
     _publish_vk,
     _set_youtube_thumbnail,
     _tiktok_access_token,
     tiktok_creator_info,
     _youtube_env,
+    _youtube_access_token,
     _vk_access_token,
     _verify_vk_identity,
     _tiktok_chunk_plan,
@@ -210,6 +213,15 @@ def test_youtube_language_credentials_override_legacy(monkeypatch) -> None:
     assert _youtube_env("grandma_kitchen", "YOUTUBE_REFRESH_TOKEN", "en") == "english"
 
 
+def test_youtube_invalid_grant_requests_exact_channel_reconnect(monkeypatch) -> None:
+    response = Mock(ok=False, status_code=400)
+    response.json.return_value = {"error": "invalid_grant"}
+    monkeypatch.setattr("app.social_publishers.requests.post", Mock(return_value=response))
+
+    with pytest.raises(PublicationDeliveryError, match=r"YouTube RU.*invalid_grant.*Reconnect"):
+        _youtube_access_token("grandma_kitchen", "ru")
+
+
 def test_youtube_custom_thumbnail_waits_for_processing_and_uploads(monkeypatch, tmp_path: Path) -> None:
     cover = tmp_path / "cover.png"
     cover.write_bytes(b"png-cover")
@@ -231,6 +243,48 @@ def test_youtube_custom_thumbnail_waits_for_processing_and_uploads(monkeypatch, 
     }
     assert post.call_args.args[0].endswith("/youtube/v3/thumbnails/set")
     assert post.call_args.kwargs["params"] == {"videoId": "video-id"}
+
+
+def test_youtube_retry_resumes_saved_session_without_creating_duplicate(
+    monkeypatch, tmp_path: Path
+) -> None:
+    video = tmp_path / "video.mp4"
+    video.write_bytes(b"abcdef")
+    job = Mock(
+        language="ru",
+        video_path=str(video),
+        title="Title",
+        description="Description",
+        payload_json={},
+    )
+    monkeypatch.setattr("app.social_publishers._youtube_access_token", lambda *_args: "token")
+    monkeypatch.setenv("PUBLISH_GRANDMA_KITCHEN_YOUTUBE_CHANNEL_ID_RU", "channel-1")
+
+    channel = Mock(ok=True, status_code=200)
+    channel.json.return_value = {"items": [{"id": "channel-1"}]}
+    monkeypatch.setattr("app.social_publishers.requests.get", Mock(return_value=channel))
+
+    initialized = Mock(ok=True, status_code=200, headers={"Location": "https://upload.example/session"})
+    initialized.json.return_value = {}
+    post = Mock(return_value=initialized)
+    monkeypatch.setattr("app.social_publishers.requests.post", post)
+
+    status = Mock(ok=False, status_code=308, headers={"Range": "bytes=0-2"})
+    uploaded = Mock(ok=True, status_code=200, headers={})
+    uploaded.json.return_value = {"id": "video-123"}
+    put = Mock(side_effect=[requests.Timeout("lost response"), status, uploaded])
+    monkeypatch.setattr("app.social_publishers.requests.put", put)
+    persist = Mock()
+
+    with pytest.raises(requests.Timeout):
+        _publish_youtube(job, "grandma_kitchen", persist)
+    assert job.payload_json["youtube_upload"]["stage"] == "uploading"
+    assert post.call_count == 1
+
+    assert _publish_youtube(job, "grandma_kitchen", persist) == "video-123"
+    assert post.call_count == 1
+    assert job.payload_json["youtube_upload"]["video_id"] == "video-123"
+    assert put.call_args_list[-1].kwargs["headers"]["Content-Range"] == "bytes 3-5/6"
 
 
 def test_instagram_readiness_only_requires_project_credentials(monkeypatch) -> None:

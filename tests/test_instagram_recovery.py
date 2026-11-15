@@ -16,6 +16,13 @@ from app.social_publishers import (
 )
 
 
+@pytest.fixture(autouse=True)
+def isolated_publication_config(monkeypatch):
+    # Live .env values must not leak into deterministic publisher tests.
+    monkeypatch.setattr("app.publication_config.load_env_file", lambda: None)
+    monkeypatch.setenv("META_GRAPH_API_VERSION", "v25.0")
+
+
 def response(payload, ok=True):
     result = Mock(ok=ok, status_code=200 if ok else 400)
     result.json.return_value = payload

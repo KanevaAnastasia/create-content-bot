@@ -138,7 +138,7 @@ def platform_readiness(project_slug: str, platform: str, language: str) -> Platf
         language=normalized_language,
         ready=supported and not missing,
         missing=tuple(missing),
-        note=("VK · видео + стена + сториз" if normalized_platform == "vk" else "Official direct API")
+        note=("VK · клип + стена; репост в сториз вручную" if normalized_platform == "vk" else "Official direct API")
         if supported and not missing else ("Unsupported platform" if not supported else ""),
     )
 
@@ -170,6 +170,16 @@ def _youtube_access_token(project_slug: str, language: str) -> str:
         },
         timeout=DEFAULT_REQUEST_TIMEOUT,
     )
+    if not response.ok:
+        try:
+            error = str((response.json() or {}).get("error") or "").strip()
+        except (TypeError, ValueError):
+            error = ""
+        if error == "invalid_grant":
+            raise PublicationDeliveryError(
+                f"YouTube {str(language or 'ru').upper()} authorization expired or was revoked "
+                f"(invalid_grant). Reconnect this exact channel before retrying the publication."
+            )
     payload = _response_json(response, "YouTube OAuth refresh")
     token = str(payload.get("access_token") or "").strip()
     if not token:
@@ -219,7 +229,45 @@ def _set_youtube_thumbnail(access_token: str, video_id: str, cover_path: str | P
     return "applied"
 
 
-def _publish_youtube(job: PublicationJob, project_slug: str) -> str:
+def _youtube_upload_fingerprint(job: PublicationJob, video_path: Path) -> str:
+    payload = job.payload_json if isinstance(job.payload_json, dict) else {}
+    source_digest = str(payload.get("video_sha256") or "").strip()
+    if not source_digest:
+        digest = hashlib.sha256()
+        with video_path.open("rb") as handle:
+            for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+                digest.update(chunk)
+        source_digest = digest.hexdigest()
+    material = json.dumps(
+        {
+            "video": source_digest,
+            "title": str(job.title or "")[:100],
+            "description": str(job.description or "")[:5000],
+        },
+        ensure_ascii=False,
+        sort_keys=True,
+    )
+    return hashlib.sha256(material.encode("utf-8")).hexdigest()
+
+
+def _publish_youtube(
+    job: PublicationJob,
+    project_slug: str,
+    persist: Callable[[], None] | None = None,
+) -> str:
+    """Publish through a persisted resumable session.
+
+    The session URL is saved before video bytes are sent. If a worker stops after
+    YouTube accepted the bytes, the next retry asks that exact session for its
+    committed offset/result instead of initializing a second video.
+    """
+
+    def save_state(state: dict[str, Any]) -> None:
+        payload = job.payload_json if isinstance(job.payload_json, dict) else {}
+        job.payload_json = {**payload, "youtube_upload": dict(state)}
+        if persist is not None:
+            persist()
+
     token = _youtube_access_token(project_slug, str(job.language or "ru"))
     headers = {"Authorization": f"Bearer {token}"}
     channel_response = requests.get(
@@ -249,34 +297,103 @@ def _publish_youtube(job: PublicationJob, project_slug: str) -> str:
         },
         "status": {"privacyStatus": privacy, "selfDeclaredMadeForKids": False},
     }
-    init_response = requests.post(
-        "https://www.googleapis.com/upload/youtube/v3/videos",
-        params={"uploadType": "resumable", "part": "snippet,status", "notifySubscribers": "false"},
-        headers={
-            **headers,
-            "Content-Type": "application/json; charset=UTF-8",
-            "X-Upload-Content-Length": str(video_path.stat().st_size),
-            "X-Upload-Content-Type": mime_type,
-        },
-        json=metadata,
-        timeout=DEFAULT_REQUEST_TIMEOUT,
-    )
-    if not init_response.ok:
-        _response_json(init_response, "YouTube upload initialization")
-    upload_url = str(init_response.headers.get("Location") or "").strip()
-    if not upload_url:
-        raise PublicationDeliveryError("YouTube did not return a resumable upload URL.")
-    with video_path.open("rb") as handle:
-        upload_response = requests.put(
+    total_size = video_path.stat().st_size
+    fingerprint = _youtube_upload_fingerprint(job, video_path)
+    payload = job.payload_json if isinstance(job.payload_json, dict) else {}
+    state = dict(payload.get("youtube_upload") or {})
+    if state and str(state.get("fingerprint") or "") != fingerprint:
+        raise PublicationNeedsReview(
+            "YouTube video or metadata changed after upload started; reconcile the saved session first."
+        )
+    video_id = str(state.get("video_id") or "").strip()
+    upload_url = str(state.get("upload_url") or "").strip()
+    offset = 0
+
+    if upload_url and not video_id:
+        status_response = requests.put(
             upload_url,
-            headers={**headers, "Content-Type": mime_type, "Content-Length": str(video_path.stat().st_size)},
-            data=handle,
+            headers={
+                **headers,
+                "Content-Length": "0",
+                "Content-Range": f"bytes */{total_size}",
+            },
             timeout=DEFAULT_REQUEST_TIMEOUT,
         )
-    upload_payload = _response_json(upload_response, "YouTube video upload")
-    video_id = str(upload_payload.get("id") or "").strip()
+        if status_response.status_code in {200, 201}:
+            status_payload = _response_json(status_response, "YouTube resumable upload status")
+            video_id = str(status_payload.get("id") or "").strip()
+        elif status_response.status_code == 308:
+            committed = str(status_response.headers.get("Range") or "").strip()
+            if committed.startswith("bytes=0-"):
+                try:
+                    offset = int(committed.split("-", 1)[1]) + 1
+                except ValueError:
+                    offset = 0
+        elif status_response.status_code in {404, 410}:
+            state = {}
+            upload_url = ""
+            save_state(state)
+        else:
+            _response_json(status_response, "YouTube resumable upload status")
+
+    if not upload_url and not video_id:
+        init_response = requests.post(
+            "https://www.googleapis.com/upload/youtube/v3/videos",
+            params={"uploadType": "resumable", "part": "snippet,status", "notifySubscribers": "false"},
+            headers={
+                **headers,
+                "Content-Type": "application/json; charset=UTF-8",
+                "X-Upload-Content-Length": str(total_size),
+                "X-Upload-Content-Type": mime_type,
+            },
+            json=metadata,
+            timeout=DEFAULT_REQUEST_TIMEOUT,
+        )
+        if not init_response.ok:
+            _response_json(init_response, "YouTube upload initialization")
+        upload_url = str(init_response.headers.get("Location") or "").strip()
+        if not upload_url:
+            raise PublicationDeliveryError("YouTube did not return a resumable upload URL.")
+        state = {
+            "fingerprint": fingerprint,
+            "upload_url": upload_url,
+            "total_size": total_size,
+            "stage": "initialized",
+        }
+        save_state(state)
+
+    if not video_id:
+        if offset >= total_size:
+            raise PublicationNeedsReview(
+                "YouTube accepted all bytes but returned no video id; retry will reconcile the saved session."
+            )
+        state.update({"stage": "uploading", "offset": offset})
+        save_state(state)
+        with video_path.open("rb") as handle:
+            handle.seek(offset)
+            upload_response = requests.put(
+                upload_url,
+                headers={
+                    **headers,
+                    "Content-Type": mime_type,
+                    "Content-Length": str(total_size - offset),
+                    "Content-Range": f"bytes {offset}-{total_size - 1}/{total_size}",
+                },
+                data=handle,
+                timeout=DEFAULT_REQUEST_TIMEOUT,
+            )
+        if upload_response.status_code == 308:
+            state.update({"stage": "uploading"})
+            save_state(state)
+            raise PublicationDeliveryError(
+                "YouTube upload is incomplete; retry resumes the same upload session."
+            )
+        upload_payload = _response_json(upload_response, "YouTube video upload")
+        video_id = str(upload_payload.get("id") or "").strip()
     if not video_id:
         raise PublicationDeliveryError("YouTube upload completed without a video id.")
+    state.update({"fingerprint": fingerprint, "video_id": video_id, "stage": "uploaded"})
+    save_state(state)
     payload = job.payload_json if isinstance(job.payload_json, dict) else {}
     cover_path = str(payload.get("cover_path") or "").strip()
     if cover_path:
@@ -285,6 +402,8 @@ def _publish_youtube(job: PublicationJob, project_slug: str) -> str:
         except Exception as exc:
             cover_status = f"failed:{type(exc).__name__}"
         job.payload_json = {**payload, "cover_delivery": cover_status}
+        if persist is not None:
+            persist()
     return video_id
 
 
@@ -308,7 +427,7 @@ def _refresh_instagram_access_token(
         raise PublicationDeliveryError(
             f"Instagram {lang} token is near expiry, but its app id or app secret is not configured."
         )
-    version = shared_env("META_GRAPH_API_VERSION", "v25.0")
+    version = shared_env("META_GRAPH_API_VERSION", "v27.0")
     try:
         response = requests.get(
             f"https://graph.facebook.com/{version}/oauth/access_token",
@@ -489,7 +608,7 @@ def _verify_instagram_publish_identity(base_url: str, access_token: str, account
 def _publish_instagram(
     job: PublicationJob, project_slug: str, persist: Callable[[], None] | None = None
 ) -> str:
-    version = shared_env("META_GRAPH_API_VERSION", "v25.0")
+    version = shared_env("META_GRAPH_API_VERSION", "v27.0")
     account_id = project_env(project_slug, f"INSTAGRAM_BUSINESS_ACCOUNT_ID_{job.language.upper()}")
     access_token = _instagram_access_token(project_slug, job.language)
     base_url = f"https://graph.facebook.com/{version}"
@@ -1537,10 +1656,37 @@ def _publish_vk(job: PublicationJob, project_slug: str, persist: Callable[[], No
                 if str(uploaded.get("owner_id")) != f"-{group_id}" or str(uploaded.get("video_id")) != str(data["video_id"]):
                     raise PublicationDeliveryError("VK upload returned an unexpected video ID.")
             except (PublicationDeliveryError, requests.RequestException, ValueError):
-                raise PublicationNeedsReview("VK upload not confirmed. Check the saved upload stage; automatic re-upload is blocked.") from None
-            external_id = f"{data['owner_id']}_{data['video_id']}"
-            job.external_post_id = external_id
-            save(vk_video_external_id=external_id, external_post_url=f"https://vk.com/video{external_id}")
+                # `video.save` gives us the exact destination ID before bytes are
+                # uploaded. A proxy timeout or malformed upload response can still
+                # mean VK accepted those bytes. Reconcile that one ID immediately;
+                # never allocate/upload a second video just because the response was
+                # lost.
+                allocated_id = str((job.payload_json or {}).get("vk_allocated_video_id") or "")
+                try:
+                    item = _vk_video_item(token, api_version, allocated_id) if allocated_id else None
+                except PublicationDeliveryError:
+                    item = None
+                if item is None:
+                    raise PublicationNeedsReview(
+                        "VK upload not confirmed. Check the saved upload stage; automatic re-upload is blocked."
+                    ) from None
+                external_id = allocated_id
+                job.external_post_id = external_id
+                save(
+                    vk_video_external_id=external_id,
+                    vk_video_processing=bool(item.get("processing")),
+                    external_post_url=f"https://vk.com/video{external_id}",
+                )
+                if bool(item.get("processing")):
+                    raise PublicationDeliveryError(
+                        "VK accepted the uploaded video and is still processing it. "
+                        "Retry only this platform after processing completes."
+                    ) from None
+                video_ready_checked = True
+            else:
+                external_id = f"{data['owner_id']}_{data['video_id']}"
+                job.external_post_id = external_id
+                save(vk_video_external_id=external_id, external_post_url=f"https://vk.com/video{external_id}")
 
     # A successful upload response still means only that VK accepted the
     # bytes. Verify transcoding before wall.post; an explicit retry can resume
@@ -1609,7 +1755,16 @@ def _publish_vk(job: PublicationJob, project_slug: str, persist: Callable[[], No
         raise PublicationNeedsReview("VK wall post exists but its video/text was not verified. Inspect the saved post link; retry only verifies it.")
     save(vk_wall_post_verified=True)
     if (job.payload_json or {}).get("vk_stories"):
-        _publish_vk_stories(job, wall_token, group_id, api_version, persist)
+        # VK's public Stories API uploads a new story media file.  It does not
+        # expose the product action the creator asked for: sharing the already
+        # published clip to a story.  Treat the checkbox as a follow-up action
+        # and keep the successful clip/wall delivery successful; uploading the
+        # MP4 again here creates a separate, misleading story publication.
+        save(
+            vk_story_share_mode="manual_clip_repost",
+            vk_story_share_status="required",
+            vk_story_share_source_url=f"https://vk.com/clip{external_id}",
+        )
     return external_id
 
 
@@ -1758,7 +1913,9 @@ def publish_publication_job(job_id: str | uuid.UUID) -> dict[str, Any]:
                 external_post_id = _publish_instagram(job, job.project.slug, session.commit)
             else:
                 external_post_id = {
-                    "youtube": _publish_youtube,
+                    "youtube": lambda current_job, current_slug: _publish_youtube(
+                        current_job, current_slug, session.commit
+                    ),
                     "tiktok": _publish_tiktok,
                 }[job.platform](job, job.project.slug)
         except (PublicationNeedsReview, zernio_publisher.ZernioPending, zernio_publisher.ZernioNeedsReview) as exc:

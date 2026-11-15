@@ -11,27 +11,57 @@
     .cf-status{display:inline-flex;padding:4px 9px;border-radius:999px;font-size:12px;font-weight:750}.cf-status.success{color:#166534;background:#dcfce7}.cf-status.error{color:#991b1b;background:#fee2e2}.cf-status.active{color:#1d4ed8;background:#dbeafe}.cf-status.waiting{color:#92400e;background:#fef3c7}
     .cf-monitor-error{max-width:580px;color:var(--error-fg)}.cf-monitor-id{font-family:var(--font-family-monospace);font-size:12px;word-break:break-all}
     .cf-retry-form{display:inline-block;margin:8px 0 0}.cf-retry-button{padding:6px 10px;border:0;border-radius:8px;color:#fff;background:#b91c1c;cursor:pointer;font-weight:700}
+    .cf-history{margin:0 0 22px}.cf-history-head{display:flex;align-items:end;justify-content:space-between;gap:16px;margin-bottom:12px}.cf-history-head h1{margin:0}.cf-history-head p{margin:5px 0 0;color:var(--body-quiet-color)}
+    .cf-history-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(320px,1fr));gap:12px}.cf-bundle{display:block;padding:16px;border:1px solid var(--border-color);border-radius:14px;background:var(--body-bg);color:var(--body-fg);text-decoration:none;transition:transform .12s ease,box-shadow .12s ease}.cf-bundle:hover{transform:translateY(-1px);box-shadow:0 8px 24px rgba(15,23,42,.09)}
+    .cf-bundle-top{display:flex;align-items:start;justify-content:space-between;gap:12px}.cf-bundle h3{margin:0 0 5px;font-size:16px}.cf-bundle-meta,.cf-bundle-targets{color:var(--body-quiet-color);font-size:12px}.cf-bundle-targets{margin-top:12px;line-height:1.5}.cf-technical{margin:22px 0 10px}.cf-technical h2{margin-bottom:4px}.cf-technical p{margin:0;color:var(--body-quiet-color)}
     @media(max-width:800px){.cf-monitor-head{display:block}.cf-monitor-table th:nth-child(3),.cf-monitor-table td:nth-child(3){display:none}}
   </style>
 {% endblock %}
 
 {% block object-tools-items %}
   <li>
-    <a href="{{ tiktok_oauth_url }}">Connect TikTok publishing API</a>
+    <a href="{{ tiktok_oauth_url }}">Подключить TikTok API</a>
   </li>
   <li>
-    <a href="{{ youtube_oauth_url }}">Connect YouTube publishing API</a>
+    <a href="{{ youtube_oauth_url }}">Подключить YouTube API</a>
   </li>
   <li>
-    <a href="{{ vk_oauth_url }}">Connect VK publishing API</a>
+    <a href="{{ vk_oauth_url }}">Подключить VK API</a>
   </li>
   <li>
-    <a href="{{ prepare_publication_url }}" class="addlink">Prepare video publication</a>
+    <a href="{{ prepare_publication_url }}" class="addlink">Новая заливка</a>
   </li>
   {{ block.super }}
 {% endblock %}
 
 {% block content %}
+  {% if publication_bundle_history %}
+    <section class="cf-history">
+      <div class="cf-history-head">
+        <div>
+          <h1>Все заливки · {{ publication_bundle_history.total }}</h1>
+          <p>Каждая карточка — отдельный запуск. Откройте её, чтобы увидеть статусы, ссылки и повторить только площадку с ошибкой.</p>
+        </div>
+      </div>
+      <div class="cf-history-grid">
+        {% for bundle in publication_bundle_history.bundles %}
+          <a class="cf-bundle" href="{{ bundle.monitor_url }}">
+            <div class="cf-bundle-top">
+              <div>
+                <h3>{{ bundle.title }}</h3>
+                <div class="cf-bundle-meta">{{ bundle.project }} · {{ bundle.created_at|date:"d.m.Y H:i" }}</div>
+              </div>
+              <span class="cf-status {{ bundle.status_class }}">{{ bundle.status_label }}</span>
+            </div>
+            <div class="cf-bundle-targets">{{ bundle.targets|join:" · " }}</div>
+            <div class="cf-bundle-meta">Опубликовано {{ bundle.published }} из {{ bundle.total }}</div>
+          </a>
+        {% empty %}
+          <p>Заливок пока нет.</p>
+        {% endfor %}
+      </div>
+    </section>
+  {% endif %}
   {% if publication_monitor %}
     <section class="cf-publication-monitor">
       <div class="cf-monitor-head">
@@ -58,14 +88,14 @@
                 {% else %}—{% endif %}
                 {% if row.vk_stories_enabled %}
                   <div>Стена: {% if row.vk_wall_verified %}подтверждена{% else %}не подтверждена{% endif %}</div>
-                  <div>Сториз:
-                    {% for story in row.vk_story_results %}
-                      <a href="{{ story.url }}" target="_blank" rel="noopener">Часть {{ forloop.counter }}</a>
-                      ({% if story.verified %}подтверждена{% else %}проверяется{% endif %})
-                    {% empty %}ещё не опубликованы{% endfor %}
-                  </div>
+                  {% if row.vk_story_share_required %}
+                    <div>Сториз: нужно поделиться готовым клипом в приложении VK{% if row.vk_story_share_url %} · <a href="{{ row.vk_story_share_url }}" target="_blank" rel="noopener">Открыть клип</a>{% endif %}</div>
+                  {% else %}
+                    <div>Сториз: будет доступен ручной репост готового клипа</div>
+                  {% endif %}
                 {% endif %}
                 {% if row.publish_error %}<div class="cf-monitor-error">{{ row.publish_error }}</div>{% endif %}
+                {% if row.youtube_reconnect_url %}<p><a class="button" href="{{ row.youtube_reconnect_url }}">Переподключить YouTube {{ row.language_upper }}</a></p>{% endif %}
                 {% if row.retry_url %}
                   <form class="cf-retry-form" method="post" action="{{ row.retry_url }}">
                     {% csrf_token %}<button class="cf-retry-button" type="submit">Повторить только эту площадку</button>
@@ -80,6 +110,10 @@
       {% if publication_monitor.auto_refresh %}<p class="cf-monitor-summary">Статусы обновляются автоматически каждые 8 секунд.</p>{% endif %}
     </section>
   {% endif %}
+  <div class="cf-technical">
+    <h2>Технические задания по площадкам</h2>
+    <p>Ниже — отдельные внутренние задания. Для обычной работы используйте карточки заливок выше.</p>
+  </div>
   {{ block.super }}
   {% if publication_monitor.auto_refresh %}<script>window.setTimeout(()=>window.location.reload(),8000);</script>{% endif %}
 {% endblock %}

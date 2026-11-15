@@ -171,14 +171,19 @@ else:
             "task": "pipeline_admin.process_due_scheduled_generations",
             "schedule": crontab(hour=1, minute=0),
             "kwargs": {"limit": int(os.getenv("SCHEDULED_GENERATION_NIGHTLY_LIMIT", "0") or 0)},
+            "options": {"expires": 3600},
         },
         "publish-due-social-videos": {
             "task": "pipeline_admin.publish_due_publication_jobs",
             "schedule": 60.0,
             "kwargs": {"limit": int(os.getenv("PUBLICATION_WORKER_BATCH_SIZE", "20") or 20)},
+            # If a worker is unavailable, old polling ticks must not flood the
+            # queue when it comes back. A fresh tick is emitted every minute.
+            "options": {"expires": 55},
         },
         "refresh-expiring-instagram-tokens": {
             "task": "pipeline_admin.refresh_expiring_instagram_tokens",
             "schedule": crontab(hour=3, minute=30),
+            "options": {"expires": 3600},
         },
     }

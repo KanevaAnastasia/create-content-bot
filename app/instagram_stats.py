@@ -73,7 +73,7 @@ def configured_accounts() -> list[InstagramAccount]:
 
 
 def _get(session: requests.Session, path: str, **params) -> dict:
-    version = shared_env("META_GRAPH_API_VERSION", "v25.0")
+    version = shared_env("META_GRAPH_API_VERSION", "v27.0")
     try:
         response = session.get(
             f"https://graph.facebook.com/{version}/{path}",

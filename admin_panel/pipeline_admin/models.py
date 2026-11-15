@@ -411,8 +411,8 @@ class PublicationJob(models.Model):
         managed = False
         db_table = "publication_jobs"
         ordering = ("-created_at",)
-        verbose_name = "Publication job / публикация"
-        verbose_name_plural = "Publication jobs / публикации"
+        verbose_name = "Задание заливки"
+        verbose_name_plural = "Заливки"
 
     def __str__(self) -> str:
         return f"{self.platform}:{self.language} {self.status}"

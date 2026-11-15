@@ -127,6 +127,7 @@ def test_publication_monitor_groups_trial_and_main_jobs(monkeypatch) -> None:
     jobs = [
         SimpleNamespace(
             pk=uuid.uuid4(),
+            project=SimpleNamespace(slug="grandma_kitchen"),
             bundle_key=f"{root}-trial",
             platform="instagram",
             language="ru",
@@ -139,6 +140,7 @@ def test_publication_monitor_groups_trial_and_main_jobs(monkeypatch) -> None:
         ),
         SimpleNamespace(
             pk=uuid.uuid4(),
+            project=SimpleNamespace(slug="grandma_kitchen"),
             bundle_key=root,
             platform="instagram",
             language="ru",
@@ -151,6 +153,7 @@ def test_publication_monitor_groups_trial_and_main_jobs(monkeypatch) -> None:
         ),
         SimpleNamespace(
             pk=uuid.uuid4(),
+            project=SimpleNamespace(slug="grandma_kitchen"),
             bundle_key=root,
             platform="youtube",
             language="en",
@@ -190,6 +193,15 @@ def test_publication_monitor_groups_trial_and_main_jobs(monkeypatch) -> None:
     assert monitor["rows"][0]["label"] == "Instagram RU · Trial Reel"
     failed_row = next(row for row in monitor["rows"] if row["status"] == "failed")
     assert failed_row["retry_url"].endswith(f"/{jobs[2].pk}/retry/")
+    assert failed_row["youtube_reconnect_url"] == ""
+
+    jobs[2].publish_error = "YouTube OAuth refresh: HTTP 400: invalid_grant"
+    monitor = admin_module._publication_monitor_context(request)
+    failed_row = next(row for row in monitor["rows"] if row["status"] == "failed")
+    assert failed_row["youtube_reconnect_url"].endswith(
+        "/youtube-oauth/?project_slug=grandma_kitchen&language=en"
+    )
+    jobs[2].publish_error = "API error"
 
     jobs[2].platform = 'vk'
     jobs[2].language = 'ru'
@@ -209,10 +221,69 @@ def test_publication_monitor_groups_trial_and_main_jobs(monkeypatch) -> None:
     assert 'private-result' not in str(row)
 
 
+def test_publication_bundle_history_groups_runs_and_links_to_control(monkeypatch) -> None:
+    root = "11111111-2222-3333-4444-555555555555"
+    created = datetime.now(timezone.utc)
+    project = SimpleNamespace(title="Grandma Kitchen", __str__=lambda self: self.title)
+    jobs = [
+        SimpleNamespace(
+            project=project,
+            bundle_key=root,
+            platform="youtube",
+            language="ru",
+            status="published",
+            payload_json={},
+            title="Сочная курица",
+            description="",
+            created_at=created,
+            updated_at=created,
+        ),
+        SimpleNamespace(
+            project=project,
+            bundle_key=f"{root}-trial",
+            platform="instagram",
+            language="ru",
+            status="failed",
+            payload_json={"instagram_trial": True},
+            title="",
+            description="Пробное описание",
+            created_at=created,
+            updated_at=created,
+        ),
+    ]
+
+    class FakeQuerySet:
+        def select_related(self, *_args):
+            return self
+
+        def order_by(self, *_args):
+            return self
+
+        def __iter__(self):
+            return iter(jobs)
+
+    monkeypatch.setattr(admin_module.PublicationJob, "objects", FakeQuerySet())
+
+    history = admin_module._publication_bundle_history_context(
+        RequestFactory().get("/admin/pipeline_admin/publicationjob/")
+    )
+
+    assert history["total"] == 1
+    bundle = history["bundles"][0]
+    assert bundle["bundle_key"] == root
+    assert bundle["title"] == "Сочная курица"
+    assert bundle["published"] == 1
+    assert bundle["failed"] == 1
+    assert bundle["status_class"] == "error"
+    assert "Instagram RU · Trial" in bundle["targets"]
+    assert bundle["monitor_url"].endswith(f"/control/{root}/")
+
+
 def test_publication_monitor_shows_verified_vk_processing_without_stale_retry(monkeypatch) -> None:
     root = "11111111-2222-3333-4444-555555555555"
     vk_job = SimpleNamespace(
         pk=uuid.uuid4(),
+        project=SimpleNamespace(slug="grandma_kitchen"),
         bundle_key=root,
         platform="vk",
         language="ru",

@@ -84,26 +84,24 @@ def test_upload_wall_and_verification_are_checkpointed(configured, monkeypatch, 
     assert [url.rsplit('/', 1)[-1] for url, _ in calls] == ['groups.getById', 'wall.get']
 
 
-def test_stories_only_for_opted_in_jobs_after_verified_wall(configured, monkeypatch, job):
+def test_story_option_marks_manual_clip_repost_after_verified_wall(configured, monkeypatch, job):
     setup_api(monkeypatch, job)
-    story = Mock()
-    monkeypatch.setattr(p, '_publish_vk_stories', story)
     p._publish_vk(job, 'grandma', lambda: None)
-    story.assert_not_called()
+    assert 'vk_story_share_mode' not in job.payload_json
     job.payload_json = {**job.payload_json, 'vk_stories': True}
     persist = Mock()
     p._publish_vk(job, 'grandma', persist)
-    story.assert_called_once_with(job, 'wall-secret', '123', '5.199', persist)
     assert job.payload_json['vk_wall_post_verified']
+    assert job.payload_json['vk_story_share_mode'] == 'manual_clip_repost'
+    assert job.payload_json['vk_story_share_status'] == 'required'
+    assert job.payload_json['vk_story_share_source_url'] == 'https://vk.com/clip-123_42'
+    assert persist.called
 
 
-def test_story_failure_retry_never_repeats_video_or_wall(configured, monkeypatch, job):
+def test_story_share_marker_retry_never_repeats_video_or_wall(configured, monkeypatch, job):
     calls = setup_api(monkeypatch, job)
     job.payload_json = {'vk_stories': True}
-    story = Mock(side_effect=[p.PublicationDeliveryError('Stories unavailable'), None])
-    monkeypatch.setattr(p, '_publish_vk_stories', story)
-    with pytest.raises(p.PublicationDeliveryError, match='Stories unavailable'):
-        p._publish_vk(job, 'grandma', lambda: None)
+    p._publish_vk(job, 'grandma', lambda: None)
     assert job.payload_json['vk_wall_post_verified']
     calls.clear()
     assert p._publish_vk(job, 'grandma', lambda: None) == '-123_42'
@@ -162,6 +160,28 @@ def test_allocated_video_is_verified_and_reused_after_lost_upload_response(confi
     assert job.external_post_id == '-123_42'
     methods = [url.rsplit('/', 1)[-1] for url, _ in calls]
     assert methods == ['groups.getById', 'video.get', 'wall.post', 'wall.get']
+
+
+def test_lost_upload_response_reconciles_allocated_id_without_manual_dead_end(
+    configured, monkeypatch, job
+):
+    calls = setup_api(monkeypatch, job)
+    original = p.requests.post
+
+    def lose_upload_response(url, **kwargs):
+        result = original(url, **kwargs)
+        if url.rsplit('/', 1)[-1] == 'upload':
+            result.json = Mock(side_effect=ValueError("invalid response"))
+        return result
+
+    monkeypatch.setattr(p.requests, 'post', lose_upload_response)
+
+    assert p._publish_vk(job, 'grandma', lambda: None) == '-123_42'
+    assert job.external_post_id == '-123_42'
+    methods = [url.rsplit('/', 1)[-1] for url, _ in calls]
+    assert methods == [
+        'groups.getById', 'video.save', 'upload', 'video.get', 'wall.post', 'wall.get'
+    ]
 
 
 def test_allocated_video_waits_for_vk_processing_before_wall_post(configured, monkeypatch, job):

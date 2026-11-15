@@ -33,7 +33,7 @@ def collect_followers(slug, platform, language, token):
         account_id = project_env(slug, f"INSTAGRAM_BUSINESS_ACCOUNT_ID_{language.upper()}")
         if not account_id or not re.fullmatch(r"\d+", account_id):
             raise MetricsUnavailable("Не настроен Instagram-аккаунт.")
-        data = api_get(f"https://graph.facebook.com/{shared_env('META_GRAPH_API_VERSION', 'v25.0')}/{account_id}",
+        data = api_get(f"https://graph.facebook.com/{shared_env('META_GRAPH_API_VERSION', 'v27.0')}/{account_id}",
                        token, {"fields": "id,followers_count"})
         if str(data.get("id")) != account_id:
             raise MetricsUnavailable("Не удалось подтвердить Instagram-аккаунт.")
@@ -278,7 +278,7 @@ def collect_metrics(job, token):
             values[key] = number(stats.get(remote))
         warnings.append("Удержание обновляется отдельным сбором YouTube Analytics; CTR этим сбором не запрашивается.")
     elif job["platform"] == "instagram":
-        base = f"https://graph.facebook.com/{shared_env('META_GRAPH_API_VERSION', 'v25.0')}"
+        base = f"https://graph.facebook.com/{shared_env('META_GRAPH_API_VERSION', 'v27.0')}"
         basic = api_get(f"{base}/{post_id}", token, {"fields": "id,like_count,comments_count"})
         values.update(likes=number(basic.get("like_count")), comments=number(basic.get("comments_count")))
         from .marketer_comments import summarize_comments

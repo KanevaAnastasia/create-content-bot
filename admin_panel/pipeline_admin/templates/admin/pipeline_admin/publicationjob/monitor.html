@@ -32,11 +32,11 @@
 
 {% block content %}
   <main class="cf-monitor-shell">
-    <a class="cf-monitor-back" href="{{ publication_list_url }}">← Все публикации</a>
+    <a class="cf-monitor-back" href="{{ publication_list_url }}">← Все заливки</a>
     <section class="cf-publication-monitor">
       <div class="cf-monitor-head">
         <div>
-          <h1>Контроль публикации</h1>
+          <h1>Контроль заливки</h1>
           <div class="cf-monitor-summary">
             Завершено {{ publication_monitor.finished }} из {{ publication_monitor.total }} ·
             опубликовано {{ publication_monitor.published }}{% if publication_monitor.failed %} · ошибок {{ publication_monitor.failed }}{% endif %}
@@ -61,12 +61,18 @@
                 {% else %}—{% endif %}
                 {% if row.vk_stories_enabled %}
                   <div>Стена: {% if row.vk_wall_verified %}подтверждена{% else %}не подтверждена{% endif %}</div>
-                  <div>Сториз: {% for story in row.vk_story_results %}<a href="{{ story.url }}" target="_blank" rel="noopener">Часть {{ forloop.counter }}</a> ({% if story.verified %}подтверждена{% else %}проверяется{% endif %}){% empty %}ещё не опубликованы{% endfor %}</div>
+                  {% if row.vk_story_share_required %}
+                    <div>Сториз: нужно поделиться готовым клипом в приложении VK{% if row.vk_story_share_url %} · <a href="{{ row.vk_story_share_url }}" target="_blank" rel="noopener">Открыть клип</a>{% endif %}</div>
+                  {% else %}
+                    <div>Сториз: будет доступен ручной репост готового клипа</div>
+                  {% endif %}
                 {% endif %}
                 {% if row.publish_error %}<div class="cf-monitor-error">{{ row.publish_error }}</div>{% endif %}
+                {% if row.youtube_reconnect_url %}<p><a class="button" href="{{ row.youtube_reconnect_url }}">Переподключить YouTube {{ row.language_upper }}</a></p>{% endif %}
                 {% if row.retry_url %}
                   <form class="cf-retry-form" method="post" action="{{ row.retry_url }}">{% csrf_token %}<button class="cf-retry-button" type="submit">Повторить только эту площадку</button></form>
                 {% endif %}
+                {% if row.retry_explanation %}<div class="cf-monitor-summary">{{ row.retry_explanation }}</div>{% endif %}
               </td>
               <td>{{ row.attempt_count }}</td>
             </tr>

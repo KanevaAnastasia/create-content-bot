@@ -68,7 +68,7 @@ DEFAULT_PUBLICATION_VIDEO_VARIANT = "titled_subtitled_music"
 PUBLICATION_TARGET_LABELS = {
     "youtube:ru": "YouTube Shorts RU",
     "instagram:ru": "Instagram RU",
-    "vk:ru": "VK RU · стена + сториз",
+    "vk:ru": "VK RU · клип + стена + репост в сториз",
     "tiktok:ru": "TikTok RU",
     "instagram:en": "Instagram EN",
     "youtube:en": "YouTube Shorts EN",

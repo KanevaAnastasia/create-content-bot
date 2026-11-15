@@ -15,7 +15,7 @@ import threading
 import time
 import uuid
 from typing import Any
-from urllib.parse import quote, unquote, urlparse
+from urllib.parse import quote, unquote, urlencode, urlparse
 
 from django import forms as django_forms
 from django.contrib import admin, messages
@@ -5458,6 +5458,84 @@ def _publication_monitor_url(bundle_key: str) -> str:
     return reverse("admin:pipeline_admin_publicationjob_monitor", args=[root_bundle])
 
 
+def _publication_bundle_history_context(request) -> dict[str, Any]:
+    """Build one concise row per publication launch, including old launches."""
+
+    jobs = list(
+        PublicationJob.objects.select_related("project").order_by("-created_at")
+    )
+    grouped: dict[str, list[PublicationJob]] = {}
+    for job in jobs:
+        root_bundle = _publication_root_bundle_key(job.bundle_key)
+        if root_bundle:
+            grouped.setdefault(root_bundle, []).append(job)
+
+    bundles = []
+    for root_bundle, bundle_jobs in grouped.items():
+        statuses = [str(job.status or "draft") for job in bundle_jobs]
+        published = statuses.count("published")
+        failed = sum(status in _PUBLICATION_ERROR_STATUSES for status in statuses)
+        active = any(status in {"approved", "scheduled", "publishing"} for status in statuses)
+        finished = sum(status in _PUBLICATION_FINISHED_STATUSES for status in statuses)
+        if published == len(bundle_jobs):
+            status_label, status_class = "Всё опубликовано", "success"
+        elif failed:
+            status_label, status_class = f"Нужна проверка · {failed}", "error"
+        elif active:
+            status_label, status_class = "Публикуется", "active"
+        elif finished == len(bundle_jobs):
+            status_label, status_class = "Завершено", "waiting"
+        else:
+            status_label, status_class = "Подготовлено", "waiting"
+
+        representative = bundle_jobs[0]
+        title = next(
+            (
+                str(job.title or "").strip()
+                for job in bundle_jobs
+                if str(job.title or "").strip()
+            ),
+            "",
+        )
+        if not title:
+            title = next(
+                (
+                    str(job.description or "").strip().splitlines()[0]
+                    for job in bundle_jobs
+                    if str(job.description or "").strip()
+                ),
+                "Заливка без названия",
+            )
+        target_labels = []
+        for job in bundle_jobs:
+            payload = job.payload_json if isinstance(job.payload_json, dict) else {}
+            target = (
+                "Instagram RU · Trial"
+                if payload.get("instagram_trial")
+                else publication_target_label(f"{job.platform}:{job.language}")
+            )
+            if target not in target_labels:
+                target_labels.append(target)
+        bundles.append(
+            {
+                "bundle_key": root_bundle,
+                "project": str(representative.project),
+                "title": _short(title, 120),
+                "created_at": max(job.created_at for job in bundle_jobs),
+                "updated_at": max(job.updated_at for job in bundle_jobs),
+                "total": len(bundle_jobs),
+                "published": published,
+                "failed": failed,
+                "finished": finished,
+                "status_label": status_label,
+                "status_class": status_class,
+                "targets": target_labels,
+                "monitor_url": _publication_monitor_url(root_bundle),
+            }
+        )
+    return {"bundles": bundles, "total": len(bundles)}
+
+
 def _publication_monitor_context(request, *, bundle_key: str = "") -> dict[str, Any] | None:
     requested = str(bundle_key or request.GET.get("bundle") or "").strip()[:128]
     root_bundle = _publication_root_bundle_key(requested)
@@ -5489,7 +5567,7 @@ def _publication_monitor_context(request, *, bundle_key: str = "") -> dict[str, 
         status = str(job.status or "draft")
         label = publication_target_label(f"{job.platform}:{job.language}")
         if job.platform == "vk" and not bool(payload.get("vk_stories")):
-            label = "VK RU · стена"
+            label = "VK RU · клип + стена"
         # VK allocates a video ID before transcoding.  A connection loss while
         # uploading used to leave the job marked as requiring intervention even
         # when we had subsequently verified that the exact asset exists and VK
@@ -5506,6 +5584,7 @@ def _publication_monitor_context(request, *, bundle_key: str = "") -> dict[str, 
             {
                 "label": "Instagram RU · Trial Reel" if is_trial else label,
                 "status": display_status,
+                "language_upper": str(job.language or "").upper(),
                 "status_label": (
                     "VK обрабатывает видео" if vk_processing
                     else _PUBLICATION_STATUS_LABELS.get(status, status)
@@ -5528,13 +5607,39 @@ def _publication_monitor_context(request, *, bundle_key: str = "") -> dict[str, 
                     if isinstance(part, dict) and re.fullmatch(r"-\d+_\d+", str(part.get("id") or ""))
                 ] if job.platform == "vk" else [],
                 "vk_stories_enabled": job.platform == "vk" and bool(payload.get("vk_stories")),
+                "vk_story_share_required": (
+                    job.platform == "vk"
+                    and payload.get("vk_story_share_mode") == "manual_clip_repost"
+                    and payload.get("vk_story_share_status") == "required"
+                ),
+                "vk_story_share_url": (
+                    str(payload.get("vk_story_share_source_url") or "")
+                    if str(payload.get("vk_story_share_source_url") or "").startswith("https://vk.com/")
+                    else ""
+                ),
                 "vk_wall_verified": job.platform == "vk" and bool(payload.get("vk_wall_post_verified")),
+                "youtube_reconnect_url": (
+                    reverse("admin:pipeline_admin_publicationjob_youtube_oauth")
+                    + "?"
+                    + urlencode({"project_slug": job.project.slug, "language": job.language})
+                    if job.platform == "youtube" and "invalid_grant" in display_error
+                    else ""
+                ),
                 "publish_error": display_error,
                 "published_at": job.published_at,
                 "change_url": reverse("admin:pipeline_admin_publicationjob_change", args=[job.pk]),
                 "retry_url": (
                     reverse("admin:pipeline_admin_publicationjob_retry", args=[job.pk])
                     if status in _PUBLICATION_ERROR_STATUSES and not vk_processing
+                    else ""
+                ),
+                "retry_explanation": (
+                    "Можно безопасно повторить только эту площадку: остальные публикации запуска не затрагиваются."
+                    if status in _PUBLICATION_ERROR_STATUSES and not vk_processing
+                    else "Повтор заблокирован, потому что публикация уже создана — это защищает от дублей."
+                    if status == "published"
+                    else "Дождитесь итогового статуса; во время загрузки повтор создавать нельзя."
+                    if status in {"approved", "scheduled", "publishing"} or vk_processing
                     else ""
                 ),
             }
@@ -5674,11 +5779,15 @@ class PublicationJobAdmin(admin.ModelAdmin):
 
     def changelist_view(self, request, extra_context=None):
         extra = dict(extra_context or {})
+        extra["title"] = "Заливки"
         extra["prepare_publication_url"] = reverse("admin:pipeline_admin_publicationjob_prepare")
         extra["vk_oauth_url"] = reverse("admin:pipeline_admin_publicationjob_vk_oauth")
         extra["youtube_oauth_url"] = reverse("admin:pipeline_admin_publicationjob_youtube_oauth")
         extra["tiktok_oauth_url"] = reverse("admin:pipeline_admin_publicationjob_tiktok_oauth")
-        extra["publication_monitor"] = _publication_monitor_context(request)
+        extra["publication_monitor"] = (
+            _publication_monitor_context(request) if request.GET.get("bundle") else None
+        )
+        extra["publication_bundle_history"] = _publication_bundle_history_context(request)
         return super().changelist_view(request, extra_context=extra)
 
     def monitor_view(self, request, bundle_key: str):
@@ -5687,7 +5796,7 @@ class PublicationJobAdmin(admin.ModelAdmin):
             raise Http404("Publication run not found.")
         context = {
             **self.admin_site.each_context(request),
-            "title": f"Контроль публикации · {monitor['bundle_key']}",
+            "title": f"Заливка · {monitor['bundle_key']}",
             "publication_monitor": monitor,
             "publication_list_url": reverse("admin:pipeline_admin_publicationjob_changelist"),
         }
