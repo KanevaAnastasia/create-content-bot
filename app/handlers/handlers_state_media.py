@@ -4446,6 +4446,8 @@ _DIALOGUE_SPEAKER_ALIASES = {
     "дедушка": "grandfather",
     "grandson": "grandson",
     "внук": "grandson",
+    "daughter": "daughter",
+    "дочь": "daughter",
     "granddaughter": "granddaughter",
     "внучка": "granddaughter",
     "banana": "banana",
@@ -4519,6 +4521,9 @@ def _dialogue_from_prompt_timing_plan(prompt: str) -> list[dict[str, str]]:
         if not match:
             continue
         speaker = _normalize_dialogue_speaker(match.group(1))
+        # A colon inside narration is punctuation, not an arbitrary speaker label.
+        if speaker not in _DIALOGUE_SPEAKER_PROMPT_LABELS:
+            continue
         text = normalize_speech_phrase_for_voice(match.group(2))
         if speaker and text:
             out.append({"speaker": speaker, "text": text})

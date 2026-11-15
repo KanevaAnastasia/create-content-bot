@@ -10733,3 +10733,33 @@ def test_keep_without_shortening_also_protects_english(monkeypatch):
     )) is False
     assert scene["speech_by_lang"]["en"] == original
     shorten.assert_not_called()
+
+
+
+def test_locked_video_prompt_preserves_narration_before_colon():
+    phrases = {
+        "ru": "Начинаем с сухих ингредиентов: в глубокой миске смешиваем муку, сахар и соль. Затем делаем небольшую ямку и добавляем одно целое яйцо.",
+        "en": "First, the dry ingredients: in a deep bowl, combine flour, sugar, and salt.",
+    }
+    for language, phrase in phrases.items():
+        scene = {"text": phrases["ru"], "speech_by_lang": phrases, "duration_sec": 8}
+        prompt = (
+            f"Mix ingredients. CHARACTERS SPEAKS: {phrase}\n"
+            f"speech_timing_plan:\n- 0.00-8.00s: {phrase}"
+        )
+        assert handlers_state_media._dialogue_from_prompt_timing_plan(prompt) == []
+        for _ in range(3):
+            prompt = handlers_state_media._compose_locked_video_prompt(scene, language, prompt)
+            assert f"CHARACTERS SPEAKS: {phrase}" in prompt
+
+
+def test_timing_dialogue_keeps_colons_inside_named_speaker_phrase():
+    prompt = (
+        "speech_timing_plan:\n"
+        "- 0.00-4.00s: Дочь: Смотри: вот ингредиенты.\n"
+        "- 4.00-8.00s: Бабушка: Начинаем с сухих ингредиентов: мука и соль."
+    )
+    assert handlers_state_media._dialogue_from_prompt_timing_plan(prompt) == [
+        {"speaker": "daughter", "text": "Смотри: вот ингредиенты."},
+        {"speaker": "grandma", "text": "Начинаем с сухих ингредиентов: мука и соль."},
+    ]
