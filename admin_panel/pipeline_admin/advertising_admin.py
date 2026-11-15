@@ -42,7 +42,7 @@ class ProductForm(forms.ModelForm):
 
     class Meta:
         model = AdvertisingProduct
-        fields = ("title", "photos", "comment", "position")
+        fields = ("title", "format", "photos", "comment", "position")
 
     def clean(self):
         cleaned = super().clean()
@@ -65,11 +65,11 @@ class ImportForm(forms.Form):
 @admin.register(AdvertisingProduct)
 class AdvertisingProductAdmin(admin.ModelAdmin):
     form = ProductForm
-    list_display = ("title", "position", "status", "created_at", "completed_at")
-    list_filter = ("status",)
+    list_display = ("title", "format", "position", "status", "created_at", "completed_at")
+    list_filter = ("status", "format")
     search_fields = ("title", "comment")
     readonly_fields = ("status", "preview", "error", "created_at", "completed_at")
-    fields = ("title", "photos", "preview", "comment", "position", "status", "error", "created_at", "completed_at")
+    fields = ("title", "format", "photos", "preview", "comment", "position", "status", "error", "created_at", "completed_at")
     change_list_template = "admin/pipeline_admin/advertising_queue.html"
     actions = ("retry_preparation",)
 
@@ -143,7 +143,7 @@ class AdvertisingProductAdmin(admin.ModelAdmin):
                     position = AdvertisingProduct.objects.aggregate(value=Max("position"))["value"] or 0
                     for index, row in enumerate(rows, 1):
                         AdvertisingProduct.objects.create(title=row["title"], comment=row["comment"], position=position + index,
-                                                          images=[store_photo(data) for data in row["photos"]])
+                                                          images=[store_photo(data) for data in row["photos"]], format=row["format"])
                 self.message_user(request, f"Добавлено товаров: {len(rows)}", messages.SUCCESS)
                 return HttpResponseRedirect(reverse("admin:pipeline_admin_advertisingproduct_changelist"))
             except Exception as exc:

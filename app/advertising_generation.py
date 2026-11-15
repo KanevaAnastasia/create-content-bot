@@ -404,7 +404,7 @@ def generate_advertising_scene_plan(
         + json.dumps(payload, ensure_ascii=False, indent=2)
     )
     if product_brief.get("speech_min_chars"):
-        prompt = prompt.replace("до 105 знаков", f"от {product_brief['speech_min_chars']} до {product_brief['speech_max_chars']} символов с пробелами")
+        prompt = prompt.replace("до 105 знаков", f"не менее {product_brief['speech_min_chars']} символов с пробелами, без верхнего ограничения на этапе сценария; сокращение под видео будет позже")
     from .directorial_notes import RULE
     prompt = RULE + prompt
     raw = gemini_generate_sync(prompt, model_profile=GEMINI_MODEL_PROFILE_CREATIVE)
@@ -424,7 +424,8 @@ def generate_advertising_scene_plan(
         action = _clean_text(candidate.get("action") or candidate.get("visual_description"), 1000)
         if not action:
             action = f"Бабушка показывает применение товара, этап {index + 1}; товар полностью виден рядом с действием."
-        speech = _clean_text(candidate.get("speech_ru"), int(product_brief.get("speech_max_chars") or 105))
+        speech = (" ".join(str(candidate.get("speech_ru") or "").split())
+                  if product_brief.get("speech_min_chars") else _clean_text(candidate.get("speech_ru"), 105))
         if not speech:
             speech = "Показываю следующий шаг, а товар всё время остаётся у нас перед глазами."
         anchors = [_clean_text(item, 180) for item in candidate.get("continuity_anchors") or [] if _clean_text(item, 180)]
@@ -521,12 +522,6 @@ def generate_advertising_production(
         "speech after CHARACTERS SPEAKS:. Do not invent product claims. If feedback is present, revise previous prompts without changing scene count.\n\n"
         + json.dumps(payload, ensure_ascii=False, indent=2)
     )
-    if product_brief.get("speech_min_chars"):
-        prompt = prompt.replace(
-            "speech_by_lang values must be natural translations no longer than 105 characters.",
-            "For Russian, copy the approved input scene speech verbatim, including punctuation; do not shorten it. "
-            "Other languages must be natural translations no longer than 105 characters.",
-        )
     from .directorial_notes import RULE
     prompt = RULE + prompt
     raw = gemini_generate_sync(prompt, model_profile=GEMINI_MODEL_PROFILE_CREATIVE)
@@ -549,8 +544,6 @@ def generate_advertising_production(
         video_by_lang: dict[str, str] = {}
         for language in languages:
             speech = _clean_text(raw_speech.get(language), 105)
-            if language == "ru" and product_brief.get("speech_min_chars"):
-                speech = str(scene.get("text") or "")
             if not speech:
                 speech = _clean_text(scene.get("text"), 105)
             video = _clean_text(raw_video.get(language), 7000)
@@ -562,9 +555,6 @@ def generate_advertising_production(
                     "no watermark, no background music."
                 )
             video = clean_advertising_video_prompt(video, product_brief)
-            if language == "ru" and product_brief.get("speech_min_chars"):
-                from .advertising_speech import replace_spoken_phrase
-                video = replace_spoken_phrase(video, speech)
             if video_continuity.lower() not in video.lower():
                 video = f"{video} {video_continuity}".strip()
             speech_by_lang[language] = speech

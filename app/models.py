@@ -28,6 +28,7 @@ class AdvertisingQueueSchedule(Base):
 
 class AdvertisingProduct(Base):
     __tablename__ = "advertising_products"
+    format: Mapped[str] = mapped_column(String(16), nullable=False, default="clip", server_default="clip")
     id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
     title: Mapped[str] = mapped_column(Text, nullable=False)
     images: Mapped[list] = mapped_column(JSON, nullable=False, default=list)

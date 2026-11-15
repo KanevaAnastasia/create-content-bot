@@ -200,6 +200,7 @@ def workbook_bytes(*, with_image=True):
 def test_excel_import_maps_embedded_images_and_sparse_columns():
     rows = files.read_product_workbook(workbook_bytes())
     assert rows[0]["title"] == "Чайник"
+    assert rows[0]["format"] == "clip"
     assert rows[0]["comment"] == "Для кухни"
     assert len(rows[0]["photos"]) == 1
 
@@ -254,21 +255,20 @@ def test_explicit_publication_requires_selected_platforms(monkeypatch):
     assert "Не выбрана" in update.message.reply_text.call_args.args[0]
 
 
-def test_production_preserves_approved_123_130_character_speech(monkeypatch):
+def test_production_uses_normal_shortening_after_unbounded_draft(monkeypatch):
     from app import advertising_generation as advertising
     phrase = "Этот товар пригодится в повседневных делах: посмотрите, как удобно им пользоваться дома, и решите, подходит ли он именно вам."
     monkeypatch.setattr(advertising, "gemini_generate_sync", lambda *args, **kwargs: json.dumps({
         "prompts": [{"speech_by_lang": {"ru": "Переписанная реплика."},
-                     "video_prompt_by_lang": {"ru": "Camera pan. CHARACTERS SPEAKS: Wrong speech."}}]}))
+                     "video_prompt_by_lang": {"ru": "Camera pan. CHARACTERS SPEAKS: Переписанная реплика."}}]}))
     result = advertising.generate_advertising_production(
         scenes_plan=[{"scene": 1, "text": phrase, "action": "Показывает товар"}],
-        product_brief={"product_name": "Товар", "speech_min_chars": 123, "speech_max_chars": 130},
+        product_brief={"product_name": "Товар", "speech_min_chars": 101},
         target_languages=["ru"],
     )
     scene = result["json_plan"][0]
-    assert scene["speech_by_lang"]["ru"] == phrase
-    assert phrase in scene["video_prompt_by_lang"]["ru"]
-    assert "Wrong speech" not in scene["video_prompt_by_lang"]["ru"]
+    assert scene["speech_by_lang"]["ru"] == "Переписанная реплика."
+    assert "Переписанная реплика." in scene["video_prompt_by_lang"]["ru"]
 
 
 def test_migration_seeds_exact_start_and_can_be_reverted():
@@ -307,11 +307,13 @@ def test_admin_form_accepts_multiple_photos_and_requires_at_least_one():
     from pipeline_admin.advertising_admin import ProductForm
     png = io.BytesIO()
     Image.new("RGB", (8, 8)).save(png, "PNG")
-    form = ProductForm(data={"title": "Чайник", "position": "1", "comment": ""},
+    form = ProductForm(data={"title": "Чайник", "format": "post", "position": "1", "comment": ""},
                        files=MultiValueDict({"photos": [SimpleUploadedFile("front.png", png.getvalue()),
                                                        SimpleUploadedFile("back.png", png.getvalue())]}))
     assert form.is_valid(), form.errors
     assert len(form.cleaned_data["photos"]) == 2
+    assert form.cleaned_data["format"] == "post"
+    assert ProductForm()["format"].value() == "clip"
     empty = ProductForm(data={"title": "Чайник", "position": "1"})
     assert not empty.is_valid()
     assert "photos" in empty.errors
@@ -334,3 +336,96 @@ def test_admin_in_progress_product_has_viewable_detail_without_upload_field():
     assert "photos" not in model_admin.get_fields(request, product)
     assert "preview" in model_admin.get_fields(request, product)
     assert "photos" in model_admin.get_fields(request)
+
+
+def test_draft_speech_has_no_upper_limit_and_ignores_legacy_maximum(monkeypatch):
+    text = "Бабушка показывает средство и объясняет, как внимательно прочитать инструкцию на упаковке перед применением. Затем она выбирает подходящий способ уборки и делится своим планом с котом."
+    monkeypatch.setattr(speech, "gemini_generate_sync", lambda *args, **kwargs: pytest.fail("Long draft should not be shortened"))
+    scenes = [{"speech_ru": text}]
+    speech.validate_scene_speech(scenes, {"speech_min_chars": 101, "speech_max_chars": 130})
+    assert scenes[0]["speech_ru"] == text
+    assert len(text) > 130
+
+
+def test_speech_selects_developed_candidate_with_string_index(monkeypatch):
+    good = "Этот товар пригодится в повседневных делах: посмотрите, как удобно им пользоваться дома, и решите, подходит ли он именно вам."
+    monkeypatch.setattr(speech, "gemini_generate_sync", lambda *args, **kwargs: json.dumps({"phrases": [
+        {"index": "0", "candidates": ["Нет.", good]}]}))
+    scenes = [{"speech_ru": "Коротко."}]
+    speech.validate_scene_speech(scenes, {"speech_min_chars": 101})
+    assert scenes[0]["speech_ru"] == good
+
+
+def test_post_queue_prepares_and_delivers_post_copy_without_clip_speech(db, monkeypatch, tmp_path):
+    from app import advertising_generation as generation
+    from app.state import SESSIONS
+    payload = prepared()
+    for campaign in payload["campaigns"]:
+        campaign.pop("prepared_scene_plan")
+    product = add_product(db, status="preparing", format="post", prepared=payload)
+    photo = tmp_path / "photo.jpg"
+    photo.write_bytes(b"photo")
+    monkeypatch.setattr(queue, "photo_path", lambda _: photo)
+    calls = []
+    def post(**kwargs):
+        calls.append(kwargs["campaign"]["title"])
+        return {"post_text": "Готовый рекламный пост", "image_prompts": ["Одна картинка"]}
+    monkeypatch.setattr(generation, "generate_advertising_post_package", post)
+    monkeypatch.setattr(generation, "generate_advertising_scene_plan", lambda **kwargs: pytest.fail("Post must not generate clip scenes"))
+    queue.prepare_product(product)
+    assert len(calls) == 5
+    queue.prepare_product(product)
+    assert len(calls) == 5
+    bot = SimpleNamespace(send_message=AsyncMock())
+    asyncio.run(queue.deliver_ready_product(bot, 123))
+    assert SESSIONS[123]["advertising_format"] == "post"
+    assert "Готовый рекламный пост" in bot.send_message.call_args_list[1].kwargs["text"]
+
+
+def test_excel_optional_type_column():
+    source = zipfile.ZipFile(io.BytesIO(workbook_bytes()))
+    result = io.BytesIO()
+    with zipfile.ZipFile(result, "w") as target:
+        for name in source.namelist():
+            data = source.read(name)
+            if name == "xl/worksheets/sheet1.xml":
+                data = data.decode().replace('</row>', '<c r="D1" t="inlineStr"><is><t>Тип</t></is></c></row>', 1)
+                pos = data.index('</row>', data.index('<row r="2">'))
+                data = data[:pos] + '<c r="D2" t="inlineStr"><is><t>Пост</t></is></c>' + data[pos:]
+                data = data.encode()
+            target.writestr(name, data)
+    assert files.read_product_workbook(result.getvalue())[0]["format"] == "post"
+
+
+def test_scene_plan_keeps_full_draft_over_130_characters(monkeypatch):
+    from app import advertising_generation as generation
+    text = "Бабушка показывает средство и объясняет, как внимательно прочитать инструкцию на упаковке перед применением. Затем она выбирает подходящий способ уборки и делится своим планом с котом."
+    monkeypatch.setattr(generation, "gemini_generate_sync", lambda *args, **kwargs: json.dumps({"scenes": [
+        {"speech_ru": text, "action": "Показывает товар"} for _ in range(3)]}))
+    result = generation.generate_advertising_scene_plan(source_text="Товар", product_brief={"speech_min_chars": 101})
+    assert all(scene["text"] == text for scene in result["json_plan"])
+
+
+def test_format_migration_defaults_existing_products_to_clip():
+    import importlib.util
+    from pathlib import Path
+    from alembic.migration import MigrationContext
+    from alembic.operations import Operations
+    from sqlalchemy import text
+    migrations = []
+    for name in ("20261113_0027_advertising_queue", "20261115_0028_advertising_format"):
+        path = Path(__file__).resolve().parents[1] / "migrations/versions" / (name + ".py")
+        spec = importlib.util.spec_from_file_location(name, path)
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        migrations.append(module)
+    engine = create_engine("sqlite://")
+    with engine.begin() as connection:
+        with Operations.context(MigrationContext.configure(connection)):
+            migrations[0].upgrade()
+            connection.execute(text("INSERT INTO advertising_products (id, title, images, prepared) VALUES ('1', 'Existing', '[]', '{}')"))
+            migrations[1].upgrade()
+            assert connection.scalar(text("SELECT format FROM advertising_products")) == "clip"
+            migrations[1].downgrade()
+            migrations[0].downgrade()
+    engine.dispose()

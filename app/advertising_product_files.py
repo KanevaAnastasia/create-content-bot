@@ -118,7 +118,11 @@ def read_product_workbook(data: bytes) -> list[dict]:
                 raise ValueError(f"Строка {number}: нужны название и вставленная фотография (Вставка → Рисунки, над ячейками).")
             if len(photos[number]) > 8:
                 raise ValueError(f"Строка {number}: максимум 8 фотографий товара.")
-            rows.append({"title": title, "comment": cells.get(headers.get("комментарий", ""), ""), "photos": photos[number]})
+            raw_format = cells.get(headers.get("тип", headers.get("формат", "")), "").lower()
+            product_format = {"": "clip", "клип": "clip", "clip": "clip", "пост": "post", "post": "post"}.get(raw_format)
+            if product_format is None:
+                raise ValueError(f"Строка {number}: тип должен быть Клип или Пост.")
+            rows.append({"format": product_format, "title": title, "comment": cells.get(headers.get("комментарий", ""), ""), "photos": photos[number]})
         if not rows:
             raise ValueError("В файле нет товаров с фотографиями.")
         if len(rows) > 200:

@@ -7257,12 +7257,13 @@ def _selected_advertising_campaign_text(campaign: dict | str | None) -> str:
 
 async def _ask_advertising_format(update: Update, *, chat_id: int, session: dict) -> bool:
     session["state"] = STATE_WAITING_ADVERTISING_FORMAT_CHOICE
-    session[ADVERTISING_FORMAT_SESSION_KEY] = "clip"
+    selected = "post" if session.get(ADVERTISING_FORMAT_SESSION_KEY) == "post" else "clip"
+    session[ADVERTISING_FORMAT_SESSION_KEY] = selected
     SESSIONS[chat_id] = session
     await _reply_text_with_optional_markup(
         update,
-        "По умолчанию выбран «Клип» — от 3 до 6 сцен Veo. Нажмите «Клип» или отправьте «ОК».\n"
-        "Можно выбрать «Пост» — одно изображение с крупным товаром и персонажами плюс рекламный текст.",
+        f"Выбран «{'Пост' if selected == 'post' else 'Клип'}». Нажмите «ОК», чтобы продолжить, или выберите другой тип.\n"
+        "«Клип» — 3–6 сцен Veo. «Пост» — одно изображение с товаром и рекламный текст.",
         reply_markup=_advertising_format_choice_markup(),
     )
     return True
@@ -7362,18 +7363,20 @@ async def _generate_advertising_post(
             update.message,
             "Готовлю рекламный пост с одним изображением. Сначала покажу текст на апрув, затем картинку.",
         )
-        package = await _call_with_503_retries(
-            update,
-            context,
-            chat_id,
-            "generate_advertising_post_package",
-            lambda: asyncio.to_thread(
-                generate_advertising_post_package,
-                source_text=source_text,
-                product_brief=product_brief,
-                campaign=campaign,
-            ),
-        )
+        package = campaign.get("prepared_post_package") if isinstance(campaign, dict) else None
+        if not isinstance(package, dict):
+            package = await _call_with_503_retries(
+                update,
+                context,
+                chat_id,
+                "generate_advertising_post_package",
+                lambda: asyncio.to_thread(
+                    generate_advertising_post_package,
+                    source_text=source_text,
+                    product_brief=product_brief,
+                    campaign=campaign,
+                ),
+            )
         prompts = package.get("image_prompts") if isinstance(package, dict) else None
         if not isinstance(prompts, list) or not prompts:
             raise RuntimeError("модель не вернула промпт изображения")
@@ -7705,7 +7708,9 @@ async def _handle_advertising_format_choice(
     text: str,
 ) -> bool:
     low = str(text or "").strip().lower()
-    if low in {_ADVERTISING_FORMAT_CLIP_BUTTON.lower(), "ок", "ok"}:
+    if low in {"ок", "ok"}:
+        low = "пост" if session.get(ADVERTISING_FORMAT_SESSION_KEY) == "post" else "клип"
+    if low == _ADVERTISING_FORMAT_CLIP_BUTTON.lower():
         session[ADVERTISING_FORMAT_SESSION_KEY] = "clip"
         session[SERIES_PENDING_NEXT_SESSION_KEY] = SERIES_NEXT_ADVERTISING_PLAN
         SESSIONS[chat_id] = session

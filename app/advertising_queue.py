@@ -94,11 +94,13 @@ def _save_prepared(product_id, payload, *, status="preparing"):
 def prepare_product(product_id):
     from .advertising_generation import (
         analyze_advertising_product, generate_advertising_campaigns, generate_advertising_scene_plan,
+        generate_advertising_post_package,
     )
     with SessionLocal() as db:
         product = db.get(AdvertisingProduct, product_id)
         title, comment, images = product.title, product.comment, list(product.images)
         payload = copy.deepcopy(product.prepared or {})
+        product_format = product.format
     if not images:
         raise ValueError("У товара нет фотографий.")
     for path in images:
@@ -107,10 +109,12 @@ def prepare_product(product_id):
     if not payload.get("brief"):
         brief = analyze_advertising_product(photo_path(images[0]).read_bytes(), source_text=source)
         brief["product_name"] = title
-        brief["speech_min_chars"] = 123
-        brief["speech_max_chars"] = 130
         payload.update(brief=brief, source=source)
         _save_prepared(product_id, payload)
+    # Apply current speech rules to resumed preparations too.
+    payload["brief"]["speech_min_chars"] = 101
+    payload["brief"].pop("speech_max_chars", None)
+    _save_prepared(product_id, payload)
     if not payload.get("campaigns"):
         from .llm_utils import GEMINI_MODEL_PROFILE_CREATIVE, extract_json_object, gemini_generate_sync
         import json
@@ -140,7 +144,12 @@ def prepare_product(product_id):
         payload["campaigns"] = result["campaigns"]
         _save_prepared(product_id, payload)
     for campaign in payload["campaigns"]:
-        if not campaign.get("prepared_scene_plan"):
+        if product_format == "post":
+            if not campaign.get("prepared_post_package"):
+                campaign["prepared_post_package"] = generate_advertising_post_package(
+                    source_text=source, product_brief=payload["brief"], campaign=campaign)
+                _save_prepared(product_id, payload)
+        elif not campaign.get("prepared_scene_plan"):
             campaign["prepared_scene_plan"] = generate_advertising_scene_plan(
                 source_text=source, product_brief=payload["brief"], selected_campaign=campaign)
             _save_prepared(product_id, payload)
@@ -201,6 +210,7 @@ async def deliver_ready_product(bot, chat_id):
             if not row:
                 return
             product_id, title, images, payload = str(row.id), row.title, list(row.images), copy.deepcopy(row.prepared)
+            product_format = row.format
         resuming = session.get(PRODUCT_KEY) == product_id
         if resuming and session.get("state") != STATE_WAITING_ADVERTISING_CAMPAIGN_CHOICE:
             _save_prepared(uuid.UUID(product_id), payload, status="offered")
@@ -214,7 +224,7 @@ async def deliver_ready_product(bot, chat_id):
                 "state": STATE_WAITING_ADVERTISING_CAMPAIGN_CHOICE,
                 "selected_project_key": "grandma_kitchen", "generation_mode": "advertising",
                 "target_languages": ["ru"], "sponsored_content": True,
-                "advertising_format": "clip",
+                "advertising_format": product_format,
                 "advertising_source_text": payload["source"], "user_input": payload["source"],
                 "advertising_product_brief": payload["brief"], "advertising_product_path": images[0],
                 PHOTOS_KEY: images, PRODUCT_KEY: product_id,
@@ -223,13 +233,14 @@ async def deliver_ready_product(bot, chat_id):
             save_session(chat_id, session)  # Fail before sending if persistence is unavailable.
             SESSIONS[chat_id] = session
         messages = [f"Реклама по очереди: {title}\nВсе {len(images)} фото товара уже добавлены в рекламный режим. "
-                    "Подготовила пять вариантов сценария; выберите подходящий."]
+                    f"Тип: {'Пост' if product_format == 'post' else 'Клип'}. Подготовила пять вариантов; выберите подходящий."]
         description = str((payload.get("sales_analysis") or {}).get("selling_description") or "")
         if description:
             messages[0] += "\n\nОписание товара:\n" + description
         for index, campaign in enumerate(payload["campaigns"], 1):
-            plan = campaign["prepared_scene_plan"]
-            messages.append(f"Вариант {index}. {campaign['title']}\n{campaign['idea']}\n\n" + plan["text_plan"])
+            creative = (campaign["prepared_post_package"]["post_text"] if product_format == "post"
+                        else campaign["prepared_scene_plan"]["text_plan"])
+            messages.append(f"Вариант {index}. {campaign['title']}\n{campaign['idea']}\n\n" + creative)
         # Store a delivery cursor: retries don't regenerate or resend confirmed chunks.
         chunks = [text[start:start + 3500] for text in messages for start in range(0, len(text), 3500)]
         for index in range(int(payload.get("delivery_index", 0)), len(chunks)):
@@ -258,8 +269,12 @@ async def tick(bot):
                 product.error = f"{type(exc).__name__}: {str(exc)[:800]}"
                 title = product.title
                 db.commit()
+            from .advertising_speech import SpeechLengthError
+            reason = ("Нейросеть вернула слишком короткие реплики. Фото и карточку менять не нужно. "
+                      if isinstance(exc, SpeechLengthError) else
+                      "Подготовка остановилась; подробности сохранены в поле «Ошибка» карточки товара. ")
             await bot.send_message(chat_id=chat_id, text=f"Не удалось подготовить рекламу «{title}». "
-                                   "Товар сохранён в очереди; исправьте ошибку в админке и нажмите «Повторить подготовку».")
+                                   + reason + "Товар и готовые варианты сохранены. В админке доступно действие «Повторить подготовку товаров с ошибкой».")
         else:
             await deliver_ready_product(bot, chat_id)
 

@@ -4388,3 +4388,16 @@ def test_on_text_navigation_previous_clears_media_pending_state(monkeypatch):
     assert "syntax_fallback_pending" not in scene
     assert "image_model_choice_pending" not in scene
     assert sent_steps == [(0, "start_image_approval")]
+
+
+def test_advertising_post_default_survives_format_review_and_ok(monkeypatch):
+    from app.handlers import handlers_state_scene as module
+    from unittest.mock import AsyncMock
+    session = {ADVERTISING_FORMAT_SESSION_KEY: "post"}
+    update = SimpleNamespace(message=SimpleNamespace(reply_text=AsyncMock()))
+    generate = AsyncMock(return_value=True)
+    monkeypatch.setattr(module, "_generate_advertising_post", generate)
+    asyncio.run(module._ask_advertising_format(update, chat_id=1234, session=session))
+    assert session[ADVERTISING_FORMAT_SESSION_KEY] == "post"
+    asyncio.run(module._handle_advertising_format_choice(update, None, chat_id=1234, session=session, text="ОК"))
+    generate.assert_awaited_once()

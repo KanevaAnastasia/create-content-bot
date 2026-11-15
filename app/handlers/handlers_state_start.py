@@ -1012,7 +1012,7 @@ async def _start_advertising_campaign_choice(
         return True
     session[ADVERTISING_CAMPAIGNS_SESSION_KEY] = campaigns
     session.pop(ADVERTISING_SELECTED_CAMPAIGN_SESSION_KEY, None)
-    session[ADVERTISING_FORMAT_SESSION_KEY] = "clip"
+    session.setdefault(ADVERTISING_FORMAT_SESSION_KEY, "clip")
     session["state"] = STATE_WAITING_ADVERTISING_CAMPAIGN_CHOICE
     SESSIONS[chat_id] = session
     await _reply_text_chunked(update, str(result.get("text") or ""))
