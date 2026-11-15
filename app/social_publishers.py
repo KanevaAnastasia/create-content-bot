@@ -1567,7 +1567,7 @@ def _publish_vk(job: PublicationJob, project_slug: str, persist: Callable[[], No
                 external_id = ""
                 payload = job.payload_json or {}
             elif bool(item.get("processing")):
-                if _vk_upload_is_stale(payload):
+                if _vk_upload_is_stale(payload) and not payload.get("vk_video_recovery_profile"):
                     reset_failed_video(external_id, "processing_timeout")
                     external_id = ""
                     payload = job.payload_json or {}
@@ -1606,7 +1606,7 @@ def _publish_vk(job: PublicationJob, project_slug: str, persist: Callable[[], No
                 reset_failed_video(allocated_id, "vk_reported_corrupt")
                 payload = job.payload_json or {}
             elif bool(item.get("processing")):
-                if _vk_upload_is_stale(payload):
+                if _vk_upload_is_stale(payload) and not payload.get("vk_video_recovery_profile"):
                     reset_failed_video(allocated_id, "processing_timeout")
                     payload = job.payload_json or {}
                 else:
@@ -1925,13 +1925,27 @@ def publish_publication_job(job_id: str | uuid.UUID) -> dict[str, Any]:
             session.commit()
             return {"job_id": str(job.id), "status": job.status, "error": job.publish_error}
         except Exception as exc:
-            job.status = PUBLICATION_STATUS_FAILED
+            # VK may need several minutes to transcode an accepted upload. Keep
+            # polling the exact saved video ID through the normal due queue;
+            # presenting this provider-side wait as a failure invites unsafe
+            # manual retries and duplicate video allocations.
+            vk_processing = (
+                job.platform == "vk"
+                and isinstance(exc, PublicationDeliveryError)
+                and bool((job.payload_json or {}).get("vk_video_processing"))
+            )
+            job.status = (
+                PUBLICATION_STATUS_SCHEDULED if vk_processing else PUBLICATION_STATUS_FAILED
+            )
+            if vk_processing:
+                job.scheduled_at = datetime.now(timezone.utc) + timedelta(minutes=5)
             job.publish_error = f"{type(exc).__name__}: {exc}"[:4000]
             session.commit()
             return {"job_id": str(job.id), "status": job.status, "error": job.publish_error}
         job.status = PUBLICATION_STATUS_PUBLISHED
         job.external_post_id = str(external_post_id or "") or None
         job.published_at = datetime.now(timezone.utc)
+        job.scheduled_at = None
         job.publish_error = None
         session.commit()
         return {"job_id": str(job.id), "status": job.status, "external_post_id": job.external_post_id}

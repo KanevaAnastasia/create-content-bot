@@ -249,6 +249,36 @@ def test_stale_processing_video_is_reuploaded_with_recovery_profile(configured, 
     assert job.payload_json['vk_video_recovery_reason'] == 'processing_timeout'
 
 
+def test_recovery_video_processing_is_preserved_instead_of_allocating_another_duplicate(
+    configured, monkeypatch, job
+):
+    job.external_post_id = '-123_41'
+    job.payload_json = {
+        'vk_upload_started_at': '2026-01-01T00:00:00+00:00',
+        'vk_video_external_id': '-123_41',
+        'vk_video_recovery_profile': True,
+    }
+    calls = setup_api(monkeypatch, job)
+    original = p.requests.post
+
+    def processing(url, **kwargs):
+        if url.rsplit('/', 1)[-1] == 'video.get':
+            calls.append((url, kwargs))
+            return response({'response': {'items': [{
+                'owner_id': -123, 'id': 41, 'processing': 1,
+            }]}})
+        return original(url, **kwargs)
+
+    monkeypatch.setattr(p.requests, 'post', processing)
+
+    with pytest.raises(p.PublicationDeliveryError, match='still processing'):
+        p._publish_vk(job, 'grandma', lambda: None)
+
+    assert job.payload_json['vk_video_external_id'] == '-123_41'
+    assert job.external_post_id == '-123_41'
+    assert 'video.save' not in [url.rsplit('/', 1)[-1] for url, _ in calls]
+
+
 def test_corrupt_video_is_never_attached_to_wall(configured, monkeypatch, job):
     job.payload_json = {
         'vk_upload_started_at': '2026-11-13T09:00:00+00:00',
@@ -308,3 +338,29 @@ def test_dispatcher_preserves_wall_outcome_without_local_video(configured, monke
     assert job.status == expected
     assert job.external_post_id == '-123_42'
     sender.assert_called_once_with(job, 'grandma', session.commit)
+
+
+def test_dispatcher_reschedules_vk_processing_without_manual_retry(configured, monkeypatch, job):
+    job.project = SimpleNamespace(slug='grandma')
+    job.platform, job.status = 'vk', 'approved'
+    job.scheduled_at, job.attempt_count = None, 0
+    job.external_post_id = '-123_42'
+    job.payload_json = {'vk_video_external_id': '-123_42', 'vk_video_processing': True}
+    session = Mock()
+    session.scalar.return_value = job
+    manager = Mock()
+    manager.__enter__ = Mock(return_value=session)
+    manager.__exit__ = Mock(return_value=False)
+    monkeypatch.setattr(p, 'SessionLocal', lambda: manager)
+    monkeypatch.setattr(
+        p,
+        '_publish_vk',
+        Mock(side_effect=p.PublicationDeliveryError('VK is still processing the uploaded video.')),
+    )
+
+    result = p.publish_publication_job(job.id)
+
+    assert result['status'] == 'scheduled'
+    assert job.status == 'scheduled'
+    assert job.scheduled_at is not None
+    assert job.external_post_id == '-123_42'
