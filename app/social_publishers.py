@@ -1354,7 +1354,12 @@ def _vk_video_is_corrupt(item: dict | None) -> bool:
     return any(marker in title for marker in ("повреж", "corrupt", "damaged"))
 
 
-def _vk_upload_is_stale(payload: dict, *, now: datetime | None = None) -> bool:
+def _vk_upload_is_stale(
+    payload: dict,
+    *,
+    now: datetime | None = None,
+    after: timedelta = timedelta(minutes=30),
+) -> bool:
     raw = str(payload.get("vk_upload_started_at") or "").strip()
     if not raw:
         return False
@@ -1365,7 +1370,37 @@ def _vk_upload_is_stale(payload: dict, *, now: datetime | None = None) -> bool:
     if started_at.tzinfo is None:
         started_at = started_at.replace(tzinfo=timezone.utc)
     current = now or datetime.now(timezone.utc)
-    return current - started_at >= timedelta(minutes=30)
+    return current - started_at >= after
+
+
+def _vk_recovery_processing_timed_out(payload: dict) -> bool:
+    """Stop polling a recovery upload which VK never managed to transcode.
+
+    The first stale upload may be replaced once with a conservative delivery
+    profile.  That recovery upload must never be replaced again: doing so made
+    invisible duplicate video objects while VK kept returning ``processing=1``.
+    After two hours an explicit retry remains useful as a read-only recheck of
+    the same ID, but the background queue should no longer poll every few
+    minutes indefinitely.
+    """
+
+    return bool(payload.get("vk_video_recovery_profile")) and _vk_upload_is_stale(
+        payload,
+        after=timedelta(hours=2),
+    )
+
+
+def _vk_raise_processing_wait(payload: dict) -> None:
+    if _vk_recovery_processing_timed_out(payload):
+        raise PublicationNeedsReview(
+            "VK did not finish processing the uploaded video within 2 hours. "
+            "No wall post was created. Retry only this platform to recheck the "
+            "same saved video ID; it will not upload another copy."
+        )
+    raise PublicationDeliveryError(
+        "VK is still processing the uploaded video. Retry only this platform "
+        "after processing completes."
+    )
 
 
 def _vk_story_files(job: PublicationJob) -> list[Path]:
@@ -1576,9 +1611,7 @@ def _publish_vk(job: PublicationJob, project_slug: str, persist: Callable[[], No
                         vk_video_processing=True,
                         external_post_url=f"https://vk.com/video{external_id}",
                     )
-                    raise PublicationDeliveryError(
-                        "VK is still processing the uploaded video. Retry only this platform after processing completes."
-                    )
+                    _vk_raise_processing_wait(job.payload_json or {})
             else:
                 save(vk_video_processing=False)
                 video_ready_checked = True
@@ -1612,9 +1645,7 @@ def _publish_vk(job: PublicationJob, project_slug: str, persist: Callable[[], No
                 else:
                     save(vk_video_processing=True, vk_video_external_id=allocated_id,
                          external_post_url=f"https://vk.com/video{allocated_id}")
-                    raise PublicationDeliveryError(
-                        "VK is still processing the uploaded video. Retry only this platform after processing completes."
-                    )
+                    _vk_raise_processing_wait(job.payload_json or {})
             else:
                 external_id = allocated_id
                 job.external_post_id = external_id
@@ -1708,9 +1739,7 @@ def _publish_vk(job: PublicationJob, project_slug: str, persist: Callable[[], No
             )
         if bool(item.get("processing")):
             save(vk_video_processing=True, external_post_url=f"https://vk.com/video{external_id}")
-            raise PublicationDeliveryError(
-                "VK is still processing the uploaded video. Retry only this platform after processing completes."
-            )
+            _vk_raise_processing_wait(job.payload_json or {})
         save(vk_video_processing=False)
 
     payload = job.payload_json or {}
@@ -1921,6 +1950,8 @@ def publish_publication_job(job_id: str | uuid.UUID) -> dict[str, Any]:
         except (PublicationNeedsReview, zernio_publisher.ZernioPending, zernio_publisher.ZernioNeedsReview) as exc:
             job.status = (PUBLICATION_STATUS_PUBLISHING if isinstance(exc, zernio_publisher.ZernioPending)
                           else PUBLICATION_STATUS_NEEDS_MANUAL_ACTION)
+            if not isinstance(exc, zernio_publisher.ZernioPending):
+                job.scheduled_at = None
             job.publish_error = str(exc)[:4000]
             session.commit()
             return {"job_id": str(job.id), "status": job.status, "error": job.publish_error}

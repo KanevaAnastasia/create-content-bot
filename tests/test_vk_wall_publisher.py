@@ -1,5 +1,6 @@
 """No network: exercise wall delivery and interruption-safe retries."""
 import uuid
+from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 from unittest.mock import Mock
 
@@ -254,7 +255,9 @@ def test_recovery_video_processing_is_preserved_instead_of_allocating_another_du
 ):
     job.external_post_id = '-123_41'
     job.payload_json = {
-        'vk_upload_started_at': '2026-01-01T00:00:00+00:00',
+        'vk_upload_started_at': (
+            datetime.now(timezone.utc) - timedelta(minutes=31)
+        ).isoformat(),
         'vk_video_external_id': '-123_41',
         'vk_video_recovery_profile': True,
     }
@@ -272,6 +275,38 @@ def test_recovery_video_processing_is_preserved_instead_of_allocating_another_du
     monkeypatch.setattr(p.requests, 'post', processing)
 
     with pytest.raises(p.PublicationDeliveryError, match='still processing'):
+        p._publish_vk(job, 'grandma', lambda: None)
+
+    assert job.payload_json['vk_video_external_id'] == '-123_41'
+    assert job.external_post_id == '-123_41'
+    assert 'video.save' not in [url.rsplit('/', 1)[-1] for url, _ in calls]
+
+
+def test_recovery_video_processing_stops_background_polling_after_two_hours(
+    configured, monkeypatch, job
+):
+    job.external_post_id = '-123_41'
+    job.payload_json = {
+        'vk_upload_started_at': (
+            datetime.now(timezone.utc) - timedelta(hours=2, minutes=1)
+        ).isoformat(),
+        'vk_video_external_id': '-123_41',
+        'vk_video_recovery_profile': True,
+    }
+    calls = setup_api(monkeypatch, job)
+    original = p.requests.post
+
+    def processing(url, **kwargs):
+        if url.rsplit('/', 1)[-1] == 'video.get':
+            calls.append((url, kwargs))
+            return response({'response': {'items': [{
+                'owner_id': -123, 'id': 41, 'processing': 1,
+            }]}})
+        return original(url, **kwargs)
+
+    monkeypatch.setattr(p.requests, 'post', processing)
+
+    with pytest.raises(p.PublicationNeedsReview, match='within 2 hours'):
         p._publish_vk(job, 'grandma', lambda: None)
 
     assert job.payload_json['vk_video_external_id'] == '-123_41'
