@@ -7700,6 +7700,23 @@ def _boost_scene_prompt_delivery(prompt: str, language: str) -> str:
     return f"{text.rstrip()} {hint}".strip()
 
 
+async def _request_english_speech_approval(update: Update, session: dict, scene: dict, duration_sec: int) -> bool:
+    _set_scene_speech_pending(
+        session,
+        scene_idx=int(session.get("image_scene_index", 0) or 0),
+        duration_sec=duration_sec,
+        stage="approval",
+    )
+    session[SCENE_SPEECH_PENDING_KEY]["language"] = "en"
+    await _reply_text_with_optional_markup(
+        update,
+        f"Проверьте EN-реплику:\n{_scene_speech_for_language(scene, 'en')}\n\n"
+        "Подтвердите запуск видео или выберите «Изменить фразу».",
+        reply_markup=_scene_speech_approval_markup(session=session),
+    )
+    return True
+
+
 async def _maybe_adjust_english_speech_for_video_budget(
     update: Update,
     *,
@@ -7775,10 +7792,7 @@ async def _maybe_adjust_english_speech_for_video_budget(
             origin="auto_shorten",
         )
         _refresh_scene_language_speech_metadata(scene, "en", status="auto_shortened", auto_shortened=True)
-        await update.message.reply_text(
-            "EN-реплика не поместилась в тайминг, поэтому применено локальное сокращение и генерация продолжается."
-        )
-        return False
+        return await _request_english_speech_approval(update, session, scene, duration_sec)
     _apply_scene_phrase_update_to_scene(
         session,
         scene,
@@ -7793,10 +7807,7 @@ async def _maybe_adjust_english_speech_for_video_budget(
         _compose_locked_video_prompt(scene, "en", _boost_scene_prompt_delivery(shortened["video_prompt"], "en")),
     )
     _refresh_scene_language_speech_metadata(scene, "en", status="auto_shortened", auto_shortened=True)
-    await update.message.reply_text(
-        "English line did not fit the timing, so I rebuilt only the EN phrase and synced the EN video prompt."
-    )
-    return False
+    return await _request_english_speech_approval(update, session, scene, duration_sec)
 
 
 async def _scene_media_video_ok(
@@ -9846,6 +9857,32 @@ async def _handle_waiting_scene_media_state(
         is_ok_pending = text.lower() in {"ок", "ok", "okay", "approve"}
         if text == SCENE_SPEECH_OPTION_APPROVE:
             is_ok_pending = True
+        if pending.get("language") == "en":
+            if stage == "approval" and is_ok_pending:
+                session.pop(SCENE_SPEECH_PENDING_KEY, None)
+                _set_scene_speech_budget_override(scene, "en", True)
+                await reply_text_without_keyboard(update.message, "EN-фраза подтверждена. Генерирую видео…")
+                return await _scene_media_video_ok(
+                    update, context=context, chat_id=chat_id, session=session,
+                    scene=scene, idx=idx, total=len(scenes),
+                )
+            if text == SCENE_SPEECH_OPTION_EDIT:
+                pending["stage"] = "approval_manual_phrase"
+                await _reply_text_with_optional_markup(
+                    update, "Пришлите новую EN-фразу для озвучки.",
+                    reply_markup=ReplyKeyboardRemove(),
+                )
+                return True
+            if not text.strip():
+                await update.message.reply_text("Пришлите EN-фразу или подтвердите «ОК».")
+                return True
+            _apply_scene_phrase_update_to_scene(
+                session, scene, scene_idx=idx, language="en",
+                phrase_text=text.strip(), origin="user",
+            )
+            return await _request_english_speech_approval(
+                update, session, scene, int(pending.get("duration_sec", 6)),
+            )
         if stage == "approval":
             if is_ok_pending:
                 _cancel_scene_speech_timeout(chat_id)
@@ -10063,7 +10100,8 @@ async def _handle_waiting_scene_media_state(
                 return True
             if text == SCENE_SPEECH_OPTION_KEEP_AS_IS:
                 _cancel_scene_speech_timeout(chat_id)
-                _set_scene_speech_budget_override(scene, "ru", True)
+                for language in _scene_target_languages(session, scene):
+                    _set_scene_speech_budget_override(scene, language, True)
                 session.pop(SCENE_SPEECH_PENDING_KEY, None)
                 await reply_text_without_keyboard(
                     update.message,

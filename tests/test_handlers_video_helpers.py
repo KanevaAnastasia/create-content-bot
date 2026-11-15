@@ -9686,8 +9686,7 @@ def test_scene_media_video_ok_boosts_english_prompt_before_shortening(monkeypatc
 
 def test_scene_media_video_ok_shortens_only_english_phrase(monkeypatch):
     async def _gen_ok(*args, **kwargs):
-        assert kwargs["prompt"].startswith("lang:ru") or kwargs["prompt"].startswith("lang:en")
-        return b"fake-mp4"
+        raise AssertionError("EN shortening must wait for approval")
 
     def _shorten(
         scene: dict,
@@ -9745,10 +9744,11 @@ def test_scene_media_video_ok_shortens_only_english_phrase(monkeypatch):
     assert scene["speech_by_lang"]["ru"] == "русская фраза"
     assert scene["speech_by_lang"]["en"] == "short english."
     assert scene["video_results_by_lang"]["ru"]["video_b64"] == _encode_b64(b"ru-old")
-    assert scene["video_approvals_by_lang"]["en"] is False
+    assert scene["video_approvals_by_lang"]["en"] is True
+    assert handlers_state_media._video_regeneration_requested(scene, "en")
 
 
-def test_scene_media_video_ok_english_shorten_failure_falls_back_and_continues(monkeypatch):
+def test_scene_media_video_ok_english_shorten_failure_waits_for_approval(monkeypatch):
     calls: list[str] = []
     messages: list[str] = []
 
@@ -9811,14 +9811,14 @@ def test_scene_media_video_ok_english_shorten_failure_falls_back_and_continues(m
     )
 
     assert out is True
-    assert len(calls) == 1
-    assert calls[0].startswith("lang:en")
+    assert calls == []
     assert scene["speech_by_lang"]["ru"] == "русская фраза"
     assert handlers_state_media.speech_chars_excluding_pauses(
         scene["speech_by_lang"]["en"]
     ) <= handlers_state_media.max_speech_chars_for_duration(8, "en")
     assert scene["video_results_by_lang"]["ru"]["video_b64"] == _encode_b64(b"ru-old")
-    assert scene["video_results_by_lang"]["en"]["video_b64"] == _encode_b64(b"fake-mp4")
+    assert "en" not in scene["video_results_by_lang"]
+    assert any("Подтвердите" in message for message in messages)
     forbidden_prefix = " ".join(["English line", "still looks", "too long"])
     assert not any(forbidden_prefix in message for message in messages)
 
@@ -10662,3 +10662,74 @@ def test_regenerate_story_video_prompt_uses_language_map_without_cooking_rules(m
     assert "Never replace them with a grandmother, cat, kitchen characters" in captured["prompt"]
     assert result.startswith("Vasily lowers his hand")
     assert "voice_lock_full" not in result
+
+
+def test_english_speech_edit_and_approval_preserve_russian(monkeypatch):
+    video_ok = AsyncMock(return_value=True)
+    monkeypatch.setattr(handlers_state_media, "_scene_media_video_ok", video_ok)
+    scene = {
+        "text": "Русская фраза.",
+        "speech_by_lang": {"ru": "Русская фраза.", "en": "Short English."},
+        "video_prompt_by_lang": {"ru": "lang:ru", "en": "lang:en"},
+    }
+    session = {
+        "production": {"json_plan": [scene]},
+        "image_scene_index": 0,
+        "target_languages": ["ru", "en"],
+        "scene_media_substep": "video_prompt",
+        handlers_state_media.SCENE_SPEECH_PENDING_KEY: {
+            "scene_idx": 0, "duration_sec": 8, "stage": "approval", "language": "en",
+        },
+    }
+    update = SimpleNamespace(message=SimpleNamespace(reply_text=AsyncMock()))
+
+    def send(text):
+        return asyncio.run(handlers_state_media._handle_waiting_scene_media_state(
+            update, context=None, chat_id=1, session=session, text=text,
+        ))
+
+    send(handlers_state_media.SCENE_SPEECH_OPTION_EDIT)
+    assert session[handlers_state_media.SCENE_SPEECH_PENDING_KEY]["stage"] == "approval_manual_phrase"
+    send("My full English phrase.")
+    assert scene["speech_by_lang"]["en"] == "My full English phrase."
+    assert scene["text"] == "Русская фраза."
+    assert scene["speech_by_lang"]["ru"] == "Русская фраза."
+    assert session[handlers_state_media.SCENE_SPEECH_PENDING_KEY]["language"] == "en"
+    video_ok.assert_not_called()
+    send(handlers_state_media.SCENE_SPEECH_OPTION_APPROVE)
+    video_ok.assert_awaited_once()
+    assert handlers_state_media.SCENE_SPEECH_PENDING_KEY not in session
+    assert handlers_state_media._scene_speech_budget_override_enabled(scene, "en")
+
+
+def test_keep_without_shortening_also_protects_english(monkeypatch):
+    scene = {
+        "text": "Длинная фраза." * 20,
+        "speech_by_lang": {"en": "Long English phrase. " * 20},
+        "video_prompt_by_lang": {"ru": "lang:ru", "en": "lang:en"},
+    }
+    session = {
+        "production": {"json_plan": [scene]},
+        "image_scene_index": 0,
+        "target_languages": ["ru", "en"],
+        "scene_media_substep": "video_prompt",
+        handlers_state_media.SCENE_SPEECH_PENDING_KEY: {
+            "scene_idx": 0, "duration_sec": 8, "stage": "user_long_phrase_choice",
+        },
+    }
+    update = SimpleNamespace(message=SimpleNamespace(reply_text=AsyncMock()))
+    monkeypatch.setattr(handlers_state_media, "_scene_media_video_ok", AsyncMock(return_value=True))
+    shorten = MagicMock(side_effect=AssertionError("English must remain unchanged"))
+    monkeypatch.setattr(handlers_state_media, "shorten_scene_speech_and_sync_video_prompt_sync", shorten)
+    original = scene["speech_by_lang"]["en"]
+    asyncio.run(handlers_state_media._handle_waiting_scene_media_state(
+        update, context=None, chat_id=1, session=session,
+        text=handlers_state_media.SCENE_SPEECH_OPTION_KEEP_AS_IS,
+    ))
+    assert handlers_state_media._scene_speech_budget_override_enabled(scene, "ru")
+    assert handlers_state_media._scene_speech_budget_override_enabled(scene, "en")
+    assert asyncio.run(handlers_state_media._maybe_adjust_english_speech_for_video_budget(
+        update, session=session, scene=scene, duration_sec=8,
+    )) is False
+    assert scene["speech_by_lang"]["en"] == original
+    shorten.assert_not_called()
