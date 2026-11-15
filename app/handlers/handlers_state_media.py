@@ -6532,6 +6532,9 @@ async def _scene_media_start_ok(
     _invalidate_scene_videos_after_frame_change(scene, _scene_target_languages(session, scene))
     session["scene_media_language_index"] = 0
     session["scene_media_substep"] = SCENE_MEDIA_SUBSTEP_START_IMAGE_APPROVAL
+    from .handlers_state_scene import _maybe_ask_title_on_first_frame
+    if await _maybe_ask_title_on_first_frame(update, session):
+        return True
     if _is_scene_media_ai_approve_enabled(session):
         image_status = await _run_ai_start_frame_check(
             update,
@@ -8295,6 +8298,8 @@ async def _run_scene_media_auto_approve(
     """
     max_steps = 500
     for _ in range(max_steps):
+        if session.get("state") == "state_waiting_overlay_title_style_approval":
+            return True
         scenes, idx = _scene_media_context(session)
         if not scenes:
             await update.message.reply_text("Нет сцен. Начни заново через /generate.")
@@ -8387,6 +8392,8 @@ async def _run_scene_media_ai_approve(
     """
     max_steps = 500
     for _ in range(max_steps):
+        if session.get("state") == "state_waiting_overlay_title_style_approval":
+            return True
         if not _is_scene_media_ai_approve_enabled(session):
             return True
         scenes, idx = _scene_media_context(session)

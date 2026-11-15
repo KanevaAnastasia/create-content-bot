@@ -931,37 +931,13 @@ def _render_overlay_title_preview(
     series_title: str = "",
     series_counter: str = "",
     subtitle: str = "",
+    background: bytes | None = None,
 ) -> bytes:
-    from PIL import Image, ImageDraw
+    from PIL import Image
 
-    width = _OVERLAY_PREVIEW_WIDTH
-    height = _OVERLAY_PREVIEW_HEIGHT
-    image = Image.new("RGB", (width, height), "#e5bf94")
-    draw = ImageDraw.Draw(image)
-    for y in range(height):
-        t = y / height
-        r = int(246 + (198 - 246) * t)
-        g = int(215 + (143 - 215) * t)
-        b = int(175 + (94 - 175) * t)
-        draw.line((0, y, width, y), fill=(r, g, b))
-    draw.rectangle((0, int(height * 0.58), width, height), fill="#b87955")
-    draw.ellipse((160, 990, 920, 1660), fill="#8d5745")
-    draw.ellipse((230, 1050, 850, 1580), fill="#efcf9d")
-    draw.ellipse((395, 760, 685, 1055), fill="#f0c7a8")
-    draw.rectangle((355, 1055, 725, 1440), fill="#74aaa9")
-    draw.rounded_rectangle((105, 1240, 280, 1530), radius=20, fill="#ff6b7e", outline="#7f2e3f", width=6)
-    draw.ellipse((780, 1210, 960, 1530), fill="#ffd85a", outline="#8c6722", width=6)
-
-    overlay = Image.new("RGBA", (width, height), (0, 0, 0, 0))
-    overlay_draw = ImageDraw.Draw(overlay)
-    fade_height = int(height * 0.42)
-    for y in range(fade_height):
-        t = y / max(1, fade_height - 1)
-        smooth = t * t * (3 - 2 * t)
-        alpha = int(255 * 0.24 * (1 - smooth))
-        if alpha > 0:
-            overlay_draw.line((0, y, width, y), fill=(0, 0, 0, alpha))
-    image = Image.alpha_composite(image.convert("RGBA"), overlay).convert("RGB")
+    if not background:
+        raise ValueError("Для превью нужен первый сгенерированный кадр")
+    image = Image.open(io.BytesIO(background)).convert("RGB")
     return render_title_overlay_preview(
         image,
         language=language,
@@ -971,6 +947,33 @@ def _render_overlay_title_preview(
         series_counter=series_counter,
         subtitle=subtitle,
     )
+
+
+def _overlay_first_frame(session: dict) -> bytes | None:
+    from ..scene_media_candidates import selected_image_bytes_for_video
+    scenes = (session.get("production") or {}).get("json_plan") or []
+    if not scenes:
+        return None
+    return selected_image_bytes_for_video(scenes[0], kind="start")
+
+
+async def _maybe_ask_title_on_first_frame(update: Update, session: dict) -> bool:
+    import hashlib
+    if int(session.get("image_scene_index", 0)) != 0 or not session.get(OVERLAY_TITLE_BY_LANG_SESSION_KEY):
+        return False
+    background = _overlay_first_frame(session)
+    if not background:
+        return False
+    signature = hashlib.sha256(background).hexdigest()
+    if session.get("overlay_title_approved_frame") == signature:
+        return False
+    session["overlay_title_review_frame"] = signature
+    if session.get("state") != STATE_WAITING_OVERLAY_TITLE_STYLE_APPROVAL:
+        session["overlay_title_return_state"] = session.get("state")
+    session[OVERLAY_TITLE_PENDING_NEXT_SESSION_KEY] = "first_frame"
+    session["state"] = STATE_WAITING_OVERLAY_TITLE_STYLE_APPROVAL
+    await _ask_overlay_title_style_approval(update, session)
+    return True
 
 
 async def _send_overlay_title_previews(update: Update, session: dict, style: dict[str, object]) -> None:
@@ -993,6 +996,7 @@ async def _send_overlay_title_previews(update: Update, session: dict, style: dic
         try:
             image_bytes = await asyncio.to_thread(
                 _render_overlay_title_preview, language, title, style, series_title, series_counter, subtitle,
+                _overlay_first_frame(session),
             )
         except Exception:
             logger.exception("overlay title preview render failed language=%s", language)
@@ -1002,7 +1006,12 @@ async def _send_overlay_title_previews(update: Update, session: dict, style: dic
         await safe_reply_photo(message, photo=bio, caption=f"Превью верхнего заголовка {label}.")
 
 
-async def _ask_overlay_title_style_approval(update: Update, session: dict) -> bool:
+async def _ask_overlay_title_style_approval(update: Update, session: dict, context=None) -> bool:
+    if not _overlay_first_frame(session):
+        await update.message.reply_text("Оформление заголовка согласуем на первом сгенерированном кадре.")
+        return await _handle_waiting_overlay_title_style_approval_state(
+            update, context, chat_id=update.effective_chat.id, session=session, text="ОК", deferred=True,
+        )
     if str(session.get(PROJECT_KEY_SESSION) or "") == "discipline":
         from .editorial_title_picker import ask_picker
         return await ask_picker(update, session)
@@ -3140,7 +3149,7 @@ async def _approve_story_audio_and_build_scenes(
     if str(session.get(PROJECT_KEY_SESSION) or "") == "discipline":
         session["state"] = STATE_WAITING_OVERLAY_TITLE_STYLE_APPROVAL
         session[OVERLAY_TITLE_PENDING_NEXT_SESSION_KEY] = "editorial_scene_approval"
-        return await _ask_overlay_title_style_approval(update, session)
+        return await _ask_overlay_title_style_approval(update, session, context)
     await _reply_text_chunked(update, scenes["text_plan"])
     await _reply_text_with_optional_markup(
         update,
@@ -5434,7 +5443,7 @@ async def _handle_waiting_overlay_subtitle_ru_state(
         session["state"] = STATE_WAITING_OVERLAY_TITLE_STYLE_APPROVAL
         SESSIONS[chat_id] = session
         _ = context
-        return await _ask_overlay_title_style_approval(update, session)
+        return await _ask_overlay_title_style_approval(update, session, context)
     if _overlay_title_requires_english(session):
         try:
             await reply_text_without_keyboard(update.message, "Перевожу третью строку на английский, ждите.")
@@ -5468,7 +5477,7 @@ async def _handle_waiting_overlay_subtitle_ru_state(
     session["state"] = STATE_WAITING_OVERLAY_TITLE_STYLE_APPROVAL
     SESSIONS[chat_id] = session
     _ = context
-    return await _ask_overlay_title_style_approval(update, session)
+    return await _ask_overlay_title_style_approval(update, session, context)
 
 
 async def _handle_waiting_overlay_subtitle_en_approval_state(
@@ -5524,7 +5533,7 @@ async def _handle_waiting_overlay_subtitle_en_approval_state(
     session["state"] = STATE_WAITING_OVERLAY_TITLE_STYLE_APPROVAL
     SESSIONS[chat_id] = session
     _ = context
-    return await _ask_overlay_title_style_approval(update, session)
+    return await _ask_overlay_title_style_approval(update, session, context)
 
 
 async def _handle_waiting_overlay_title_style_approval_state(
@@ -5534,8 +5543,9 @@ async def _handle_waiting_overlay_title_style_approval_state(
     chat_id: int,
     session: dict,
     text: str,
+    deferred: bool = False,
 ) -> bool:
-    if str(session.get(PROJECT_KEY_SESSION) or "") == "discipline":
+    if not deferred and str(session.get(PROJECT_KEY_SESSION) or "") == "discipline":
         from .editorial_title_picker import handle_picker_input
         if await handle_picker_input(update, session, text):
             SESSIONS[chat_id] = session
@@ -5549,11 +5559,28 @@ async def _handle_waiting_overlay_title_style_approval_state(
             SESSIONS[chat_id] = session
             return await _ask_overlay_subtitle(update, session)
         next_step = str(session.pop(OVERLAY_TITLE_PENDING_NEXT_SESSION_KEY, "") or "").strip()
+        if next_step == "first_frame":
+            session["overlay_title_approved_frame"] = session.pop("overlay_title_review_frame", "")
+            session["state"] = session.pop("overlay_title_return_state")
+            _apply_overlay_title_to_production(session, session.get("production") or {})
+            SESSIONS[chat_id] = session
+            from .handlers_media_scene import _send_next_scene_media_step
+            await update.message.reply_text("Оформление заголовка сохранено.")
+            from .handlers_state_media import (
+                _is_scene_media_ai_approve_enabled, _run_scene_media_ai_approve,
+                _run_scene_media_auto_approve, SCENE_MEDIA_AUTO_APPROVE_SESSION_KEY,
+            )
+            if _is_scene_media_ai_approve_enabled(session):
+                return await _run_scene_media_ai_approve(update, context=context, chat_id=chat_id, session=session)
+            if session.get(SCENE_MEDIA_AUTO_APPROVE_SESSION_KEY):
+                return await _run_scene_media_auto_approve(update, context=context, chat_id=chat_id, session=session)
+            await _send_next_scene_media_step(update, session)
+            return True
         if next_step == "editorial_scene_approval":
             session["state"] = STATE_WAITING_SCENE_APPROVAL
             SESSIONS[chat_id] = session
             await _reply_text_chunked(update, str(session.get("scenes_text") or ""))
-            await _reply_text_with_optional_markup(update, "Оформление сохранено. Проверьте сцены: «ОК» — подготовить кадры; иначе пришлите правку.", reply_markup=ok_only_markup())
+            await _reply_text_with_optional_markup(update, "Проверьте сцены: «ОК» — подготовить кадры; иначе пришлите правку.", reply_markup=ok_only_markup())
             return True
         if next_step == OVERLAY_TITLE_NEXT_SERIES_CHOICE:
             await _ask_series_choice(update, session)

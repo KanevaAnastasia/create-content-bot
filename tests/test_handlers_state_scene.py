@@ -2401,9 +2401,8 @@ def test_scene_approval_with_existing_overlay_title_generates_production(monkeyp
     message_text["value"] = "ОК"
     asyncio.run(on_text(update, context=None))
 
-    assert SESSIONS[1047]["state"] == "state_waiting_overlay_title_style_approval"
     assert SESSIONS[1047][OVERLAY_SUBTITLE_DECIDED_SESSION_KEY] is True
-    asyncio.run(on_text(update, context=None))
+    assert any("первом сгенерированном кадре" in text for text in replies)
 
     assert SESSIONS[1047]["state"] == "waiting_production_bundle_approval"
     assert not any("русский заголовок" in text.lower() for text in replies)
@@ -2498,7 +2497,7 @@ def test_overlay_title_ru_only_skips_english_candidate(monkeypatch):
     assert any("третью строку" in text.lower() for text in replies)
 
 
-def test_overlay_subtitle_text_translates_to_en_before_style_approval(monkeypatch):
+def test_overlay_subtitle_text_translates_to_en_before_style_approval(monkeypatch, generated_title_frame):
     replies: list[str] = []
     photos: list[str] = []
     message_text = {"value": "КБЖУ на 100 гр: 126/10/4/24"}
@@ -2550,7 +2549,7 @@ def test_overlay_subtitle_text_translates_to_en_before_style_approval(monkeypatc
     assert photos == ["overlay_title_preview_ru.png", "overlay_title_preview_en.png"]
 
 
-def test_overlay_subtitle_en_correction_is_saved_before_style_approval():
+def test_overlay_subtitle_en_correction_is_saved_before_style_approval(generated_title_frame):
     replies: list[str] = []
     photos: list[str] = []
     SESSIONS[1055] = {
@@ -2640,7 +2639,7 @@ def test_overlay_title_ru_empty_translation_falls_back_to_russian(monkeypatch):
     assert any("EN: Борщ как у бабушки" in text for text in replies)
 
 
-def test_overlay_title_en_ok_asks_for_style_approval():
+def test_overlay_title_en_ok_asks_for_style_approval(generated_title_frame):
     replies: list[str] = []
     photos: list[tuple[str, str]] = []
     message_text = {"value": "ОК"}
@@ -2691,7 +2690,7 @@ def test_overlay_title_en_ok_asks_for_style_approval():
     assert artifact.payload_json["overlay_title_by_lang"] == {"ru": "Борщ", "en": "Borscht"}
 
 
-def test_overlay_title_preview_receives_series_context(monkeypatch):
+def test_overlay_title_preview_receives_series_context(monkeypatch, generated_title_frame):
     calls: list[tuple[str, str, str, str, str]] = []
     message_text = {"value": "ОК"}
     SESSIONS[1051] = {
@@ -2713,7 +2712,7 @@ def test_overlay_title_preview_receives_series_context(monkeypatch):
         async def reply_photo(self, photo, caption):
             _ = (photo, caption)
 
-    def _fake_preview(language, title, _style, series_title="", series_counter="", subtitle=""):
+    def _fake_preview(language, title, _style, series_title="", series_counter="", subtitle="", background=None):
         calls.append((language, title, series_title, series_counter, subtitle))
         return b"png"
 
@@ -2747,7 +2746,7 @@ def test_overlay_title_en_missing_pending_returns_to_ru_title_state():
     assert any("Введите русский заголовок ещё раз" in text for text in replies)
 
 
-def test_overlay_title_en_correction_asks_for_style_approval():
+def test_overlay_title_en_correction_asks_for_style_approval(generated_title_frame):
     replies: list[str] = []
     photos: list[str] = []
     message_text = {"value": "Real Borscht"}
@@ -2783,7 +2782,7 @@ def test_overlay_title_en_correction_asks_for_style_approval():
     assert photos == ["overlay_title_preview_ru.png", "overlay_title_preview_en.png"]
 
 
-def test_overlay_title_style_preview_failure_does_not_block_approval(monkeypatch):
+def test_overlay_title_style_preview_failure_does_not_block_approval(monkeypatch, generated_title_frame):
     replies: list[str] = []
     photos: list[str] = []
     message_text = {"value": "ОК"}
@@ -2806,7 +2805,7 @@ def test_overlay_title_style_preview_failure_does_not_block_approval(monkeypatch
             _ = caption
             photos.append(getattr(photo, "name", ""))
 
-    def _raise_preview(_language, _title, _style, _series_title="", _series_counter="", _subtitle=""):
+    def _raise_preview(_language, _title, _style, _series_title="", _series_counter="", _subtitle="", _background=None):
         raise RuntimeError("font missing")
 
     monkeypatch.setattr("app.handlers.handlers_state_scene._render_overlay_title_preview", _raise_preview)
@@ -2978,7 +2977,7 @@ def test_production_bundle_empty_feedback_does_not_regenerate(monkeypatch):
     assert not any("Перегенерирую production" in text for text in replies)
 
 
-def test_overlay_title_style_feedback_updates_settings_without_generating(monkeypatch):
+def test_overlay_title_style_feedback_updates_settings_without_generating(monkeypatch, generated_title_frame):
     replies: list[str] = []
     photos: list[str] = []
     calls: list[str] = []
@@ -4401,3 +4400,12 @@ def test_advertising_post_default_survives_format_review_and_ok(monkeypatch):
     assert session[ADVERTISING_FORMAT_SESSION_KEY] == "post"
     asyncio.run(module._handle_advertising_format_choice(update, None, chat_id=1234, session=session, text="ОК"))
     generate.assert_awaited_once()
+
+
+@pytest.fixture
+def generated_title_frame(monkeypatch):
+    from PIL import Image
+    data = io.BytesIO()
+    Image.new("RGB", (1080, 1920), "#123456").save(data, format="PNG")
+    monkeypatch.setattr("app.handlers.handlers_state_scene._overlay_first_frame", lambda session: data.getvalue())
+    return data.getvalue()

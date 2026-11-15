@@ -586,6 +586,9 @@ async def _send_next_scene_media_step(update: Update, session: dict) -> None:
     effective_chat = getattr(update, "effective_chat", None)
     restore_scene_prompt_fields_from_history(getattr(effective_chat, "id", None), session, idx)
     record_checkpoint(getattr(effective_chat, "id", None), session)
+    from .handlers_state_scene import _maybe_ask_title_on_first_frame
+    if await _maybe_ask_title_on_first_frame(update, session):
+        return
     if session.get(SCENE_MEDIA_AUTO_APPROVE_SESSION_KEY):
         return
     if (

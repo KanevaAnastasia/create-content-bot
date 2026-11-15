@@ -19,7 +19,7 @@ def picker_markup():
     ], resize_keyboard=True)
 
 
-def render_card(titles: dict, style: dict) -> bytes:
+def render_card(titles: dict, style: dict, background_bytes: bytes) -> bytes:
     """Use the production ASS renderer, not AI images, for every selectable card."""
     languages = [lang for lang in ('ru', 'en') if titles.get(lang)]
     width, height = 540, 960
@@ -29,9 +29,7 @@ def render_card(titles: dict, style: dict) -> bytes:
     style_id = str(style[STYLE_KEY])
     draw.text((20, 14), f'{style_id}. {STYLES[style_id].name}', font=font, fill='#24282a')
     for index, language in enumerate(languages):
-        # The first video frame does not exist at title selection time.
-        # A neutral light background makes typography and 32% scrim comparable.
-        background = Image.new('RGB', (width, height), '#8b9698')
+        background = Image.open(io.BytesIO(background_bytes)).convert('RGB').resize((width, height))
         data = render_title_overlay_preview(background, language=language, title=titles[language], title_style={**style, "word_timing_by_lang": {}})
         card.paste(Image.open(io.BytesIO(data)), (index * width, 82))
         draw.text((index * width + 20, 48), language.upper(), font=font, fill='#42484a')
@@ -40,9 +38,10 @@ def render_card(titles: dict, style: dict) -> bytes:
     return stream.getvalue()
 
 
-async def _send_card(update, titles, style):
+async def _send_card(update, titles, style, session):
     from .handlers_state_scene import safe_reply_photo
-    data = await asyncio.to_thread(render_card, titles, style)
+    from .handlers_state_scene import _overlay_first_frame
+    data = await asyncio.to_thread(render_card, titles, style, _overlay_first_frame(session))
     stream = io.BytesIO(data)
     stream.name = f'editorial_style_{style[STYLE_KEY]}.png'
     await safe_reply_photo(update.message, photo=stream, caption=f'Стиль {style[STYLE_KEY]} · {STYLES[str(style[STYLE_KEY])].name}')
@@ -59,9 +58,9 @@ async def ask_picker(update, session, *, all_styles=True):
         parts = await propose_parts(titles)
     style.update({PARTS_KEY: parts, 'dim_opacity': style.get('dim_opacity', DEFAULT_DIM)})
     session[OVERLAY_TITLE_STYLE_SESSION_KEY] = style
-    await update.message.reply_text('Выберите оформление заголовка. На карточках ваш текст; фон условный, затемнение всего кадра 32%.')
+    await update.message.reply_text('Выберите оформление заголовка. На карточках ваш текст; фон — первый сгенерированный кадр.')
     for style_id in STYLE_IDS if all_styles else (str(style.get(STYLE_KEY) or '1'),):
-        await _send_card(update, titles, {**style, STYLE_KEY: style_id})
+        await _send_card(update, titles, {**style, STYLE_KEY: style_id}, session)
     await update.message.reply_text(
         'Нажмите номер стиля. Смысловые части:\n' + '\n'.join(f'{lang.upper()}: ' + ' | '.join(value) for lang, value in parts.items())
         + '\nМожно исправить: RU: У меня | нет | энергии (или EN: I have | no | energy). '
@@ -100,7 +99,7 @@ async def handle_picker_input(update, session, text):
         style['dim_opacity'] = int(dim.group(1)) / 100
     session[OVERLAY_TITLE_STYLE_SESSION_KEY] = style
     if style.get(STYLE_KEY):
-        await _send_card(update, titles, style)
+        await _send_card(update, titles, style, session)
         await update.message.reply_text('Если оформление подходит — «ОК». Можно выбрать другой стиль.', reply_markup=picker_markup())
     else:
         await ask_picker(update, session)
