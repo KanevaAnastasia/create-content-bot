@@ -1357,7 +1357,7 @@ _SYNTAX_VEO_QUEUE_LIMIT_RE = re.compile(
 def _syntax_veo_uploaded_reference_count_sync(page: Any) -> int:
     with contextlib.suppress(Exception):
         text = str(page.locator("body").inner_text() or "")
-        match = re.search(r"Загружено\s*\(\s*(\d+)\s*/", text, flags=re.IGNORECASE)
+        match = re.search(r"Загружен{1,2}[оа]\s*\(\s*(\d+)\s*/", text, flags=re.IGNORECASE)
         if match:
             return max(0, int(match.group(1)))
     return 0
@@ -1468,7 +1468,7 @@ def _submit_syntax_veo_generate_sync(page: Any, *, timeout_ms: int) -> str:
 
 def _open_syntax_veo_page_sync(playwright: Any, url: str, timeout_ms: int) -> tuple[Any, Any]:
     """Retry a broken bundled browser before any generation can be submitted."""
-    for channel in (None, "chrome"):
+    for attempt, channel in enumerate((None, "chrome", "chrome", "chrome")):
         browser = None
         try:
             kwargs = {"headless": True}
@@ -1483,7 +1483,8 @@ def _open_syntax_veo_page_sync(playwright: Any, url: str, timeout_ms: int) -> tu
             if browser is not None:
                 with contextlib.suppress(Exception):
                     browser.close()
-            if channel is not None or (not launch_failed and "ERR_SOCKET_NOT_CONNECTED" not in str(exc)):
+            retryable = "ERR_SOCKET_NOT_CONNECTED" in str(exc) or (channel is None and launch_failed)
+            if attempt == 3 or not retryable:
                 raise
             logger.warning("syntax.veo.webapp_retry_system_chrome err=%s", _sanitize_syntax_webview_error(exc))
     raise RuntimeError("Syntax Veo webview did not open.")
@@ -1727,12 +1728,10 @@ async def _run_syntax_veo_configure_flow(
         timeout_sec=max(30, int(deadline - time.monotonic())),
     )
     if configure_error:
-        return _result(
-            success=False,
-            video_bytes=None,
-            video_uri=None,
-            provider_message=configure_error,
-            attempt_id=attempt_id,
+        initial_last_info = configure_error
+        logger.warning(
+            "syntax.veo.ui_unconfirmed attempt_id=%s; waiting_for_telegram_result=true error=%s",
+            attempt_id, configure_error,
         )
     return await _poll_syntax_bot_until_video(
         client,
@@ -2949,20 +2948,22 @@ async def _run_batch_fallback_async(
                 timeout_sec=timeout,
             )
             if configure_error:
-                results[request.key] = _result(
-                    success=False,
-                    video_bytes=None,
-                    video_uri=None,
-                    provider_message=configure_error,
-                    attempt_id=request.attempt_id,
+                # A WebView error does not prove that generation failed: the
+                # click may have reached Syntx, or the user may finish the form.
+                # Keep the request correlated and collect its Telegram result
+                # without submitting (and potentially charging) a second job.
+                last_info = configure_error
+                logger.warning(
+                    "syntax_batch.veo_ui_unconfirmed key=%s attempt_id=%s; waiting_for_telegram_result=true error=%s",
+                    request.key, request.attempt_id, configure_error,
                 )
-                continue
             submission_status_ids[request.key] = await _capture_syntax_submission_status(
                 client, target, after_id=max(sent_ids),
             )
             logger.info("syntax_batch.status_bound key=%s message_ids=%s",
                         request.key, sorted(submission_status_ids[request.key]))
-            logger.info("syntax_batch.veo_submitted key=%s attempt_id=%s", request.key, request.attempt_id)
+            logger.info("syntax_batch.veo_waiting key=%s attempt_id=%s ui_confirmed=%s",
+                        request.key, request.attempt_id, not bool(configure_error))
             request_runtime.append((request, reply_anchor, sent_ids, last_info))
 
         if not request_runtime:

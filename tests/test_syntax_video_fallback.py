@@ -1878,7 +1878,8 @@ def test_try_generate_via_syntax_parallel_uses_distinct_sessions(monkeypatch):
     assert set(seen_sessions) == {"session-a", "session-b"}
 
 
-def test_try_generate_via_syntax_batch_sends_all_requests_before_waiting(monkeypatch):
+@pytest.mark.parametrize("configure_error", [None, "Syntax Veo UI configure failed: upload counter timeout"])
+def test_try_generate_via_syntax_batch_sends_all_requests_before_waiting(monkeypatch, configure_error):
     import app.syntax_telethon_fallback as telethon_fallback
 
     class _ReplyTo:
@@ -1962,7 +1963,7 @@ def test_try_generate_via_syntax_batch_sends_all_requests_before_waiting(monkeyp
 
     async def _fake_submit_webview(*_args, **kwargs):
         events.append(f"submit:{kwargs['prompt']}")
-        return None
+        return configure_error
 
     monkeypatch.setattr(telethon_fallback, "TelegramClient", _FakeClient)
     monkeypatch.setattr(telethon_fallback, "StringSession", lambda value: value)

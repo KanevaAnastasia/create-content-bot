@@ -63,3 +63,55 @@ def test_old_six_second_veo_request_uses_eight(monkeypatch):
         configure_button=None, prompt='Chicken', start_image=b'png', duration_sec=6,
         aspect_ratio='9:16', timeout_sec=60)) is None
     assert fill.call_args.kwargs['duration_sec'] == 8
+
+
+@pytest.mark.parametrize("label", ["Загружено (1/2)", "Загруженно (1/50)", "Загруженна (1 / 11)"])
+def test_veo_accepts_upload_counter_spelling_variants(label):
+    from app import syntax_telethon_fallback as s
+    page = Mock()
+    page.locator.return_value.inner_text.return_value = label
+    assert s._syntax_veo_uploaded_reference_count_sync(page) == 1
+
+
+def test_veo_retries_system_chrome_socket_failure_after_missing_bundled_browser():
+    broken, good = Mock(), Mock()
+    broken.new_page.return_value.goto.side_effect = RuntimeError('net::ERR_SOCKET_NOT_CONNECTED')
+    launch = Mock(side_effect=[RuntimeError("Executable doesn't exist"), broken, good])
+    browser, _ = _open_syntax_veo_page_sync(
+        SimpleNamespace(chromium=SimpleNamespace(launch=launch)), 'https://example.test', 30000)
+    assert browser is good
+    broken.close.assert_called_once()
+    assert launch.call_count == 3
+
+
+def test_veo_socket_retries_are_bounded():
+    broken = Mock()
+    broken.new_page.return_value.goto.side_effect = RuntimeError('net::ERR_SOCKET_NOT_CONNECTED')
+    launch = Mock(return_value=broken)
+    with pytest.raises(RuntimeError, match='ERR_SOCKET_NOT_CONNECTED'):
+        _open_syntax_veo_page_sync(
+            SimpleNamespace(chromium=SimpleNamespace(launch=launch)), 'https://example.test', 30000)
+    assert launch.call_count == 4
+    assert broken.close.call_count == 4
+
+
+def test_single_veo_keeps_polling_after_webview_error(monkeypatch):
+    import asyncio
+    import time
+    from unittest.mock import AsyncMock
+    from app import syntax_telethon_fallback as s
+    submit = AsyncMock(return_value="upload counter timeout")
+    result = object()
+    poll = AsyncMock(return_value=result)
+    monkeypatch.setattr(s, '_submit_syntax_veo_webview', submit)
+    monkeypatch.setattr(s, '_poll_syntax_bot_until_video', poll)
+    actual = asyncio.run(s._run_syntax_veo_configure_flow(
+        None, None, bot_entity=None, configure_message=SimpleNamespace(id=15),
+        configure_button=None, prompt='lang:ru test', start_image=b'png',
+        duration_sec=8, aspect_ratio='9:16', reply_anchor=10, sent_ids={10, 11},
+        attempt_id='test', poll=1, deadline=time.monotonic() + 60, timeout=60,
+        initial_last_info='', expected_lang_token='lang:ru'))
+    assert actual is result
+    submit.assert_awaited_once()
+    assert poll.call_args.kwargs['sent_ids'] == {10, 11, 15}
+    assert poll.call_args.kwargs['initial_last_info'] == 'upload counter timeout'
