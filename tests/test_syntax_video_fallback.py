@@ -1973,7 +1973,9 @@ def test_try_generate_via_syntax_batch_sends_all_requests_before_waiting(monkeyp
     monkeypatch.setenv("TELEGRAM_API_HASH", "hash")
     monkeypatch.setenv("TELETHON_STRING_SESSION", "session")
 
+    sink = {}
     results = try_generate_via_syntax_batch(
+        result_sink=sink,
         requests=[
             BatchFallbackRequest(key="ru", prompt="lang:ru prompt", start_image=_syntax_test_frame_bytes()),
             BatchFallbackRequest(key="en", prompt="lang:en prompt", start_image=_syntax_test_frame_bytes()),
@@ -1984,6 +1986,8 @@ def test_try_generate_via_syntax_batch_sends_all_requests_before_waiting(monkeyp
         acquire_timeout_sec=5,
     )
 
+    assert results is sink
+    assert sink["en"].video_bytes == b"mp4-content"
     assert results["ru"].success is True
     assert results["en"].success is True
     assert events[:12] == [

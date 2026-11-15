@@ -73,10 +73,12 @@ def try_generate_via_syntax_batch(
     syntax_provider: str | None = None,
     aspect_ratio: str = "9:16",
     audio_enabled: bool = True,
+    result_sink: dict[str, FallbackResult] | None = None,
 ) -> dict[str, FallbackResult]:
     """Try generating multiple videos via one Syntax Telegram session."""
     return run_syntax_telethon_fallback_batch(
         requests=requests,
+        result_sink=result_sink,
         model=model,
         duration_sec=duration_sec,
         timeout_sec=timeout_sec,

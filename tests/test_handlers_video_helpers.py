@@ -10763,3 +10763,36 @@ def test_timing_dialogue_keeps_colons_inside_named_speaker_phrase():
         {"speaker": "daughter", "text": "Смотри: вот ингредиенты."},
         {"speaker": "grandma", "text": "Начинаем с сухих ингредиентов: мука и соль."},
     ]
+
+
+def test_syntax_batch_outer_timeout_preserves_completed_english(monkeypatch):
+    import threading
+    from app.handlers import handlers_media_core as core
+    captured = {}
+    ready = threading.Event()
+    release = threading.Event()
+    def batch(**kwargs):
+        captured.update(kwargs)
+        kwargs['result_sink']['en'] = FallbackResult(
+            success=True, video_bytes=b'english-video', video_uri=None,
+            provider_message='ok', attempt_id='en')
+        ready.set()
+        release.wait(2)
+        return kwargs['result_sink']
+    original_wait = asyncio.wait_for
+    async def timeout_after_partial(awaitable, *, timeout):
+        if not captured:
+            task = asyncio.create_task(awaitable)
+            while not ready.is_set():
+                await asyncio.sleep(0.001)
+            task.cancel()
+            release.set()
+            raise TimeoutError
+        return await original_wait(awaitable, timeout=timeout)
+    monkeypatch.setattr(core, '_syntax_fallback_env_enabled', lambda: True)
+    monkeypatch.setattr(core, 'try_generate_via_syntax_batch', batch)
+    monkeypatch.setattr(core.asyncio, 'wait_for', timeout_after_partial)
+    result = asyncio.run(core._attempt_syntax_video_fallback_batch(
+        requests=[core.BatchFallbackRequest(key=k, prompt=f'lang:{k}', start_image=b'img') for k in ('en', 'ru')],
+        model='veo3_fast', duration_sec=8))
+    assert result == {'en': b'english-video'}

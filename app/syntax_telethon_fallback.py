@@ -1450,20 +1450,34 @@ def _submit_syntax_veo_generate_sync(page: Any, *, timeout_ms: int) -> str:
     repeated accepted click returns "Эта генерация уже отправлена".
     """
 
-    try:
-        return _click_syntax_kling_generate_sync(
-            page,
-            timeout_ms=15_000,
-            wait_for_form_ready=False,
-        )
-    except SyntaxVeoQueueFullError:
-        logger.info("syntax.veo.submit_queue_rejected waiting_for_slot=true")
-        _wait_for_syntax_veo_queue_slot_sync(page, timeout_ms=timeout_ms)
-        return _click_syntax_kling_generate_sync(
-            page,
-            timeout_ms=15_000,
-            wait_for_form_ready=False,
-        )
+    for attempt in range(3):
+        # Retry the same draft, never create a fresh paid request here.
+        text = ""
+        with contextlib.suppress(Exception):
+            text = str(_syntax_kling_submit_snapshot_sync(page).get("text") or "")
+        if _KLING_SUBMISSION_ALREADY_SENT_RE.search(text):
+            return "started"
+        try:
+            return _click_syntax_kling_generate_sync(
+                page, timeout_ms=15_000, wait_for_form_ready=False,
+            )
+        except SyntaxVeoQueueFullError:
+            if attempt == 2:
+                raise
+            logger.info("syntax.veo.submit_queue_rejected waiting_for_slot=true")
+            _wait_for_syntax_veo_queue_slot_sync(page, timeout_ms=timeout_ms)
+        except Exception as exc:
+            # Explicit rejection is terminal. Retry only failed UI interaction
+            # or missing acknowledgement, on the same idempotent WebView.
+            retryable = any(marker in str(exc).lower() for marker in (
+                "timeout", "timed out", "did not confirm generation", "detached",
+            ))
+            if attempt == 2 or not retryable:
+                raise
+            logger.warning("syntax.veo.submit_retry attempt=%s error=%s",
+                           attempt + 1, _sanitize_syntax_webview_error(exc))
+            page.wait_for_timeout(1500 * (attempt + 1))
+    raise RuntimeError("Syntax Veo submit attempts exhausted.")
 
 
 def _open_syntax_veo_page_sync(playwright: Any, url: str, timeout_ms: int) -> tuple[Any, Any]:
@@ -1487,6 +1501,7 @@ def _open_syntax_veo_page_sync(playwright: Any, url: str, timeout_ms: int) -> tu
             if attempt == 3 or not retryable:
                 raise
             logger.warning("syntax.veo.webapp_retry_system_chrome err=%s", _sanitize_syntax_webview_error(exc))
+            time.sleep(1.5 * (attempt + 1))
     raise RuntimeError("Syntax Veo webview did not open.")
 
 
@@ -2724,9 +2739,10 @@ async def _run_batch_fallback_async(
     syntax_provider: str | None,
     aspect_ratio: str = "9:16",
     audio_enabled: bool = True,
+    result_sink: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     _ = model
-    results: dict[str, Any] = {}
+    results: dict[str, Any] = result_sink if result_sink is not None else {}
     if not requests:
         return results
     if _normalize_syntax_provider(syntax_provider, model) == SYNTAX_PROVIDER_KLING:
@@ -2843,6 +2859,8 @@ async def _run_batch_fallback_async(
             "Add more sessions or increase SYNTAX_FALLBACK_LOCK_TIMEOUT_SEC."
         )
         for request in ready:
+            if request.key in results:
+                continue
             results[request.key] = _result(
                 success=False,
                 video_bytes=None,
@@ -3047,6 +3065,8 @@ async def _run_batch_fallback_async(
                         provider_message=msg_out or (pmsg or "Syntax fallback ok."),
                         attempt_id=state["request"].attempt_id,
                     )
+                    logger.info("syntax_batch.video_received key=%s message_id=%s attempt_id=%s",
+                                key, mid, state["request"].attempt_id)
                     pending_states.pop(key, None)
                     return
                 if retry_later:
@@ -3110,6 +3130,8 @@ async def _run_batch_fallback_async(
             else f"Syntax Telethon SQLite error: {exc}"
         )
         for request in ready:
+            if request.key in results:
+                continue
             results[request.key] = _result(
                 success=False,
                 video_bytes=None,
@@ -3120,6 +3142,8 @@ async def _run_batch_fallback_async(
         return results
     except Exception as exc:
         for request in ready:
+            if request.key in results:
+                continue
             results[request.key] = _result(
                 success=False,
                 video_bytes=None,
@@ -3176,11 +3200,13 @@ def run_syntax_telethon_fallback_batch(
     syntax_provider: str | None = None,
     aspect_ratio: str = "9:16",
     audio_enabled: bool = True,
+    result_sink: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Run one Telethon session that sends multiple Syntax requests before waiting for replies."""
     return asyncio.run(
         _run_batch_fallback_async(
             requests=requests,
+            result_sink=result_sink,
             model=model,
             duration_sec=duration_sec,
             timeout_sec=timeout_sec,

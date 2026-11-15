@@ -115,3 +115,36 @@ def test_single_veo_keeps_polling_after_webview_error(monkeypatch):
     submit.assert_awaited_once()
     assert poll.call_args.kwargs['sent_ids'] == {10, 11, 15}
     assert poll.call_args.kwargs['initial_last_info'] == 'upload counter timeout'
+
+
+def test_veo_retries_button_timeout_on_same_page(monkeypatch):
+    from app import syntax_telethon_fallback as s
+    page = Mock()
+    monkeypatch.setattr(s, '_syntax_kling_submit_snapshot_sync', lambda p: {"text": "Сгенерировать"})
+    click = Mock(side_effect=[RuntimeError('Locator.click: Timeout 15000ms exceeded'), 'started'])
+    monkeypatch.setattr(s, '_click_syntax_kling_generate_sync', click)
+    assert s._submit_syntax_veo_generate_sync(page, timeout_ms=30000) == 'started'
+    assert click.call_count == 2
+    assert all(call.args == (page,) for call in click.call_args_list)
+
+
+def test_veo_does_not_click_again_if_previous_attempt_was_accepted(monkeypatch):
+    from app import syntax_telethon_fallback as s
+    page = Mock()
+    snapshots = iter([{"text": "Сгенерировать"}, {"text": "Эта генерация уже отправлена"}])
+    monkeypatch.setattr(s, '_syntax_kling_submit_snapshot_sync', lambda p: next(snapshots))
+    click = Mock(side_effect=RuntimeError('did not confirm generation'))
+    monkeypatch.setattr(s, '_click_syntax_kling_generate_sync', click)
+    assert s._submit_syntax_veo_generate_sync(page, timeout_ms=30000) == 'started'
+    click.assert_called_once()
+
+
+def test_veo_button_retry_is_bounded_and_rejection_is_terminal(monkeypatch):
+    from app import syntax_telethon_fallback as s
+    monkeypatch.setattr(s, '_syntax_kling_submit_snapshot_sync', lambda p: {"text": ""})
+    for error, count in [('Locator.click: Timeout', 3), ('UI rejected generation', 1)]:
+        click = Mock(side_effect=RuntimeError(error))
+        monkeypatch.setattr(s, '_click_syntax_kling_generate_sync', click)
+        with pytest.raises(RuntimeError, match=error):
+            s._submit_syntax_veo_generate_sync(Mock(), timeout_ms=30000)
+        assert click.call_count == count

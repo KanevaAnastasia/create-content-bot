@@ -8117,10 +8117,10 @@ async def _scene_media_video_ok(
                 await _reply_text_with_optional_markup(
                     update,
                     (
-                        "Syntax вернул не весь набор языков. Автоматически в Vertex не ухожу.\n\n"
+                        "Не удалось получить все видео из Syntax. Автоматически в Vertex не ухожу.\n\n"
                         f"Языки сцены: {', '.join(sorted(expected_syntax_keys))}\n"
-                        f"Готово из Syntax: {', '.join(ready_syntax_keys) or 'ничего'}\n"
-                        f"Не пришли из Syntax: {', '.join(missing_syntax_keys)}\n\n"
+                        f"Получено ботом из Syntax: {', '.join(ready_syntax_keys) or 'пока ничего'}\n"
+                        f"Бот ещё не получил: {', '.join(missing_syntax_keys)}\n\n"
                         "Напишите `Syntax`, чтобы отправить недостающие языки ещё раз через Syntax, "
                         "или `Vertex`, чтобы запустить Vertex/Veo для недостающих языков."
                     ),

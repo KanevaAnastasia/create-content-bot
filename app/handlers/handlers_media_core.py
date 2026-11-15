@@ -1184,11 +1184,13 @@ async def _attempt_syntax_video_fallback_batch(
     timeout_sec = int(timeout_sec or _positive_int_env("SYNTAX_FALLBACK_TIMEOUT_SEC", SYNTAX_FALLBACK_DEFAULT_TIMEOUT_SEC))
     lock_timeout_sec = int(acquire_timeout_sec or _positive_int_env("SYNTAX_FALLBACK_LOCK_TIMEOUT_SEC", timeout_sec))
 
+    partial_results: dict[str, Any] = {}
     try:
         results = await asyncio.wait_for(
             asyncio.to_thread(
                 try_generate_via_syntax_batch,
                 requests=requests,
+                result_sink=partial_results,
                 model=model,
                 duration_sec=duration_sec,
                 timeout_sec=timeout_sec,
@@ -1206,7 +1208,9 @@ async def _attempt_syntax_video_fallback_batch(
             timeout_sec,
             len(requests),
         )
-        return {}
+        results = partial_results.copy()
+        logger.info("video.syntax_batch retained_after_timeout keys=%s",
+                    sorted(key for key, result in results.items() if result.success))
 
     output: dict[str, bytes] = {}
     payload_hashes: dict[str, str] = {}
