@@ -44,6 +44,7 @@ from .publications import (
 
 
 DEFAULT_REQUEST_TIMEOUT = (20, 300)
+YOUTUBE_UPLOAD_CHUNK_SIZE = 2 * 1024 * 1024
 INSTAGRAM_TOKEN_REFRESH_WINDOW_SECONDS = 7 * 24 * 60 * 60
 SUPPORTED_DIRECT_PLATFORMS = frozenset({"youtube", "instagram", "tiktok", "vk"})
 
@@ -367,29 +368,53 @@ def _publish_youtube(
             raise PublicationNeedsReview(
                 "YouTube accepted all bytes but returned no video id; retry will reconcile the saved session."
             )
-        state.update({"stage": "uploading", "offset": offset})
-        save_state(state)
+        # Send bounded chunks rather than the whole remaining 150-300 MB file in
+        # one request.  Parallel platform delivery can otherwise starve the socket
+        # long enough to hit its write timeout.  Every 308 response records the
+        # server-confirmed byte boundary, so a retry resumes the same session and
+        # can never create a duplicate video.
         with video_path.open("rb") as handle:
-            handle.seek(offset)
-            upload_response = requests.put(
-                upload_url,
-                headers={
-                    **headers,
-                    "Content-Type": mime_type,
-                    "Content-Length": str(total_size - offset),
-                    "Content-Range": f"bytes {offset}-{total_size - 1}/{total_size}",
-                },
-                data=handle,
-                timeout=DEFAULT_REQUEST_TIMEOUT,
-            )
-        if upload_response.status_code == 308:
-            state.update({"stage": "uploading"})
-            save_state(state)
-            raise PublicationDeliveryError(
-                "YouTube upload is incomplete; retry resumes the same upload session."
-            )
-        upload_payload = _response_json(upload_response, "YouTube video upload")
-        video_id = str(upload_payload.get("id") or "").strip()
+            while offset < total_size and not video_id:
+                handle.seek(offset)
+                chunk_end = min(offset + YOUTUBE_UPLOAD_CHUNK_SIZE, total_size) - 1
+                chunk = handle.read(chunk_end - offset + 1)
+                if len(chunk) != chunk_end - offset + 1:
+                    raise PublicationDeliveryError("YouTube video changed or became unreadable during upload.")
+                state.update({"stage": "uploading", "offset": offset})
+                save_state(state)
+                upload_response = requests.put(
+                    upload_url,
+                    headers={
+                        **headers,
+                        "Content-Type": mime_type,
+                        "Content-Length": str(len(chunk)),
+                        "Content-Range": f"bytes {offset}-{chunk_end}/{total_size}",
+                    },
+                    data=chunk,
+                    timeout=DEFAULT_REQUEST_TIMEOUT,
+                )
+                if upload_response.status_code == 308:
+                    committed = str(upload_response.headers.get("Range") or "").strip()
+                    if not committed.startswith("bytes=0-"):
+                        raise PublicationDeliveryError(
+                            "YouTube did not confirm the uploaded chunk; retry will reconcile the saved session."
+                        )
+                    try:
+                        next_offset = int(committed.split("-", 1)[1]) + 1
+                    except ValueError as exc:
+                        raise PublicationDeliveryError(
+                            "YouTube returned an invalid resumable byte range."
+                        ) from exc
+                    if next_offset <= offset or next_offset > total_size:
+                        raise PublicationDeliveryError(
+                            "YouTube returned a non-progressing resumable byte range."
+                        )
+                    offset = next_offset
+                    state.update({"stage": "uploading", "offset": offset})
+                    save_state(state)
+                    continue
+                upload_payload = _response_json(upload_response, "YouTube video upload")
+                video_id = str(upload_payload.get("id") or "").strip()
     if not video_id:
         raise PublicationDeliveryError("YouTube upload completed without a video id.")
     state.update({"fingerprint": fingerprint, "video_id": video_id, "stage": "uploaded"})

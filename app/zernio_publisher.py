@@ -6,7 +6,10 @@ Retries use the job UUID; accepted posts are polled, never recreated.
 from __future__ import annotations
 
 import mimetypes
+import os
 import re
+import subprocess
+import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Callable
@@ -18,6 +21,7 @@ from .publication_config import project_env
 
 BASE_URL = "https://zernio.com/api/v1"
 CONFIG_KEYS = ("ZERNIO_API_KEY", "ZERNIO_TIKTOK_ACCOUNT_ID", "ZERNIO_TIKTOK_USERNAME")
+DIRECT_UPLOAD_MAX_BYTES = 64 * 1024**2
 
 
 class ZernioError(RuntimeError):
@@ -30,6 +34,41 @@ class ZernioPending(ZernioError):
 
 class ZernioNeedsReview(ZernioError):
     """Cannot safely retry without reconciling the remote state."""
+
+
+def _delivery_video(path: Path) -> Path:
+    """Keep Zernio's single presigned PUT small enough for weak uplinks."""
+    if path.stat().st_size <= DIRECT_UPLOAD_MAX_BYTES:
+        return path
+    destination = path.with_name(f"{path.stem}.zernio.v1.mp4")
+    if (destination.is_file() and destination.stat().st_size > 0
+            and destination.stat().st_mtime_ns >= path.stat().st_mtime_ns):
+        return destination
+    from .ai_approval_service import _resolve_ffmpeg
+
+    ffmpeg = _resolve_ffmpeg()
+    if not ffmpeg:
+        raise ZernioError("Zernio delivery video preparation requires ffmpeg.")
+    temporary = destination.with_name(f".{destination.stem}.{uuid.uuid4().hex}.tmp.mp4")
+    try:
+        subprocess.run([
+            ffmpeg, "-hide_banner", "-loglevel", "error", "-y", "-i", str(path),
+            "-map", "0:v:0", "-map", "0:a:0?",
+            "-vf", "scale=720:1280:force_original_aspect_ratio=decrease:force_divisible_by=2,"
+                   "pad=720:1280:(ow-iw)/2:(oh-ih)/2,setsar=1,fps=30",
+            "-c:v", "libx264", "-profile:v", "main", "-pix_fmt", "yuv420p",
+            "-preset", "fast", "-b:v", "1800k", "-maxrate", "2200k", "-bufsize", "4400k",
+            "-g", "60", "-c:a", "aac", "-b:a", "128k", "-ar", "48000", "-ac", "2",
+            "-movflags", "+faststart", str(temporary),
+        ], check=True, capture_output=True, timeout=1200)
+        if not temporary.is_file() or temporary.stat().st_size <= 0:
+            raise ZernioError("Zernio delivery video preparation produced an empty file.")
+        os.replace(temporary, destination)
+    except (OSError, subprocess.SubprocessError) as exc:
+        raise ZernioError("Zernio delivery video preparation failed.") from exc
+    finally:
+        temporary.unlink(missing_ok=True)
+    return destination
 
 
 def _id(value: str) -> str:
@@ -93,6 +132,8 @@ class ZernioClient:
         return account
 
     def upload(self, path: Path) -> str:
+        if (mimetypes.guess_type(path.name)[0] or "").startswith("video/"):
+            path = _delivery_video(path)
         size = path.stat().st_size
         content_type = mimetypes.guess_type(path.name)[0]
         if content_type not in {"video/mp4", "video/quicktime", "video/webm", "image/jpeg", "image/png", "image/webp"}:
@@ -172,7 +213,14 @@ def apply_post(job, data: dict, persist: Callable[[], None]) -> str:
         host = urlparse(url).hostname or ""
         if urlparse(url).scheme == "https" and (host == "tiktok.com" or host.endswith(".tiktok.com")):
             _save(job, persist, external_post_url=url)
-        return str(entry.get("platformPostId") or post_id)
+            url_id = url.rstrip("/").rsplit("/", 1)[-1]
+            platform_id = str(entry.get("platformPostId") or "")
+            return platform_id if platform_id.isdigit() else (url_id if url_id.isdigit() else post_id)
+        # Zernio can briefly label delivery as published while still returning
+        # an internal ``v_pub_url~...`` placeholder.  Do not turn that into the
+        # permanent external ID: the next status poll normally supplies the real
+        # TikTok permalink and numeric video ID.
+        raise ZernioPending("Zernio reports published; awaiting the final TikTok permalink.")
     if status in {"failed", "error", "cancelled", "canceled"}:
         raise ZernioError(f"TikTok delivery {status}; inspect Zernio post {post_id}. Retry reuses this post.")
     raise ZernioPending(f"Zernio: {status}. Awaiting TikTok confirmation; do not create a duplicate.")

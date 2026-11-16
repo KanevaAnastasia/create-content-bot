@@ -287,6 +287,42 @@ def test_youtube_retry_resumes_saved_session_without_creating_duplicate(
     assert put.call_args_list[-1].kwargs["headers"]["Content-Range"] == "bytes 3-5/6"
 
 
+def test_youtube_upload_uses_confirmed_bounded_chunks(monkeypatch, tmp_path: Path) -> None:
+    video = tmp_path / "video.mp4"
+    video.write_bytes(b"abcdef")
+    job = Mock(
+        language="ru",
+        video_path=str(video),
+        title="Title",
+        description="Description",
+        payload_json={},
+    )
+    monkeypatch.setattr("app.social_publishers.YOUTUBE_UPLOAD_CHUNK_SIZE", 3)
+    monkeypatch.setattr("app.social_publishers._youtube_access_token", lambda *_args: "token")
+    monkeypatch.setenv("PUBLISH_GRANDMA_KITCHEN_YOUTUBE_CHANNEL_ID_RU", "channel-1")
+
+    channel = Mock(ok=True, status_code=200)
+    channel.json.return_value = {"items": [{"id": "channel-1"}]}
+    monkeypatch.setattr("app.social_publishers.requests.get", Mock(return_value=channel))
+    initialized = Mock(ok=True, status_code=200, headers={"Location": "https://upload.example/session"})
+    initialized.json.return_value = {}
+    monkeypatch.setattr("app.social_publishers.requests.post", Mock(return_value=initialized))
+
+    first = Mock(ok=False, status_code=308, headers={"Range": "bytes=0-2"})
+    second = Mock(ok=True, status_code=200, headers={})
+    second.json.return_value = {"id": "video-123"}
+    put = Mock(side_effect=[first, second])
+    monkeypatch.setattr("app.social_publishers.requests.put", put)
+
+    assert _publish_youtube(job, "grandma_kitchen", Mock()) == "video-123"
+    assert [call.kwargs["headers"]["Content-Range"] for call in put.call_args_list] == [
+        "bytes 0-2/6",
+        "bytes 3-5/6",
+    ]
+    assert [call.kwargs["data"] for call in put.call_args_list] == [b"abc", b"def"]
+    assert job.payload_json["youtube_upload"]["video_id"] == "video-123"
+
+
 def test_instagram_readiness_only_requires_project_credentials(monkeypatch) -> None:
     monkeypatch.setenv("PUBLISH_GRANDMA_KITCHEN_INSTAGRAM_ACCESS_TOKEN", "token")
     monkeypatch.setenv("PUBLISH_GRANDMA_KITCHEN_INSTAGRAM_BUSINESS_ACCOUNT_ID_RU", "account")

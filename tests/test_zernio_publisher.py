@@ -1,4 +1,5 @@
 import uuid
+from pathlib import Path
 from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 from unittest.mock import Mock
@@ -34,6 +35,16 @@ def published():
     return {"post": {"_id": POST, "status": "published", "platforms": [{"platform": "tiktok",
             "accountId": ACCOUNT, "status": "published", "platformPostId": "123",
             "platformPostUrl": "https://www.tiktok.com/@grandma/video/123"}]}}
+
+
+def test_published_placeholder_waits_for_final_tiktok_permalink(job):
+    data = {"post": {"_id": POST, "status": "published", "platforms": [{
+        "platform": "tiktok", "accountId": ACCOUNT, "status": "published",
+        "platformPostId": "v_pub_url~temporary", "platformPostUrl": "",
+    }]}}
+    job.payload_json["zernio_account_id"] = ACCOUNT
+    with pytest.raises(z.ZernioPending, match="final TikTok permalink"):
+        z.apply_post(job, data, Mock())
 
 
 def fake_client(monkeypatch):
@@ -189,6 +200,26 @@ def test_media_upload_never_sends_api_key_to_storage(configured, monkeypatch, tm
     client.upload(path)
     assert put.call_args.kwargs["headers"] == {"Content-Type": "video/mp4"}
     assert put.call_args.kwargs["allow_redirects"] is False
+
+
+def test_large_media_is_prepared_once_before_zernio_upload(monkeypatch, tmp_path):
+    source = tmp_path / "video.mp4"
+    source.write_bytes(b"large")
+    monkeypatch.setattr(z, "DIRECT_UPLOAD_MAX_BYTES", 3)
+    monkeypatch.setattr("app.ai_approval_service._resolve_ffmpeg", lambda: "/fake/ffmpeg")
+
+    calls = []
+    def transcode(command, **_kwargs):
+        calls.append(command)
+        Path(command[-1]).write_bytes(b"small")
+    monkeypatch.setattr(z.subprocess, "run", transcode)
+
+    prepared = z._delivery_video(source)
+    assert prepared.name == "video.zernio.v1.mp4"
+    assert prepared.read_bytes() == b"small"
+    assert len(calls) == 1
+    assert z._delivery_video(source) == prepared
+    assert len(calls) == 1
 
 
 @pytest.mark.parametrize("outcome, expected", [
