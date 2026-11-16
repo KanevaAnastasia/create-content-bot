@@ -1,5 +1,6 @@
 import asyncio
 import time
+import pytest
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
@@ -41,12 +42,13 @@ def test_single_poll_rechecks_unknown_status_edited_into_error(monkeypatch):
     assert client.reads == 2
 
 
-def test_batch_binds_english_status_before_it_is_edited_without_reply_or_language():
+@pytest.mark.parametrize("initial_text", ["Ожидайте, видео в очереди.", "Задание зарегистрировано.", "❌ Произошла ошибка. Попробуйте ещё раз."])
+def test_batch_binds_english_status_before_it_is_edited_without_reply_or_language(initial_text):
     def msg(mid, text):
         return SimpleNamespace(id=mid, out=False, reply_to=None, raw_text=text,
                                entities=[], video=None, document=None)
 
-    client = SimpleNamespace(get_messages=AsyncMock(return_value=msg(808003, 'Ожидайте, видео в очереди.')))
+    client = SimpleNamespace(get_messages=AsyncMock(return_value=msg(808003, initial_text)))
     status_ids = asyncio.run(syntax._capture_syntax_submission_status(client, None, after_id=808002))
     assert status_ids == {808003}
     states = {
@@ -67,3 +69,36 @@ def test_batch_binds_english_status_before_it_is_edited_without_reply_or_languag
     ))
     assert result[-1] is True
     assert 'ru' in states  # English failure does not depend on Russian completion.
+
+
+@pytest.mark.parametrize('text', [
+    'Промпт сохранён ✅ Чтобы выбрать параметры и запустить генерацию, перейдите в Настройки',
+    'Файл сохранён ✅ Чтобы выбрать параметры и запустить генерацию, перейдите в Настройки',
+    'Чтобы начать генерацию, откройте «Настройки»',
+])
+def test_setup_acknowledgements_are_not_pending_jobs(text):
+    assert syntax._text_looks_like_syntax_pending_status(text) is False
+
+
+def test_both_unknown_statuses_bind_to_their_own_language_and_fail_immediately():
+    states = {}
+    for key, anchor, status_id in [('en', 818539, 818540), ('ru', 818551, 818552)]:
+        status = SimpleNamespace(id=status_id, out=False, reply_to=None,
+            raw_text='Задание зарегистрировано.', entities=[], video=None, document=None)
+        client = SimpleNamespace(get_messages=AsyncMock(return_value=status))
+        bound = asyncio.run(syntax._capture_syntax_submission_status(client, None, after_id=anchor))
+        assert bound == {status_id}
+        states[key] = dict(request=SimpleNamespace(expected_lang_token=f'lang:{key}'),
+            sent_ids={anchor}, reply_anchor=anchor, pending_refetch=bound,
+            submission_status_ids=bound)
+    for key, status_id in [('ru', 818552), ('en', 818540)]:
+        error = SimpleNamespace(id=status_id, out=False, reply_to=None,
+            raw_text='❌ Произошла ошибка\n\nПопробуйте ещё раз.',
+            entities=[], video=None, document=None)
+        assert syntax._batch_message_candidate_keys(error, states) == [key]
+        state = states[key]
+        result = asyncio.run(syntax._process_bot_message(
+            None, message=error, sent_ids=state['sent_ids'] | state['submission_status_ids'],
+            expected_lang_token=f'lang:{key}'))
+        assert result[-1] is True
+        del states[key]

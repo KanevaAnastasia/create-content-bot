@@ -1874,6 +1874,9 @@ def _syntax_bot_message_is_hard_reject(text: str, _urls: list[str]) -> bool:
 def _text_looks_like_syntax_pending_status(text: str) -> bool:
     """Syntax often *edits* the same message from status to final link — keep re-reading it."""
     low = (text or "").lower()
+    # Setup acknowledgements also contain "генерация", but are not jobs.
+    if re.search(r"(?:промпт|файл)\s+сохран|prompt\s+saved|file\s+saved|чтобы\s+начать\s+генерацию", low):
+        return False
     markers = (
         "ожидает выполнения",
         "ожидайте",
@@ -2246,7 +2249,12 @@ async def _capture_syntax_submission_status(client: Any, target: Any, *, after_i
         return set()
     mid = int(getattr(latest, "id", 0) or 0)
     text = _extract_text(latest)
-    if mid <= after_id or not _text_looks_like_syntax_pending_status(text):
+    if mid <= after_id or _syntax_find_configure_button(latest) is not None:
+        return set()
+    # This is the new response to the current submission, captured before
+    # dispatching the next language. Bind even an unknown status or an
+    # immediate failure: Syntx later edits this same ID without reply_to/lang.
+    if re.search(r"(?:промпт|файл)\s+сохран|prompt\s+saved|file\s+saved", text, re.IGNORECASE):
         return set()
     return {mid}
 
@@ -3006,6 +3014,9 @@ async def _run_batch_fallback_async(
                 return
             candidate_keys = _batch_message_candidate_keys(message, pending_states)
             if not candidate_keys and _message_looks_like_video(message):
+                if all(int(getattr(message, "id", 0) or 0) <= state["reply_anchor"]
+                       for state in pending_states.values()):
+                    return
                 logger.warning(
                     "syntax_batch.unmatched_video message_id=%s pending_keys=%s",
                     int(getattr(message, "id", 0) or 0),
@@ -3022,7 +3033,8 @@ async def _run_batch_fallback_async(
                     continue
                 if mid in state["processed"] and state["processed_revisions"].get(mid) == revision:
                     continue
-                correlation_ids = set(state["sent_ids"]) | set(state["pending_refetch"])
+                correlation_ids = (set(state["sent_ids"]) | set(state["pending_refetch"])
+                                   | set(state.get("submission_status_ids", set())))
                 if mid in state["pending_refetch"] or mid in state["processed_revisions"]:
                     correlation_ids.add(mid)
                 out = await _process_bot_message(
