@@ -58,7 +58,7 @@ def test_music_only_overrides_holiday_series():
     assert holiday_music({}) is None
     path, volume = holiday_music({'series_theme': HOLIDAY_THEME})
     assert path.endswith('/assets/music/17-melodija.mp3')
-    assert volume == 0.18
+    assert volume == 0.5
 
 
 def test_holiday_replaces_white_but_keeps_selected_colour():

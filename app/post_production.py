@@ -23,7 +23,7 @@ from sqlalchemy import select
 
 from .ai_approval_service import _resolve_ffmpeg
 from .db import SessionLocal
-from .series_theme import holiday_dish_color, holiday_font, holiday_music, themed_fonts
+from .series_theme import holiday_dish_color, holiday_font, holiday_music, holiday_music_filter, themed_fonts
 from .models import Project
 from .scene_media_candidates import (
     DEFAULT_SCENE_VIDEO_SPEED_COEF,
@@ -3485,6 +3485,7 @@ def _render_subtitled_music_master(
             )
     subtitle_filter = _subtitle_filter(subtitles_path)
     effective_music_volume = _apply_db_attenuation(music_volume, BACKGROUND_MUSIC_ATTENUATION_DB)
+    music_filter = holiday_music_filter(music_path)
     has_source_audio = _has_audio_stream(clean_path)
     if music_path:
         if has_source_audio:
@@ -3507,7 +3508,7 @@ def _render_subtitled_music_master(
                 "-filter_complex",
                 f"[0:v]{subtitle_filter}[v];"
                 f"[0:a]volume={SOURCE_AUDIO_VOLUME:.4f}{voice_duration_filter}[voice];"
-                f"[1:a]volume={effective_music_volume:.4f}[music];"
+                f"[1:a]{music_filter}volume={effective_music_volume:.4f}[music];"
                 "[voice][music]amix=inputs=2:duration=first:dropout_transition=0:normalize=0[a]",
                 "-map",
                 "[v]",
@@ -3540,7 +3541,7 @@ def _render_subtitled_music_master(
             "-i",
             str(music_path),
             "-filter_complex",
-            f"[0:v]{subtitle_filter}[v];[1:a]volume={effective_music_volume:.4f}[a]",
+            f"[0:v]{subtitle_filter}[v];[1:a]{music_filter}volume={effective_music_volume:.4f}[a]",
             "-map",
             "[v]",
             "-map",

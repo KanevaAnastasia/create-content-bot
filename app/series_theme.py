@@ -47,7 +47,15 @@ def holiday_music(style):
     path = Path(__file__).resolve().parents[1] / "assets/music/17-melodija.mp3"
     if not path.is_file():
         raise FileNotFoundError(f"Series music is missing: {path}")
-    return str(path), 0.18
+    return str(path), 0.5
+
+
+def holiday_music_filter(path):
+    """Level the quiet holiday recording before applying background gain."""
+    expected = Path(__file__).resolve().parents[1] / "assets/music/17-melodija.mp3"
+    if path and Path(path).resolve() == expected.resolve():
+        return "loudnorm=I=-16:TP=-2:LRA=7,"
+    return ""
 
 
 def holiday_dish_color(style):

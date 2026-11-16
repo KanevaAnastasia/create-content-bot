@@ -1680,7 +1680,8 @@ def test_subtitle_text_removes_veo_stress_markers():
     assert post_production._normalize_subtitle_text("Мягкий бЕлый мусс") == "Мягкий белый мусс"
 
 
-def test_render_subtitled_music_mix_keeps_source_audio_leading(monkeypatch, tmp_path):
+@pytest.mark.parametrize("holiday", [False, True])
+def test_render_subtitled_music_mix_keeps_source_audio_leading(monkeypatch, tmp_path, holiday):
     clean = tmp_path / "clean.mp4"
     subtitles = tmp_path / "subtitles.ass"
     music = tmp_path / "music.mp3"
@@ -1705,7 +1706,7 @@ def test_render_subtitled_music_mix_keeps_source_audio_leading(monkeypatch, tmp_
         ffmpeg="/usr/bin/ffmpeg",
         clean_path=clean,
         subtitles_path=subtitles,
-        music_path=str(music),
+        music_path=post_production.holiday_music({"series_theme": "grandma_christmas"})[0] if holiday else str(music),
         music_volume=0.18,
         dest_path=dest,
     ) is True
@@ -1713,7 +1714,11 @@ def test_render_subtitled_music_mix_keeps_source_audio_leading(monkeypatch, tmp_
     assert "subtitles=filename=" in filter_complex
     assert ":fontsdir=" in filter_complex
     assert "[0:a]volume=1.0000,apad=whole_dur=6.000,atrim=duration=6.000,asetpts=N/SR/TB[voice]" in filter_complex
-    assert "[1:a]volume=0.1274[music]" in filter_complex
+    if holiday:
+        assert "[1:a]loudnorm=I=-16:TP=-2:LRA=7,volume=0.1274[music]" in filter_complex
+    else:
+        assert "[1:a]volume=0.1274[music]" in filter_complex
+        assert "loudnorm" not in filter_complex
     assert "amix=inputs=2:duration=first:dropout_transition=0:normalize=0[a]" in filter_complex
     assert "-stream_loop" in captured["cmd"]
     assert "-shortest" in captured["cmd"]
