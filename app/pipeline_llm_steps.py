@@ -17,9 +17,7 @@ from .llm_utils import GEMINI_MODEL_PROFILE_CREATIVE, gemini_generate_sync
 
 
 FINAL_SCENE_SUBSCRIBE_CTA = "Подписывайтесь на бабушку, тут много вкусных и простых рецептов"
-FINAL_SCENE_SUBSCRIBE_CTA_VEO3 = (
-    "подписЫвайтесь на бАбушку [пауза] тут мнОго вкУсных и простЫх рецЕптов"
-)
+FINAL_SCENE_SUBSCRIBE_CTA_VEO3 = FINAL_SCENE_SUBSCRIBE_CTA
 RUSSIAN_YO_RULE = (
     "Правило русской буквы ё для ОЗВУЧКИ: в voiceover-полях `text`, `dialogue.text`, `speech` "
     "и `CHARACTERS SPEAKS` используй нормативную русскую орфографию. Ставь `ё` только в словах, "
