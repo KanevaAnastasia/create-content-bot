@@ -947,7 +947,8 @@ def test_build_upscaled_post_production_reuses_existing_clean_master(tmp_path, m
     assert [item["stage"] for item in progress_events] == ["reuse_clean", "upscale_building", "upscale_ready", "persisting"]
 
 
-def test_build_subtitled_post_production_reuses_existing_upscaled_master(tmp_path, monkeypatch):
+@pytest.mark.parametrize("holiday", [False, True])
+def test_build_subtitled_post_production_reuses_existing_upscaled_master(tmp_path, monkeypatch, holiday):
     source = tmp_path / "final_upscaled_4k_master_ru.mp4"
     source.write_bytes(b"upscaled-source")
     scene = {
@@ -981,9 +982,11 @@ def test_build_subtitled_post_production_reuses_existing_upscaled_master(tmp_pat
         upscaled_video_path=source,
         language="ru",
         progress_callback=progress_events.append,
+        overlay_title_style={"series_theme": "grandma_christmas"} if holiday else None,
     )
 
-    assert rendered_inputs == [("/usr/bin/ffmpeg", source, "/tmp/music.mp3", 0.2)]
+    expected_music = post_production.holiday_music({"series_theme": "grandma_christmas"}) if holiday else ("/tmp/music.mp3", 0.2)
+    assert rendered_inputs == [("/usr/bin/ffmpeg", source, *expected_music)]
     payload = out["renders_by_language"]["ru"]["subtitled_music"]
     assert payload["source_variant"] == "upscaled_4k"
     assert payload["source_video_path"] == str(source)

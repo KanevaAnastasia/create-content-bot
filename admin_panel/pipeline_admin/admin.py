@@ -1871,6 +1871,7 @@ def _build_final_videos_for_run(
             upscaled_video_path=source_upscaled_video_path,
             language=target_language,
             project_slug=project_slug,
+            overlay_title_style=overlay_title_style,
             progress_callback=progress_callback,
             use_candidate_subtitle_snapshot=True,
             include_background_music=not is_story_workflow,

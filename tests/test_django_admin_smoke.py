@@ -2260,6 +2260,7 @@ def test_django_admin_first_subtitle_build_does_not_call_speech_to_text(monkeypa
     production = {
         "json_plan": [{"scene": 1, "duration_sec": 8, "text": "scene"}],
         "overlay_title_by_lang": {"ru": "Борщ"},
+        "overlay_title_style": {"series_theme": "grandma_christmas"},
     }
     session = {"production": production}
 
@@ -2276,11 +2277,11 @@ def test_django_admin_first_subtitle_build_does_not_call_speech_to_text(monkeypa
             AssertionError("default subtitle build must remain free")
         ),
     )
-    monkeypatch.setattr(
-        admin_module,
-        "build_subtitled_post_production_from_upscaled_master",
-        lambda *_args, **_kwargs: {"renders_by_language": {"ru": {"subtitled_music": {}}}},
-    )
+    def build_subtitled(*_args, **kwargs):
+        assert kwargs["overlay_title_style"]["series_theme"] == "grandma_christmas"
+        return {"renders_by_language": {"ru": {"subtitled_music": {}}}}
+
+    monkeypatch.setattr(admin_module, "build_subtitled_post_production_from_upscaled_master", build_subtitled)
     monkeypatch.setattr(admin_module, "persist_post_production_artifacts", lambda *_args, **_kwargs: None)
 
     admin_module._build_final_videos_for_run(

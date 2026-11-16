@@ -4488,6 +4488,7 @@ def build_subtitled_post_production_from_upscaled_master(
     progress_callback: Any | None = None,
     use_candidate_subtitle_snapshot: bool = True,
     include_background_music: bool = True,
+    overlay_title_style: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     ffmpeg = _resolve_ffmpeg()
     if not ffmpeg:
@@ -4515,7 +4516,7 @@ def build_subtitled_post_production_from_upscaled_master(
 
     source_w, source_h = _video_dimensions(source_path)
     music_path, music_volume = (
-        _resolve_music_path(project_slug) if include_background_music else (None, 0.0)
+        (holiday_music(overlay_title_style) or _resolve_music_path(project_slug)) if include_background_music else (None, 0.0)
     )
     subtitle_entries = _subtitle_entries_for_language_from_plan(
         scenes,
