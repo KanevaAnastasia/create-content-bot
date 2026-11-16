@@ -1928,7 +1928,9 @@ def _write_burned_subtitle_ass(
             )
         elif fit is not None:
             series_row_offsets.append(
-                _title_series_main_row_offset(layout, fit)
+                max(0, _title_series_main_row_offset(layout, fit) - int(round(layout.height * 0.012)))
+                if holiday_font("series", language)
+                else _title_series_main_row_offset(layout, fit)
             )
         else:
             series_row_offsets.append(_title_series_row_offset(layout, language))
@@ -2196,9 +2198,9 @@ def _write_burned_subtitle_ass(
                 )
             if counter_text:
                 if holiday_font("series", language):
-                    day_pos_x = layout.width - title_margin_h
+                    day_pos_x = title_margin_h
                     day_pos_y = holiday_day_y - int(round(holiday_day_size * _title_series_day_y_shift_ratio(language)))
-                    counter_text = "{\\an9}" + counter_text
+                    counter_text = "{\\an7}" + counter_text
                 elif is_story_series:
                     series_font_size = fit.series_font_size if fit is not None else _title_series_font_size(layout)
                     day_font_size = max(

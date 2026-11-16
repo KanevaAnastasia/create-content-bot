@@ -101,7 +101,7 @@ def test_snow_mask_aligns_with_base_in_final_renderer(tmp_path, text):
     ('ru', 'Имбирное печенье', 'Новогодние рецепты', 'день 1 из 10'),
     ('en', 'Gingerbread Cookies', 'Christmas Recipes', 'day 1 of 10'),
 ])
-def test_holiday_counter_has_own_right_aligned_row(tmp_path, language, title, series, counter):
+def test_holiday_counter_has_own_left_aligned_row(tmp_path, language, title, series, counter):
     import re
     cues = [pp._build_title_overlay_cue({language: title}, language=language, duration_sec=2),
             pp._build_title_series_overlay_cue({language: series}, {language: counter}, language=language, duration_sec=2)]
@@ -110,9 +110,9 @@ def test_holiday_counter_has_own_right_aligned_row(tmp_path, language, title, se
                                   title_style={'series_theme': HOLIDAY_THEME}, video_width=1080, video_height=1920)
     content = path.read_text()
     day = next(line for line in content.splitlines() if line.startswith('Dialogue:') and r'\fnMarianna' in line)
-    assert r'\an9' in day
+    assert r'\an7' in day
     x, y = map(int, re.search(r'\\pos\((\d+),(\d+)\)', day).groups())
-    assert x == 972
+    assert x == 108
     title_style = next(line for line in content.splitlines() if line.startswith('Style: TitleOverlay'))
     title_y = int(title_style.split(',')[-2])
     assert y > title_y + 80
