@@ -1503,6 +1503,17 @@ def test_syntax_hard_reject_detects_veo_update_message_with_decorations():
     assert telethon_fallback._syntax_bot_message_is_hard_reject(text, []) is True
 
 
+def test_syntax_hard_reject_detects_behavior_standards_refusal():
+    import app.syntax_telethon_fallback as telethon_fallback
+
+    text = (
+        "Нейросеть заблокировала запрос: не соответствует стандартам поведения.\n"
+        "Повторные нарушения могут привести к блокировке доступа.\n"
+        "Неприемлемый контент:\n- Оружие\n- Насилие"
+    )
+    assert telethon_fallback._syntax_bot_message_is_hard_reject(text, []) is True
+
+
 def test_syntax_hard_reject_detects_missing_tool_selection():
     import app.syntax_telethon_fallback as telethon_fallback
 

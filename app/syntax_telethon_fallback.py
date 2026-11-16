@@ -1882,6 +1882,8 @@ def _syntax_bot_message_is_hard_reject(text: str, _urls: list[str]) -> bool:
         "отклонён",
         "нарушает правила",
         "заблокирован",
+        "заблокировала запрос",
+        "не соответствует стандартам поведения",
         "не прошло модерац",
         "content policy",
         "safety",
