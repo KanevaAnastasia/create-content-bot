@@ -8343,6 +8343,27 @@ def test_scheduled_scene_media_video_records_syntax_retries_after_exhaustion(mon
     assert any("попытка 2/2" in text for text in messages)
 
 
+def test_attempt_syntax_video_fallback_batch_reports_not_submitted(monkeypatch):
+    monkeypatch.setattr(handlers_media_core, "_syntax_fallback_env_enabled", lambda: True)
+    for reason, expected in (
+        ("No free Telethon session became available before timeout", "занята"),
+        ("Syntax Veo not submitted: navigation failed", "Генерация не запущена"),
+    ):
+        monkeypatch.setattr(handlers_media_core, "try_generate_via_syntax_batch", lambda **kwargs: {
+            "ru": FallbackResult(success=False, video_bytes=None, video_uri=None,
+                                 provider_message=reason, attempt_id="test"),
+        })
+        try:
+            asyncio.run(handlers_media_core._attempt_syntax_video_fallback_batch(
+                requests=[handlers_media_core.BatchFallbackRequest(key="ru", prompt="test", start_image=b"img")],
+                model="veo3_fast", duration_sec=8,
+            ))
+        except handlers_media_core.SyntaxFallbackDispatchError as exc:
+            assert expected in str(exc)
+        else:
+            raise AssertionError("Dispatch failure must not look like missing videos")
+
+
 def test_attempt_syntax_video_fallback_batch_discards_duplicate_language_payloads(monkeypatch):
     captured: dict[str, object] = {}
 

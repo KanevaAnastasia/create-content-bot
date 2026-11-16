@@ -117,6 +117,41 @@ def test_single_veo_keeps_polling_after_webview_error(monkeypatch):
     assert poll.call_args.kwargs['initial_last_info'] == 'upload counter timeout'
 
 
+def test_single_veo_releases_session_without_polling_when_not_submitted(monkeypatch):
+    import asyncio
+    import time
+    from unittest.mock import AsyncMock
+    from app import syntax_telethon_fallback as s
+    monkeypatch.setattr(s, '_submit_syntax_veo_webview', AsyncMock(
+        return_value='Syntax Veo not submitted: Page.goto: net::ERR_SOCKET_NOT_CONNECTED'))
+    poll = AsyncMock()
+    monkeypatch.setattr(s, '_poll_syntax_bot_until_video', poll)
+    result = asyncio.run(s._run_syntax_veo_configure_flow(
+        None, None, bot_entity=None, configure_message=SimpleNamespace(id=15),
+        configure_button=None, prompt='lang:ru test', start_image=b'png',
+        duration_sec=8, aspect_ratio='9:16', reply_anchor=10, sent_ids={10},
+        attempt_id='test', poll=1, deadline=time.monotonic() + 7200, timeout=7200,
+        initial_last_info='', expected_lang_token='lang:ru'))
+    assert not result.success
+    poll.assert_not_awaited()
+
+
+def test_veo_navigation_failure_is_known_not_submitted(monkeypatch):
+    from app import syntax_telethon_fallback as s
+    from playwright import sync_api
+    context = Mock()
+    context.__enter__ = Mock(return_value=Mock())
+    context.__exit__ = Mock(return_value=False)
+    monkeypatch.setattr(sync_api, 'sync_playwright', lambda: context)
+    monkeypatch.setattr(s, '_open_syntax_veo_page_sync', Mock(side_effect=RuntimeError('net::ERR_SOCKET_NOT_CONNECTED')))
+    submit = Mock()
+    monkeypatch.setattr(s, '_submit_syntax_veo_generate_sync', submit)
+    with pytest.raises(s.SyntaxVeoNotSubmittedError):
+        s._fill_syntax_veo_webapp_sync(url='https://example.test', prompt='test', start_image=b'png',
+                                     duration_sec=8, aspect_ratio='9:16', timeout_sec=60)
+    submit.assert_not_called()
+
+
 def test_veo_retries_button_timeout_on_same_page(monkeypatch):
     from app import syntax_telethon_fallback as s
     page = Mock()

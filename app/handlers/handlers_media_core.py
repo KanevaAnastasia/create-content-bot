@@ -1134,6 +1134,7 @@ def _syntax_failure_happened_before_dispatch(provider_message: str) -> bool:
             "missing telegram_api_id/telegram_api_hash",
             "missing telethon session",
             "no free telethon session",
+            "syntax veo not submitted:",
             "telethon stringsession is unavailable",
             "telethon session is not authorized",
             "syntax frame prepare failed",
@@ -1154,6 +1155,8 @@ def _syntax_dispatch_error_user_message(provider_message: str) -> str:
         )
     if "no free telethon session" in low:
         return "Telethon-сессия Syntax занята другой попыткой. Дождитесь её завершения и повторите."
+    if "syntax veo not submitted:" in low:
+        return "Не удалось открыть или подготовить форму Syntax. Генерация не запущена; сессия освобождена для повтора."
     if "not authorized" in low:
         return "Telethon-сессия Syntax не авторизована."
     if "missing telethon session" in low:
@@ -1250,6 +1253,13 @@ async def _attempt_syntax_video_fallback_batch(
         normalized_key = str(key)
         payload_hashes[digest] = normalized_key
         output[normalized_key] = payload
+    if not output and results and all(
+        not getattr(result, "success", False)
+        and _syntax_failure_happened_before_dispatch(str(getattr(result, "provider_message", "")))
+        for result in results.values()
+    ):
+        first = next(iter(results.values()))
+        raise SyntaxFallbackDispatchError(_syntax_dispatch_error_user_message(first.provider_message))
     return output
 
 

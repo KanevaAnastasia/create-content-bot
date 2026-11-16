@@ -1505,6 +1505,10 @@ def _open_syntax_veo_page_sync(playwright: Any, url: str, timeout_ms: int) -> tu
     raise RuntimeError("Syntax Veo webview did not open.")
 
 
+class SyntaxVeoNotSubmittedError(RuntimeError):
+    """The WebView failed before the Generate action was attempted."""
+
+
 def _fill_syntax_veo_webapp_sync(
     *,
     url: str,
@@ -1531,7 +1535,11 @@ def _fill_syntax_veo_webapp_sync(
 
     timeout_ms = max(30_000, int(timeout_sec) * 1000)
     with sync_playwright() as p:
-        browser, page = _open_syntax_veo_page_sync(p, url, timeout_ms)
+        try:
+            browser, page = _open_syntax_veo_page_sync(p, url, timeout_ms)
+        except Exception as exc:
+            raise SyntaxVeoNotSubmittedError(_sanitize_syntax_webview_error(exc)) from exc
+        submit_attempted = False
         try:
             with contextlib.suppress(Exception):
                 page.wait_for_load_state("networkidle", timeout=min(timeout_ms, 30_000))
@@ -1556,7 +1564,12 @@ def _fill_syntax_veo_webapp_sync(
             # banner: the current form may itself be one of those active jobs.
             # Syntax deduplicates this WebView launch server-side.
             queue_wait_ms = max(30_000, timeout_ms - 60_000)
+            submit_attempted = True
             _submit_syntax_veo_generate_sync(page, timeout_ms=queue_wait_ms)
+        except Exception as exc:
+            if not submit_attempted:
+                raise SyntaxVeoNotSubmittedError(_sanitize_syntax_webview_error(exc)) from exc
+            raise
         finally:
             browser.close()
 
@@ -1743,6 +1756,9 @@ async def _run_syntax_veo_configure_flow(
         timeout_sec=max(30, int(deadline - time.monotonic())),
     )
     if configure_error:
+        if configure_error.startswith("Syntax Veo not submitted:"):
+            return _result(success=False, video_bytes=None, video_uri=None,
+                           provider_message=configure_error, attempt_id=attempt_id)
         initial_last_info = configure_error
         logger.warning(
             "syntax.veo.ui_unconfirmed attempt_id=%s; waiting_for_telegram_result=true error=%s",
@@ -1785,7 +1801,7 @@ async def _submit_syntax_veo_webview(
         configure_button,
     )
     if not webview_url:
-        return "Syntax Veo Настроить и запустить button did not expose a WebView URL."
+        return "Syntax Veo not submitted: Настроить и запустить button did not expose a WebView URL."
     try:
         await asyncio.to_thread(
             _fill_syntax_veo_webapp_sync,
@@ -1796,6 +1812,8 @@ async def _submit_syntax_veo_webview(
             aspect_ratio=aspect_ratio,
             timeout_sec=max(30, int(timeout_sec)),
         )
+    except SyntaxVeoNotSubmittedError as exc:
+        return f"Syntax Veo not submitted: {_sanitize_syntax_webview_error(exc)}"
     except Exception as exc:
         return f"Syntax Veo UI configure failed: {_sanitize_syntax_webview_error(exc)}"
     return None
@@ -2974,6 +2992,12 @@ async def _run_batch_fallback_async(
                 timeout_sec=timeout,
             )
             if configure_error:
+                if configure_error.startswith("Syntax Veo not submitted:"):
+                    results[request.key] = _result(
+                        success=False, video_bytes=None, video_uri=None,
+                        provider_message=configure_error, attempt_id=request.attempt_id,
+                    )
+                    continue
                 # A WebView error does not prove that generation failed: the
                 # click may have reached Syntx, or the user may finish the form.
                 # Keep the request correlated and collect its Telegram result

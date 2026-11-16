@@ -1878,7 +1878,7 @@ def test_try_generate_via_syntax_parallel_uses_distinct_sessions(monkeypatch):
     assert set(seen_sessions) == {"session-a", "session-b"}
 
 
-@pytest.mark.parametrize("configure_error", [None, "Syntax Veo UI configure failed: upload counter timeout"])
+@pytest.mark.parametrize("configure_error", [None, "Syntax Veo UI configure failed: upload counter timeout", "Syntax Veo not submitted: navigation failed"])
 def test_try_generate_via_syntax_batch_sends_all_requests_before_waiting(monkeypatch, configure_error):
     import app.syntax_telethon_fallback as telethon_fallback
 
@@ -1987,6 +1987,10 @@ def test_try_generate_via_syntax_batch_sends_all_requests_before_waiting(monkeyp
     )
 
     assert results is sink
+    if configure_error and configure_error.startswith("Syntax Veo not submitted:"):
+        assert all(not result.success for result in results.values())
+        assert "iter_messages" not in events
+        return
     assert sink["en"].video_bytes == b"mp4-content"
     assert results["ru"].success is True
     assert results["en"].success is True
