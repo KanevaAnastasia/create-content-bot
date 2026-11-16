@@ -112,7 +112,7 @@ def test_holiday_counter_has_own_left_aligned_row(tmp_path, language, title, ser
     day = next(line for line in content.splitlines() if line.startswith('Dialogue:') and r'\fnMarianna' in line)
     assert r'\an7' in day
     x, y = map(int, re.search(r'\\pos\((\d+),(\d+)\)', day).groups())
-    assert x == 108
+    assert 108 <= x <= 135
     title_style = next(line for line in content.splitlines() if line.startswith('Style: TitleOverlay'))
     title_y = int(title_style.split(',')[-2])
     assert y > title_y + 80
@@ -121,3 +121,24 @@ def test_holiday_counter_has_own_left_aligned_row(tmp_path, language, title, ser
     assert counter in visible
     series_event = next(line for line in content.splitlines() if r'\1c&H5AA63F&' in line)
     assert int(re.search(r'\\fs(\d+)', series_event).group(1)) >= 150
+
+
+@pytest.mark.parametrize('language,title,series,counter', [
+    ('ru', 'Оливье', 'Новогодние рецепты', 'день 1 из 10'),
+    ('en', 'Olivier', 'Christmas Recipes', 'day 1 of 10'),
+])
+def test_holiday_day_visible_left_edge(language, title, series, counter):
+    import io
+    from PIL import Image
+    data = pp.render_title_overlay_preview(
+        Image.new('RGB', (1080, 1920), '#19352d'), language=language,
+        title=title, series_title=series, series_counter=counter,
+        title_style={'series_theme': HOLIDAY_THEME},
+    )
+    image = Image.open(io.BytesIO(data)).convert('RGB')
+    red = [(x, y) for y in range(1920) for x in range(1080)
+           if (lambda c: c[0] > 130 and c[0] > 2*c[1] and c[0] > 2*c[2])(image.getpixel((x, y)))]
+    title_bottom = max(y for x, y in red)
+    day_left = min(x for y in range(title_bottom + 5, min(title_bottom + 300, 1920))
+                   for x in range(1080) if min(image.getpixel((x, y))) > 210)
+    assert abs(day_left - min(x for x, y in red)) <= 5

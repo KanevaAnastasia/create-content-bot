@@ -917,6 +917,21 @@ def _title_series_day_y_shift_ratio(language: str) -> float:
     return float(TITLE_SERIES_DAY_BASELINE_Y_SHIFT_BY_LANGUAGE.get(code) or 0.0)
 
 
+def _title_day_ink_left_offset(text: str, font_size: int) -> int:
+    """Compensate Marianna's overhanging strokes in libass coordinates."""
+    path = _title_series_day_font_path()
+    if path is None or not text.strip():
+        return 0
+    font = ImageFont.truetype(str(path), size=1000)
+    mask, offset = font.getmask2(text.strip())
+    bounds = mask.getbbox()
+    if bounds is None:
+        return 0
+    ascent, descent = font.getmetrics()
+    # libass normalizes the font to its ascender + descender height.
+    return int(round((offset[0] + bounds[0]) * font_size / (ascent + descent)))
+
+
 def _title_series_main_title_offset_scale(language: str) -> float:
     code = str(language or "").strip().lower()
     return float(TITLE_SERIES_MAIN_TITLE_OFFSET_FONT_SCALE_BY_LANGUAGE.get(code) or 0.74)
@@ -2198,7 +2213,9 @@ def _write_burned_subtitle_ass(
                 )
             if counter_text:
                 if holiday_font("series", language):
-                    day_pos_x = title_margin_h
+                    day_pos_x = title_margin_h - _title_day_ink_left_offset(
+                        str(cue.get("counter_text") or ""), holiday_day_size,
+                    )
                     day_pos_y = holiday_day_y - int(round(holiday_day_size * _title_series_day_y_shift_ratio(language)))
                     counter_text = "{\\an7}" + counter_text
                 elif is_story_series:
