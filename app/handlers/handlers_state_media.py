@@ -8820,11 +8820,14 @@ def _refresh_video_provider_choice_payloads(scene: dict, pending: dict, language
             return
         for language in languages:
             entry = entries_by_lang.get(language)
-            if isinstance(entry, dict):
-                entry["prompt"] = _scene_video_prompt_for_language(scene, language)
+            prompt = _scene_video_prompt_for_language(scene, language)
+            if isinstance(entry, dict) and prompt.strip():
+                entry["prompt"] = prompt
         return
     language = normalize_language_code(str(pending.get("language") or "")) or (languages[0] if languages else "ru")
-    pending["prompt"] = _scene_video_prompt_for_language(scene, language)
+    prompt = _scene_video_prompt_for_language(scene, language)
+    if prompt.strip():
+        pending["prompt"] = prompt
 
 
 async def _handle_scene_video_provider_choice_edit_command(
@@ -8843,6 +8846,21 @@ async def _handle_scene_video_provider_choice_edit_command(
     phrase_cmd = _parse_lang_payload_command(text, "фраза")
     feedback = _extract_format_or_feedback(text)
     generic_prompt = _extract_prompt_override(text)
+
+    if phrase_cmd is None:
+        generic_phrase = re.match(r"^\s*(?:фраза|phrase)\s*:\s*(.*)$", text, re.IGNORECASE | re.DOTALL)
+        if generic_phrase:
+            phrase_cmd = (_scene_current_language(session, scene), generic_phrase.group(1).strip())
+    awaiting = pending.pop("edit_input_pending", None)
+    if awaiting and not any((prompt_cmd, phrase_cmd, feedback is not None, generic_prompt is not None)):
+        if text.strip().lower() in {"отмена", "cancel"}:
+            await _safe_reply_text(update.message, "Ввод правки отменён. Можно выбрать Syntax или Vertex.")
+            return True
+        if video_provider_choice_parse_user_selection(text) is None:
+            if awaiting.get("kind") == "feedback":
+                feedback = text.strip()
+            elif awaiting.get("kind") == "phrase":
+                phrase_cmd = (awaiting["language"], text.strip())
 
     if prompt_cmd:
         lang, payload = prompt_cmd
@@ -8877,6 +8895,7 @@ async def _handle_scene_video_provider_choice_edit_command(
             )
             return True
         if not payload:
+            pending["edit_input_pending"] = {"kind": "phrase", "language": lang}
             await _safe_reply_text(update.message, f'После "ФРАЗА {lang}:" пришлите текст фразы.')
             return True
         asked = await _apply_scene_phrase_update(
@@ -8921,6 +8940,7 @@ async def _handle_scene_video_provider_choice_edit_command(
 
     if feedback is not None:
         if not feedback.strip():
+            pending["edit_input_pending"] = {"kind": "feedback"}
             await _safe_reply_text(update.message, 'После "ФИДБЕК:" пришлите комментарий.')
             return True
         current_lang = _scene_current_language(session, scene)
@@ -9050,6 +9070,9 @@ async def _handle_scene_video_provider_choice_pending(
         return False
     if update.message is None:
         return True
+    if _get_scene_phrase_translation_pending(session, scene_idx=idx) is not None:
+        # Let the regular phrase translation flow consume its confirmation.
+        return False
     retry_aspect_ratio = _scene_aspect_ratio(scene, session)
     scene["aspect_ratio"] = retry_aspect_ratio
     pending_languages = (
@@ -9094,6 +9117,7 @@ async def _handle_scene_video_provider_choice_pending(
         )
         return True
 
+    _refresh_video_provider_choice_payloads(scene, pending, pending_languages)
     total = len(scenes)
     if pending.get("source") == "scene_batch":
         entries_by_lang = pending.get("entries_by_lang")

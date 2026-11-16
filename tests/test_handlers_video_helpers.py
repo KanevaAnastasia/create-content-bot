@@ -9362,6 +9362,59 @@ def test_handle_scene_video_provider_choice_pending_updates_retry_prompt():
     assert replies[-1][1] is not None
 
 
+def test_provider_recovery_accepts_feedback_and_phrase_in_followup_messages(monkeypatch):
+    replies = []
+
+    class Message:
+        async def reply_text(self, text, **kwargs):
+            replies.append(text)
+
+    scene = {
+        "video_prompt_by_lang": {"ru": "original prompt"},
+        "video_provider_choice_pending": {"source": "scene", "language": "ru", "prompt": "original prompt"},
+    }
+    session = {
+        "scene_media_substep": handlers_state_media.SCENE_MEDIA_SUBSTEP_VIDEO,
+        "target_languages": ["ru"],
+        "production": {"json_plan": [scene]},
+    }
+    rewrite = AsyncMock(return_value="No carrots in the video")
+    monkeypatch.setattr(handlers_state_media, "_rewrite_video_prompt_by_format_instruction", rewrite)
+
+    async def apply_phrase(update, **kwargs):
+        assert kwargs["phrase_text"] == "Новая фраза бабушки"
+        assert kwargs["language"] == "ru"
+        scene["video_prompt_by_lang"]["ru"] = "No carrots. Speech: Новая фраза бабушки"
+        return False
+
+    monkeypatch.setattr(handlers_state_media, "_apply_scene_phrase_update", apply_phrase)
+
+    async def run():
+        for text in ("ФИДБЕК:", "Никакой моркови в видео", "ФРАЗА:", "Новая фраза бабушки"):
+            assert await handlers_state_media._handle_scene_video_provider_choice_pending(
+                SimpleNamespace(message=Message()), None, chat_id=1, session=session, text=text,
+            )
+
+    asyncio.run(run())
+    assert rewrite.await_args.args[1] == "Никакой моркови в видео"
+    pending = scene["video_provider_choice_pending"]
+    assert pending["prompt"] == "No carrots. Speech: Новая фраза бабушки"
+    assert "edit_input_pending" not in pending
+    assert not any(text.startswith("Нажмите `Syntax`") for text in replies)
+
+
+def test_provider_recovery_does_not_intercept_phrase_translation_confirmation():
+    scene = {"video_provider_choice_pending": {"source": "scene", "language": "ru"}}
+    session = {
+        "scene_media_substep": handlers_state_media.SCENE_MEDIA_SUBSTEP_VIDEO,
+        "production": {"json_plan": [scene]},
+        "scene_phrase_translation_pending": {"scene_idx": 0, "stage": "confirm"},
+    }
+    assert asyncio.run(handlers_state_media._handle_scene_video_provider_choice_pending(
+        SimpleNamespace(message=object()), None, chat_id=1, session=session, text="да",
+    )) is False
+
+
 def test_run_syntax_fallback_payload_reports_pre_dispatch_failure(monkeypatch):
     async def _attempt(**kwargs):
         assert kwargs["raise_on_dispatch_failure"] is True
