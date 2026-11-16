@@ -23,6 +23,7 @@ from sqlalchemy import select
 
 from .ai_approval_service import _resolve_ffmpeg
 from .db import SessionLocal
+from .series_theme import holiday_font, holiday_music, themed_fonts
 from .models import Project
 from .scene_media_candidates import (
     DEFAULT_SCENE_VIDEO_SPEED_COEF,
@@ -783,11 +784,17 @@ def _title_overlay_style_name(language: str) -> str:
 
 def _title_overlay_font_name(language: str) -> str:
     code = str(language or "").strip().lower()
+    custom = holiday_font("dish", code)
+    if custom:
+        return custom[0]
     return TITLE_OVERLAY_FONT_BY_LANGUAGE.get(code) or TITLE_OVERLAY_DEFAULT_FONT
 
 
 def _title_overlay_font_path(language: str) -> Path | None:
     code = str(language or "").strip().lower()
+    custom = holiday_font("dish", code)
+    if custom:
+        return subtitle_fonts_dir() / custom[1]
     filename = TITLE_OVERLAY_FONT_FILE_BY_LANGUAGE.get(code) or TITLE_OVERLAY_DEFAULT_FONT_FILE
     path = subtitle_fonts_dir() / filename
     return path if path.exists() else None
@@ -810,11 +817,17 @@ def _title_overlay_ass_safe_width_ratio(language: str) -> float:
 
 def _title_series_font_name(language: str) -> str:
     code = str(language or "").strip().lower()
+    custom = holiday_font("series", code)
+    if custom:
+        return custom[0]
     return TITLE_SERIES_FONT_BY_LANGUAGE.get(code) or TITLE_SERIES_DEFAULT_FONT
 
 
 def _title_series_font_path(language: str) -> Path | None:
     code = str(language or "").strip().lower()
+    custom = holiday_font("series", code)
+    if custom:
+        return subtitle_fonts_dir() / custom[1]
     filename = TITLE_SERIES_FONT_FILE_BY_LANGUAGE.get(code) or TITLE_SERIES_DEFAULT_FONT_FILE
     path = subtitle_fonts_dir() / filename
     return path if path.exists() else None
@@ -881,6 +894,8 @@ def _title_series_font_size_scale(language: str) -> float:
 
 def _title_series_ass_width_correction(language: str) -> float:
     code = str(language or "").strip().lower()
+    if holiday_font("series", code):
+        return 1.0
     return float(TITLE_SERIES_ASS_WIDTH_CORRECTION_BY_LANGUAGE.get(code) or 1.0)
 
 
@@ -1838,6 +1853,7 @@ def _without_large_title_words(cues, title_cues, style, language):
     return result
 
 
+@themed_fonts
 def _write_burned_subtitle_ass(
     path: Path,
     cues: list[dict[str, Any]],
@@ -3625,7 +3641,7 @@ def build_post_production(
             logger.exception("post_production.progress_callback_failed language=%s stage=%s", language, stage)
 
     music_path, music_volume = (
-        _resolve_music_path(project_slug) if include_background_music else (None, 0.0)
+        (holiday_music(overlay_title_style) or _resolve_music_path(project_slug)) if include_background_music else (None, 0.0)
     )
     renders_by_language: dict[str, dict[str, Any]] = {}
     subtitle_entries_by_language: dict[str, list[dict[str, Any]]] = {}

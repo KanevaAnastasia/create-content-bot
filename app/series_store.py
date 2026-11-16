@@ -31,9 +31,11 @@ class SeriesPayload:
     video_index: int
     total_videos: int
     counter_by_lang: dict[str, str]
+    series_theme: str = ""
 
     def as_session_dict(self) -> dict[str, Any]:
         return {
+            "series_theme": self.series_theme,
             "id": self.id,
             "title_by_lang": dict(self.title_by_lang),
             "video_index": self.video_index,
@@ -78,6 +80,7 @@ def payload_for_series(row: ContentSeries) -> SeriesPayload:
     for lang in title_by_lang:
         counter_by_lang.setdefault(lang, counter_by_lang["en"])
     return SeriesPayload(
+        series_theme=str(meta.get("series_theme") or ""),
         id=str(row.id),
         title_by_lang=title_by_lang,
         video_index=video_index,
@@ -217,6 +220,14 @@ def create_series(
 
 
 def attach_series_to_session(session: dict[str, Any], payload: SeriesPayload | None) -> None:
+    style = dict(session.get("overlay_title_style") or {})
+    style.pop("series_theme", None)
+    if payload is not None and payload.series_theme:
+        style["series_theme"] = payload.series_theme
+    if style:
+        session["overlay_title_style"] = style
+    else:
+        session.pop("overlay_title_style", None)
     if payload is None:
         for key in (
             SERIES_SESSION_KEY,

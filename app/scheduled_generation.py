@@ -1528,6 +1528,11 @@ async def process_scheduled_generation_item(item_id: uuid.UUID) -> str:
         payload={"series_id": str(series_id or "")},
     )
     try:
+        if series_id:
+            from .directorial_notes import direction_for_session
+            theme_session = {}
+            attach_series_to_session(theme_session, select_series_payload(str(series_id)))
+            comment = "\n".join(filter(None, (comment, direction_for_session(theme_session))))
         recipe_text = await _resolve_scheduled_recipe_text(recipe)
         if recipe_text != recipe:
             await record_scheduled_generation_event_async(

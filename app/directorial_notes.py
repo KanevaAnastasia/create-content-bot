@@ -64,4 +64,8 @@ def direction_for_session(session):
     for key in ('user_input', 'story_source_text', 'advertising_source_text'):
         for note in split_notes(session.get(key))[1]:
             if note not in notes: notes.append(note)
-    return RULE + json.dumps(notes, ensure_ascii=False) if notes else ''
+    from .series_theme import HOLIDAY_DIRECTION, HOLIDAY_THEME, theme_from_session
+    direction = RULE + json.dumps(notes, ensure_ascii=False) if notes else ''
+    if theme_from_session(session) == HOLIDAY_THEME:
+        direction += '\n' + HOLIDAY_DIRECTION
+    return direction
