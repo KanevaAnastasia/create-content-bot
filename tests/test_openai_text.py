@@ -54,7 +54,8 @@ def test_routes_existing_entrypoint_to_openai_with_images(monkeypatch):
     assert kwargs['json']['model'] == 'creative-model'
     assert kwargs['json']['store'] is False
     content = kwargs['json']['input'][0]['content']
-    assert content[0] == {'type': 'input_text', 'text': 'script'}
+    from app.writing_style import with_writing_style
+    assert content[0] == {'type': 'input_text', 'text': with_writing_style('script')}
     assert len(content) == 2
     assert content[1]['image_url'].startswith('data:image/png;base64,')
 

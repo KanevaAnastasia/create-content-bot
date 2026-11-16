@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from app.writing_style import with_writing_style
+
 import subprocess
 from io import BytesIO
 from pathlib import Path
@@ -484,7 +486,7 @@ def test_call_ai_approval_model_reuses_vertex_helpers_and_dedupes_media(monkeypa
     assert result["status"] == "APPROVE"
     assert captured["model"] == "approval-model"
     assert captured["parts"] == [
-        {"text": "approve this"},
+        {"text": with_writing_style("approve this")},
         {"data": png, "mime_type": "image/png"},
         {"data": mp4, "mime_type": "video/mp4"},
     ]

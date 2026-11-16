@@ -1,3 +1,4 @@
+from app.writing_style import with_writing_style
 import pytest
 
 from app import llm_utils
@@ -42,6 +43,9 @@ def test_gemini_generate_sync_uses_vertexai_sdk(monkeypatch):
             self.model_name = model_name
 
         def generate_content(self, _prompt, **_kwargs):
+            from app.writing_style import HUMAN_WRITING_RULES
+            assert _prompt.startswith(HUMAN_WRITING_RULES + "\n\n")
+            assert _prompt.endswith("\n\nhello")
             return _Resp()
 
     monkeypatch.setenv("GOOGLE_CLOUD_PROJECT", "proj")
@@ -186,7 +190,7 @@ def test_gemini_generate_sync_sends_image_parts(monkeypatch):
 
     assert result == "recipe"
     assert captured["request"] == [
-        {"text": "extract recipe"},
+        {"text": with_writing_style("extract recipe")},
         {"data": b"\x89PNG\r\n\x1a\nimage", "mime_type": "image/png"},
     ]
 
@@ -249,7 +253,7 @@ def test_gemini_generate_sync_dedupes_image_parts(monkeypatch):
 
     assert result == "recipe"
     assert captured["request"] == [
-        {"text": "extract recipe"},
+        {"text": with_writing_style("extract recipe")},
         {"data": b"\x89PNG\r\n\x1a\nimage", "mime_type": "image/png"},
     ]
 

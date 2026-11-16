@@ -38,6 +38,7 @@ from .constants import (
 )
 from .llm_logging import get_llm_io_logger
 from .llm_queue import LLMCallTimeoutError, submit_llm
+from .writing_style import with_writing_style
 
 logger = logging.getLogger("bot")
 _llm_io = get_llm_io_logger()
@@ -704,7 +705,7 @@ def openai_generate_sync(
     model = (os.getenv("OPENAI_MODEL") or "gpt-6-astra").strip()
     if model_profile in {GEMINI_MODEL_PROFILE_CREATIVE, GEMINI_MODEL_PROFILE_EDIT}:
         model = (os.getenv(f"OPENAI_{model_profile.upper()}_MODEL") or model).strip()
-    content: list[dict[str, Any]] = [{"type": "input_text", "text": str(prompt)}]
+    content: list[dict[str, Any]] = [{"type": "input_text", "text": with_writing_style(prompt)}]
     for payload in _dedupe_binary_payloads(images):
         mime = _guess_media_mime_type(payload)
         if not mime.startswith("image/"):
@@ -801,7 +802,7 @@ def _gemini_generate_sync(
     _load_vertex_generative_sdk()
     model_ids = _model_ids_for_profile(model_profile)
     transports: list[tuple[str, Any]] = [("vertexai_sdk", None)]
-    prompt_snapshot = str(prompt)
+    prompt_snapshot = with_writing_style(prompt)
     image_payloads = _dedupe_binary_payloads(images)
     context_fingerprint = hashlib.sha1(prompt_snapshot.encode("utf-8")).hexdigest()[:10]
 

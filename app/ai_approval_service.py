@@ -29,6 +29,7 @@ from .llm_utils import (
     vertex_part_from_text,
 )
 from .llm_queue import LLMCallTimeoutError
+from .writing_style import with_writing_style
 
 logger = logging.getLogger("bot")
 
@@ -1025,7 +1026,7 @@ def call_ai_approval_model(
     for prompt_variant_idx, prompt_variant in enumerate(prompt_variants, start=1):
         for model_id in model_ids:
             for attempt in range(1, max_json_attempts + 1):
-                request_text = prompt_variant
+                request_text = with_writing_style(prompt_variant)
                 if attempt > 1:
                     request_text += "\n\nYour previous response was not valid JSON. Return only one valid JSON object."
 

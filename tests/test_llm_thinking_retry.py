@@ -1,3 +1,4 @@
+from app.writing_style import with_writing_style
 from types import SimpleNamespace
 from unittest.mock import Mock
 
@@ -18,7 +19,7 @@ def test_flash_disconnection_retries_without_thinking(monkeypatch):
     assert llm_utils.gemini_generate_sync('preserve this prompt') == 'valid response'
     assert 'generation_config' not in generate.call_args_list[0].kwargs
     assert generate.call_args_list[1].kwargs['generation_config'] == {'thinking_config': {'thinking_budget': 0}}
-    assert [call.args for call in generate.call_args_list] == [('preserve this prompt',)] * 2
+    assert [call.args for call in generate.call_args_list] == [(with_writing_style('preserve this prompt'),)] * 2
     generate.reset_mock(side_effect=True)
     generate.return_value = SimpleNamespace(text='next response')
     assert llm_utils.gemini_generate_sync('next prompt') == 'next response'
