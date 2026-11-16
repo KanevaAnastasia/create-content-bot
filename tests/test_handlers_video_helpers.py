@@ -9403,6 +9403,56 @@ def test_provider_recovery_accepts_feedback_and_phrase_in_followup_messages(monk
     assert not any(text.startswith("Нажмите `Syntax`") for text in replies)
 
 
+def test_provider_recovery_ru_edit_offers_translation_when_only_en_retry_pending(monkeypatch):
+    replies = []
+
+    class Message:
+        async def reply_text(self, text, **kwargs):
+            replies.append(text)
+
+    entry = handlers_state_media._scene_video_provider_choice_entry(
+        prompt="English prompt", model="veo3_fast", duration_sec=8,
+        start_image=b"start", end_image=None, quality="1080", aspect_ratio="9:16",
+        audio_enabled=True, syntax_error_message="English failed",
+    )
+    scene = {
+        "text": "Старая фраза",
+        "text_by_lang": {"ru": "Старая фраза", "en": "Old phrase"},
+        "video_prompt_by_lang": {"ru": "Russian prompt", "en": "English prompt"},
+        "video_provider_choice_pending": {
+            "source": "scene_batch", "languages": ["en"],
+            "entries_by_lang": {"en": entry},
+        },
+    }
+    session = {
+        "scene_media_substep": handlers_state_media.SCENE_MEDIA_SUBSTEP_VIDEO,
+        "target_languages": ["ru", "en"], "scene_media_language_index": 1,
+        "production": {"json_plan": [scene]},
+    }
+    translate = AsyncMock(return_value="Daughter: Mom, what is your favorite dish?")
+    monkeypatch.setattr(handlers_state_media, "_translate_scene_phrase_adaptive", translate)
+    monkeypatch.setattr(handlers_state_media, "_send_next_scene_media_step", AsyncMock())
+
+    async def run():
+        for text in ("ФРАЗА ru: Дочка: Ма, какое твое любимое блюдо?", "да", "да"):
+            assert await handlers_state_media._handle_waiting_scene_media_state(
+                SimpleNamespace(message=Message()), None, chat_id=1, session=session, text=text,
+            )
+            if text.startswith("ФРАЗА"):
+                assert "Перевести адаптивно на английский" in replies[-1]
+                assert session["scene_media_language_index"] == 0
+
+    asyncio.run(run())
+    translate.assert_awaited_once()
+    assert "scene_phrase_translation_pending" not in session
+    pending = scene["video_provider_choice_pending"]
+    handlers_state_media._refresh_video_provider_choice_payloads(scene, pending, ["ru", "en"])
+    assert set(pending["languages"]) == {"ru", "en"}
+    assert "Дочка" in pending["entries_by_lang"]["ru"]["prompt"]
+    assert "Daughter" in pending["entries_by_lang"]["en"]["prompt"]
+    assert pending["entries_by_lang"]["ru"]["start_image_b64"] == entry["start_image_b64"]
+
+
 def test_provider_recovery_does_not_intercept_phrase_translation_confirmation():
     scene = {"video_provider_choice_pending": {"source": "scene", "language": "ru"}}
     session = {

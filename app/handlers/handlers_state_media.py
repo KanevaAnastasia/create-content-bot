@@ -5514,7 +5514,7 @@ async def _apply_scene_phrase_update(
     langs = _scene_target_languages(session, scene)
     if auto_offer_en_translation and lang == "ru" and "en" in langs:
         prev_en = _scene_speech_for_language_or_prompt(scene, "en")
-        if prev_en and prev_en != phrase:
+        if prev_en != phrase:
             _set_scene_phrase_translation_pending(
                 session,
                 scene_idx=scene_idx,
@@ -8821,6 +8821,15 @@ def _refresh_video_provider_choice_payloads(scene: dict, pending: dict, language
         for language in languages:
             entry = entries_by_lang.get(language)
             prompt = _scene_video_prompt_for_language(scene, language)
+            if entry is None and prompt.strip() and _video_regeneration_requested(scene, language):
+                # Batch retries share scene frames/settings, but a phrase edit can
+                # also invalidate a language that succeeded in the original batch.
+                template = next((value for value in entries_by_lang.values() if isinstance(value, dict)), None)
+                if template is not None:
+                    entry = dict(template)
+                    entries_by_lang[language] = entry
+                    pending["languages"] = list(dict.fromkeys([*pending.get("languages", []), language]))
+                    pending["missing_languages"] = list(pending["languages"])
             if isinstance(entry, dict) and prompt.strip():
                 entry["prompt"] = prompt
         return
@@ -9105,7 +9114,7 @@ async def _handle_scene_video_provider_choice_pending(
         scene=scene,
         pending=pending,
         text=text,
-        languages=pending_languages,
+        languages=current_languages,
     ):
         return True
     choice = video_provider_choice_parse_user_selection(text)
@@ -9117,7 +9126,7 @@ async def _handle_scene_video_provider_choice_pending(
         )
         return True
 
-    _refresh_video_provider_choice_payloads(scene, pending, pending_languages)
+    _refresh_video_provider_choice_payloads(scene, pending, current_languages)
     total = len(scenes)
     if pending.get("source") == "scene_batch":
         entries_by_lang = pending.get("entries_by_lang")
