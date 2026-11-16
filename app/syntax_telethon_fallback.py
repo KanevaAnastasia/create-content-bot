@@ -4,6 +4,9 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import fcntl
+import hashlib
+from pathlib import Path
 import io
 import json
 import logging
@@ -88,6 +91,23 @@ def _syntax_session_candidates() -> list[_SessionCandidate]:
     return candidates
 
 
+_SESSION_FILE_LOCKS: dict[_SessionCandidate, Any] = {}
+
+
+def _try_lock_session_process(candidate: _SessionCandidate) -> bool:
+    root = Path(os.getenv("SYNTAX_SESSION_LOCK_DIR") or Path(__file__).resolve().parent.parent / "runtime" / "syntax_session_locks")
+    root.mkdir(parents=True, exist_ok=True, mode=0o700)
+    digest = hashlib.sha256((candidate.kind + ":" + candidate.value).encode()).hexdigest()
+    handle = (root / (digest + ".lock")).open("a")
+    try:
+        fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except BlockingIOError:
+        handle.close()
+        return False
+    _SESSION_FILE_LOCKS[candidate] = handle
+    return True
+
+
 def _acquire_syntax_session_candidate(timeout_sec: int | None) -> _SessionCandidate | None:
     candidates = _syntax_session_candidates()
     if not candidates:
@@ -96,16 +116,16 @@ def _acquire_syntax_session_candidate(timeout_sec: int | None) -> _SessionCandid
     with _SESSION_POOL_CONDITION:
         while True:
             for candidate in candidates:
-                if candidate not in _SESSION_POOL_IN_USE:
+                if candidate not in _SESSION_POOL_IN_USE and _try_lock_session_process(candidate):
                     _SESSION_POOL_IN_USE.add(candidate)
                     return candidate
             if deadline is not None:
                 remaining = deadline - time.monotonic()
                 if remaining <= 0:
                     return None
-                _SESSION_POOL_CONDITION.wait(timeout=remaining)
+                _SESSION_POOL_CONDITION.wait(timeout=min(remaining, 0.5))
             else:
-                _SESSION_POOL_CONDITION.wait()
+                _SESSION_POOL_CONDITION.wait(timeout=0.5)
 
 
 def _release_syntax_session_candidate(candidate: _SessionCandidate | None) -> None:
@@ -113,6 +133,10 @@ def _release_syntax_session_candidate(candidate: _SessionCandidate | None) -> No
         return
     with _SESSION_POOL_CONDITION:
         _SESSION_POOL_IN_USE.discard(candidate)
+        handle = _SESSION_FILE_LOCKS.pop(candidate, None)
+        if handle is not None:
+            fcntl.flock(handle, fcntl.LOCK_UN)
+            handle.close()
         _SESSION_POOL_CONDITION.notify()
 
 

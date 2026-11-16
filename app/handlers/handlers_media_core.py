@@ -1062,6 +1062,22 @@ async def _attempt_syntax_video_fallback_bytes(
     """Runs Syntax adapter in a worker thread; returns bytes or None."""
     if not _syntax_fallback_env_enabled():
         return None
+    from ..syntax_durable import enabled_for_scene
+    from ..syntax_telethon_fallback import _normalize_syntax_provider
+    if enabled_for_scene() and _normalize_syntax_provider(syntax_provider, model) == SYNTAX_PROVIDER_VEO:
+        from ..state import SESSIONS
+        from ..syntax_durable import current_dialogue
+        active = SESSIONS.get(current_dialogue().update.effective_chat.id) or {}
+        match = re.search(r"lang\s*[:=]\s*(ru|en)\b", prompt, flags=re.IGNORECASE)
+        languages = active.get("target_languages") or ["ru"]
+        language = match.group(1).lower() if match else languages[min(int(active.get("scene_media_language_index") or 0), len(languages) - 1)]
+        values = await _attempt_syntax_video_fallback_batch(
+            requests=[BatchFallbackRequest(key=language, prompt=prompt, start_image=start_image, end_image=end_image)],
+            model=model, duration_sec=duration_sec, timeout_sec=timeout_sec,
+            acquire_timeout_sec=acquire_timeout_sec, syntax_provider=syntax_provider,
+            aspect_ratio=aspect_ratio, audio_enabled=audio_enabled,
+        )
+        return values.get(language)
     timeout_sec = int(timeout_sec or _positive_int_env("SYNTAX_FALLBACK_TIMEOUT_SEC", SYNTAX_FALLBACK_DEFAULT_TIMEOUT_SEC))
     lock_timeout_sec = int(acquire_timeout_sec or _positive_int_env("SYNTAX_FALLBACK_LOCK_TIMEOUT_SEC", timeout_sec))
     try:
@@ -1187,34 +1203,42 @@ async def _attempt_syntax_video_fallback_batch(
     timeout_sec = int(timeout_sec or _positive_int_env("SYNTAX_FALLBACK_TIMEOUT_SEC", SYNTAX_FALLBACK_DEFAULT_TIMEOUT_SEC))
     lock_timeout_sec = int(acquire_timeout_sec or _positive_int_env("SYNTAX_FALLBACK_LOCK_TIMEOUT_SEC", timeout_sec))
 
-    partial_results: dict[str, Any] = {}
-    try:
-        results = await asyncio.wait_for(
-            asyncio.to_thread(
-                try_generate_via_syntax_batch,
-                requests=requests,
-                result_sink=partial_results,
-                model=model,
-                duration_sec=duration_sec,
-                timeout_sec=timeout_sec,
-                acquire_timeout_sec=lock_timeout_sec,
-                syntax_provider=syntax_provider,
-                aspect_ratio=aspect_ratio,
-                audio_enabled=audio_enabled,
-            ),
-            timeout=lock_timeout_sec + timeout_sec + SYNTAX_FALLBACK_TIMEOUT_GRACE_SEC,
+    from ..syntax_durable import enabled_for_scene, run_batch as run_durable_batch
+    if enabled_for_scene():
+        results = await run_durable_batch(
+            requests=requests, model=model, duration_sec=duration_sec,
+            timeout_sec=timeout_sec, acquire_timeout_sec=lock_timeout_sec,
+            syntax_provider=syntax_provider, aspect_ratio=aspect_ratio,
+            audio_enabled=audio_enabled,
         )
-    except TimeoutError:
-        logger.warning(
-            "video.syntax_batch call_timeout acquire_timeout_sec=%s timeout_sec=%s requests=%s",
-            lock_timeout_sec,
-            timeout_sec,
-            len(requests),
-        )
-        results = partial_results.copy()
-        logger.info("video.syntax_batch retained_after_timeout keys=%s",
-                    sorted(key for key, result in results.items() if result.success))
-
+    else:
+        partial_results: dict[str, Any] = {}
+        try:
+            results = await asyncio.wait_for(
+                asyncio.to_thread(
+                    try_generate_via_syntax_batch,
+                    requests=requests,
+                    result_sink=partial_results,
+                    model=model,
+                    duration_sec=duration_sec,
+                    timeout_sec=timeout_sec,
+                    acquire_timeout_sec=lock_timeout_sec,
+                    syntax_provider=syntax_provider,
+                    aspect_ratio=aspect_ratio,
+                    audio_enabled=audio_enabled,
+                ),
+                timeout=lock_timeout_sec + timeout_sec + SYNTAX_FALLBACK_TIMEOUT_GRACE_SEC,
+            )
+        except TimeoutError:
+            logger.warning(
+                "video.syntax_batch call_timeout acquire_timeout_sec=%s timeout_sec=%s requests=%s",
+                lock_timeout_sec,
+                timeout_sec,
+                len(requests),
+            )
+            results = partial_results.copy()
+            logger.info("video.syntax_batch retained_after_timeout keys=%s",
+                        sorted(key for key, result in results.items() if result.success))
     output: dict[str, bytes] = {}
     payload_hashes: dict[str, str] = {}
     for key, result in results.items():

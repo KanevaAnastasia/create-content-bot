@@ -16,6 +16,8 @@ from .scene_media_store import persist_scene_video_prompts, rebuild_production_s
 
 logger = logging.getLogger("bot.session")
 
+DIALOGUE_SNAPSHOT_ARTIFACT_TYPE = "dialogue_runtime_checkpoint"
+
 GUEST_RUN_SNAPSHOT_ARTIFACT_TYPE = "guest_run_session_snapshot"
 GUEST_SYNTAX_PENDING_STATE = "guest_syntax_pending"
 GUEST_SYNTAX_RETRY_STATE = "guest_syntax_error"
@@ -27,11 +29,14 @@ _PENDING_SESSION_KEYS = (
     "scene_prompt_input_pending",
     "scene_phrase_input_pending",
     "scene_video_speed_pending",
+    "scene_speech_shorten_pending",
+    "scene_phrase_translation_pending",
 )
 _RUN_PENDING_SESSION_KEYS = (
     "social_descriptions_pending",
 )
 _CHAT_SESSION_CACHE_KEYS = {
+    "_syntax_durable_update_id",
     "advertising_queue_product_id",
     "advertising_product_paths",
     "social_descriptions_sent",
@@ -484,6 +489,23 @@ def save_session(chat_id: int, session: dict[str, Any]) -> None:
         row.session_json = payload
         row.generation_run_id = uuid.UUID(run_id_str) if run_id_str else None
         if row.generation_run_id is not None:
+            # Keep UI decisions not represented by normalized model columns.
+            # Binary media remains in the existing candidate/artifact storage.
+            checkpoint_uri = f"db://chat_sessions/{int(chat_id)}/runtime"
+            checkpoint = db.execute(select(GenerationArtifact).where(
+                GenerationArtifact.run_id == row.generation_run_id,
+                GenerationArtifact.artifact_type == DIALOGUE_SNAPSHOT_ARTIFACT_TYPE,
+                GenerationArtifact.uri == checkpoint_uri,
+            )).scalars().first()
+            checkpoint_payload = _serialize_value(_strip_inline_media_payloads(session))
+            if checkpoint is None:
+                checkpoint = GenerationArtifact(run_id=row.generation_run_id,
+                    artifact_type=DIALOGUE_SNAPSHOT_ARTIFACT_TYPE, uri=checkpoint_uri,
+                    label="Dialogue runtime checkpoint", mime_type="application/json",
+                    payload_json=checkpoint_payload)
+                db.add(checkpoint)
+            else:
+                checkpoint.payload_json = checkpoint_payload
             run = db.get(GenerationRun, row.generation_run_id)
             if run is not None:
                 try:
@@ -548,10 +570,35 @@ def load_guest_run_snapshot(run_id: str | uuid.UUID) -> dict[str, Any] | None:
     return session if isinstance(session, dict) else None
 
 
+def _restore_missing_runtime_fields(current: dict, snapshot: dict) -> None:
+    """Fill absent UI state, keeping current normalized DB values authoritative."""
+    for key, value in snapshot.items():
+        if key not in current:
+            current[key] = value
+        elif key in {"speech_budget_override_by_lang", "speech_origin_by_lang", "speech_by_lang",
+                     "video_prompt_by_lang", "syntax_prompt_by_lang", "prompt_meta_json"}:
+            continue  # Explicit DB edits/cleared approvals override older runtime metadata.
+        elif isinstance(current[key], dict) and isinstance(value, dict):
+            _restore_missing_runtime_fields(current[key], value)
+        elif key == "json_plan" and isinstance(current[key], list) and isinstance(value, list):
+            if len(current[key]) == len(value):
+                for scene, old in zip(current[key], value):
+                    if isinstance(scene, dict) and isinstance(old, dict):
+                        _restore_missing_runtime_fields(scene, old)
+
+
 def load_session(chat_id: int) -> dict[str, Any] | None:
     with SessionLocal() as db:
         row = db.execute(select(ChatSession).where(ChatSession.chat_id == int(chat_id))).scalar_one_or_none()
         run = db.get(GenerationRun, row.generation_run_id) if row is not None and row.generation_run_id else None
+        checkpoint = None
+        if row is not None and row.generation_run_id:
+            checkpoint = db.execute(select(GenerationArtifact).where(
+                GenerationArtifact.run_id == row.generation_run_id,
+                GenerationArtifact.artifact_type == DIALOGUE_SNAPSHOT_ARTIFACT_TYPE,
+                GenerationArtifact.uri == f"db://chat_sessions/{int(chat_id)}/runtime",
+            )).scalars().first()
+        runtime_snapshot = _deserialize_value(dict(checkpoint.payload_json or {})) if checkpoint is not None else {}
     if row is None:
         return None
     session = _deserialize_value(dict(row.session_json or {}))
@@ -580,6 +627,9 @@ def load_session(chat_id: int) -> dict[str, Any] | None:
         _restore_overlay_title_by_lang_from_artifact(session, generation_run_id)
         _ensure_scene_plan_from_production(session)
         _restore_pending_inputs_from_artifacts(session, generation_run_id)
+    if all(session.get(key) == runtime_snapshot.get(key) for key in
+           ("state", "image_scene_index", "scene_media_substep")):
+        _restore_missing_runtime_fields(session, runtime_snapshot)
     return session
 
 

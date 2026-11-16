@@ -37,6 +37,8 @@ SCENE_META_SNAPSHOT_KEYS = (
     "speech_plan_by_lang",
     "speech_cues_by_lang",
     "speech_budget_by_lang",
+    "speech_budget_override_by_lang",
+    "speech_origin_by_lang",
     "action",
     "visual_description",
     "retention_function",

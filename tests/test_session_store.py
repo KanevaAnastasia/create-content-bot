@@ -524,7 +524,7 @@ def test_save_and_load_session_restores_bytes_and_scene_candidates(monkeypatch):
     loaded = session_store.load_session(101)
 
     assert loaded is not None
-    assert "first_step_custom_reference_images" not in loaded
+    assert loaded["first_step_custom_reference_images"] == [b"ref-image"]
     restored_scene = loaded["production"]["json_plan"][0]
     assert restored_scene["image_candidates"][0]["liked"] is True
     selected = resolve_scene_video_for_production(restored_scene, "ru")
@@ -2071,3 +2071,55 @@ def test_series_and_title_review_survive_session_cache():
         "overlay_title_approved_frame": "old-frame",
     }
     assert _chat_session_cache_payload(session) == session
+
+
+def test_approved_phrase_and_pending_decisions_survive_restart_without_rewriting(monkeypatch):
+    from app.handlers import handlers_state_media as media
+    _install_sqlite(monkeypatch)
+    SESSIONS.clear()
+    phrase = 'Это утверждённая пользователем длинная фраза. ' * 12
+    scene = dict(scene=1, duration_sec=6, text=phrase,
+                 speech_by_lang={'ru': phrase, 'en': phrase},
+                 speech_budget_override_by_lang={'ru': True, 'en': True},
+                 speech_origin_by_lang={'ru': 'user', 'en': 'user'},
+                 video_prompt_by_lang={'ru': 'approved ru prompt', 'en': 'approved en prompt'},
+                 custom_review_decision={'keep': True})
+    session = dict(state='waiting_scene_media', image_scene_index=0,
+                   scene_media_substep='video_prompt', scene_media_language_index=1,
+                   production={'json_plan': [scene]},
+                   scene_speech_shorten_pending={'scene_idx': 0, 'stage': 'approval', 'duration_sec': 6},
+                   scene_phrase_translation_pending={'scene_idx': 0, 'stage': 'approval'},
+                   _syntax_durable_update_id=123, custom_dialogue_option='keep me')
+    session_store.save_session(994, session)
+    SESSIONS.clear()
+    restored = session_store.load_session(994)
+    current = restored['production']['json_plan'][0]
+    assert restored['scene_speech_shorten_pending'] == session['scene_speech_shorten_pending']
+    assert restored['scene_phrase_translation_pending'] == session['scene_phrase_translation_pending']
+    assert restored['_syntax_durable_update_id'] == 123
+    assert restored['custom_dialogue_option'] == 'keep me'
+    assert current['custom_review_decision'] == {'keep': True}
+    assert current['speech_budget_override_by_lang'] == {'ru': True, 'en': True}
+    assert current['speech_origin_by_lang'] == {'ru': 'user', 'en': 'user'}
+    async def forbidden(*args, **kwargs):
+        raise AssertionError('Approved phrase must not trigger LLM or Telegram dialogue')
+    monkeypatch.setattr(media, '_call_with_503_retries', forbidden)
+    update = SimpleNamespace(message=SimpleNamespace(reply_text=forbidden))
+    assert asyncio.run(media._maybe_shorten_scene_speech_for_video_budget(
+        update, context=None, session=restored, chat_id=994, scene_idx=0, scene=current, duration_sec=6)) is False
+    assert asyncio.run(media._maybe_adjust_english_speech_for_video_budget(
+        update, context=None, session=restored, chat_id=994, scene=current, duration_sec=6)) is False
+    assert current['text'] == phrase
+    assert current['duration_sec'] == 6
+    assert current['video_prompt_by_lang'] == {'ru': 'approved ru prompt', 'en': 'approved en prompt'}
+
+
+def test_new_session_snapshot_does_not_resurrect_cleared_approval(monkeypatch):
+    _install_sqlite(monkeypatch)
+    session = dict(state='waiting_scene_media', production={'json_plan': [
+        dict(scene=1, text='phrase', duration_sec=8, speech_budget_override_by_lang={'ru': True})]})
+    session_store.save_session(995, session)
+    session['production']['json_plan'][0]['speech_budget_override_by_lang'] = {}
+    session_store.save_session(995, session)
+    restored = session_store.load_session(995)
+    assert restored['production']['json_plan'][0]['speech_budget_override_by_lang'] == {}

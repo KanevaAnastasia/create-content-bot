@@ -197,6 +197,7 @@ from ..scene_speech_budget import (
     speech_budget_for_duration,
     speech_chars_excluding_pauses,
 )
+from ..state import save_loaded_session_if_possible
 from ..scene_speech_shorten import shorten_scene_speech_and_sync_video_prompt_sync
 from ..series_store import (
     SERIES_COUNTER_BY_LANG_SESSION_KEY,
@@ -7498,6 +7499,8 @@ async def _maybe_shorten_scene_speech_for_video_budget(
         ``True`` — остановить шаг (пользователь уведомлён об ошибке).
         ``False`` — можно продолжать генерацию видео.
     """
+    if _scene_speech_budget_override_enabled(scene, "ru"):
+        return False
     speech_text = str(scene.get("text", "")).strip()
     if not speech_text:
         return False
@@ -7741,6 +7744,8 @@ async def _maybe_adjust_english_speech_for_video_budget(
     duration_sec: int,
 ) -> bool:
     """Apply an EN-only prompt-speedup, then shorten only EN if still over budget."""
+    if _scene_speech_budget_override_enabled(scene, "en"):
+        return False
     text_en = _scene_speech_for_language(scene, "en")
     if not text_en:
         return False
@@ -9918,6 +9923,7 @@ async def _handle_waiting_scene_media_state(
             if stage == "approval" and is_ok_pending:
                 session.pop(SCENE_SPEECH_PENDING_KEY, None)
                 _set_scene_speech_budget_override(scene, "en", True)
+                save_loaded_session_if_possible(chat_id)
                 await reply_text_without_keyboard(update.message, "EN-фраза подтверждена. Генерирую видео…")
                 return await _scene_media_video_ok(
                     update, context=context, chat_id=chat_id, session=session,
@@ -9945,6 +9951,7 @@ async def _handle_waiting_scene_media_state(
                 _cancel_scene_speech_timeout(chat_id)
                 session.pop(SCENE_SPEECH_PENDING_KEY, None)
                 _set_scene_speech_budget_override(scene, "ru", True)
+                save_loaded_session_if_possible(chat_id)
                 await reply_text_without_keyboard(update.message, "Фраза подтверждена. Генерирую видео…")
                 return await _scene_media_video_ok(
                     update,
@@ -10160,6 +10167,7 @@ async def _handle_waiting_scene_media_state(
                 for language in _scene_target_languages(session, scene):
                     _set_scene_speech_budget_override(scene, language, True)
                 session.pop(SCENE_SPEECH_PENDING_KEY, None)
+                save_loaded_session_if_possible(chat_id)
                 await reply_text_without_keyboard(
                     update.message,
                     "Оставляю фразу как есть и запускаю видео без автосокращения.",

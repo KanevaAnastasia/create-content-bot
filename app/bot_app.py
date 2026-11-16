@@ -109,7 +109,27 @@ async def _run_admin(callback, update, context, identity, *, quiet_enabled: bool
         return
     async with chat_lock(chat_id):
         with quiet_mode_menu_scope(identity, quiet_enabled):
-            await callback(update, context)
+            if isinstance(update, TelegramUpdate):
+                from .syntax_durable import dialogue_scope, read_json, finish_dialogue, MARKER
+                recovery_ids = context.application.bot_data.setdefault("syntax_recovery_updates", set())
+                recovered = update.update_id in recovery_ids
+                with dialogue_scope(update, recovered=recovered) as scope:
+                    if recovered:
+                        saved = read_json(scope.envelope)
+                        current = SESSIONS.get(chat_id)
+                        if not isinstance(current, dict) or current.get(MARKER) != update.update_id:
+                            recovery_ids.discard(update.update_id)
+                            return
+                        from .session_store import _deserialize_value
+                        from .syntax_durable import resume_scene_job
+                        SESSIONS[chat_id] = _deserialize_value(saved["session"])
+                        await resume_scene_job(update, context, scope)
+                    else:
+                        await callback(update, context)
+                    finish_dialogue(scope)
+                    recovery_ids.discard(update.update_id)
+            else:
+                await callback(update, context)
     if is_quiet_mode_owner(identity):
         try:
             await deliver_ready_product(context.bot, chat_id)
@@ -428,6 +448,8 @@ async def _post_init(application: Application) -> None:
         await asyncio.to_thread(recover_interrupted_guest_syntax_sessions)
     except Exception:
         logger.exception("guest.syntax_startup_recovery_failed")
+    from .syntax_durable import enqueue_recovery
+    await enqueue_recovery(application)
     application.bot_data[_QUIET_MODE_MIDNIGHT_TASK_KEY] = asyncio.create_task(
         _quiet_mode_midnight_loop(),
         name="quiet-mode-midnight-moscow",
