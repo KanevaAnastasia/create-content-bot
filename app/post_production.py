@@ -878,6 +878,8 @@ def _title_series_ass_scale_x(language: str) -> int:
 
 def _title_series_width_ratio(language: str) -> float:
     code = str(language or "").strip().lower()
+    if holiday_font("series", code):
+        return 0.45
     return float(TITLE_SERIES_WIDTH_RATIO_BY_LANGUAGE.get(code) or TITLE_SERIES_WIDTH_RATIO)
 
 
@@ -895,7 +897,8 @@ def _title_series_font_size_scale(language: str) -> float:
 def _title_series_ass_width_correction(language: str) -> float:
     code = str(language or "").strip().lower()
     if holiday_font("series", code):
-        return 1.0
+        # Pudelinka renders at ~70% of Pillow metrics in libass.
+        return 0.70
     return float(TITLE_SERIES_ASS_WIDTH_CORRECTION_BY_LANGUAGE.get(code) or 1.0)
 
 
@@ -1195,6 +1198,11 @@ def _fit_title_overlay_ass_text(
     )
     _ = (top_margin_ratio, has_series_cue)
     max_height = max(1, int(layout.height * TITLE_OVERLAY_MAX_HEIGHT_RATIO))
+    # SnowCapCyr has different font ascent/descent metrics in libass. Fit
+    # to the existing visible title box, not the larger Pillow measurement.
+    render_scale = 0.81 if holiday_font("dish", language) else 1.0
+    max_width = int(max_width / render_scale)
+    max_height = int(max_height / render_scale)
     base_size = _title_overlay_font_size(layout, clean)
     max_size = max(base_size, int(layout.height * 0.42))
     min_size = max(32, int(round(base_size * 0.45)))
@@ -1206,12 +1214,12 @@ def _fit_title_overlay_ass_text(
         spacing = max(8, int(size * 0.10))
         width, height = _measure_title_block(draw, lines, font, spacing=spacing, stroke_width=outline)
         if width <= max_width and height <= max_height:
-            return TitleOverlayFit("\n".join(lines), size, width, height)
+            return TitleOverlayFit("\n".join(lines), size, int(width * render_scale), int(height * render_scale))
     font = ImageFont.truetype(str(font_path), size=min_size)
     width, height = _measure_title_block(
         draw, [clean], font, spacing=max(8, int(min_size * 0.10)), stroke_width=outline,
     )
-    return TitleOverlayFit(clean, min_size, width, height)
+    return TitleOverlayFit(clean, min_size, int(width * render_scale), int(height * render_scale))
 
 
 def _fit_title_series_ass_text(
@@ -2117,6 +2125,8 @@ def _write_burned_subtitle_ass(
                 max_width=max_series_row_width,
                 fit=fit,
             )
+            if holiday_font("series", language) and series_text:
+                series_text = "{\\1c&H5AA63F&}" + series_text
             counter_text = _format_title_series_counter_ass_text(
                 str(cue.get("counter_text") or ""),
                 layout=layout,

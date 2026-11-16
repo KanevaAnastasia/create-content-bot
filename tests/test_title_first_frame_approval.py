@@ -9,6 +9,7 @@ from PIL import Image
 
 from app.handlers import handlers_state_scene as scene
 from app.handlers import handlers_media_scene as media
+from app.scene_media_candidates import register_image_candidate, mark_image_candidate_approved
 
 
 def frame(color):
@@ -30,12 +31,17 @@ def test_title_waits_for_frame_and_reopens_after_replacement(monkeypatch, projec
     assert not asyncio.run(scene._maybe_ask_title_on_first_frame(update(), session))
     ask.assert_not_awaited()
     first = session['production']['json_plan'][0]
-    first['start_frame_image_b64'] = base64.b64encode(frame('red')).decode()
+    candidate = register_image_candidate(first, kind='start', image_bytes=frame('red'))
+    assert not asyncio.run(scene._maybe_ask_title_on_first_frame(update(), session))
+    ask.assert_not_awaited()
+    mark_image_candidate_approved(first, candidate['candidate_id'])
     assert asyncio.run(scene._maybe_ask_title_on_first_frame(update(), session))
     assert session['overlay_title_return_state'] == 'waiting_scene_media'
     session['overlay_title_approved_frame'] = session['overlay_title_review_frame']
     assert not asyncio.run(scene._maybe_ask_title_on_first_frame(update(), session))
-    first['start_frame_image_b64'] = base64.b64encode(frame('blue')).decode()
+    candidate = register_image_candidate(first, kind='start', image_bytes=frame('blue'))
+    assert not asyncio.run(scene._maybe_ask_title_on_first_frame(update(), session))
+    mark_image_candidate_approved(first, candidate['candidate_id'])
     assert asyncio.run(scene._maybe_ask_title_on_first_frame(update(), session))
 
 
@@ -58,7 +64,8 @@ def test_approval_updates_production_and_resumes_without_regeneration(monkeypatc
     session = {'state': scene.STATE_WAITING_OVERLAY_TITLE_STYLE_APPROVAL,
                'overlay_title_review_frame': 'hash',
                'overlay_title_return_state': 'waiting_scene_media',
-               'overlay_title_style': {'title_color': '#123456'}, 'production': {'json_plan': [{}]}}
+               'overlay_title_style': {'title_color': '#123456'},
+               'production': {'json_plan': [{'start_frame_image_b64': base64.b64encode(frame('red')).decode()}]}}
     session[scene.OVERLAY_TITLE_PENDING_NEXT_SESSION_KEY] = 'first_frame'
     asyncio.run(scene._handle_waiting_overlay_title_style_approval_state(
         update(), None, chat_id=901, session=session, text='ОК'))
@@ -92,3 +99,43 @@ def test_automatic_generation_pauses_for_title_review(monkeypatch, runner_name):
     assert asyncio.run(getattr(handlers_state_media, runner_name)(
         update(), context=None, chat_id=901,
         session={'state': scene.STATE_WAITING_OVERLAY_TITLE_STYLE_APPROVAL}))
+
+
+@pytest.mark.parametrize('needs_end', [False, True])
+def test_frame_approval_precedes_title_review_and_saves_next_step(monkeypatch, needs_end):
+    from app.handlers import handlers_state_media as state_media
+    first = {}
+    candidate = register_image_candidate(first, kind='start', image_bytes=frame('red'))
+    session = {'state': 'waiting_scene_media', 'image_scene_index': 0,
+               'scene_media_substep': state_media.SCENE_MEDIA_SUBSTEP_START_IMAGE_APPROVAL,
+               'overlay_title_by_lang': {'ru': 'Печенье'}, 'production': {'json_plan': [first]}}
+    monkeypatch.setattr(state_media, '_persist_image_state_best_effort', lambda candidate: None)
+    monkeypatch.setattr(state_media, '_scene_needs_end_frame_step', lambda scene: needs_end)
+    monkeypatch.setattr(state_media, '_promote_draft_repair_frame_stage_to_video', lambda *args: None)
+    next_step = AsyncMock()
+    monkeypatch.setattr(state_media, '_send_next_scene_media_step', next_step)
+    async def ask(update, current):
+        assert candidate['approved_for_video']
+    monkeypatch.setattr(scene, '_ask_overlay_title_style_approval', ask)
+    asyncio.run(state_media._scene_media_start_image_approval_step(
+        update(), None, chat_id=901, session=session, scene=first, idx=0, text='ОК'))
+    assert session['state'] == scene.STATE_WAITING_OVERLAY_TITLE_STYLE_APPROVAL
+    assert session['scene_media_substep'] == (state_media.SCENE_MEDIA_SUBSTEP_END if needs_end else state_media.SCENE_MEDIA_SUBSTEP_VIDEO)
+    next_step.assert_not_awaited()
+
+
+def test_previously_opened_title_review_returns_to_unapproved_frame(monkeypatch):
+    first = {}
+    register_image_candidate(first, kind='start', image_bytes=frame('red'))
+    session = {'state': scene.STATE_WAITING_OVERLAY_TITLE_STYLE_APPROVAL,
+               scene.OVERLAY_TITLE_PENDING_NEXT_SESSION_KEY: 'first_frame',
+               'overlay_title_review_frame': 'old', 'overlay_title_return_state': 'waiting_scene_media',
+               'production': {'json_plan': [first]}}
+    resume = AsyncMock()
+    monkeypatch.setattr(media, '_send_next_scene_media_step', resume)
+    asyncio.run(scene._handle_waiting_overlay_title_style_approval_state(
+        update(), None, chat_id=901, session=session, text='ОК'))
+    assert session['state'] == 'waiting_scene_media'
+    assert 'overlay_title_approved_frame' not in session
+    resume.assert_awaited_once()
+    scene.SESSIONS.pop(901, None)

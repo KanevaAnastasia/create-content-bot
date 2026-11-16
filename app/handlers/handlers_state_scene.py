@@ -950,9 +950,12 @@ def _render_overlay_title_preview(
 
 
 def _overlay_first_frame(session: dict) -> bytes | None:
-    from ..scene_media_candidates import selected_image_bytes_for_video
+    from ..scene_media_candidates import resolve_scene_image_for_video, selected_image_bytes_for_video
     scenes = (session.get("production") or {}).get("json_plan") or []
     if not scenes:
+        return None
+    selected = resolve_scene_image_for_video(scenes[0], kind="start")
+    if not selected or not selected.get("approved_for_video"):
         return None
     return selected_image_bytes_for_video(scenes[0], kind="start")
 
@@ -1008,7 +1011,7 @@ async def _send_overlay_title_previews(update: Update, session: dict, style: dic
 
 async def _ask_overlay_title_style_approval(update: Update, session: dict, context=None) -> bool:
     if not _overlay_first_frame(session):
-        await update.message.reply_text("Оформление заголовка согласуем на первом сгенерированном кадре.")
+        await update.message.reply_text("Оформление заголовка согласуем после утверждения первого стартового кадра.")
         return await _handle_waiting_overlay_title_style_approval_state(
             update, context, chat_id=update.effective_chat.id, session=session, text="ОК", deferred=True,
         )
@@ -5545,6 +5548,18 @@ async def _handle_waiting_overlay_title_style_approval_state(
     text: str,
     deferred: bool = False,
 ) -> bool:
+    if (session.get(OVERLAY_TITLE_PENDING_NEXT_SESSION_KEY) == "first_frame"
+            and not _overlay_first_frame(session)):
+        # Sessions opened before this approval ordering changed must also return
+        # to frame approval; do not interpret their next OK as title approval.
+        session.pop(OVERLAY_TITLE_PENDING_NEXT_SESSION_KEY, None)
+        session.pop("overlay_title_review_frame", None)
+        session["state"] = session.pop("overlay_title_return_state", STATE_WAITING_SCENE_MEDIA)
+        from .handlers_media_scene import _send_next_scene_media_step
+        await update.message.reply_text("Сначала утвердите стартовый кадр, затем примерим на него заголовки.")
+        await _send_next_scene_media_step(update, session)
+        SESSIONS[chat_id] = session
+        return True
     if not deferred and str(session.get(PROJECT_KEY_SESSION) or "") == "discipline":
         from .editorial_title_picker import handle_picker_input
         if await handle_picker_input(update, session, text):

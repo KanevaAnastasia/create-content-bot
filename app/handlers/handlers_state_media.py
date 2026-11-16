@@ -6537,9 +6537,6 @@ async def _scene_media_start_ok(
     _invalidate_scene_videos_after_frame_change(scene, _scene_target_languages(session, scene))
     session["scene_media_language_index"] = 0
     session["scene_media_substep"] = SCENE_MEDIA_SUBSTEP_START_IMAGE_APPROVAL
-    from .handlers_state_scene import _maybe_ask_title_on_first_frame
-    if await _maybe_ask_title_on_first_frame(update, session):
-        return True
     if _is_scene_media_ai_approve_enabled(session):
         image_status = await _run_ai_start_frame_check(
             update,
@@ -6553,6 +6550,7 @@ async def _scene_media_start_ok(
             session["scene_media_substep"] = (
                 SCENE_MEDIA_SUBSTEP_END if _scene_needs_end_frame_step(scene) else SCENE_MEDIA_SUBSTEP_VIDEO
             )
+            await _review_titles_after_start_frame_approval(update, session, scene)
             return True
         if image_status == AI_APPROVAL_STATUS_REGENERATE_IMAGE:
             if _ai_attempt_count(scene, "image") <= _ai_regenerate_attempt_limit(session):
@@ -6986,6 +6984,15 @@ async def _scene_media_end_ok(update: Update, *, session: dict, scene: dict, idx
     return True
 
 
+async def _review_titles_after_start_frame_approval(update: Update, session: dict, scene: dict) -> bool:
+    selected = resolve_scene_image_for_video(scene, kind="start")
+    if selected is not None and not selected.get("approved_for_video"):
+        approved = mark_image_candidate_approved(scene, str(selected.get("candidate_id") or ""))
+        _persist_image_state_best_effort(approved)
+    from .handlers_state_scene import _maybe_ask_title_on_first_frame
+    return await _maybe_ask_title_on_first_frame(update, session)
+
+
 async def _scene_media_start_image_approval_step(
     update: Update,
     context: ContextTypes.DEFAULT_TYPE,
@@ -7036,6 +7043,8 @@ async def _scene_media_start_image_approval_step(
         session["scene_media_substep"] = next_substep
         if next_substep == SCENE_MEDIA_SUBSTEP_VIDEO:
             _promote_draft_repair_frame_stage_to_video(session, scene, idx)
+        if await _review_titles_after_start_frame_approval(update, session, scene):
+            return True
         await _send_next_scene_media_step(update, session)
         return True
     if low in {"перегенерировать", "regen", "regenerate"}:
@@ -8341,6 +8350,8 @@ async def _run_scene_media_auto_approve(
             session["scene_media_substep"] = (
                 SCENE_MEDIA_SUBSTEP_END if _scene_needs_end_frame_step(scene) else SCENE_MEDIA_SUBSTEP_VIDEO
             )
+            if await _review_titles_after_start_frame_approval(update, session, scene):
+                return True
         elif sub == SCENE_MEDIA_SUBSTEP_END:
             await _scene_media_end_ok(update, session=session, scene=scene, idx=idx)
         elif sub == SCENE_MEDIA_SUBSTEP_END_IMAGE_APPROVAL:
@@ -8458,6 +8469,8 @@ async def _run_scene_media_ai_approve(
                     session["scene_media_substep"] = (
                         SCENE_MEDIA_SUBSTEP_END if _scene_needs_end_frame_step(scene) else SCENE_MEDIA_SUBSTEP_VIDEO
                     )
+                    if await _review_titles_after_start_frame_approval(update, session, scene):
+                        return True
                 elif image_status == AI_APPROVAL_STATUS_REGENERATE_IMAGE:
                     if _ai_attempt_count(scene, "image") <= _ai_regenerate_attempt_limit(session):
                         scene.pop("start_frame_image_b64", None)

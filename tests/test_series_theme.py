@@ -39,6 +39,9 @@ def test_holiday_ass_fonts_and_no_leak(tmp_path, language, title, series):
     content = path.read_text()
     assert ',SnowCapCyr,' in content
     assert ',Pudelinka,' in content
+    series_event = next(line for line in content.splitlines() if line.startswith('Dialogue:') and r'\1c&H5AA63F&' in line)
+    assert series.replace(' ', r'\h').lower() in series_event.lower()
+    assert sum(r'\1c&H5AA63F&' in line for line in content.splitlines()) == 1
     assert title in content or title.replace(' ', r'\h') in content
     pp._write_burned_subtitle_ass(path, [], title_cues=cues,
                                   video_width=1080, video_height=1920)

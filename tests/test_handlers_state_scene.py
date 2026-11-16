@@ -2402,7 +2402,7 @@ def test_scene_approval_with_existing_overlay_title_generates_production(monkeyp
     asyncio.run(on_text(update, context=None))
 
     assert SESSIONS[1047][OVERLAY_SUBTITLE_DECIDED_SESSION_KEY] is True
-    assert any("первом сгенерированном кадре" in text for text in replies)
+    assert any("после утверждения первого стартового кадра" in text for text in replies)
 
     assert SESSIONS[1047]["state"] == "waiting_production_bundle_approval"
     assert not any("русский заголовок" in text.lower() for text in replies)
