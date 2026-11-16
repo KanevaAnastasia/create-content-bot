@@ -23,7 +23,7 @@ from sqlalchemy import select
 
 from .ai_approval_service import _resolve_ffmpeg
 from .db import SessionLocal
-from .series_theme import holiday_font, holiday_music, themed_fonts
+from .series_theme import holiday_dish_color, holiday_font, holiday_music, themed_fonts
 from .models import Project
 from .scene_media_candidates import (
     DEFAULT_SCENE_VIDEO_SPEED_COEF,
@@ -1874,6 +1874,13 @@ def _write_burned_subtitle_ass(
     layout = _subtitle_layout_for_dimensions(video_width, video_height)
     font_name = _subtitle_font_name()
     title_style = title_style if isinstance(title_style, dict) else {}
+    # Normalize before fitting so uppercase dimensions match the final glyphs.
+    title_cues = [
+        {**cue, "text": str(cue.get("text") or "").upper()}
+        if str(cue.get("kind") or "title") == "title"
+        and holiday_font("dish", str(cue.get("language") or "ru")) else cue
+        for cue in title_cues or []
+    ]
     title_margin_ratio = _coerce_overlay_ratio(
         title_style.get("side_margin_ratio"),
         default=TITLE_OVERLAY_MARGIN_RATIO,
@@ -2038,10 +2045,10 @@ def _write_burned_subtitle_ass(
                         "style_name": style_name,
                         "font": _title_overlay_font_name(language),
                         "font_size": _title_overlay_font_size(layout, ""),
-                        "primary_colour": title_primary_colour,
+                        "primary_colour": _ass_colour_from_hex(holiday_dish_color(title_style)) if holiday_font("dish", language) else title_primary_colour,
                         "outline_colour": TITLE_OVERLAY_OUTLINE_COLOUR,
                         "shadow_colour": TITLE_OVERLAY_SHADOW_COLOUR,
-                        "bold": 0 if language == "en" else TITLE_OVERLAY_BOLD,
+                        "bold": 0 if language == "en" or holiday_font("dish", language) else TITLE_OVERLAY_BOLD,
                         "spacing": TITLE_OVERLAY_SPACING,
                         "outline": _title_overlay_outline(language),
                         "shadow": _title_overlay_shadow(layout, language),
@@ -2246,6 +2253,17 @@ def _write_burned_subtitle_ass(
                 text=text,
             )
         )
+        if kind == "title" and holiday_font("dish", str(cue.get("language") or "ru")):
+            # Same metrics, positioning and timing as the coloured base. This
+            # companion font contains only the original transparent snow caps.
+            lines.append(
+                "Dialogue: 3,{start},{end},{style},,0,0,0,,{text}".format(
+                    start=_ass_timestamp(float(cue.get("start_sec") or 0.0)),
+                    end=_ass_timestamp(float(cue.get("end_sec") or 0.0)),
+                    style=str(cue.get("style") or _title_overlay_style_name(str(cue.get("language") or "ru"))),
+                    text="{\\fnCF SnowCap Snow\\1c&HFFFFFF&\\bord0\\shad0\\b0}" + text,
+                )
+            )
     for cue in cues:
         fixed_block_text = _story_fixed_block_ass_text(cue, layout)
         if fixed_block_text:

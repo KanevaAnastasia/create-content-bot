@@ -639,6 +639,9 @@ def _semantic_overlay_title_color(title: str) -> str:
 def _default_overlay_title_style(session: dict) -> dict[str, object]:
     title = str(session.get(OVERLAY_TITLE_SESSION_KEY) or "").strip()
     existing = session.get(OVERLAY_TITLE_STYLE_SESSION_KEY)
+    from ..series_theme import HOLIDAY_THEME, holiday_dish_color
+    if isinstance(existing, dict) and existing.get("series_theme") == HOLIDAY_THEME:
+        return {**existing, "title_color": holiday_dish_color(existing)}
     if isinstance(existing, dict) and existing:
         return dict(existing)
     return {

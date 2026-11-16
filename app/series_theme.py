@@ -48,3 +48,14 @@ def holiday_music(style):
     if not path.is_file():
         raise FileNotFoundError(f"Series music is missing: {path}")
     return str(path), 0.18
+
+
+def holiday_dish_color(style):
+    """Keep chosen colours, replacing white/near-white with festive red."""
+    import re
+    value = str((style or {}).get("title_color") or "").strip()
+    if re.fullmatch(r"#[0-9a-fA-F]{6}", value):
+        channels = [int(value[i:i + 2], 16) for i in (1, 3, 5)]
+        if min(channels) < 220:
+            return value
+    return "#cd2b34"
