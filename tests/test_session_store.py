@@ -2053,3 +2053,21 @@ def test_scene_syntax_recovery_survives_restart_and_clears_after_completion(monk
     session_store.save_session(991, restored)
     reloaded = session_store.load_session(991)
     assert "video_provider_choice_pending" not in reloaded["production"]["json_plan"][0]
+
+
+def test_series_and_title_review_survive_session_cache():
+    from app.session_store import _chat_session_cache_payload
+
+    session = {
+        "series": {"id": "holiday", "series_theme": "grandma_christmas"},
+        "series_title_by_lang": {"ru": "Новогодние рецепты"},
+        "series_counter_by_lang": {"ru": "день 1 из 10"},
+        "series_video_index": 1,
+        "series_total_videos": 10,
+        "series_render_counter_advanced": True,
+        "overlay_title_pending_next": "first_frame",
+        "overlay_title_return_state": "waiting_scene_media",
+        "overlay_title_review_frame": "new-frame",
+        "overlay_title_approved_frame": "old-frame",
+    }
+    assert _chat_session_cache_payload(session) == session
