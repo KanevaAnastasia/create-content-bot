@@ -126,3 +126,22 @@ def test_server_error_retries(monkeypatch):
     with pytest.raises(ConnectionError):
         llm.gemini_generate_sync('hello')
     assert len(calls) == llm.LLM_TRANSPORT_MAX_ATTEMPTS
+
+
+def test_persistent_admin_choice_wins_over_profile_but_guest_keeps_original(monkeypatch, tmp_path):
+    from app import text_settings as settings
+    from app.writing_style import LEGACY_HUMAN_WRITING_RULES
+    monkeypatch.setattr(settings, 'SETTINGS_PATH', tmp_path / 'model.json')
+    settings.save_text_model('gpt-6.1-sol')
+    monkeypatch.setenv('OPENAI_CREATIVE_MODEL', 'original-profile-model')
+    calls = response(monkeypatch, completed())
+    llm.gemini_generate_sync('script', model_profile='creative')
+    assert calls[-1][1]['json']['model'] == 'gpt-6.1-sol'
+    token = settings.LEGACY_GUEST_TEXT.set(True)
+    try:
+        llm.gemini_generate_sync('script', model_profile='creative')
+    finally:
+        settings.LEGACY_GUEST_TEXT.reset(token)
+    payload = calls[-1][1]['json']
+    assert payload['model'] == 'original-profile-model'
+    assert payload['input'][0]['content'][0]['text'] == LEGACY_HUMAN_WRITING_RULES + '\n\nscript'

@@ -4,7 +4,9 @@ Reference: https://en.wikipedia.org/wiki/Wikipedia:Signs_of_AI_writing
 Reviewed 2026-11-16. These are editing principles, not an AI detector.
 """
 
-HUMAN_WRITING_RULES = """[CONTENT_FABRIC_WRITING_STYLE_V1]
+from .text_settings import LEGACY_GUEST_TEXT
+
+LEGACY_HUMAN_WRITING_RULES = """[CONTENT_FABRIC_WRITING_STYLE_V1]
 Общие правила для создаваемого и редактируемого текста на любом языке:
 Пиши естественно, конкретно и понятно выбранной аудитории. Сохраняй голос персонажа,
 жанр и уместные эмоции. Реплики должны удобно произноситься; меняй длину предложений
@@ -28,9 +30,38 @@ HUMAN_WRITING_RULES = """[CONTENT_FABRIC_WRITING_STYLE_V1]
 [/CONTENT_FABRIC_WRITING_STYLE_V1]"""
 
 
+# Keep the previous policy byte-for-byte for guest workflows.
+
+HUMAN_WRITING_RULES = LEGACY_HUMAN_WRITING_RULES.replace("WRITING_STYLE_V1", "WRITING_STYLE_V2").replace(
+    "[/CONTENT_FABRIC_WRITING_STYLE_V2]",
+    """Дополнительная редактура сценариев и описаний:
+Начинай с события, узнаваемого поступка или конкретной проблемы. Не объясняй зрителю,
+почему тема важна. Каждый следующий фрагмент должен двигать действие или мысль.
+Если задан юмор, строй шутки на поступках, деталях и противоречиях персонажа.
+Не подменяй шутку случайной метафорой, набором острот или объяснением, почему смешно.
+Финальная отсылка должна продолжать понятную деталь из начала, а не вводить новую.
+Сохраняй причинность, время действия, голос и точку зрения рассказчика.
+Не унижай зрителя. Не добавляй нравоучения, общие призывы и обещания вирусности.
+Если нужен вывод, свяжи его с показанным действием и дай выполнимый следующий шаг.
+В тёплой речи не злоупотребляй уменьшительными словами и не сюсюкай.
+Описание публикации должно быть понятным само по себе и добавлять повод посмотреть,
+а не повторять сценарий целиком. Не придумывай результат, которого нет в ролике.
+В производственных описаниях сцен выбирай конкретные действия: без «возможно»,
+«или» и нескольких альтернатив одного кадра. Не меняй рецепт, количества и порядок.
+Молча проверь черновик: можно ли это естественно произнести; понятны ли шутки;
+нет ли скачка логики, лишнего итога, повторов или натянутого сравнения.
+Удали слабые фразы, затем проверь обязательные условия и формат ответа.
+Эти рекомендации не меняют дословные цитаты, утверждённый текст и требования задачи.
+[/CONTENT_FABRIC_WRITING_STYLE_V2]""",
+)
+
+
 def with_writing_style(prompt: str) -> str:
-    """Attach once, without modifying task payloads or approved source text."""
+    """Attach the applicable policy once; preserve the complete task payload."""
     text = str(prompt)
-    if text.startswith(HUMAN_WRITING_RULES + "\n\n"):
-        return text
-    return HUMAN_WRITING_RULES + "\n\n" + text
+    rules = LEGACY_HUMAN_WRITING_RULES if LEGACY_GUEST_TEXT.get() else HUMAN_WRITING_RULES
+    for existing in (HUMAN_WRITING_RULES, LEGACY_HUMAN_WRITING_RULES):
+        if text.startswith(existing + "\n\n"):
+            text = text[len(existing) + 2:]
+            break
+    return rules + "\n\n" + text

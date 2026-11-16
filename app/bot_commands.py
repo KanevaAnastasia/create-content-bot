@@ -15,6 +15,7 @@ OWNER_COMMANDS = (
     BotCommand("inst", "Статистика Instagram русской Бабушки"),
     BotCommand("stat", "Статистика генераций и субтитров"),
     BotCommand("stats", "Статистика — аналог /stat"),
+    BotCommand("text_model", "Выбрать модель ChatGPT для текстов"),
     BotCommand("generate", "Запустить генерацию"),
     BotCommand("quick", "Быстрая генерация"),
     BotCommand("image", "Сгенерировать изображение"),

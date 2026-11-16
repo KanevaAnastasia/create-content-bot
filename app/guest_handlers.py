@@ -23,6 +23,7 @@ from telegram.ext import ContextTypes
 from .db import SessionLocal
 from .final_build_queue import queue_final_builds_for_session
 from .guest_access import BotIdentity
+from .text_settings import guest_text_context
 from .media_file_store import (
     image_file_extension,
     image_mime_type,
@@ -1670,12 +1671,16 @@ async def _generate_image(update: Update, session: dict[str, Any], *, target: st
         caption = "Изображение готово." if target == "image" else "Стартовый кадр сцены готов."
     prompt = _requirements_prompt(base, feedback, prefix=prefix)
     await _reply(update, "Генерирую изображение, пожалуйста, подождите.", markup=ReplyKeyboardRemove())
+    image_options = {}
+    if session.get("guest_mode") and not session.get("project_workspace_mode"):
+        image_options["model"] = "gemini-nano-banana-2.1"
     try:
         image = await asyncio.to_thread(
             generate_image_vertex,
             prompt,
             reference_images=refs,
             aspect_ratio=aspect_ratio,
+            **image_options,
         )
     except Exception:
         logger.exception("guest.image_generation_failed target=%s", target)
@@ -2004,6 +2009,7 @@ def _clear_workflow_data(session: dict[str, Any], *, keep_cartoon_scenes: bool =
     data.update(preserved)
 
 
+@guest_text_context
 async def guest_start(update: Update, context: ContextTypes.DEFAULT_TYPE, identity: BotIdentity) -> None:
     _ = context
     if update.effective_chat is None:
@@ -2067,6 +2073,7 @@ async def project_workspace_start(update: Update, context: ContextTypes.DEFAULT_
     save_loaded_session_if_possible(chat_id)
 
 
+@guest_text_context
 async def guest_cancel(update: Update, context: ContextTypes.DEFAULT_TYPE, identity: BotIdentity) -> None:
     _ = context
     if update.effective_chat is None:
@@ -2095,6 +2102,7 @@ async def guest_cancel(update: Update, context: ContextTypes.DEFAULT_TYPE, ident
     await _reply(update, "Текущий шаг отменён. Выберите действие.", markup=guest_main_menu_markup(session))
 
 
+@guest_text_context
 async def guest_on_photo(update: Update, context: ContextTypes.DEFAULT_TYPE, identity: BotIdentity) -> None:
     if update.effective_chat is None:
         return
@@ -2155,6 +2163,7 @@ async def guest_on_photo(update: Update, context: ContextTypes.DEFAULT_TYPE, ide
     save_loaded_session_if_possible(chat_id)
 
 
+@guest_text_context
 async def guest_on_video(update: Update, context: ContextTypes.DEFAULT_TYPE, identity: BotIdentity) -> None:
     _ = (context, identity)
     if update.effective_chat is None:
@@ -2644,6 +2653,7 @@ def _refresh_final_review_session_if_needed(
     return session
 
 
+@guest_text_context
 async def guest_on_text(update: Update, context: ContextTypes.DEFAULT_TYPE, identity: BotIdentity) -> None:
     if update.message is None or update.effective_chat is None:
         return

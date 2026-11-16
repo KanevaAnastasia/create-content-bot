@@ -39,6 +39,7 @@ from .constants import (
 from .llm_logging import get_llm_io_logger
 from .llm_queue import LLMCallTimeoutError, submit_llm
 from .writing_style import with_writing_style
+from .text_settings import selected_text_model
 
 logger = logging.getLogger("bot")
 _llm_io = get_llm_io_logger()
@@ -683,6 +684,8 @@ def vertex_part_from_data(project: str, location: str, data: bytes) -> Any:
 
 def text_llm_provider() -> str:
     """Select text backend; preserve Gemini for installations without an OpenAI key."""
+    if selected_text_model():
+        return "openai"
     provider = (os.getenv("TEXT_LLM_PROVIDER") or "").strip().lower()
     if not provider:
         provider = "openai" if (os.getenv("OPENAI_API_KEY") or "").strip() else "gemini"
@@ -705,6 +708,7 @@ def openai_generate_sync(
     model = (os.getenv("OPENAI_MODEL") or "gpt-6-astra").strip()
     if model_profile in {GEMINI_MODEL_PROFILE_CREATIVE, GEMINI_MODEL_PROFILE_EDIT}:
         model = (os.getenv(f"OPENAI_{model_profile.upper()}_MODEL") or model).strip()
+    model = selected_text_model() or model
     content: list[dict[str, Any]] = [{"type": "input_text", "text": with_writing_style(prompt)}]
     for payload in _dedupe_binary_payloads(images):
         mime = _guess_media_mime_type(payload)

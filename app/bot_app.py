@@ -60,6 +60,7 @@ from .session_store import recover_interrupted_guest_syntax_sessions
 from .speech_usage import format_speech_alignment_remaining, speech_alignment_monthly_usage
 from .handlers.instagram_stats import handle_calendar, send_instagram_stats
 from .bot_commands import configure_owner_commands
+from .text_settings import text_model_command as admin_text_model_command
 
 logger = logging.getLogger("bot")
 _QUIET_MODE_MIDNIGHT_TASK_KEY = "quiet_mode_midnight_task"
@@ -377,6 +378,7 @@ def _admin_only(callback):
     return wrapped
 
 
+text_model_command = _admin_only(admin_text_model_command)
 check_env = _admin_only(admin_check_env)
 generate = _admin_only(admin_generate)
 quick_generate = _admin_only(admin_quick_generate)
@@ -499,6 +501,7 @@ def build_application(token: str) -> Application:
     app.add_handler(CommandHandler("inst", instagram_stats_command, block=False))
     app.add_handler(CallbackQueryHandler(instagram_stats_callback, pattern=r"^igstat:", block=False))
     app.add_handler(CommandHandler("check_env", check_env))
+    app.add_handler(CommandHandler("text_model", text_model_command))
     app.add_handler(CommandHandler("cancel", cancel))
     app.add_handler(CommandHandler("reset", cancel))
     app.add_handler(CommandHandler("generate", generate))
