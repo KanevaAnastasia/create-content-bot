@@ -5089,13 +5089,6 @@ async def _deliver_scene_video_result(
     provider: str,
     caption_suffix: str,
 ) -> None:
-    vb = io.BytesIO(video_bytes)
-    vb.name = f"scene_{idx + 1}_{language}.mp4"
-    sent_message = await _safe_reply_video(
-        update.message,
-        video=vb,
-        caption=f"Сцена {idx + 1}/{total}, язык {language}: видео готово{caption_suffix}",
-    )
     cost_summary = _store_scene_video_result(
         scene,
         language,
@@ -5104,6 +5097,13 @@ async def _deliver_scene_video_result(
         scene_idx=idx,
         provider=provider,
         source_image_candidate_id=str((resolve_scene_image_for_video(scene, kind='start') or {}).get("candidate_id") or ""),
+    )
+    vb = io.BytesIO(video_bytes)
+    vb.name = f"scene_{idx + 1}_{language}.mp4"
+    sent_message = await _safe_reply_video(
+        update.message,
+        video=vb,
+        caption=f"Сцена {idx + 1}/{total}, язык {language}: видео готово{caption_suffix}",
     )
     latest_candidate = latest_scene_video_candidate(scene, language)
     register_media_message_candidate(
@@ -8055,19 +8055,6 @@ async def _scene_media_video_ok(
             returned_syntax_keys = set(syntax_batch_results)
             missing_syntax_keys = sorted(expected_syntax_keys - returned_syntax_keys)
             if missing_syntax_keys:
-                for language in sorted(returned_syntax_keys):
-                    await _deliver_scene_video_result(
-                        update,
-                        chat_id=int(chat_id) if chat_id is not None else 0,
-                        session=session,
-                        scene=scene,
-                        idx=idx,
-                        total=total,
-                        language=language,
-                        video_bytes=syntax_batch_results[language],
-                        provider="telegram",
-                        caption_suffix=". Источник: Syntax.",
-                    )
                 scene["video_provider_choice_pending"] = {
                     "source": "scene_batch",
                     "languages": missing_syntax_keys,
@@ -8098,6 +8085,25 @@ async def _scene_media_video_ok(
                     pending_payload=scene["video_provider_choice_pending"],
                     error_message="Syntax вернул не весь набор языков.",
                 )
+                await _safe_reply_text(
+                    update.message,
+                    f"Получено из Syntax: {', '.join(sorted(returned_syntax_keys)) or 'ничего'}. "
+                    f"Без готового результата: {', '.join(missing_syntax_keys)}. "
+                    "Пересылаю полученные видео; повтор понадобится только для остальных языков.",
+                )
+                for language in sorted(returned_syntax_keys):
+                    await _deliver_scene_video_result(
+                        update,
+                        chat_id=int(chat_id) if chat_id is not None else 0,
+                        session=session,
+                        scene=scene,
+                        idx=idx,
+                        total=total,
+                        language=language,
+                        video_bytes=syntax_batch_results[language],
+                        provider="telegram",
+                        caption_suffix=". Источник: Syntax.",
+                    )
                 if _is_scheduled_unattended_ai_mode(session):
                     session[SCENE_MEDIA_AI_TECHNICAL_FAILURE_SESSION_KEY] = {
                         "stage": "syntax_video",
@@ -9194,19 +9200,6 @@ async def _handle_scene_video_provider_choice_pending(
                 return True
             missing = [language for language in languages if language not in syntax_batch_results]
             if missing:
-                for language in sorted(set(syntax_batch_results) & set(languages)):
-                    await _deliver_scene_video_result(
-                        update,
-                        chat_id=chat_id,
-                        session=session,
-                        scene=scene,
-                        idx=idx,
-                        total=total,
-                        language=language,
-                        video_bytes=syntax_batch_results[language],
-                        provider="telegram",
-                        caption_suffix=". Источник: Syntax.",
-                    )
                 entries_by_lang = {
                     language: entries_by_lang[language]
                     for language in missing
@@ -9232,6 +9225,19 @@ async def _handle_scene_video_provider_choice_pending(
                     ),
                     reply_markup=_syntax_recovery_markup(missing, session=session),
                 )
+                for language in sorted(set(syntax_batch_results) & set(languages)):
+                    await _deliver_scene_video_result(
+                        update,
+                        chat_id=chat_id,
+                        session=session,
+                        scene=scene,
+                        idx=idx,
+                        total=total,
+                        language=language,
+                        video_bytes=syntax_batch_results[language],
+                        provider="telegram",
+                        caption_suffix=". Источник: Syntax.",
+                    )
                 return True
             scene.pop("video_provider_choice_pending", None)
             for language in languages:

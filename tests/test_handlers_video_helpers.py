@@ -8174,6 +8174,9 @@ def test_scene_media_video_ok_preserves_partial_syntax_batch_and_retries_missing
         raise AssertionError("auto Vertex path must not start after partial Syntax batch")
 
     async def _fake_reply_video(_message, *, video, caption):
+        assert scene["video_provider_choice_pending"]["languages"] == ["en"]
+        assert scene["video_results_by_lang"]["ru"]["video_b64"] == _encode_b64(b"syntax-ru-video")
+        assert any("Получено из Syntax: ru" in text for text in messages)
         captions.append(caption)
         return SimpleNamespace(message_id=len(captions))
 
