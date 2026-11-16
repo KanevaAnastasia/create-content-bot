@@ -879,7 +879,7 @@ def _title_series_ass_scale_x(language: str) -> int:
 def _title_series_width_ratio(language: str) -> float:
     code = str(language or "").strip().lower()
     if holiday_font("series", code):
-        return 0.45
+        return 0.80
     return float(TITLE_SERIES_WIDTH_RATIO_BY_LANGUAGE.get(code) or TITLE_SERIES_WIDTH_RATIO)
 
 
@@ -1239,6 +1239,7 @@ def _fit_title_series_ass_text(
     if not clean or font_path is None:
         return None
 
+    separate_counter = bool(holiday_font("series", language))
     margin_h = int(layout.width * side_margin_ratio)
     max_row_width = max(1, int(max_width or (layout.width - (margin_h * 2))))
     clean_counter = " ".join(str(counter_text or "").split())
@@ -1266,7 +1267,8 @@ def _fit_title_series_ass_text(
         font = ImageFont.truetype(str(font_path), size=display_size)
         raw_width, height = _measure_title_block(draw, [measure_text], font, spacing=0)
         width = int(round(raw_width * (display_series_scale_x / 100.0) * series_width_correction))
-        if width <= series_target_width:
+        fits_height = not separate_counter or height * 0.70 <= layout.height * 0.065
+        if width <= series_target_width and fits_height:
             size = candidate_size
             series_width = width
             series_height = height
@@ -1323,7 +1325,7 @@ def _fit_title_series_ass_text(
             counter_width = int(round(counter_width * _title_series_day_ass_width_correction(language)))
             counter_scale_x = 100
     scaled_counter_width = counter_width
-    fitted_width = series_width + gap_width + scaled_counter_width
+    fitted_width = series_width if separate_counter else series_width + gap_width + scaled_counter_width
     while fitted_width > max_row_width and (size > min_series_size or (clean_counter and counter_size > min_counter_size)):
         reduce_counter = bool(
             clean_counter
@@ -1363,7 +1365,7 @@ def _fit_title_series_ass_text(
             counter_width = int(round(counter_width * _title_series_day_ass_width_correction(language)))
             counter_scale_x = 100
         scaled_counter_width = counter_width
-        fitted_width = series_width + gap_width + scaled_counter_width
+        fitted_width = series_width if separate_counter else series_width + gap_width + scaled_counter_width
     display_series_size = int(round(size * display_series_scale))
     series_slot_width = series_target_width
     counter_slot_width = counter_target_width if clean_counter else 0
@@ -1935,6 +1937,7 @@ def _write_burned_subtitle_ass(
     subtitle_margin_v = main_title_margin_v
     subtitle_fits_by_key: dict[int, TitleOverlayFit | None] = {}
     main_title_heights: list[int] = []
+    holiday_title_blocks: list[int] = []
     for cue in title_cues or []:
         kind = str(cue.get("kind") or "title")
         language = str(cue.get("language") or "ru").strip().lower() or "ru"
@@ -1953,6 +1956,8 @@ def _write_burned_subtitle_ass(
                 fit = None
             if fit is not None:
                 main_title_heights.append(fit.height)
+                if holiday_font("dish", language):
+                    holiday_title_blocks.append(int(round(fit.font_size * 0.90)))
         elif kind == "subtitle":
             try:
                 subtitle_fits_by_key[id(cue)] = _fit_title_subtitle_ass_text(
@@ -1966,6 +1971,10 @@ def _write_burned_subtitle_ass(
                 subtitle_fits_by_key[id(cue)] = None
     if main_title_heights:
         subtitle_margin_v = main_title_margin_v + max(main_title_heights) + int(round(layout.height * TITLE_SUBTITLE_GAP_RATIO))
+    holiday_day_y = main_title_margin_v + max(holiday_title_blocks, default=0) + int(round(layout.height * 0.008))
+    holiday_day_size = max(24, int(round(layout.height * 0.070)))
+    if holiday_title_blocks and any(cue.get("counter_text") for cue in title_cues if cue.get("kind") == "series"):
+        subtitle_margin_v = max(subtitle_margin_v, holiday_day_y + holiday_day_size)
     series_margin_l = title_margin_h
     title_styles: list[str] = []
     if title_cues:
@@ -2166,6 +2175,11 @@ def _write_burned_subtitle_ass(
                 ),
                 scale_x=100 if is_story_series else fit.counter_scale_x if fit is not None else 100,
             )
+            if holiday_font("series", language):
+                counter_text = _format_title_series_counter_ass_text(
+                    str(cue.get("counter_text") or ""), layout=layout, language=language,
+                    base_size=holiday_day_size, number_size=holiday_day_size,
+                )
             style_name = str(cue.get("style") or _title_series_style_name(language))
             if series_text:
                 lines.append(
@@ -2181,7 +2195,11 @@ def _write_burned_subtitle_ass(
                     )
                 )
             if counter_text:
-                if is_story_series:
+                if holiday_font("series", language):
+                    day_pos_x = layout.width - title_margin_h
+                    day_pos_y = holiday_day_y - int(round(holiday_day_size * _title_series_day_y_shift_ratio(language)))
+                    counter_text = "{\\an9}" + counter_text
+                elif is_story_series:
                     series_font_size = fit.series_font_size if fit is not None else _title_series_font_size(layout)
                     day_font_size = max(
                         24,

@@ -95,3 +95,29 @@ def test_snow_mask_aligns_with_base_in_final_renderer(tmp_path, text):
     assert snow.getbbox() is not None
     assert ImageChops.multiply(base, snow).getbbox() is None
     assert snow.getbbox()[3] < base.getbbox()[3] * 0.65
+
+
+@pytest.mark.parametrize('language,title,series,counter', [
+    ('ru', 'Имбирное печенье', 'Новогодние рецепты', 'день 1 из 10'),
+    ('en', 'Gingerbread Cookies', 'Christmas Recipes', 'day 1 of 10'),
+])
+def test_holiday_counter_has_own_right_aligned_row(tmp_path, language, title, series, counter):
+    import re
+    cues = [pp._build_title_overlay_cue({language: title}, language=language, duration_sec=2),
+            pp._build_title_series_overlay_cue({language: series}, {language: counter}, language=language, duration_sec=2)]
+    path = tmp_path / 'layout.ass'
+    pp._write_burned_subtitle_ass(path, [], title_cues=cues,
+                                  title_style={'series_theme': HOLIDAY_THEME}, video_width=1080, video_height=1920)
+    content = path.read_text()
+    day = next(line for line in content.splitlines() if line.startswith('Dialogue:') and r'\fnMarianna' in line)
+    assert r'\an9' in day
+    x, y = map(int, re.search(r'\\pos\((\d+),(\d+)\)', day).groups())
+    assert x == 972
+    title_style = next(line for line in content.splitlines() if line.startswith('Style: TitleOverlay'))
+    title_y = int(title_style.split(',')[-2])
+    assert y > title_y + 80
+    # ASS overrides may split the number from surrounding text, but no words disappear.
+    visible = re.sub(r'\{[^}]*\}', '', day.split(',,', 2)[-1]).replace(r'\h', ' ')
+    assert counter in visible
+    series_event = next(line for line in content.splitlines() if r'\1c&H5AA63F&' in line)
+    assert int(re.search(r'\\fs(\d+)', series_event).group(1)) >= 150
