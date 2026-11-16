@@ -465,7 +465,7 @@ production-промпты, переводы и правки) выбирают п
 ```dotenv
 TEXT_LLM_PROVIDER=openai
 OPENAI_API_KEY=your-secret-key
-OPENAI_MODEL=gpt-5.4
+OPENAI_MODEL=gpt-6-astra
 ```
 
 Ключ хранится только в локальном `.env`, исключённом из Git. Используется

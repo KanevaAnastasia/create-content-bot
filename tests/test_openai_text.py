@@ -7,7 +7,7 @@ from app import llm_utils as llm
 def isolated_backend(monkeypatch):
     monkeypatch.setenv('TEXT_LLM_PROVIDER', 'openai')
     monkeypatch.setenv('OPENAI_API_KEY', 'sk-test-secret')
-    monkeypatch.setenv('OPENAI_MODEL', 'gpt-5.4')
+    monkeypatch.setenv('OPENAI_MODEL', 'gpt-6-astra')
     monkeypatch.delenv('OPENAI_CREATIVE_MODEL', raising=False)
     monkeypatch.setattr(llm, 'submit_llm', lambda fn: fn())
     monkeypatch.setattr(llm.time, 'sleep', lambda _: None)

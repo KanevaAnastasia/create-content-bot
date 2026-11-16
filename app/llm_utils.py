@@ -701,7 +701,7 @@ def openai_generate_sync(
     api_key = (os.getenv("OPENAI_API_KEY") or "").strip()
     if not api_key:
         raise RuntimeError("Missing environment variable: OPENAI_API_KEY")
-    model = (os.getenv("OPENAI_MODEL") or "gpt-5.4").strip()
+    model = (os.getenv("OPENAI_MODEL") or "gpt-6-astra").strip()
     if model_profile in {GEMINI_MODEL_PROFILE_CREATIVE, GEMINI_MODEL_PROFILE_EDIT}:
         model = (os.getenv(f"OPENAI_{model_profile.upper()}_MODEL") or model).strip()
     content: list[dict[str, Any]] = [{"type": "input_text", "text": str(prompt)}]
