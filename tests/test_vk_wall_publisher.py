@@ -314,6 +314,25 @@ def test_recovery_video_processing_stops_background_polling_after_two_hours(
     assert 'video.save' not in [url.rsplit('/', 1)[-1] for url, _ in calls]
 
 
+def test_explicit_compact_recovery_uses_small_delivery_video(configured, monkeypatch, job):
+    job.payload_json = {
+        'vk_video_recovery_profile': True,
+        'vk_video_compact_recovery_profile': True,
+        'vk_failed_video_external_ids': ['-123_40', '-123_41'],
+    }
+    setup_api(monkeypatch, job)
+    compact = Mock(return_value=p.Path(job.video_path))
+    instagram = Mock(side_effect=AssertionError('Instagram profile must not be used'))
+    monkeypatch.setattr(p.zernio_publisher, '_delivery_video', compact)
+    monkeypatch.setattr(p, '_instagram_compatible_video', instagram)
+
+    assert p._publish_vk(job, 'grandma', lambda: None) == '-123_42'
+
+    compact.assert_called_once_with(p.Path(job.video_path))
+    instagram.assert_not_called()
+    assert job.payload_json['vk_failed_video_external_ids'] == ['-123_40', '-123_41']
+
+
 def test_corrupt_video_is_never_attached_to_wall(configured, monkeypatch, job):
     job.payload_json = {
         'vk_upload_started_at': '2026-11-13T09:00:00+00:00',

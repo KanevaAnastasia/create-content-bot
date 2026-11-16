@@ -1684,7 +1684,14 @@ def _publish_vk(job: PublicationJob, project_slug: str, persist: Callable[[], No
         if not external_id:
             token = _vk_access_token(project_slug)
             _verify_vk_identity(project_slug, token=token, group_id=group_id, api_version=api_version)
-            if payload.get("vk_video_recovery_profile"):
+            if payload.get("vk_video_compact_recovery_profile"):
+                try:
+                    video_path = zernio_publisher._delivery_video(Path(job.video_path))
+                except zernio_publisher.ZernioError as exc:
+                    raise PublicationDeliveryError(
+                        "VK compact recovery video preparation failed."
+                    ) from exc
+            elif payload.get("vk_video_recovery_profile"):
                 video_path = _instagram_compatible_video(Path(job.video_path), recovery_profile=True)
             else:
                 video_path = _instagram_compatible_video(Path(job.video_path))
