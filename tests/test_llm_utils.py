@@ -3,6 +3,11 @@ import pytest
 from app import llm_utils
 
 
+@pytest.fixture(autouse=True)
+def gemini_backend(monkeypatch):
+    monkeypatch.setenv("TEXT_LLM_PROVIDER", "gemini")
+
+
 def test_model_profile_creative_defaults_to_flash_pro_lite(monkeypatch):
     monkeypatch.setenv("GEMINI_MODEL", "gemini-2.5-flash")
     monkeypatch.delenv("GEMINI_CREATIVE_MODEL_FALLBACKS", raising=False)

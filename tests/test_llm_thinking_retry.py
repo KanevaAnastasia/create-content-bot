@@ -6,6 +6,7 @@ from app import llm_utils
 
 
 def test_flash_disconnection_retries_without_thinking(monkeypatch):
+    monkeypatch.setenv('TEXT_LLM_PROVIDER', 'gemini')
     monkeypatch.setenv('GOOGLE_CLOUD_PROJECT', 'test')
     monkeypatch.setattr(llm_utils, '_load_vertex_generative_sdk', lambda: (None, None))
     monkeypatch.setattr(llm_utils, '_model_ids_for_profile', lambda _: ['gemini-2.5-flash'])

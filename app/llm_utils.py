@@ -1,5 +1,5 @@
 """
-Обёртки над Google Gemini и разбор ответов модели.
+Обёртки над OpenAI / Google Gemini и разбор ответов модели.
 
 Модели часто возвращают JSON внутри markdown-блоков ```json ... ``` или с пояснительным текстом;
 функции ``extract_json_*`` вытаскивают валидный JSON из «грязного» вывода.
@@ -13,6 +13,8 @@
 from __future__ import annotations
 
 import json
+import base64
+import requests
 import logging
 import os
 import random
@@ -678,7 +680,91 @@ def vertex_part_from_data(project: str, location: str, data: bytes) -> Any:
     return Part.from_data(data=data, mime_type=_guess_media_mime_type(data))
 
 
+def text_llm_provider() -> str:
+    """Select text backend; preserve Gemini for installations without an OpenAI key."""
+    provider = (os.getenv("TEXT_LLM_PROVIDER") or "").strip().lower()
+    if not provider:
+        provider = "openai" if (os.getenv("OPENAI_API_KEY") or "").strip() else "gemini"
+    if provider not in {"openai", "gemini"}:
+        raise RuntimeError("TEXT_LLM_PROVIDER must be openai or gemini")
+    return provider
+
+
+def openai_generate_sync(
+    prompt: str,
+    *,
+    images: list[bytes] | None = None,
+    rate_limit_max_attempts: int | None = None,
+    model_profile: str | None = None,
+) -> str:
+    """Generate text through Responses API and the shared bounded retry queue."""
+    api_key = (os.getenv("OPENAI_API_KEY") or "").strip()
+    if not api_key:
+        raise RuntimeError("Missing environment variable: OPENAI_API_KEY")
+    model = (os.getenv("OPENAI_MODEL") or "gpt-5.4").strip()
+    if model_profile in {GEMINI_MODEL_PROFILE_CREATIVE, GEMINI_MODEL_PROFILE_EDIT}:
+        model = (os.getenv(f"OPENAI_{model_profile.upper()}_MODEL") or model).strip()
+    content: list[dict[str, Any]] = [{"type": "input_text", "text": str(prompt)}]
+    for payload in _dedupe_binary_payloads(images):
+        mime = _guess_media_mime_type(payload)
+        if not mime.startswith("image/"):
+            raise ValueError("OpenAI text generation accepts images, not video payloads")
+        encoded = base64.b64encode(payload).decode("ascii")
+        content.append({"type": "input_image", "image_url": f"data:{mime};base64,{encoded}"})
+
+    def _call() -> str:
+        logger.info("OpenAI text generation model=%s profile=%s", model, model_profile)
+        with requests.post(
+            "https://api.openai.com/v1/responses",
+            headers={"Authorization": f"Bearer {api_key}"},
+            json={"model": model, "input": [{"role": "user", "content": content}], "store": False},
+            timeout=(15, 150),
+        ) as response:
+            if not response.ok:
+                # Never expose upstream messages: auth errors may echo a credential.
+                if response.status_code == 429:
+                    try:
+                        code = response.json().get("error", {}).get("code")
+                    except (ValueError, AttributeError):
+                        code = None
+                    if code == "insufficient_quota":
+                        raise GeminiQuotaError("OpenAI: исчерпан баланс или лимит API. Пополните баланс или переключите TEXT_LLM_PROVIDER=gemini.")
+                if response.status_code >= 500:
+                    raise ConnectionError(f"OpenAI HTTP {response.status_code}")
+                raise RuntimeError(f"OpenAI HTTP {response.status_code}")
+            data = response.json()
+        if data.get("status") != "completed":
+            raise RuntimeError("OpenAI did not complete the response")
+        text = "\n".join(
+            part["text"]
+            for item in data.get("output", []) if item.get("type") == "message"
+            for part in item.get("content", [])
+            if part.get("type") == "output_text" and isinstance(part.get("text"), str)
+        ).strip()
+        if not text:
+            raise RuntimeError("OpenAI returned an empty response or refusal")
+        return text
+
+    kwargs = {} if rate_limit_max_attempts is None else {"max_attempts": rate_limit_max_attempts}
+    return safe_llm_call(_call, **kwargs)
+
+
 def gemini_generate_sync(
+    prompt: str,
+    *,
+    images: list[bytes] | None = None,
+    rate_limit_max_attempts: int | None = None,
+    model_profile: str | None = None,
+) -> str:
+    """Compatibility entry point for all text generation, routed by TEXT_LLM_PROVIDER.
+
+    Gemini remains selectable explicitly; errors never silently switch providers.
+    """
+    generate = openai_generate_sync if text_llm_provider() == "openai" else _gemini_generate_sync
+    return generate(prompt, images=images, rate_limit_max_attempts=rate_limit_max_attempts, model_profile=model_profile)
+
+
+def _gemini_generate_sync(
     prompt: str,
     *,
     images: list[bytes] | None = None,

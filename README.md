@@ -456,3 +456,28 @@ python3 organize_assets.py --source ./images --assets-dir ./assets
 - Сохранение сгенерированных изображений на диск (`generated/...`).
 - Явные списки референсов в данных сцены / `ScenePerStepMedia`; location-ассеты хранятся в проекте, но не отправляются в генерацию.
 - Персистентное хранение сессий и кэша (Redis/DB) вместо in-memory.
+
+### Провайдер генерации текста и сценариев
+
+Все общие текстовые вызовы (идеи, рецепты, сценарии, озвучиваемый текст,
+production-промпты, переводы и правки) выбирают провайдера через `.env`:
+
+```dotenv
+TEXT_LLM_PROVIDER=openai
+OPENAI_API_KEY=your-secret-key
+OPENAI_MODEL=gpt-5.4
+```
+
+Ключ хранится только в локальном `.env`, исключённом из Git. Используется
+[OpenAI Responses API](https://developers.openai.com/api/reference/resources/responses/methods/create)
+с `store=false`. При необходимости модели творческих задач и правок можно задать
+отдельно: `OPENAI_CREATIVE_MODEL` и `OPENAI_EDIT_MODEL`.
+
+Для возврата на Gemini установите `TEXT_LLM_PROVIDER=gemini`, сохранив текущие
+`GOOGLE_CLOUD_PROJECT`, `GOOGLE_CLOUD_LOCATION` и `GEMINI_MODEL`.
+После изменения настроек выполните `scripts/botctl.sh status`, затем
+`scripts/botctl.sh restart`. Для активных Celery-воркеров примените
+`scripts/botctl.sh celery-worker-reload`.
+Ошибки OpenAI не вызывают скрытого переключения на Gemini.
+Без явного `TEXT_LLM_PROVIDER` выбирается OpenAI при наличии ключа, иначе Gemini.
+Генерация изображений и отдельный AI approval медиа сохраняют свои настройки.
