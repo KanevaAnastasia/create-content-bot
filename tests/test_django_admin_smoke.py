@@ -748,7 +748,7 @@ def test_django_content_series_model_string():
     assert str(series) == "летние напитки / summer drinks (7 из 10)"
 
 
-def test_django_admin_series_overlay_counter_uses_current_series_day():
+def test_django_admin_series_overlay_counter_keeps_recipe_day_after_series_advances():
     admin_dir = Path(__file__).resolve().parents[1] / "admin_panel"
     sys.path.insert(0, str(admin_dir))
     os.environ.setdefault("DJANGO_SETTINGS_MODULE", "cf_admin.settings")
@@ -759,7 +759,7 @@ def test_django_admin_series_overlay_counter_uses_current_series_day():
 
     import pipeline_admin.admin as admin_module
 
-    series = SimpleNamespace(current_video_index=6, total_videos=10)
+    series = SimpleNamespace(current_video_index=8, total_videos=10)
     run = SimpleNamespace(series=series, series_video_index=7, series_total_videos=10)
 
     counter = admin_module._overlay_series_counter_for_admin_render(
@@ -768,7 +768,7 @@ def test_django_admin_series_overlay_counter_uses_current_series_day():
         production={"series_counter_by_lang": {"ru": "день 7 из 10", "en": "day 7 of 10"}},
     )
 
-    assert counter == {"ru": "день 6 из 10", "en": "day 6 of 10"}
+    assert counter == {"ru": "день 7 из 10", "en": "day 7 of 10"}
 
 
 def test_django_admin_series_overlay_counter_supports_story_label():
@@ -794,7 +794,7 @@ def test_django_admin_series_overlay_counter_supports_story_label():
     }
 
 
-def test_django_admin_series_context_sync_uses_current_series_day():
+def test_django_admin_series_context_sync_keeps_recipe_day_after_series_advances():
     admin_dir = Path(__file__).resolve().parents[1] / "admin_panel"
     sys.path.insert(0, str(admin_dir))
     os.environ.setdefault("DJANGO_SETTINGS_MODULE", "cf_admin.settings")
@@ -809,7 +809,7 @@ def test_django_admin_series_context_sync_uses_current_series_day():
         id=uuid.UUID("00000000-0000-0000-0000-000000000006"),
         title_ru="Каюта вкусов",
         title_en="Taste Cabin",
-        current_video_index=6,
+        current_video_index=8,
         total_videos=10,
     )
     run = SimpleNamespace(series=series, series_video_index=7, series_total_videos=10)
@@ -817,9 +817,9 @@ def test_django_admin_series_context_sync_uses_current_series_day():
 
     admin_module._sync_series_context_from_run(session, run)
 
-    assert session["series_video_index"] == 6
-    assert session["series_counter_by_lang"] == {"ru": "день 6 из 10", "en": "day 6 of 10"}
-    assert session["series"]["counter_by_lang"] == {"ru": "день 6 из 10", "en": "day 6 of 10"}
+    assert session["series_video_index"] == 7
+    assert session["series_counter_by_lang"] == {"ru": "день 7 из 10", "en": "day 7 of 10"}
+    assert session["series"]["counter_by_lang"] == {"ru": "день 7 из 10", "en": "day 7 of 10"}
 
 
 def test_django_admin_allows_series_binding_and_day_editing():

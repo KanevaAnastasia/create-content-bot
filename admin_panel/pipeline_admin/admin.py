@@ -541,11 +541,11 @@ def _overlay_series_title_for_admin_render(
     return values
 
 
-def _series_counter_by_lang_from_series(series: Any) -> dict[str, str]:
+def _series_counter_by_lang_from_series(series: Any, *, index=None, total=None) -> dict[str, str]:
     if series is None:
         return {}
-    index = getattr(series, "current_video_index", None)
-    total = getattr(series, "total_videos", None)
+    index = index or getattr(series, "current_video_index", None)
+    total = total or getattr(series, "total_videos", None)
     if not index or not total:
         return {}
     meta = getattr(series, "meta_json", None)
@@ -563,7 +563,11 @@ def _overlay_series_counter_for_admin_render(
     session: dict[str, Any],
     production: dict[str, Any],
 ) -> dict[str, str]:
-    series_counter = _series_counter_by_lang_from_series(getattr(run, "series", None))
+    series_counter = _series_counter_by_lang_from_series(
+        getattr(run, "series", None),
+        index=getattr(run, "series_video_index", None),
+        total=getattr(run, "series_total_videos", None),
+    )
     if series_counter:
         return series_counter
     for source in (production, session):
@@ -4045,13 +4049,13 @@ def _sync_series_context_from_run(session: dict[str, Any], run: GenerationRun) -
         ):
             session.pop(key, None)
         return
-    video_index = int(getattr(series, "current_video_index", None) or getattr(run, "series_video_index", None) or 1)
-    total_videos = int(getattr(series, "total_videos", None) or getattr(run, "series_total_videos", None) or 1)
+    video_index = int(getattr(run, "series_video_index", None) or getattr(series, "current_video_index", None) or 1)
+    total_videos = int(getattr(run, "series_total_videos", None) or getattr(series, "total_videos", None) or 1)
     title_by_lang = {
         "ru": " ".join(str(getattr(series, "title_ru", "") or "").split()),
         "en": " ".join(str(getattr(series, "title_en", "") or "").split()),
     }
-    counter_by_lang = _series_counter_by_lang_from_series(series) or {
+    counter_by_lang = _series_counter_by_lang_from_series(series, index=video_index, total=total_videos) or {
         "ru": f"день {video_index} из {total_videos}",
         "en": f"day {video_index} of {total_videos}",
     }
