@@ -237,3 +237,18 @@ def test_advertising_social_copy_is_not_forced_into_recipe_language():
     fallback = _fallback_social_copy("Как почистить белые кроссовки", advertising=True)
     assert "#реклама" in fallback["instagram_ru"]
     assert "#ad" in fallback["instagram_en"]
+
+
+def test_advertising_editorial_rules_bind_comment_first_person_and_canonical_names(monkeypatch):
+    captured = []
+    def generate(prompt, **kwargs):
+        captured.append(prompt)
+        return json.dumps({'campaigns': [{'title': 'Оливье', 'idea': 'Я нарезаю оливье'}] * 5})
+    monkeypatch.setattr(advertising_generation, 'gemini_generate_sync', generate)
+    comment = 'Сначала оливье с нарезкой, затем смузи, тесто и крем; отличный подарок.'
+    advertising_generation.generate_advertising_campaigns(source_text='Pioneer', product_brief={'owner_comment': comment})
+    assert comment in captured[0]
+    assert 'основа КАЖДОГО концепта' in captured[0]
+    assert 'от её первого лица' in captured[0]
+    assert 'Тимоша' in captured[0]
+    assert 'Мурзик' not in captured[0]

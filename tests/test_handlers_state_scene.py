@@ -4409,3 +4409,32 @@ def generated_title_frame(monkeypatch):
     Image.new("RGB", (1080, 1920), "#123456").save(data, format="PNG")
     monkeypatch.setattr("app.handlers.handlers_state_scene._overlay_first_frame", lambda session: data.getvalue())
     return data.getvalue()
+
+
+@pytest.mark.parametrize('initial_state', [
+    'waiting_scene_approval', 'refining_scenes',
+    'waiting_recipe_approval', STATE_WAITING_ADVERTISING_FORMAT_CHOICE,
+    STATE_WAITING_ADVERTISING_CAMPAIGN_CHOICE,
+])
+def test_advertising_previous_twice_then_one_selects_campaign_not_recipe(initial_state):
+    from app.handlers import handlers_state_scene as module
+    from unittest.mock import AsyncMock
+    source = 'Товар: комбайн. Комментарий: оливье и подарок.'
+    session = {
+        'state': initial_state, 'generation_mode': 'advertising',
+        ADVERTISING_SOURCE_SESSION_KEY: source,
+        ADVERTISING_PRODUCT_PATH_SESSION_KEY: '/tmp/product.jpg',
+        ADVERTISING_PRODUCT_BRIEF_SESSION_KEY: {'product_name': 'Pioneer'},
+        ADVERTISING_CAMPAIGNS_SESSION_KEY: [{'title': f'Оливье {i}', 'idea': 'Нарезка и другие функции'} for i in range(1, 6)],
+        'recipe_full_text': 'Случайный яблочный пирог', 'scenes_plan': [{'text': 'old'}],
+    }
+    update = SimpleNamespace(message=SimpleNamespace(reply_text=AsyncMock()))
+    for _ in range(2):
+        assert asyncio.run(module._handle_navigation_buttons(update, chat_id=1991, session=session, text='Предыдущий шаг'))
+        assert session['state'] == STATE_WAITING_ADVERTISING_CAMPAIGN_CHOICE
+        assert session[ADVERTISING_PRODUCT_PATH_SESSION_KEY] == '/tmp/product.jpg'
+        assert session['recipe_full_text'] == source
+    asyncio.run(module._handle_advertising_campaign_choice(update, None, chat_id=1991, session=session, text='1'))
+    assert session[ADVERTISING_SELECTED_CAMPAIGN_SESSION_KEY]['title'] == 'Оливье 1'
+    assert session['state'] == STATE_WAITING_ADVERTISING_FORMAT_CHOICE
+    assert all('апруву рецепта' not in call.args[0] for call in update.message.reply_text.call_args_list)

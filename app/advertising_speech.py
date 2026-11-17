@@ -29,6 +29,8 @@ def validate_scene_speech(scenes: list[dict], brief: dict) -> None:
             "Верни JSON {\"phrases\": [{\"index\": 0, \"candidates\": [\"...\", \"...\", \"...\"]}]}.\n"
             + json.dumps({"product": brief, "phrases": invalid}, ensure_ascii=False)
         )
+        from .advertising_generation import advertising_editorial_rules
+        prompt = advertising_editorial_rules(brief) + prompt
         data = extract_json_object(gemini_generate_sync(prompt, model_profile=GEMINI_MODEL_PROFILE_CREATIVE))
         allowed = {item["index"] for item in invalid}
         for item in data.get("phrases", []):

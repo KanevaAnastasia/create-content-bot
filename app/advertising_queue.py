@@ -94,7 +94,7 @@ def _save_prepared(product_id, payload, *, status="preparing"):
 def prepare_product(product_id):
     from .advertising_generation import (
         analyze_advertising_product, generate_advertising_campaigns, generate_advertising_scene_plan,
-        generate_advertising_post_package,
+        generate_advertising_post_package, advertising_editorial_rules,
     )
     with SessionLocal() as db:
         product = db.get(AdvertisingProduct, product_id)
@@ -112,6 +112,7 @@ def prepare_product(product_id):
         payload.update(brief=brief, source=source)
         _save_prepared(product_id, payload)
     # Apply current speech rules to resumed preparations too.
+    payload["brief"]["owner_comment"] = comment
     payload["brief"]["speech_min_chars"] = 101
     payload["brief"].pop("speech_max_chars", None)
     _save_prepared(product_id, payload)
@@ -120,7 +121,8 @@ def prepare_product(product_id):
         import json
         if not payload.get("sales_analysis"):
             analysis = extract_json_object(gemini_generate_sync(
-                "Разбери товар для продающей рекламы ВК с бабушкой и рыжим котом. "
+                advertising_editorial_rules(payload["brief"], source)
+                + "Разбери товар для продающей рекламы ВК с бабушкой и рыжим котом. "
                 "Используй только факты из карточки и комментария. Не обращайся к закрытым сайтам. "
                 "Отдели подтверждённые свойства от гипотез о потребностях аудитории. "
                 "Нельзя выдумывать цену, скидку, состав, эффективность, отзывы и исследования. "
@@ -238,8 +240,10 @@ async def deliver_ready_product(bot, chat_id):
         if description:
             messages[0] += "\n\nОписание товара:\n" + description
         for index, campaign in enumerate(payload["campaigns"], 1):
-            creative = (campaign["prepared_post_package"]["post_text"] if product_format == "post"
-                        else campaign["prepared_scene_plan"]["text_plan"])
+            creative = ((campaign.get("prepared_post_package") or {}).get("post_text") if product_format == "post"
+                        else (campaign.get("prepared_scene_plan") or {}).get("text_plan"))
+            if not creative:
+                creative = "\n".join(str(campaign.get(key) or "") for key in ("hook", "product_role", "cta"))
             messages.append(f"Вариант {index}. {campaign['title']}\n{campaign['idea']}\n\n" + creative)
         # Store a delivery cursor: retries don't regenerate or resend confirmed chunks.
         chunks = [text[start:start + 3500] for text in messages for start in range(0, len(text), 3500)]

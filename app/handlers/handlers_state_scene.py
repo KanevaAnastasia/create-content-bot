@@ -4386,6 +4386,30 @@ def _scene_media_nav_label(substep: str) -> str:
     return substep
 
 
+def _restore_advertising_campaign_choice(session: dict) -> None:
+    """Return to ad concepts without losing the product or its original brief."""
+    _drop_step_outputs_from(session, "scenes")
+    session["recipe_full_text"] = str(session.get(ADVERTISING_SOURCE_SESSION_KEY) or "")
+    session["user_input"] = session["recipe_full_text"]
+    for key in (ADVERTISING_SELECTED_CAMPAIGN_SESSION_KEY, "selected_concept", "selected_concept_name",
+                "pending_feedback_mode", SERIES_PENDING_NEXT_SESSION_KEY,
+                "generation_run_id", "scene_db_ids_by_index"):
+        session.pop(key, None)
+    session["state"] = STATE_WAITING_ADVERTISING_CAMPAIGN_CHOICE
+
+
+async def _show_saved_advertising_campaigns(update, *, chat_id, session):
+    from ..advertising_generation import format_advertising_campaigns
+    from .handlers_state_start import _advertising_campaign_choice_markup
+    SESSIONS[chat_id] = session
+    campaigns = session.get(ADVERTISING_CAMPAIGNS_SESSION_KEY) or []
+    await _reply_text_chunked(update, format_advertising_campaigns(campaigns))
+    await _reply_text_with_optional_markup(
+        update, "Вернула к выбору рекламного концепта. Выберите номер 1–5; товар и комментарий сохранены.",
+        reply_markup=_advertising_campaign_choice_markup(),
+    )
+
+
 async def _handle_navigation_buttons(
     update: Update,
     *,
@@ -4407,6 +4431,16 @@ async def _handle_navigation_buttons(
         return False
 
     state = str(session.get("state") or "")
+    if is_advertising_generation(session) and state in {
+        STATE_WAITING_ADVERTISING_CAMPAIGN_CHOICE, STATE_WAITING_ADVERTISING_CUSTOM_CAMPAIGN,
+        STATE_WAITING_ADVERTISING_FORMAT_CHOICE, STATE_WAITING_SERIES_CHOICE,
+        STATE_WAITING_SCENE_APPROVAL, STATE_REFINING_SCENES,
+        STATE_WAITING_RECIPE_APPROVAL, STATE_REFINING_RECIPE, STATE_WAITING_CONCEPT, STATE_REFINING_CONCEPT,
+        STATE_WAITING_ADVERTISING_POST_TEXT_APPROVAL, STATE_WAITING_ADVERTISING_POST_TEXT_FEEDBACK,
+    }:
+        _restore_advertising_campaign_choice(session)
+        await _show_saved_advertising_campaigns(update, chat_id=chat_id, session=session)
+        return True
     if state == _STATE_WAITING_FRAME_PROMPT_REFERENCES:
         session["state"] = STATE_WAITING_FRAME_PROMPTS_APPROVAL
         SESSIONS[chat_id] = session
@@ -8074,6 +8108,12 @@ async def _on_text_impl(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     if update.message is None:
         return
     session = session or SESSIONS.get(chat_id) or {}
+    # Repair sessions stranded by the old generic recipe back-navigation.
+    if is_advertising_generation(session) and session.get("state") in {
+        STATE_WAITING_RECIPE_APPROVAL, STATE_REFINING_RECIPE, STATE_WAITING_CONCEPT, STATE_REFINING_CONCEPT,
+    }:
+        _restore_advertising_campaign_choice(session)
+        SESSIONS[chat_id] = session
     if await _handle_navigation_buttons(update, chat_id=chat_id, session=session, text=text):
         return
     if await _handle_draft_buttons(update, context, chat_id=chat_id, session=session, text=text):

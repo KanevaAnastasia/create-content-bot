@@ -429,3 +429,48 @@ def test_format_migration_defaults_existing_products_to_clip():
             migrations[1].downgrade()
             migrations[0].downgrade()
     engine.dispose()
+
+
+def test_return_to_ad_concepts_does_not_reload_old_recipe_from_run(db, monkeypatch):
+    from app import session_store
+    from app.models import GenerationRun
+    from app.handlers.handlers_state_scene import _restore_advertising_campaign_choice
+    monkeypatch.setattr(session_store, "SessionLocal", db)
+    # The queue fixture replaces save_session for delivery tests; use the real implementation here.
+    import importlib
+    original_save = importlib.util.spec_from_file_location("app._ad_repair_session_store", session_store.__file__)
+    module = importlib.util.module_from_spec(original_save)
+    original_save.loader.exec_module(module)
+    monkeypatch.setattr(module, "SessionLocal", db)
+    with db() as database:
+        run = GenerationRun(status="draft", language="ru", script="Яблочный пирог")
+        database.add(run)
+        database.commit()
+        run_id = str(run.id)
+    session = {"state": "waiting_recipe_approval", "generation_mode": "advertising",
+               "generation_run_id": run_id, "recipe_full_text": "Яблочный пирог",
+               "advertising_source_text": "Оливье с комбайном", "advertising_campaigns": [{"title": "Оливье"}]}
+    _restore_advertising_campaign_choice(session)
+    module.save_session(123, session)
+    restored = module.load_session(123)
+    assert restored["state"] == "waiting_advertising_campaign_choice"
+    assert restored["recipe_full_text"] == "Оливье с комбайном"
+    assert not restored.get("generation_run_id")
+    with db() as database:
+        import uuid
+        assert database.get(GenerationRun, uuid.UUID(run_id)).script == "Яблочный пирог"
+
+
+@pytest.mark.parametrize("format", ["clip", "post"])
+def test_reoffer_revised_concepts_without_stale_prepared_scripts(db, format):
+    payload = prepared()
+    for campaign in payload["campaigns"]:
+        campaign.pop("prepared_scene_plan", None)
+        campaign.update(hook="Оливье", product_role="Смузи, тесто и крем", cta="Отличный подарок")
+    product = add_product(db, status="ready", prepared=payload, format=format)
+    bot = SimpleNamespace(send_message=AsyncMock())
+    asyncio.run(queue.deliver_ready_product(bot, 123))
+    assert bot.send_message.await_count == 7
+    assert "Отличный подарок" in bot.send_message.call_args_list[1].kwargs["text"]
+    with db() as session:
+        assert session.get(AdvertisingProduct, product).status == "offered"

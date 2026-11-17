@@ -96,6 +96,30 @@ def _normalize_campaign(candidate: Any, *, index: int) -> dict[str, Any]:
     }
 
 
+def advertising_editorial_rules(product_brief: dict, source_text: str = "") -> str:
+    from .character_catalog import CHARACTER_CATALOG
+    cast = {key: {"name": value["name"], "role": value.get("short_description", "")}
+            for key, value in CHARACTER_CATALOG.items()}
+    comment = str(product_brief.get("owner_comment") or source_text or "").strip()
+    return (
+        "ОБЯЗАТЕЛЬНОЕ РЕДАКЦИОННОЕ ЗАДАНИЕ. Это личный блог самой бабушки: она автор, хозяйка и рассказчик. "
+        "Хуки, CTA, текст поста и реплики — от её первого лица: я, мой, моя кухня. "
+        "Не рассказывай о ней от лица внука, покупателя или стороннего автора; нельзя 'моя бабушка', "
+        "'наша бабушка', 'бабушка рекомендует' в её речи. В технических описаниях кадров можно писать 'бабушка'. "
+        "Используй только имена и роли из утверждённого списка ниже; не переименовывай персонажей "
+        "и не смешивай разных котов. Если имя не нужно, скажи 'мой кот'. Не добавляй родственников без задачи пользователя. "
+        "Комментарий владельца — обязательная основа КАЖДОГО концепта, не просто источник характеристик. "
+        "Сохраняй указанное блюдо, последовательность, показанное применение и ключевые преимущества. "
+        "Пять вариантов отличаются подачей, хуком и юмором внутри этой задачи; нельзя заменить основное блюдо "
+        "на другой рецепт или заменить демонстрацию обзором. Дополнительные функции товара упоминай после "
+        "основного действия. Текст в скобках — обязательное действие в кадре, не озвучка. "
+        "Не выдавай рекламный хук о скорости за гарантию полного приготовления с нуля за это время. "
+        "Если комментарий просит рецепт, покажи ингредиенты и понятные этапы без выдуманных возможностей прибора.\n"
+        + "УТВЕРЖДЁННЫЕ ПЕРСОНАЖИ: " + json.dumps(cast, ensure_ascii=False)
+        + "\nКОММЕНТАРИЙ/ИСХОДНАЯ ЗАДАЧА ВЛАДЕЛЬЦА: " + comment + "\n"
+    )
+
+
 def generate_advertising_campaigns(
     *,
     source_text: str,
@@ -123,7 +147,7 @@ def generate_advertising_campaigns(
         + json.dumps(payload, ensure_ascii=False, indent=2)
     )
     from .directorial_notes import RULE
-    prompt = RULE + prompt
+    prompt = RULE + advertising_editorial_rules(product_brief, source_text) + prompt
     raw = gemini_generate_sync(prompt, model_profile=GEMINI_MODEL_PROFILE_CREATIVE)
     data = extract_json_object(raw)
     source = data.get("campaigns") if isinstance(data.get("campaigns"), list) else []
@@ -176,7 +200,7 @@ def generate_advertising_post_package(
         + json.dumps(payload, ensure_ascii=False, indent=2)
     )
     from .directorial_notes import RULE
-    prompt = RULE + prompt
+    prompt = RULE + advertising_editorial_rules(product_brief, source_text) + prompt
     raw = gemini_generate_sync(prompt, model_profile=GEMINI_MODEL_PROFILE_CREATIVE)
     data = extract_json_object(raw)
     product_lock = advertising_product_lock_ru(product_brief)
@@ -242,6 +266,7 @@ def regenerate_advertising_post_text(
             indent=2,
         )
     )
+    prompt = advertising_editorial_rules(product_brief, source_text) + prompt
     post_text = gemini_generate_sync(prompt, model_profile=GEMINI_MODEL_PROFILE_CREATIVE).strip()
     post_text = re.sub(r"^```(?:markdown|text)?\s*|\s*```$", "", post_text, flags=re.IGNORECASE)
     post_text = re.sub(r"(?<!\w)#[^\s#]+", "", post_text, flags=re.UNICODE)
@@ -406,7 +431,7 @@ def generate_advertising_scene_plan(
     if product_brief.get("speech_min_chars"):
         prompt = prompt.replace("до 105 знаков", f"не менее {product_brief['speech_min_chars']} символов с пробелами, без верхнего ограничения на этапе сценария; сокращение под видео будет позже")
     from .directorial_notes import RULE
-    prompt = RULE + prompt
+    prompt = RULE + advertising_editorial_rules(product_brief, source_text) + prompt
     raw = gemini_generate_sync(prompt, model_profile=GEMINI_MODEL_PROFILE_CREATIVE)
     data = extract_json_object(raw)
     source_scenes = data.get("scenes") if isinstance(data.get("scenes"), list) else []
@@ -523,7 +548,7 @@ def generate_advertising_production(
         + json.dumps(payload, ensure_ascii=False, indent=2)
     )
     from .directorial_notes import RULE
-    prompt = RULE + prompt
+    prompt = RULE + advertising_editorial_rules(product_brief) + prompt
     raw = gemini_generate_sync(prompt, model_profile=GEMINI_MODEL_PROFILE_CREATIVE)
     data = extract_json_object(raw)
     prompts = data.get("prompts") if isinstance(data.get("prompts"), list) else []
