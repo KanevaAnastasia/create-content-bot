@@ -16,6 +16,7 @@ from app.scene_speech_budget import (
 
 def test_speech_chars_excluding_pauses_strips_token() -> None:
     assert speech_chars_excluding_pauses("") == 0
+    assert speech_chars_excluding_pauses("a[pause]b") == 2
     assert speech_chars_excluding_pauses(f"а{PAUSE_TOKEN}б") == 2
     assert speech_chars_excluding_pauses(f"{PAUSE_TOKEN}{PAUSE_TOKEN}xy") == 2
 
@@ -34,6 +35,7 @@ def test_normalize_speech_phrase_for_voice_does_not_rewrite_yo_letters() -> None
 
 def test_max_speech_chars_for_duration() -> None:
     assert max_speech_chars_for_duration(8) == 125
+    assert max_speech_chars_for_duration(8, "en") == 125
     assert max_speech_chars_for_duration(6) == 84
     assert max_speech_chars_for_duration(6, "en") == 66
 

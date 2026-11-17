@@ -119,7 +119,10 @@ def shorten_scene_speech_and_sync_video_prompt_sync(
             "- preserve meaningful punctuation from the source line; if there is no final . ! ? or …, add a period;\n"
             "- no hyphen-minus or dash characters in the spoken phrase: do not use -, – or —; use words or [пауза] instead;\n"
             f"- optional {PAUSE_TOKEN} only between major phrases;\n"
-            "- if the line is still risky, prefer making it shorter over preserving every detail;\n"
+            "- rewrite as a complete grammatical sentence; never truncate a sentence or ingredient list;\n"
+            "- preserve all essential ingredients, cooking actions and their order; remove redundant introductions first;\n"
+            "- never end on a conjunction, preposition or unfinished enumeration;\n"
+            "- if the essential meaning cannot fit, return an empty text instead of losing instructions;\n"
             f"- длина речи **без** всех вхождений {PAUSE_TOKEN} — строго не больше max_speech_chars_excluding_pauses.\n"
         )
     prompt = (
@@ -136,7 +139,7 @@ def shorten_scene_speech_and_sync_video_prompt_sync(
     )
     attempts = max(1, int(max_llm_attempts or 1))
     for attempt in range(1, attempts + 1):
-        extra = "" if attempt == 1 else "\n\nПредыдущий ответ нарушил лимит или формат. Сократи агрессивнее."
+        extra = "" if attempt == 1 else "\n\nПредыдущий ответ нарушил лимит или формат. Переформулируй короче, сохранив смысл и законченность предложения."
         full_prompt = prompt + extra
         raw = gemini_generate_sync(
             full_prompt,
@@ -155,6 +158,10 @@ def shorten_scene_speech_and_sync_video_prompt_sync(
         raw_t = t.strip()
         t = normalize_speech_phrase_for_voice(raw_t)
         if not t:
+            continue
+        if lang == "en" and re.search(
+            r"\b(?:and|or|but|with|the|a|an|to|of|for|then)\W*$", t, flags=re.IGNORECASE
+        ):
             continue
         if not isinstance(vp, str) or not vp.strip():
             merged = _replace_speech_in_video_prompt_if_substring(prev_vp, t, prev_text)

@@ -19,6 +19,7 @@ SPEECH_CHARS_PER_SECOND_BY_LANG = {
 }
 SPEECH_MAX_CHARS_BY_LANG_DURATION = {
     ("ru", 8): 125,
+    ("en", 8): 125,
 }
 
 
@@ -42,16 +43,16 @@ def normalize_speech_phrase_for_voice(text: str) -> str:
 
 def speech_chars_excluding_pauses(text: str) -> int:
     """
-    Длина речи в символах без учёта токенов ``[пауза]`` (регистрозависимо, как в сценарии).
+    Длина речи в символах без токенов ``[пауза]`` и ``[pause]``.
 
     Пробелы вокруг удалённых токенов схлопываются по краям фрагментов; множественные пробелы
     между словами сохраняются как один пробел только на стыках удаления токена — упрощённо:
-    удаляем все вхождения ``[пауза]`` и считаем ``len`` остатка.
+    удаляем все маркеры пауз и считаем ``len`` остатка.
     """
     raw = (text or "").strip()
     if not raw:
         return 0
-    compact = raw.replace(PAUSE_TOKEN, "")
+    compact = re.sub(r"\[\s*(?:пауза|pause)\s*\]", "", raw, flags=re.IGNORECASE)
     return len(compact.strip())
 
 

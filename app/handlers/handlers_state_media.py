@@ -3953,17 +3953,6 @@ def _fallback_scheduled_ru_speech_for_budget(text: str, max_chars: int) -> str:
     return _trim_speech_to_budget(normalized, max_chars)
 
 
-def _fallback_scene_speech_for_budget(text: str, max_chars: int, *, language: str) -> str:
-    normalized = normalize_speech_phrase_for_voice(text)
-    parts = [part.strip() for part in re.split(r"(?<=[.!?…])\s+", normalized) if part.strip()]
-    if parts:
-        candidate = parts[0]
-        if speech_chars_excluding_pauses(candidate) <= max_chars:
-            return candidate
-    fallback = "Done" if normalize_language_code(language) == "en" else "Готово"
-    return _trim_speech_to_budget(normalized, max_chars, fallback=fallback)
-
-
 async def _reply_text_with_optional_markup(update: Update, text: str, reply_markup=None) -> None:
     """Отправляет сообщение с `reply_markup`, даже если тестовый стаб не принимает kwargs."""
     if update.message is None:
@@ -7743,7 +7732,7 @@ async def _maybe_adjust_english_speech_for_video_budget(
     scene: dict,
     duration_sec: int,
 ) -> bool:
-    """Apply an EN-only prompt-speedup, then shorten only EN if still over budget."""
+    """Shorten English semantically; preserve the original if no valid result exists."""
     if _scene_speech_budget_override_enabled(scene, "en"):
         return False
     text_en = _scene_speech_for_language(scene, "en")
@@ -7751,81 +7740,39 @@ async def _maybe_adjust_english_speech_for_video_budget(
         return False
     max_chars = max_speech_chars_for_duration(duration_sec, "en")
     current_chars = speech_chars_excluding_pauses(text_en)
-    if current_chars <= max_chars or _scene_speech_budget_override_enabled(scene, "en"):
-        _refresh_scene_language_speech_metadata(scene, "en")
-        return False
-    boosted_prompt = _boost_scene_prompt_delivery(_scene_video_prompt_for_language(scene, "en"), "en")
-    _set_scene_video_prompt_for_language(scene, "en", boosted_prompt)
-    _set_scene_speech_budget_meta(
-        scene,
-        "en",
-        duration_sec=duration_sec,
-        text=text_en,
-        status="prompt_tempo_boost",
-        auto_shortened=False,
-    )
-    boosted_limit = max_chars + max(6, duration_sec)
-    if current_chars <= boosted_limit:
-        await update.message.reply_text(
-            "English line is near the timing limit, so I boosted delivery speed in the EN video prompt."
-        )
+    _refresh_scene_language_speech_metadata(scene, "en")
+    if current_chars <= max_chars:
         return False
     try:
         shortened = await _call_with_503_retries(
-            update,
-            context,
-            chat_id,
+            update, context, chat_id,
             "shorten_english_scene_speech_for_video_budget",
             lambda: asyncio.to_thread(
                 shorten_scene_speech_and_sync_video_prompt_sync,
-                scene,
-                duration_sec,
-                language="en",
-                current_text=text_en,
-                current_video_prompt=boosted_prompt,
-                max_llm_attempts=1,
-                rate_limit_max_attempts=1,
+                scene, duration_sec, language="en", current_text=text_en,
+                current_video_prompt=_scene_video_prompt_for_language(scene, "en"),
+                max_llm_attempts=2, rate_limit_max_attempts=1,
             ),
             retry_ai_rate_limit=False,
         )
-    except ServiceUnavailableRetriesExhaustedError as e:
-        await update.message.reply_text(str(e))
-        return True
-    except Exception as e:
-        logger.exception("english scene speech auto-shorten failed")
-        await update.message.reply_text(f"Не удалось автоматически сократить EN-реплику: {_user_error_message(e)}")
-        return True
-    if shortened is None:
-        fallback_text = _fallback_scene_speech_for_budget(text_en, max_chars, language="en")
-        prompt = _sync_scene_text_into_video_prompt(
-            _compose_locked_video_prompt(scene, "en", boosted_prompt),
-            fallback_text,
-        )
-        _set_scene_video_prompt_for_language(scene, "en", _boost_scene_prompt_delivery(prompt, "en"))
+    except Exception:
+        logger.exception("english scene speech shortening failed; preserving original")
+        shortened = None
+    if shortened is not None:
         _apply_scene_phrase_update_to_scene(
-            session,
-            scene,
-            scene_idx=int(session.get("image_scene_index", 0) or 0),
-            language="en",
-            phrase_text=fallback_text,
-            origin="auto_shorten",
+            session, scene, scene_idx=int(session.get("image_scene_index", 0) or 0),
+            language="en", phrase_text=shortened["text"], origin="auto_shorten",
+        )
+        _set_scene_video_prompt_for_language(
+            scene, "en", _compose_locked_video_prompt(scene, "en", shortened["video_prompt"]),
         )
         _refresh_scene_language_speech_metadata(scene, "en", status="auto_shortened", auto_shortened=True)
         return await _request_english_speech_approval(update, session, scene, duration_sec)
-    _apply_scene_phrase_update_to_scene(
-        session,
-        scene,
-        scene_idx=int(session.get("image_scene_index", 0) or 0),
-        language="en",
-        phrase_text=shortened["text"],
-        origin="auto_shorten",
+    await _reply_text_with_optional_markup(
+        update,
+        f"EN-реплика длиннее лимита: {current_chars} символов при лимите {max_chars}. "
+        "Фраза сохранена целиком, без сокращений.",
     )
-    _set_scene_video_prompt_for_language(
-        scene,
-        "en",
-        _compose_locked_video_prompt(scene, "en", _boost_scene_prompt_delivery(shortened["video_prompt"], "en")),
-    )
-    _refresh_scene_language_speech_metadata(scene, "en", status="auto_shortened", auto_shortened=True)
     return await _request_english_speech_approval(update, session, scene, duration_sec)
 
 
@@ -9550,6 +9497,16 @@ async def _handle_waiting_scene_media_state(
     if idx >= len(scenes):
         return await _finish_scene_media_production(update, session, message="Все сцены обработаны.")
     scene = scenes[idx]
+    # Language approval remains a command while another language's prompt is edited.
+    approval_language = _parse_ok_language_command(text)
+    if approval_language and session.get("scene_media_substep") == "video_prompt":
+        if approval_language not in _scene_target_languages(session, scene) or not _scene_video_bytes_for_language(scene, approval_language):
+            await update.message.reply_text(f"Нет готового видео для языка {approval_language}.")
+            return True
+        _approve_scene_video_language(scene, approval_language, speed_coef=_scene_speed_coef(scene, approval_language))
+        _set_video_regeneration_requested(scene, approval_language, False)
+        await update.message.reply_text(f"Готовое видео {approval_language} утверждено.")
+        return True
     if await _handle_scene_reference_images_pending_text(
         update,
         session,
@@ -9928,6 +9885,7 @@ async def _handle_waiting_scene_media_state(
                 return await _scene_media_video_ok(
                     update, context=context, chat_id=chat_id, session=session,
                     scene=scene, idx=idx, total=len(scenes),
+                    regenerate_language="en" if _scene_video_bytes_for_language(scene, "ru") else None,
                 )
             if text == SCENE_SPEECH_OPTION_EDIT:
                 pending["stage"] = "approval_manual_phrase"
