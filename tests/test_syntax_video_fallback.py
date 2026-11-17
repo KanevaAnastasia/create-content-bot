@@ -152,7 +152,7 @@ def test_syntax_kling_submission_state_detects_blocked_text_first():
     assert telethon_fallback._syntax_kling_submission_state_from_text("Ready to generate") == ""
 
 
-def test_click_syntax_kling_generate_waits_for_livewire_submit_response(monkeypatch):
+def test_click_syntax_kling_generate_rejects_two_http_200_without_task_status(monkeypatch):
     import app.syntax_telethon_fallback as telethon_fallback
 
     class _Request:
@@ -198,7 +198,9 @@ def test_click_syntax_kling_generate_waits_for_livewire_submit_response(monkeypa
         lambda _page: {"text": "Настройте параметры генерации", "generateButtons": [{"disabled": False}]},
     )
 
-    telethon_fallback._click_syntax_kling_generate_sync(_Page())
+    monkeypatch.setattr(telethon_fallback, "_syntax_kling_submit_confirm_timeout_sec", lambda: 0.001)
+    with pytest.raises(telethon_fallback.SyntaxSubmissionUnconfirmedError):
+        telethon_fallback._click_syntax_kling_generate_sync(_Page())
 
 
 def test_click_syntax_kling_generate_waits_past_processing_button_for_parent_response(monkeypatch):
@@ -253,6 +255,8 @@ def test_click_syntax_kling_generate_waits_past_processing_button_for_parent_res
 
     def _snapshot(_page):
         calls["count"] += 1
+        if calls["count"] >= 4:
+            return {"text": "Видео добавлено в очередь", "generateButtons": []}
         return snapshots[0] if calls["count"] == 1 else snapshots[1]
 
     monkeypatch.setattr(
@@ -264,7 +268,7 @@ def test_click_syntax_kling_generate_waits_past_processing_button_for_parent_res
     telethon_fallback._click_syntax_kling_generate_sync(_Page())
 
 
-def test_click_syntax_kling_generate_keeps_waiting_for_video_after_processing_button(monkeypatch):
+def test_click_syntax_kling_generate_rejects_processing_button_without_task_status(monkeypatch):
     import app.syntax_telethon_fallback as telethon_fallback
 
     class _Locator:
@@ -297,7 +301,8 @@ def test_click_syntax_kling_generate_keeps_waiting_for_video_after_processing_bu
     monkeypatch.setattr(telethon_fallback, "_syntax_kling_submit_snapshot_sync", _snapshot)
     monkeypatch.setattr(telethon_fallback, "_syntax_kling_submit_confirm_timeout_sec", lambda: 0.001)
 
-    telethon_fallback._click_syntax_kling_generate_sync(_Page())
+    with pytest.raises(telethon_fallback.SyntaxSubmissionUnconfirmedError):
+        telethon_fallback._click_syntax_kling_generate_sync(_Page())
 
 
 def test_click_syntax_kling_generate_does_not_accept_static_generation_text(monkeypatch):
@@ -1889,7 +1894,7 @@ def test_try_generate_via_syntax_parallel_uses_distinct_sessions(monkeypatch):
     assert set(seen_sessions) == {"session-a", "session-b"}
 
 
-@pytest.mark.parametrize("configure_error", [None, "Syntax Veo UI configure failed: upload counter timeout", "Syntax Veo not submitted: navigation failed"])
+@pytest.mark.parametrize("configure_error", [None, "Syntax Veo UI configure failed: upload counter timeout", "Syntax Veo not submitted: navigation failed", "Syntax Veo launch unconfirmed: no task status"])
 def test_try_generate_via_syntax_batch_sends_all_requests_before_waiting(monkeypatch, configure_error):
     import app.syntax_telethon_fallback as telethon_fallback
 
@@ -1998,7 +2003,7 @@ def test_try_generate_via_syntax_batch_sends_all_requests_before_waiting(monkeyp
     )
 
     assert results is sink
-    if configure_error and configure_error.startswith("Syntax Veo not submitted:"):
+    if configure_error and configure_error.startswith(("Syntax Veo not submitted:", "Syntax Veo launch unconfirmed:")):
         assert all(not result.success for result in results.values())
         assert "iter_messages" not in events
         return
@@ -2386,3 +2391,31 @@ def test_batch_routes_video_replying_to_english_status():
     }
 
     assert telethon_fallback._batch_message_candidate_keys(_Message(), states) == ["en"]
+
+
+@pytest.mark.parametrize("accepted_on", [2, None])
+def test_veo_retries_same_form_until_real_confirmation_or_three_failures(monkeypatch, accepted_on):
+    import app.syntax_telethon_fallback as adapter
+    page = __import__("types").SimpleNamespace(wait_for_timeout=lambda _: None)
+    calls = []
+    monkeypatch.setattr(adapter, "_syntax_kling_submit_snapshot_sync", lambda _: {"text": "Настройки Veo"})
+    def click(current, **kwargs):
+        assert current is page
+        calls.append(current)
+        if len(calls) == accepted_on:
+            return "started"
+        raise adapter.SyntaxSubmissionUnconfirmedError("did not confirm generation start")
+    monkeypatch.setattr(adapter, "_click_syntax_kling_generate_sync", click)
+    if accepted_on:
+        assert adapter._submit_syntax_veo_generate_sync(page, timeout_ms=30000) == "started"
+        assert len(calls) == accepted_on
+    else:
+        with pytest.raises(adapter.SyntaxSubmissionUnconfirmedError):
+            adapter._submit_syntax_veo_generate_sync(page, timeout_ms=30000)
+        assert len(calls) == 3
+
+
+@pytest.mark.parametrize("text", ["Настройки Veo Генерация может занять больше времени", "Сгенерировать Обработка..."])
+def test_settings_and_button_processing_are_not_generation_confirmation(text):
+    import app.syntax_telethon_fallback as adapter
+    assert adapter._syntax_kling_submission_state_after_change("Настройки Veo", text) == ""

@@ -860,7 +860,7 @@ def _disable_syntax_audio_sync(page: Any, *, timeout_ms: int = 5000) -> None:
 
 
 _KLING_SUBMISSION_STARTED_RE = re.compile(
-    r"генерац|генерир|созда[её]т|создан|очеред|обраб|ожид|generating|creating|queued|in queue|processing|submitted",
+    r"(?:генерация|видео|задание|запрос)\s+(?:успешно\s+)?(?:запущен[ао]?|отправлен[ао]?|добавлен[ао]?\s+в\s+очередь|поставлен[ао]?\s+в\s+очередь|ожидает\s+выполнения|зарегистрирован[ао]?)|generating\s+video|video\s+(?:queued|submitted)|generation\s+(?:started|submitted)",
     re.IGNORECASE,
 )
 _KLING_SUBMISSION_BUTTON_PROGRESS_RE = re.compile(
@@ -1025,115 +1025,110 @@ def _click_syntax_kling_generate_sync(
     with contextlib.suppress(Exception):
         page.on("response", _record_response)
 
-    button = page.locator("#btn_submit")
-    visible_label = ""
-    with contextlib.suppress(Exception):
-        visible_label = str(button.inner_text(timeout=timeout_ms) or "").strip()
-    if visible_label and not generate_re.search(visible_label):
-        raise RuntimeError(f"Syntax visible submit button has unexpected label: {visible_label}")
-    logger.info("syntax.kling.click_visible_generate label=%s", visible_label or "<unavailable>")
-    button.click(timeout=timeout_ms)
+    try:
+        button = page.locator("#btn_submit")
+        visible_label = ""
+        with contextlib.suppress(Exception):
+            visible_label = str(button.inner_text(timeout=timeout_ms) or "").strip()
+        if visible_label and not generate_re.search(visible_label):
+            raise RuntimeError(f"Syntax visible submit button has unexpected label: {visible_label}")
+        logger.info("syntax.kling.click_visible_generate label=%s", visible_label or "<unavailable>")
+        button.click(timeout=timeout_ms)
 
-    deadline = time.monotonic() + _syntax_kling_submit_confirm_timeout_sec()
-    last_text = ""
-    last_buttons: list[Any] = []
-    progress_button_seen = False
-    while time.monotonic() < deadline:
-        page.wait_for_timeout(700)
-        snapshot = _syntax_kling_submit_snapshot_sync(page)
-        last_text = str(snapshot.get("text") or "")
-        buttons = snapshot.get("generateButtons")
-        last_buttons = buttons if isinstance(buttons, list) else []
-        current_button_texts = {
-            str(item.get("text") or "").strip()
-            for item in last_buttons
-            if isinstance(item, dict)
-        }
-        progressed_button_texts = current_button_texts - before_button_texts
-        button_progress_now = any(
-            _KLING_SUBMISSION_BUTTON_PROGRESS_RE.search(text)
-            for text in progressed_button_texts
-        )
-        text_changed = bool(last_text and last_text != before_text)
-        state = (
-            _syntax_kling_submission_state_after_change(before_text, last_text)
-            if text_changed
-            else ""
-        )
-        if state == "blocked":
-            excerpt = last_text[:500].strip()
-            if _regex_match_count(_SYNTAX_VEO_QUEUE_LIMIT_RE, last_text) > _regex_match_count(
-                _SYNTAX_VEO_QUEUE_LIMIT_RE,
-                before_text,
-            ):
-                raise SyntaxVeoQueueFullError(excerpt)
-            raise RuntimeError(f"Syntax Kling UI rejected generation after Generate click: {excerpt}")
-        if state == "started" and not button_progress_now:
-            return "started"
-        if text_changed:
-            logger.info("syntax.kling.submit_changed_without_known_status text=%s", last_text[:300])
-
-        # The current Syntx Livewire UI first updates only the nested button
-        # text (for example, ``Сгенерировать Обработка...``).  That is
-        # acknowledgement of the click, not proof that the paid generation
-        # was submitted.  Keep the webview alive until the parent component's
-        # second Livewire response arrives; closing it here cancels the launch.
-        if button_progress_now:
-            if not progress_button_seen:
-                progress_button_seen = True
-                logger.info(
-                    "syntax.kling.submit_button_progress_seen buttons=%s; waiting_for_parent_response=true",
-                    sorted(progressed_button_texts),
-                )
-
-        if submit_responses:
-            failed_statuses = [status for status, _response_url in submit_responses if status >= 400]
-            if failed_statuses:
-                raise RuntimeError(f"Syntax Kling submit request failed with HTTP {failed_statuses[-1]}.")
-            # The visible button is a nested Livewire component.  Its child
-            # acknowledgement must be followed by the parent component's
-            # actual generation-submission response.
-            if len(submit_responses) < 2:
-                continue
-            status, response_url = submit_responses[-1]
-            page.wait_for_timeout(1200)
-            final_snapshot = _syntax_kling_submit_snapshot_sync(page)
-            final_text = str(final_snapshot.get("text") or "")
-            final_state = _syntax_kling_submission_state_after_change(before_text, final_text)
-            if final_state == "blocked":
-                if _regex_match_count(_SYNTAX_VEO_QUEUE_LIMIT_RE, final_text) > _regex_match_count(
+        deadline = time.monotonic() + _syntax_kling_submit_confirm_timeout_sec()
+        last_text = ""
+        last_buttons: list[Any] = []
+        progress_button_seen = False
+        while time.monotonic() < deadline:
+            page.wait_for_timeout(700)
+            snapshot = _syntax_kling_submit_snapshot_sync(page)
+            last_text = str(snapshot.get("text") or "")
+            buttons = snapshot.get("generateButtons")
+            last_buttons = buttons if isinstance(buttons, list) else []
+            current_button_texts = {
+                str(item.get("text") or "").strip()
+                for item in last_buttons
+                if isinstance(item, dict)
+            }
+            progressed_button_texts = current_button_texts - before_button_texts
+            button_progress_now = any(
+                _KLING_SUBMISSION_BUTTON_PROGRESS_RE.search(text)
+                for text in progressed_button_texts
+            )
+            text_changed = bool(last_text and last_text != before_text)
+            state = (
+                _syntax_kling_submission_state_after_change(before_text, last_text)
+                if text_changed
+                else ""
+            )
+            if state == "blocked":
+                excerpt = last_text[:500].strip()
+                if _regex_match_count(_SYNTAX_VEO_QUEUE_LIMIT_RE, last_text) > _regex_match_count(
                     _SYNTAX_VEO_QUEUE_LIMIT_RE,
                     before_text,
                 ):
-                    raise SyntaxVeoQueueFullError(final_text[:500].strip())
-                raise RuntimeError(
-                    f"Syntax Kling UI rejected generation after Generate click: {final_text[:500].strip()}"
-                )
-            if final_state == "started":
+                    raise SyntaxVeoQueueFullError(excerpt)
+                raise RuntimeError(f"Syntax Kling UI rejected generation after Generate click: {excerpt}")
+            if state == "started":
                 return "started"
-            logger.info(
-                "syntax.kling.submit_request_confirmed responses=%s status=%s endpoint=%s",
-                len(submit_responses),
-                status,
-                response_url,
-            )
-            return "response_confirmed"
+            if text_changed:
+                logger.info("syntax.kling.submit_changed_without_known_status text=%s", last_text[:300])
 
-    logger.warning(
-        "syntax.kling.submit_not_confirmed responses=%s progress_seen=%s buttons=%s text=%s",
-        submit_responses,
-        progress_button_seen,
-        last_buttons,
-        last_text[:500],
-    )
-    if progress_button_seen:
-        # Generate was clicked and Syntax changed the button to its processing
-        # state. Do not risk paying for a duplicate job merely because the
-        # parent Livewire acknowledgement was late or invisible to Playwright.
-        # The caller will now keep polling the Syntax chat for its video/error.
-        logger.warning("syntax.kling.submit_assumed_started_after_processing_state=true")
-        return "processing"
-    raise RuntimeError("Syntax Kling UI did not confirm generation start after Generate click.")
+            # The current Syntx Livewire UI first updates only the nested button
+            # text (for example, ``Сгенерировать Обработка...``).  That is
+            # acknowledgement of the click, not proof that the paid generation
+            # was submitted. Keep the webview alive until a task status appears.
+            if button_progress_now:
+                if not progress_button_seen:
+                    progress_button_seen = True
+                    logger.info(
+                        "syntax.kling.submit_button_progress_seen buttons=%s; waiting_for_task_status=true",
+                        sorted(progressed_button_texts),
+                    )
+
+            if submit_responses:
+                failed_statuses = [status for status, _response_url in submit_responses if status >= 400]
+                if failed_statuses:
+                    raise RuntimeError(f"Syntax Kling submit request failed with HTTP {failed_statuses[-1]}.")
+                # The visible button is a nested Livewire component.  Its child
+                # acknowledgement must be followed by the parent component's
+                # actual generation-submission response.
+                if len(submit_responses) < 2:
+                    continue
+                page.wait_for_timeout(1200)
+                final_snapshot = _syntax_kling_submit_snapshot_sync(page)
+                final_text = str(final_snapshot.get("text") or "")
+                final_state = _syntax_kling_submission_state_after_change(before_text, final_text)
+                if final_state == "blocked":
+                    if _regex_match_count(_SYNTAX_VEO_QUEUE_LIMIT_RE, final_text) > _regex_match_count(
+                        _SYNTAX_VEO_QUEUE_LIMIT_RE,
+                        before_text,
+                    ):
+                        raise SyntaxVeoQueueFullError(final_text[:500].strip())
+                    raise RuntimeError(
+                        f"Syntax Kling UI rejected generation after Generate click: {final_text[:500].strip()}"
+                    )
+                if final_state == "started":
+                    return "started"
+                # HTTP 200 also acknowledges settings/child component updates.
+                # Only a provider task status proves that generation was accepted.
+                logger.debug("syntax.kling.submit_response_without_task_status responses=%s", len(submit_responses))
+
+        logger.warning(
+            "syntax.kling.submit_not_confirmed responses=%s progress_seen=%s buttons=%s text=%s",
+            submit_responses,
+            progress_button_seen,
+            last_buttons,
+            last_text[:500],
+        )
+        raise SyntaxSubmissionUnconfirmedError(
+            "Syntax UI did not confirm generation start after Generate click. "
+            "Запуск не подтверждён; новое платное задание автоматически не создаю."
+        )
+    finally:
+        with contextlib.suppress(Exception):
+            page.remove_listener("response", _record_response)
+
 
 
 def _fill_and_commit_syntax_kling_prompt_sync(page: Any, prompt: str, *, timeout_ms: int = 10_000) -> None:
@@ -1529,6 +1524,10 @@ def _open_syntax_veo_page_sync(playwright: Any, url: str, timeout_ms: int) -> tu
     raise RuntimeError("Syntax Veo webview did not open.")
 
 
+class SyntaxSubmissionUnconfirmedError(RuntimeError):
+    """A click was attempted but no provider task acknowledgement appeared."""
+
+
 class SyntaxVeoNotSubmittedError(RuntimeError):
     """The WebView failed before the Generate action was attempted."""
 
@@ -1780,7 +1779,7 @@ async def _run_syntax_veo_configure_flow(
         timeout_sec=max(30, int(deadline - time.monotonic())),
     )
     if configure_error:
-        if configure_error.startswith("Syntax Veo not submitted:"):
+        if configure_error.startswith(("Syntax Veo not submitted:", "Syntax Veo launch unconfirmed:")):
             return _result(success=False, video_bytes=None, video_uri=None,
                            provider_message=configure_error, attempt_id=attempt_id)
         initial_last_info = configure_error
@@ -1836,6 +1835,8 @@ async def _submit_syntax_veo_webview(
             aspect_ratio=aspect_ratio,
             timeout_sec=max(30, int(timeout_sec)),
         )
+    except SyntaxSubmissionUnconfirmedError as exc:
+        return f"Syntax Veo launch unconfirmed: {_sanitize_syntax_webview_error(exc)}"
     except SyntaxVeoNotSubmittedError as exc:
         return f"Syntax Veo not submitted: {_sanitize_syntax_webview_error(exc)}"
     except Exception as exc:
@@ -3018,7 +3019,7 @@ async def _run_batch_fallback_async(
                 timeout_sec=timeout,
             )
             if configure_error:
-                if configure_error.startswith("Syntax Veo not submitted:"):
+                if configure_error.startswith(("Syntax Veo not submitted:", "Syntax Veo launch unconfirmed:")):
                     results[request.key] = _result(
                         success=False, video_bytes=None, video_uri=None,
                         provider_message=configure_error, attempt_id=request.attempt_id,
