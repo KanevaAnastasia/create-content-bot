@@ -869,7 +869,7 @@ def test_syntax_veo_clears_all_stale_uploaded_references():
         def locator(self, selector):
             if selector == "body":
                 return _Body(self)
-            assert selector == "button[aria-label='Remove file']"
+            assert selector == telethon_fallback._SYNTAX_REMOVE_FILE_SELECTOR
             return _Buttons(self)
 
         def wait_for_timeout(self, _ms):
@@ -906,8 +906,11 @@ def test_syntax_veo_reloads_and_retries_stale_remove_counter(monkeypatch):
             del timeout
 
     class _Buttons:
+        def __init__(self, page):
+            self.page = page
+
         def count(self):
-            return 1
+            return self.page.uploaded
 
         def nth(self, index):
             assert index == 0
@@ -920,8 +923,8 @@ def test_syntax_veo_reloads_and_retries_stale_remove_counter(monkeypatch):
         def locator(self, selector):
             if selector == "body":
                 return _Body(self)
-            assert selector == "button[aria-label='Remove file']"
-            return _Buttons()
+            assert selector == telethon_fallback._SYNTAX_REMOVE_FILE_SELECTOR
+            return _Buttons(self)
 
         def reload(self, *, wait_until, timeout):
             assert wait_until == "commit"

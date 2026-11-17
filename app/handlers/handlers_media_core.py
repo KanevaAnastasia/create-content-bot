@@ -1171,6 +1171,21 @@ def _syntax_dispatch_error_user_message(provider_message: str) -> str:
         )
     if "no free telethon session" in low:
         return "Telethon-сессия Syntax занята другой попыткой. Дождитесь её завершения и повторите."
+    if "syntax veo launch unconfirmed:" in low:
+        return "После трёх попыток Syntx не подтвердил запуск. Результат запуска неизвестен; новая генерация автоматически не отправлена."
+    if "syntax veo not submitted:" in low:
+        stages = {
+            "clear_attachments": "удаление прежних кадров",
+            "upload_frame": "передача кадра",
+            "confirm_upload": "подтверждение загрузки кадра",
+            "verify_persisted_frame": "проверка сохранения кадра в Syntx",
+            "commit_prompt": "сохранение промпта",
+            "set_aspect_ratio": "выбор формата кадра",
+            "form_ready": "готовность формы к запуску",
+        }
+        for stage, label in stages.items():
+            if f"этап={stage}" in low:
+                return f"Syntx: не завершён этап «{label}» после трёх попыток. Кнопку генерации не нажимали; фраза и кадр сохранены для повтора."
     if "syntax veo not submitted:" in low:
         return "Не удалось открыть или подготовить форму Syntax. Генерация не запущена; сессия освобождена для повтора."
     if "not authorized" in low:

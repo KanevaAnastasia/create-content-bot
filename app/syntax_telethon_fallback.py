@@ -1198,7 +1198,7 @@ def _upload_syntax_kling_start_frame_sync(page: Any, start_image: bytes, *, time
     # observes the authoritative UI state instead.
     with contextlib.suppress(Exception):
         page.wait_for_timeout(800)
-    logger.info("syntax.kling.start_frame_uploaded bytes=%s extension=%s", len(start_image), extension)
+    logger.info("syntax.kling.start_frame_transfer_completed bytes=%s extension=%s", len(start_image), extension)
 
 
 def _fill_syntax_kling_webapp_sync(
@@ -1373,13 +1373,33 @@ _SYNTAX_VEO_QUEUE_LIMIT_RE = re.compile(
 )
 
 
+_SYNTAX_REMOVE_FILE_SELECTOR = "button[aria-label='Remove file'], button[aria-label='Удалить файл']"
+
+
 def _syntax_veo_uploaded_reference_count_sync(page: Any) -> int:
+    """Read attachment evidence; -1 means unknown, never an empty form."""
+    label_count = None
     with contextlib.suppress(Exception):
         text = str(page.locator("body").inner_text() or "")
-        match = re.search(r"Загружен{1,2}[оа]\s*\(\s*(\d+)\s*/", text, flags=re.IGNORECASE)
+        match = re.search(r"(?:Загружен{1,2}[оаы]|Uploaded)\s*\(\s*(\d+)\s*/", text, flags=re.IGNORECASE)
         if match:
-            return max(0, int(match.group(1)))
-    return 0
+            label_count = int(match.group(1))
+    controls_count = None
+    with contextlib.suppress(Exception):
+        controls = page.locator(_SYNTAX_REMOVE_FILE_SELECTOR)
+        controls_count = sum(controls.nth(i).is_visible() for i in range(controls.count()))
+    if controls_count:
+        # A stale text counter must not hide an additional attached frame.
+        if label_count is not None and label_count != controls_count:
+            return -1
+        return controls_count
+    if label_count is not None:
+        return label_count
+    # No label and no attachment controls is empty only on a recognizable form.
+    with contextlib.suppress(Exception):
+        if controls_count == 0 and page.locator("input[type=file]").count() > 0:
+            return 0
+    return -1
 
 
 def _syntax_veo_queue_is_full_sync(page: Any) -> bool:
@@ -1400,7 +1420,8 @@ def _wait_for_syntax_veo_uploaded_count_sync(
             return
         page.wait_for_timeout(500)
     raise RuntimeError(
-        f"Syntax Veo uploaded reference count did not become {expected}."
+        f"Syntax Veo uploaded reference count did not become {expected}; "
+        f"observed={_syntax_veo_uploaded_reference_count_sync(page)} (-1 means unknown)."
     )
 
 
@@ -1411,7 +1432,9 @@ def _clear_syntax_veo_uploaded_references_sync(page: Any, *, timeout_ms: int = 1
         count_before = _syntax_veo_uploaded_reference_count_sync(page)
         if count_before == 0:
             return
-        buttons = page.locator("button[aria-label='Remove file']")
+        if count_before < 0:
+            raise RuntimeError("Syntax Veo attachment state is unknown; refusing to add another frame.")
+        buttons = page.locator(_SYNTAX_REMOVE_FILE_SELECTOR)
         visible_button: Any | None = None
         for index in range(buttons.count()):
             candidate = buttons.nth(index)
@@ -1532,6 +1555,51 @@ class SyntaxVeoNotSubmittedError(RuntimeError):
     """The WebView failed before the Generate action was attempted."""
 
 
+def _prepare_syntax_veo_form_sync(page: Any, *, start_image: bytes, prompt: str, aspect_ratio: str) -> None:
+    """Retry only pre-submit preparation; verify the server persisted the frame."""
+    stage = "inspect_attachments"
+    for attempt in range(1, 4):
+        try:
+            stage = "clear_attachments"
+            _clear_syntax_veo_uploaded_references_sync(page)
+            stage = "upload_frame"
+            _upload_syntax_kling_start_frame_sync(page, start_image)
+            stage = "confirm_upload"
+            _wait_for_syntax_veo_uploaded_count_sync(page, 1, timeout_ms=60_000)
+            stage = "verify_persisted_frame"
+            page.reload(wait_until="commit", timeout=30_000)
+            with contextlib.suppress(Exception):
+                page.wait_for_load_state("networkidle", timeout=15_000)
+            _wait_for_syntax_veo_uploaded_count_sync(page, 1, timeout_ms=30_000)
+            stage = "commit_prompt"
+            _fill_and_commit_syntax_kling_prompt_sync(page, prompt)
+            stage = "set_aspect_ratio"
+            _set_syntax_aspect_ratio_sync(page, aspect_ratio)
+            if not _syntax_page_contains_aspect_ratio_sync(page, aspect_ratio):
+                raise RuntimeError("Requested aspect ratio is not visible")
+            stage = "form_ready"
+            _wait_for_syntax_kling_form_ready_sync(page)
+            if _syntax_veo_uploaded_reference_count_sync(page) != 1:
+                raise RuntimeError("Attachment state changed while preparing the form")
+            logger.info("syntax.veo.prepared attempt=%s frame_persisted=true", attempt)
+            return
+        except Exception as exc:
+            logger.warning("syntax.veo.prepare_failed stage=%s attempt=%s count=%s error=%s",
+                           stage, attempt, _syntax_veo_uploaded_reference_count_sync(page),
+                           _sanitize_syntax_webview_error(exc))
+            if attempt == 3:
+                raise SyntaxVeoNotSubmittedError(
+                    f"Подготовка формы не завершена: этап={stage}, попыток={attempt}. "
+                    + _sanitize_syntax_webview_error(exc)
+                ) from exc
+            # Same draft, before Generate: safe to reload and replace its frame.
+            try:
+                page.reload(wait_until="commit", timeout=30_000)
+                page.wait_for_load_state("networkidle", timeout=15_000)
+            except Exception:
+                logger.warning("syntax.veo.prepare_reload_failed attempt=%s", attempt)
+
+
 def _fill_syntax_veo_webapp_sync(
     *,
     url: str,
@@ -1567,21 +1635,9 @@ def _fill_syntax_veo_webapp_sync(
             with contextlib.suppress(Exception):
                 page.wait_for_load_state("networkidle", timeout=min(timeout_ms, 30_000))
 
-            # Syntax persists Telegram picker items between attempts.  Always
-            # replace them with exactly the requested frame; otherwise two
-            # retries become an unintended start/end-frame pair.
-            _clear_syntax_veo_uploaded_references_sync(page)
-            _upload_syntax_kling_start_frame_sync(page, start_image)
-            _wait_for_syntax_veo_uploaded_count_sync(page, 1, timeout_ms=30_000)
-            _fill_and_commit_syntax_kling_prompt_sync(page, prompt)
-
-            # Veo clips are always 8 seconds. Do not open the duration picker:
-            # old scene plans may contain 6, which is not an available option.
-            _set_syntax_aspect_ratio_sync(page, aspect_ratio)
-            if not _syntax_page_contains_aspect_ratio_sync(page, aspect_ratio):
-                raise RuntimeError(
-                    f"Syntax Veo page does not show selected aspect ratio {_normalize_syntax_aspect_ratio(aspect_ratio)}."
-                )
+            _prepare_syntax_veo_form_sync(
+                page, start_image=start_image, prompt=prompt, aspect_ratio=aspect_ratio,
+            )
 
             # Click once even if the page already shows the account-wide queue
             # banner: the current form may itself be one of those active jobs.
