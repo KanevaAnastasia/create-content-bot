@@ -760,13 +760,20 @@ def gemini_generate_sync(
     images: list[bytes] | None = None,
     rate_limit_max_attempts: int | None = None,
     model_profile: str | None = None,
+    editorial_plain_text: bool = False,
 ) -> str:
     """Compatibility entry point for all text generation, routed by TEXT_LLM_PROVIDER.
 
     Gemini remains selectable explicitly; errors never silently switch providers.
     """
     generate = openai_generate_sync if text_llm_provider() == "openai" else _gemini_generate_sync
-    return generate(prompt, images=images, rate_limit_max_attempts=rate_limit_max_attempts, model_profile=model_profile)
+    raw = generate(prompt, images=images, rate_limit_max_attempts=rate_limit_max_attempts, model_profile=model_profile)
+    from .prose_review import review_prose_output
+    return review_prose_output(
+        prompt, raw,
+        lambda review_prompt: generate(review_prompt, rate_limit_max_attempts=rate_limit_max_attempts, model_profile=model_profile),
+        plain_text=editorial_plain_text,
+    )
 
 
 def _gemini_generate_sync(

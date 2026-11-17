@@ -267,7 +267,7 @@ def regenerate_advertising_post_text(
         )
     )
     prompt = advertising_editorial_rules(product_brief, source_text) + prompt
-    post_text = gemini_generate_sync(prompt, model_profile=GEMINI_MODEL_PROFILE_CREATIVE).strip()
+    post_text = gemini_generate_sync(prompt, model_profile=GEMINI_MODEL_PROFILE_CREATIVE, editorial_plain_text=True).strip()
     post_text = re.sub(r"^```(?:markdown|text)?\s*|\s*```$", "", post_text, flags=re.IGNORECASE)
     post_text = re.sub(r"(?<!\w)#[^\s#]+", "", post_text, flags=re.UNICODE)
     post_text = re.sub(r"[ \t]+\n", "\n", post_text)
