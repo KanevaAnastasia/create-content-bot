@@ -30,7 +30,7 @@ def test_unreadable_page_is_not_assumed_to_have_zero_frames():
 
 
 @pytest.mark.parametrize('failures', [0, 1, 3])
-def test_prepare_replaces_frame_and_verifies_persistence_before_success(monkeypatch, failures):
+def test_prepare_keeps_transient_frame_on_same_page_until_submit(monkeypatch, failures):
     events = []
     page = SimpleNamespace(
         reload=lambda **_: events.append('reload'),
@@ -58,7 +58,8 @@ def test_prepare_replaces_frame_and_verifies_persistence_before_success(monkeypa
         assert events.count('upload') == 3
     else:
         syntax._prepare_syntax_veo_form_sync(page, start_image=b'frame', prompt='approved phrase', aspect_ratio='9:16')
-        assert events[-8:] == ['clear', 'upload', 'verify', 'reload', 'verify', 'prompt', 'aspect', 'ready']
+        assert events[-6:] == ['clear', 'upload', 'verify', 'prompt', 'aspect', 'ready']
+        assert events.count('reload') == failures
         assert events.count('upload') == failures + 1
     assert events.count('clear') == events.count('upload')
 

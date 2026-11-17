@@ -1556,7 +1556,7 @@ class SyntaxVeoNotSubmittedError(RuntimeError):
 
 
 def _prepare_syntax_veo_form_sync(page: Any, *, start_image: bytes, prompt: str, aspect_ratio: str) -> None:
-    """Retry only pre-submit preparation; verify the server persisted the frame."""
+    """Prepare one live form; uploads are transient and must not be reloaded."""
     stage = "inspect_attachments"
     for attempt in range(1, 4):
         try:
@@ -1566,11 +1566,6 @@ def _prepare_syntax_veo_form_sync(page: Any, *, start_image: bytes, prompt: str,
             _upload_syntax_kling_start_frame_sync(page, start_image)
             stage = "confirm_upload"
             _wait_for_syntax_veo_uploaded_count_sync(page, 1, timeout_ms=60_000)
-            stage = "verify_persisted_frame"
-            page.reload(wait_until="commit", timeout=30_000)
-            with contextlib.suppress(Exception):
-                page.wait_for_load_state("networkidle", timeout=15_000)
-            _wait_for_syntax_veo_uploaded_count_sync(page, 1, timeout_ms=30_000)
             stage = "commit_prompt"
             _fill_and_commit_syntax_kling_prompt_sync(page, prompt)
             stage = "set_aspect_ratio"
@@ -1581,7 +1576,7 @@ def _prepare_syntax_veo_form_sync(page: Any, *, start_image: bytes, prompt: str,
             _wait_for_syntax_kling_form_ready_sync(page)
             if _syntax_veo_uploaded_reference_count_sync(page) != 1:
                 raise RuntimeError("Attachment state changed while preparing the form")
-            logger.info("syntax.veo.prepared attempt=%s frame_persisted=true", attempt)
+            logger.info("syntax.veo.prepared attempt=%s frame_attached=true", attempt)
             return
         except Exception as exc:
             logger.warning("syntax.veo.prepare_failed stage=%s attempt=%s count=%s error=%s",
