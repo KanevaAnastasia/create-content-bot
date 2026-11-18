@@ -2143,6 +2143,48 @@ def _syntax_media_download_timeout_sec() -> float:
 
 async def _download_telegram_media_bytes(client: Any, message: Any) -> bytes | None:
     timeout_sec = _syntax_media_download_timeout_sec()
+    document = getattr(message, "document", None)
+    document_id = getattr(document, "id", None)
+    size = getattr(document, "size", None)
+    if isinstance(document_id, int) and isinstance(size, int) and size > 0:
+        # Persist complete chunks, so a timeout or executor restart can resume.
+        root = Path(__file__).resolve().parent.parent / "runtime" / "syntax_media"
+        root.mkdir(parents=True, exist_ok=True, mode=0o700)
+        path = root / f"{document_id}-{size}.part"
+        with (root / f"{document_id}-{size}.lock").open("a+b") as lock:
+            try:
+                fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except BlockingIOError:
+                return None
+            for attempt in range(3):
+                with path.open("r+b" if path.exists() else "w+b") as output:
+                    output.seek(0, os.SEEK_END)
+                    offset = output.tell()
+                    if offset == size:
+                        return path.read_bytes()
+                    # Telegram offsets must be aligned; only discard a partial block.
+                    offset = (offset // 4096) * 4096 if offset < size else 0
+                    output.truncate(offset)
+                    output.seek(offset)
+                    stream = client.iter_download(message.media, offset=offset, request_size=512 * 1024)
+                    try:
+                        while offset < size:
+                            # This is an inactivity deadline, not a whole-file deadline.
+                            chunk = await asyncio.wait_for(stream.__anext__(), timeout=timeout_sec)
+                            if not chunk or offset + len(chunk) > size:
+                                raise ValueError("Invalid Telegram media chunk size")
+                            output.write(chunk)
+                            output.flush()
+                            os.fsync(output.fileno())
+                            offset += len(chunk)
+                        logger.info("syntax.download_complete message_id=%s bytes=%s", message.id, size)
+                        return path.read_bytes()
+                    except (TimeoutError, ConnectionError, OSError, StopAsyncIteration) as exc:
+                        logger.warning("syntax.download_resume message_id=%s offset=%s size=%s attempt=%s error=%s",
+                                       message.id, offset, size, attempt + 1, type(exc).__name__)
+                    finally:
+                        await stream.close()
+            return None
     try:
         data = await asyncio.wait_for(client.download_media(message, file=bytes), timeout=timeout_sec)
     except TimeoutError:
