@@ -1770,6 +1770,11 @@ async def _run_syntax_kling_configure_flow(
             audio_enabled=audio_enabled,
             timeout_sec=max(30, min(timeout, 180)),
         )
+    except SyntaxSubmissionUnconfirmedError as exc:
+        # Generate may have reached Syntx even when the WebView never acknowledges it.
+        # Keep listening to the existing request; never submit another paid job here.
+        initial_last_info = f"Syntax Kling launch unconfirmed: {_sanitize_syntax_webview_error(exc)}"
+        logger.warning("syntax.kling.ui_unconfirmed attempt_id=%s; waiting_for_telegram_result=true", attempt_id)
     except Exception as exc:
         return _result(
             success=False,
@@ -1785,10 +1790,10 @@ async def _run_syntax_kling_configure_flow(
         sent_ids=sent_ids,
         attempt_id=attempt_id,
         poll=poll,
-        deadline=deadline,
+        deadline=time.monotonic() + timeout,
         initial_last_info=initial_last_info,
         timeout=timeout,
-        expected_lang_token=None,
+        expected_lang_token=_expected_lang_token_from_prompt(prompt),
     )
 
 
