@@ -1684,17 +1684,17 @@ def _publish_vk(job: PublicationJob, project_slug: str, persist: Callable[[], No
         if not external_id:
             token = _vk_access_token(project_slug)
             _verify_vk_identity(project_slug, token=token, group_id=group_id, api_version=api_version)
-            if payload.get("vk_video_compact_recovery_profile"):
-                try:
-                    video_path = zernio_publisher._delivery_video(Path(job.video_path))
-                except zernio_publisher.ZernioError as exc:
-                    raise PublicationDeliveryError(
-                        "VK compact recovery video preparation failed."
-                    ) from exc
-            elif payload.get("vk_video_recovery_profile"):
-                video_path = _instagram_compatible_video(Path(job.video_path), recovery_profile=True)
-            else:
-                video_path = _instagram_compatible_video(Path(job.video_path))
+            # VK repeatedly leaves the 130-150 MB final masters in processing
+            # with duration=0.  Use the deterministic 720p delivery copy from
+            # the first attempt instead of creating a doomed large video object
+            # and a second hidden recovery object later.  Small/manual inputs
+            # are returned unchanged by the helper.
+            try:
+                video_path = zernio_publisher._delivery_video(Path(job.video_path))
+            except zernio_publisher.ZernioError as exc:
+                raise PublicationDeliveryError(
+                    "VK delivery video preparation failed."
+                ) from exc
             # Persist before the first remote write: an interruption must not re-upload.
             save(vk_upload_started_at=datetime.now(timezone.utc).isoformat())
             try:

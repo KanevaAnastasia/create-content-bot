@@ -19,6 +19,7 @@ def configured(monkeypatch):
     monkeypatch.setattr(p, "_vk_access_token", lambda project: "video-secret")
     monkeypatch.setattr(p, "_verify_vk_identity", lambda *a, **kw: None)
     monkeypatch.setattr(p, "_instagram_compatible_video", lambda path, **kwargs: path)
+    monkeypatch.setattr(p.zernio_publisher, "_delivery_video", lambda path: path)
     return values
 
 
@@ -230,12 +231,8 @@ def test_stale_processing_video_is_reuploaded_with_recovery_profile(configured, 
     }
     calls = setup_api(monkeypatch, job)
     original = p.requests.post
-    profiles = []
-    monkeypatch.setattr(
-        p,
-        '_instagram_compatible_video',
-        lambda path, **kwargs: profiles.append(bool(kwargs.get('recovery_profile'))) or path,
-    )
+    compact = Mock(return_value=p.Path(job.video_path))
+    monkeypatch.setattr(p.zernio_publisher, '_delivery_video', compact)
 
     def video_state(url, **kwargs):
         if url.rsplit('/', 1)[-1] == 'video.get' and kwargs['data']['videos'] == '-123_41':
@@ -245,9 +242,22 @@ def test_stale_processing_video_is_reuploaded_with_recovery_profile(configured, 
 
     monkeypatch.setattr(p.requests, 'post', video_state)
     assert p._publish_vk(job, 'grandma', lambda: None) == '-123_42'
-    assert profiles == [True]
+    compact.assert_called_once_with(p.Path(job.video_path))
     assert job.payload_json['vk_failed_video_external_ids'] == ['-123_41']
     assert job.payload_json['vk_video_recovery_reason'] == 'processing_timeout'
+
+
+def test_initial_vk_upload_uses_compact_delivery_video(configured, monkeypatch, job):
+    setup_api(monkeypatch, job)
+    compact = Mock(return_value=p.Path(job.video_path))
+    instagram = Mock(side_effect=AssertionError('Instagram delivery profile must not be used'))
+    monkeypatch.setattr(p.zernio_publisher, '_delivery_video', compact)
+    monkeypatch.setattr(p, '_instagram_compatible_video', instagram)
+
+    assert p._publish_vk(job, 'grandma', lambda: None) == '-123_42'
+
+    compact.assert_called_once_with(p.Path(job.video_path))
+    instagram.assert_not_called()
 
 
 def test_recovery_video_processing_is_preserved_instead_of_allocating_another_duplicate(
