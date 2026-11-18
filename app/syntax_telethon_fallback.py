@@ -1830,7 +1830,7 @@ async def _run_syntax_veo_configure_flow(
         timeout_sec=max(30, int(deadline - time.monotonic())),
     )
     if configure_error:
-        if configure_error.startswith(("Syntax Veo not submitted:", "Syntax Veo launch unconfirmed:")):
+        if configure_error.startswith("Syntax Veo not submitted:"):
             return _result(success=False, video_bytes=None, video_uri=None,
                            provider_message=configure_error, attempt_id=attempt_id)
         initial_last_info = configure_error
@@ -3070,7 +3070,7 @@ async def _run_batch_fallback_async(
                 timeout_sec=timeout,
             )
             if configure_error:
-                if configure_error.startswith(("Syntax Veo not submitted:", "Syntax Veo launch unconfirmed:")):
+                if configure_error.startswith("Syntax Veo not submitted:"):
                     results[request.key] = _result(
                         success=False, video_bytes=None, video_uri=None,
                         provider_message=configure_error, attempt_id=request.attempt_id,

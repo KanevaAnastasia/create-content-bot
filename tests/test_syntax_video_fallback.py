@@ -1897,7 +1897,7 @@ def test_try_generate_via_syntax_parallel_uses_distinct_sessions(monkeypatch):
     assert set(seen_sessions) == {"session-a", "session-b"}
 
 
-@pytest.mark.parametrize("configure_error", [None, "Syntax Veo UI configure failed: upload counter timeout", "Syntax Veo not submitted: navigation failed", "Syntax Veo launch unconfirmed: no task status"])
+@pytest.mark.parametrize("configure_error", [None, "Syntax Veo UI configure failed: upload counter timeout", "Syntax Veo not submitted: navigation failed", "Syntax Veo launch unconfirmed: no task status", "en_only_unconfirmed"])
 def test_try_generate_via_syntax_batch_sends_all_requests_before_waiting(monkeypatch, configure_error):
     import app.syntax_telethon_fallback as telethon_fallback
 
@@ -1982,6 +1982,8 @@ def test_try_generate_via_syntax_batch_sends_all_requests_before_waiting(monkeyp
 
     async def _fake_submit_webview(*_args, **kwargs):
         events.append(f"submit:{kwargs['prompt']}")
+        if configure_error == "en_only_unconfirmed":
+            return "Syntax Veo launch unconfirmed: no task status" if "lang:en" in kwargs["prompt"] else None
         return configure_error
 
     monkeypatch.setattr(telethon_fallback, "TelegramClient", _FakeClient)
@@ -2006,7 +2008,7 @@ def test_try_generate_via_syntax_batch_sends_all_requests_before_waiting(monkeyp
     )
 
     assert results is sink
-    if configure_error and configure_error.startswith(("Syntax Veo not submitted:", "Syntax Veo launch unconfirmed:")):
+    if configure_error and configure_error.startswith("Syntax Veo not submitted:"):
         assert all(not result.success for result in results.values())
         assert "iter_messages" not in events
         return
