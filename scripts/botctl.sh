@@ -119,10 +119,18 @@ child_pids() {
   [[ -n "$pid" ]] && pgrep -P "$pid" 2>/dev/null || true
 }
 
+is_durable_syntax_worker() {
+  local command
+  command="$(ps -p "$1" -o command= 2>/dev/null || true)"
+  [[ "$command" == *" -m app.syntax_durable "* ]]
+}
+
 terminate_bot_tree() {
   local pid="$1"
   local child
   for child in $(child_pids "$pid"); do
+    # Syntx owns an independent session and must survive frontend restarts.
+    is_durable_syntax_worker "$child" && continue
     kill "$child" 2>/dev/null || true
   done
   kill "$pid" 2>/dev/null || true
@@ -132,6 +140,8 @@ force_kill_bot_tree() {
   local pid="$1"
   local child
   for child in $(child_pids "$pid"); do
+    # Syntx owns an independent session and must survive frontend restarts.
+    is_durable_syntax_worker "$child" && continue
     kill -KILL "$child" 2>/dev/null || true
   done
   kill -KILL "$pid" 2>/dev/null || true
