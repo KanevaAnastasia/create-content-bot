@@ -1173,6 +1173,8 @@ def _syntax_dispatch_error_user_message(provider_message: str) -> str:
         return "Telethon-сессия Syntax занята другой попыткой. Дождитесь её завершения и повторите."
     if "syntax veo launch unconfirmed:" in low:
         return "После трёх попыток Syntx не подтвердил запуск. Результат запуска неизвестен; новая генерация автоматически не отправлена."
+    if "syntax veo not submitted:" in low and "prompt acknowledgement" in low:
+        return "Syntx не прислал подтверждение сохранения промпта и кнопку настроек за время ожидания. Генерация ещё не запущена; кадр и промпт сохранены."
     if "syntax veo not submitted:" in low:
         stages = {
             "clear_attachments": "удаление прежних кадров",

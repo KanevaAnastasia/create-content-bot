@@ -329,18 +329,17 @@ async def _wait_for_latest_syntax_configure_button(
     poll: float,
     attempts: int = 6,
     require_prompt_saved: bool = False,
+    deadline: float | None = None,
 ) -> tuple[Any | None, Any | None]:
-    """Probe the newest bot replies without consuming legacy video iterators.
+    """Wait for this prompt's settings acknowledgement without resending it.
 
-    Veo's current chat flow posts the ``Настроить и запустить`` WebView button
-    immediately after it has accepted the prompt.  Older Syntax flows start the
-    task directly and never post that button.  Looking only at ``get_messages``
-    lets us support both variants: if no WebView appears after a few bounded
-    probes, the caller continues through the legacy video poll unchanged.
+    Callers with a known WebView flow use a time budget. The bounded probe
+    mode remains available to legacy transports that generate without a form.
     """
-
-    for attempt in range(max(1, min(int(attempts), 10))):
-        latest_raw = await client.get_messages(target, limit=5)
+    attempt = 0
+    while (time.monotonic() < deadline if deadline is not None else attempt < max(1, min(int(attempts), 10))):
+        attempt += 1
+        latest_raw = await client.get_messages(target, limit=20 if deadline is not None else 5)
         if latest_raw is None:
             latest_messages: list[Any] = []
         elif isinstance(latest_raw, (list, tuple)):
@@ -354,22 +353,21 @@ async def _wait_for_latest_syntax_configure_button(
             if mid <= reply_anchor:
                 continue
             if require_prompt_saved:
-                message_text = str(
-                    getattr(message, "raw_text", "")
-                    or getattr(message, "text", "")
-                    or ""
-                ).lower()
+                message_text = str(getattr(message, "raw_text", "") or getattr(message, "text", "") or "").lower()
                 if not re.search(r"промпт\s+сохран|prompt\s+saved", message_text):
-                    # Veo posts identical WebView buttons for the uploaded
-                    # file and for the prompt.  The file reply can arrive
-                    # first; opening it races the prompt save and launches a
-                    # stale draft.  Wait for the prompt acknowledgement.
                     continue
+                reply_to = getattr(getattr(message, "reply_to", None), "reply_to_msg_id", None)
+                if deadline is not None and reply_to is not None and int(reply_to) != reply_anchor:
+                    continue  # Delayed acknowledgement of another language/request.
             button = _syntax_find_configure_button(message)
             if button is not None:
                 return message, button
-        if attempt + 1 < attempts:
-            await asyncio.sleep(max(0.5, min(float(poll), 2.0)))
+        delay = max(0.5, min(float(poll), 5.0))
+        if deadline is not None:
+            delay = min(delay, max(0.0, deadline - time.monotonic()))
+        if delay > 0 and (deadline is not None or attempt < attempts):
+            await asyncio.sleep(delay)
+    logger.warning("syntax.configure_ack_timeout prompt_message_id=%s probes=%s", reply_anchor, attempt)
     return None, None
 
 
@@ -2801,10 +2799,12 @@ async def _run_fallback_async(
                     configure_message, configure_button = await _wait_for_latest_syntax_configure_button(
                         client,
                         target,
-                        reply_anchor=reply_anchor,
-                        poll=0.5,
+                        reply_anchor=int(request_message.id),
+                        poll=2.0,
                         require_prompt_saved=True,
+                        deadline=time.monotonic() + min(timeout, 180),
                     )
+                    deadline = time.monotonic() + timeout
                     if configure_message is not None and configure_button is not None:
                         return await _run_syntax_veo_configure_flow(
                             client,
@@ -3088,16 +3088,17 @@ async def _run_batch_fallback_async(
             configure_message, configure_button = await _wait_for_latest_syntax_configure_button(
                 client,
                 target,
-                reply_anchor=reply_anchor,
-                poll=0.5,
+                reply_anchor=int(request_message.id),
+                poll=2.0,
                 require_prompt_saved=True,
+                deadline=time.monotonic() + min(timeout, 180),
             )
             if configure_message is None or configure_button is None:
                 results[request.key] = _result(
                     success=False,
                     video_bytes=None,
                     video_uri=None,
-                    provider_message="Syntax Veo did not expose the prompt-saved configure button.",
+                    provider_message="Syntax Veo not submitted: prompt acknowledgement and settings did not arrive before the configure deadline.",
                     attempt_id=request.attempt_id,
                 )
                 continue
