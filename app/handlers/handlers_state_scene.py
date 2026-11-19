@@ -466,6 +466,7 @@ def _apply_overlay_title_to_production(session: dict, production: dict) -> None:
             str(key).strip(): str(value).strip()
             for key, value in title_map.items()
             if str(key).strip() and str(value).strip()
+            and (not is_advertising_generation(session) or str(key).strip() == "ru")
         }
         if cleaned_titles:
             production[OVERLAY_TITLE_BY_LANG_SESSION_KEY] = cleaned_titles
@@ -480,6 +481,7 @@ def _apply_overlay_title_to_production(session: dict, production: dict) -> None:
             str(key).strip(): str(value).strip()
             for key, value in subtitle_map.items()
             if str(key).strip() and str(value).strip()
+            and (not is_advertising_generation(session) or str(key).strip() == "ru")
         }
         if cleaned_subtitles:
             production[OVERLAY_SUBTITLE_BY_LANG_SESSION_KEY] = cleaned_subtitles
@@ -591,7 +593,9 @@ def _store_overlay_titles(session: dict, *, ru_title: str, en_title: str) -> Non
     ru = " ".join(str(ru_title or "").split())
     en = " ".join(str(en_title or "").split())
     session[OVERLAY_TITLE_SESSION_KEY] = ru
-    session[OVERLAY_TITLE_BY_LANG_SESSION_KEY] = {"ru": ru, "en": en or ru}
+    session[OVERLAY_TITLE_BY_LANG_SESSION_KEY] = {"ru": ru}
+    if not is_advertising_generation(session):
+        session[OVERLAY_TITLE_BY_LANG_SESSION_KEY]["en"] = en or ru
     session.pop(OVERLAY_TITLE_TRANSLATION_PENDING_SESSION_KEY, None)
     session.pop(OVERLAY_SUBTITLE_TRANSLATION_PENDING_SESSION_KEY, None)
     session.pop(OVERLAY_SUBTITLE_DECIDED_SESSION_KEY, None)
@@ -603,7 +607,7 @@ def _store_overlay_subtitle(session: dict, text: str | None, *, en_text: str | N
     if ru:
         raw_languages = session.get("target_languages")
         languages = ["ru"]
-        if isinstance(raw_languages, list):
+        if isinstance(raw_languages, list) and not is_advertising_generation(session):
             languages.extend(str(item or "").strip().lower() for item in raw_languages)
         language_keys = [lang for lang in dict.fromkeys(languages) if lang]
         session[OVERLAY_SUBTITLE_BY_LANG_SESSION_KEY] = {
@@ -992,7 +996,8 @@ async def _send_overlay_title_previews(update: Update, session: dict, style: dic
     subtitles = session.get(OVERLAY_SUBTITLE_BY_LANG_SESSION_KEY)
     series_titles = session.get(SERIES_TITLE_BY_LANG_SESSION_KEY)
     series_counters = session.get(SERIES_COUNTER_BY_LANG_SESSION_KEY)
-    for language, label in (("ru", "RU"), ("en", "EN")):
+    languages = (("ru", "RU"), ("en", "EN")) if _overlay_title_requires_english(session) else (("ru", "RU"),)
+    for language, label in languages:
         title = str(titles.get(language) or titles.get("ru") or "").strip()
         if not title:
             continue
@@ -5349,6 +5354,8 @@ async def _handle_waiting_production_bundle_approval_state(
 
 
 def _overlay_title_requires_english(session: dict) -> bool:
+    if is_advertising_generation(session):
+        return False
     raw_languages = session.get("target_languages")
     if isinstance(raw_languages, list) and raw_languages:
         languages = [str(item or "").strip().lower() for item in raw_languages]

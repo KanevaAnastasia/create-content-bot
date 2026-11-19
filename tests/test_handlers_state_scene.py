@@ -4476,3 +4476,37 @@ def test_advertising_advice_does_not_reuse_prepared_monologue(monkeypatch):
     assert calls == [True]
     assert session['scenes_text'] == 'new'
     assert cached['text_plan'] == 'old'
+
+
+@pytest.mark.parametrize('languages', [None, ['ru'], ['ru', 'en']])
+def test_advertising_titles_and_preview_are_russian_only(monkeypatch, languages):
+    from unittest.mock import AsyncMock
+    from app.handlers import handlers_state_scene as module
+    session = {'generation_mode': 'advertising', 'target_languages': languages}
+    assert module._overlay_title_requires_english(session) is False
+    module._store_overlay_titles(session, ru_title='Мягкие полотенца', en_title='Soft towels')
+    module._store_overlay_subtitle(session, 'Совет', en_text='Advice')
+    assert session['overlay_title_by_lang'] == {'ru': 'Мягкие полотенца'}
+    assert session['overlay_subtitle_by_lang'] == {'ru': 'Совет'}
+    # Even a legacy EN title must not produce an EN preview.
+    session['overlay_title_by_lang']['en'] = 'Old English title'
+    rendered = []
+    def render(language, *args):
+        rendered.append(language)
+        return b'image'
+    monkeypatch.setattr(module, '_render_overlay_title_preview', render)
+    monkeypatch.setattr(module, '_overlay_first_frame', lambda s: b'frame')
+    monkeypatch.setattr(module, 'safe_reply_photo', AsyncMock())
+    update = SimpleNamespace(message=SimpleNamespace(reply_photo=AsyncMock()))
+    asyncio.run(module._send_overlay_title_previews(update, session, {}))
+    assert rendered == ['ru']
+
+
+def test_advertising_production_ignores_stale_english_overlay():
+    from app.handlers import handlers_state_scene as module
+    session = {'generation_mode': 'advertising', 'overlay_title_by_lang': {'ru': 'Совет', 'en': 'Advice'},
+               'overlay_subtitle_by_lang': {'ru': 'Мягкость', 'en': 'Softness'}}
+    production = {}
+    module._apply_overlay_title_to_production(session, production)
+    assert production['overlay_title_by_lang'] == {'ru': 'Совет'}
+    assert production['overlay_subtitle_by_lang'] == {'ru': 'Мягкость'}
