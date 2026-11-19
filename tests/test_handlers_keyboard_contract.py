@@ -104,7 +104,7 @@ CUSTOM_REFERENCE_ROWS = [["больше файлов не нужно"], ["В н�
             STATE_WAITING_ADVERTISING_CAMPAIGN_CHOICE,
             [["1", "2", "3"], ["4", "5"], ["Другие варианты", "Усилить варианты"], ["Свой вариант"], ["В начало"]],
         ),
-        (STATE_WAITING_ADVERTISING_FORMAT_CHOICE, [["Клип", "Пост"], ["В начало"]]),
+        (STATE_WAITING_ADVERTISING_FORMAT_CHOICE, [["Клип", "Клип — совет"], ["Пост"], ["В начало"]]),
         (
             STATE_WAITING_ADVERTISING_POST_TEXT_APPROVAL,
             [["АПРУВ"], ["ПЕРЕГЕНЕРИРОВАТЬ"], ["ФИДБЭК"], ["В начало"]],

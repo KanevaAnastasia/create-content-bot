@@ -252,3 +252,35 @@ def test_advertising_editorial_rules_bind_comment_first_person_and_canonical_nam
     assert 'от её первого лица' in captured[0]
     assert 'Тимоша' in captured[0]
     assert 'Мурзик' not in captured[0]
+
+
+def test_advice_ad_preserves_two_speakers_through_production(monkeypatch):
+    dialogue = [{'speaker': 'daughter', 'text': 'Мам, почему мои полотенца после стирки жёсткие?'},
+                {'speaker': 'grandma', 'text': 'Сейчас покажу, что я делаю, чтобы они оставались мягкими.'}]
+    scenes = [{'speech_ru': 'stale monologue', 'action': 'Дочь рядом с бабушкой',
+               'dialogue': dialogue, 'characters': ['daughter', 'grandma', 'cat']}] + [
+                   {'speech_ru': 'Показываю приём', 'action': 'Бабушка показывает товар'}] * 2
+    prompts = []
+    def generate(prompt, **kwargs):
+        prompts.append(prompt)
+        return json.dumps({'scenes': scenes} if len(prompts) == 1 else {'prompts': [
+            {'speech_by_lang': {'ru': 'Wrong monologue'}, 'video_prompt_by_lang': {'ru': 'Wrong monologue'}}] * 3})
+    monkeypatch.setattr(advertising_generation, 'gemini_generate_sync', generate)
+    brief = dict(PRODUCT, video_style='advice')
+    plan = advertising_generation.generate_advertising_scene_plan(source_text='Полотенца', product_brief=brief)
+    assert plan['video_style'] == 'advice'
+    assert 'Дочь:' in plan['text_plan']
+    result = advertising_generation.generate_advertising_production(scenes_plan=plan['json_plan'], product_brief=brief)
+    first = result['json_plan'][0]
+    assert first['dialogue'] == dialogue
+    assert first['speech_plan_by_lang']['ru'][0]['speaker'] == 'daughter'
+    assert first['speech_by_lang']['ru'] == ' '.join(x['text'] for x in dialogue)
+    assert 'Wrong monologue' not in first['video_prompt']
+    assert dialogue[0]['text'] in first['video_prompt']
+    assert 'ВЫБРАНА ПОДАЧА СОВЕТ' in prompts[0]
+
+
+def test_advice_ad_rejects_narration_instead_of_dialogue(monkeypatch):
+    monkeypatch.setattr(advertising_generation, 'gemini_generate_sync', lambda *a, **k: json.dumps({'scenes': [{'speech_ru': 'Моя дочка спросила'}] * 3}))
+    with pytest.raises(ValueError, match='вопрос дочери'):
+        advertising_generation.generate_advertising_scene_plan(source_text='Полотенца', product_brief=dict(PRODUCT, video_style='advice'))

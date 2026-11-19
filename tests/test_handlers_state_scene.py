@@ -4438,3 +4438,41 @@ def test_advertising_previous_twice_then_one_selects_campaign_not_recipe(initial
     assert session[ADVERTISING_SELECTED_CAMPAIGN_SESSION_KEY]['title'] == 'Оливье 1'
     assert session['state'] == STATE_WAITING_ADVERTISING_FORMAT_CHOICE
     assert all('апруву рецепта' not in call.args[0] for call in update.message.reply_text.call_args_list)
+
+
+def test_advertising_advice_choice_keeps_advertising_mode(monkeypatch):
+    from unittest.mock import AsyncMock
+    from app.handlers import handlers_state_scene as module
+    from app.handlers.handlers_state_start import _advertising_format_choice_markup
+    session = {'generation_mode': 'advertising', 'advertising_product_brief': {}}
+    update = SimpleNamespace(message=SimpleNamespace(reply_text=AsyncMock()))
+    monkeypatch.setattr(module, '_ask_series_choice', AsyncMock())
+    asyncio.run(module._handle_advertising_format_choice(update, None, chat_id=778, session=session, text='Клип — совет'))
+    assert session['advertising_format'] == 'clip'
+    assert session['advertising_product_brief']['video_style'] == 'advice'
+    assert session['generation_mode'] == 'advertising'
+    assert any(button.text == 'Клип — совет' for row in _advertising_format_choice_markup().keyboard for button in row)
+    asyncio.run(module._handle_advertising_format_choice(update, None, chat_id=778, session=session, text='ОК'))
+    assert session['advertising_product_brief']['video_style'] == 'advice'
+    asyncio.run(module._handle_advertising_format_choice(update, None, chat_id=778, session=session, text='Клип'))
+    assert session['advertising_product_brief']['video_style'] == 'story'
+
+
+def test_advertising_advice_does_not_reuse_prepared_monologue(monkeypatch):
+    from unittest.mock import AsyncMock
+    from app.handlers import handlers_state_start as module
+    cached = {'json_plan': [{'text': 'old monologue'}] * 3, 'text_plan': 'old'}
+    session = {'advertising_source_text': 'Полотенца', 'advertising_product_brief': {'video_style': 'advice'},
+               'advertising_product_path': '/tmp/product.jpg', 'advertising_selected_campaign': {'prepared_scene_plan': cached}}
+    fresh = {'json_plan': [{'text': 'Дочь и бабушка'}] * 3, 'text_plan': 'new', 'video_style': 'advice'}
+    calls = []
+    async def generate(*args):
+        calls.append(True)
+        return fresh
+    monkeypatch.setattr(module, '_call_with_503_retries', generate)
+    monkeypatch.setattr(module, 'ensure_generation_run_for_session', lambda s: (None, {}))
+    update = SimpleNamespace(message=SimpleNamespace(reply_text=AsyncMock()))
+    asyncio.run(module._start_advertising_scene_plan(update, None, chat_id=779, session=session))
+    assert calls == [True]
+    assert session['scenes_text'] == 'new'
+    assert cached['text_plan'] == 'old'

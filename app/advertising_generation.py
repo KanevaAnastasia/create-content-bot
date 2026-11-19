@@ -100,6 +100,8 @@ def advertising_editorial_rules(product_brief: dict, source_text: str = "") -> s
     from .character_catalog import CHARACTER_CATALOG
     cast = {key: {"name": value["name"], "role": value.get("short_description", "")}
             for key, value in CHARACTER_CATALOG.items()}
+    from .advertising_style import ADVICE_RULE
+    style_rule = ADVICE_RULE if product_brief.get("video_style") == "advice" else ""
     comment = str(product_brief.get("owner_comment") or source_text or "").strip()
     return (
         "ОБЯЗАТЕЛЬНОЕ РЕДАКЦИОННОЕ ЗАДАНИЕ. Это личный блог самой бабушки: она автор, хозяйка и рассказчик. "
@@ -116,7 +118,7 @@ def advertising_editorial_rules(product_brief: dict, source_text: str = "") -> s
         "Не выдавай рекламный хук о скорости за гарантию полного приготовления с нуля за это время. "
         "Если комментарий просит рецепт, покажи ингредиенты и понятные этапы без выдуманных возможностей прибора.\n"
         + "УТВЕРЖДЁННЫЕ ПЕРСОНАЖИ: " + json.dumps(cast, ensure_ascii=False)
-        + "\nКОММЕНТАРИЙ/ИСХОДНАЯ ЗАДАЧА ВЛАДЕЛЬЦА: " + comment + "\n"
+        + "\nКОММЕНТАРИЙ/ИСХОДНАЯ ЗАДАЧА ВЛАДЕЛЬЦА: " + comment + "\n" + style_rule
     )
 
 
@@ -435,11 +437,18 @@ def generate_advertising_scene_plan(
     raw = gemini_generate_sync(prompt, model_profile=GEMINI_MODEL_PROFILE_CREATIVE)
     data = extract_json_object(raw)
     source_scenes = data.get("scenes") if isinstance(data.get("scenes"), list) else []
+    dialogue = None
+    if product_brief.get("video_style") == "advice":
+        from .advertising_style import advice_dialogue
+        dialogue = advice_dialogue(source_scenes[0] if source_scenes else {})
+        source_scenes[0]["speech_ru"] = " ".join(item["text"] for item in dialogue)
     if product_brief.get("speech_min_chars"):
         from .advertising_speech import validate_scene_speech
         if not 3 <= len(source_scenes) <= 6 or not all(isinstance(scene, dict) for scene in source_scenes):
             raise ValueError("Нужен полный сценарий из 3–6 сцен.")
-        validate_scene_speech(source_scenes, product_brief)
+        if dialogue and len(source_scenes[0]["speech_ru"]) < int(product_brief["speech_min_chars"]):
+            raise ValueError("Диалог первой сцены слишком короткий; нужны законченные вопрос и ответ.")
+        validate_scene_speech(source_scenes[1:] if dialogue else source_scenes, product_brief)
     product_lock_ru = advertising_product_lock_ru(product_brief)
     product_lock_en = advertising_product_lock_en(product_brief)
     normalized: list[dict[str, Any]] = []
@@ -487,6 +496,9 @@ def generate_advertising_scene_plan(
                 },
             }
         )
+    if dialogue:
+        from .advertising_style import apply_advice_dialogue
+        apply_advice_dialogue(normalized[0], dialogue)
     title = _clean_text(data.get("title"), 90) or _clean_text(product_brief.get("product_name"), 90) or "Реклама товара"
     content_type = str(data.get("content_type") or "story").strip().lower()
     if content_type not in {"recipe", "how_to", "story"}:
@@ -494,6 +506,7 @@ def generate_advertising_scene_plan(
     return {
         "title": title,
         "content_type": content_type,
+        "video_style": product_brief.get("video_style", "story"),
         "json_plan": normalized,
         "text_plan": format_advertising_scene_plan(normalized, title=title, content_type=content_type),
     }
@@ -503,9 +516,14 @@ def format_advertising_scene_plan(scenes: list[dict[str, Any]], *, title: str, c
     labels = {"recipe": "рецепт", "how_to": "инструкция", "story": "история"}
     blocks = [f"РЕКЛАМНЫЙ ПЛАН · {title}\nТип: {labels.get(content_type, content_type)}"]
     for scene in scenes:
+        dialogue = scene.get("dialogue") if scene.get("dialogue_mode") == "multi" else None
+        speech = (" / ".join(
+            ("Дочь: " if item["speaker"] == "daughter" else "Бабушка: ") + item["text"]
+            for item in dialogue
+        ) if dialogue else scene.get("text") or "—")
         blocks.append(
             f"СЦЕНА {scene.get('scene')} · 8 сек · Veo 3 Fast\n"
-            f"Реплика: {scene.get('text') or '—'}\n"
+            f"Реплика: {speech}\n"
             f"Действие: {scene.get('display_action') or scene.get('action') or '—'}\n"
             f"Товар: {scene.get('product_use') or 'целиком виден в кадре'}\n"
             f"План: {scene.get('shot_type') or '—'}"
@@ -627,5 +645,8 @@ def generate_advertising_production(
                 "prompt_meta_json": meta,
             }
         )
+        if scene.get("dialogue_mode") == "multi":
+            from .advertising_style import advice_dialogue, apply_advice_dialogue
+            apply_advice_dialogue(scene_out, advice_dialogue(scene))
         enriched.append(scene_out)
     return {"json_plan": enriched}

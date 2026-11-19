@@ -384,12 +384,13 @@ def _advertising_campaign_choice_markup() -> object | None:
 
 
 def _advertising_format_choice_markup() -> object | None:
+    from ..advertising_style import ADVICE_BUTTON
     try:
         from telegram import ReplyKeyboardMarkup
     except Exception:
         return None
     return ReplyKeyboardMarkup(
-        [[_ADVERTISING_FORMAT_CLIP_BUTTON, _ADVERTISING_FORMAT_POST_BUTTON], [NAV_BUTTON_START_OVER]],
+        [[_ADVERTISING_FORMAT_CLIP_BUTTON, ADVICE_BUTTON], [_ADVERTISING_FORMAT_POST_BUTTON], [NAV_BUTTON_START_OVER]],
         resize_keyboard=True,
         one_time_keyboard=False,
     )
@@ -1047,6 +1048,8 @@ async def _start_advertising_scene_plan(
         await reply_text_without_keyboard(update.message, "Строю рекламный план из 3–6 сцен Veo, ждите.")
         campaign = session.get(ADVERTISING_SELECTED_CAMPAIGN_SESSION_KEY)
         result = campaign.get("prepared_scene_plan") if isinstance(campaign, dict) else None
+        if isinstance(result, dict) and result.get("video_style", "story") != product_brief.get("video_style", "story"):
+            result = None
         if not isinstance(result, dict):
             result = await _call_with_503_retries(
                 update, context, chat_id, "generate_advertising_scene_plan",

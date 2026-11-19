@@ -7339,10 +7339,11 @@ async def _ask_advertising_format(update: Update, *, chat_id: int, session: dict
     selected = "post" if session.get(ADVERTISING_FORMAT_SESSION_KEY) == "post" else "clip"
     session[ADVERTISING_FORMAT_SESSION_KEY] = selected
     SESSIONS[chat_id] = session
+    label = "Пост" if selected == "post" else ("Клип — совет" if (session.get(ADVERTISING_PRODUCT_BRIEF_SESSION_KEY) or {}).get("video_style") == "advice" else "Клип")
     await _reply_text_with_optional_markup(
         update,
-        f"Выбран «{'Пост' if selected == 'post' else 'Клип'}». Нажмите «ОК», чтобы продолжить, или выберите другой тип.\n"
-        "«Клип» — 3–6 сцен Veo. «Пост» — одно изображение с товаром и рекламный текст.",
+        f"Выбран «{label}». Нажмите «ОК», чтобы продолжить, или выберите другой тип.\n"
+        "«Клип» — обычная подача. «Клип — совет» — дочь спрашивает, бабушка отвечает и показывает решение. «Пост» — одно изображение и текст.",
         reply_markup=_advertising_format_choice_markup(),
     )
     return True
@@ -7786,18 +7787,23 @@ async def _handle_advertising_format_choice(
     session: dict,
     text: str,
 ) -> bool:
+    from ..advertising_style import ADVICE_BUTTON
     low = str(text or "").strip().lower()
     if low in {"ок", "ok"}:
-        low = "пост" if session.get(ADVERTISING_FORMAT_SESSION_KEY) == "post" else "клип"
-    if low == _ADVERTISING_FORMAT_CLIP_BUTTON.lower():
+        low = "пост" if session.get(ADVERTISING_FORMAT_SESSION_KEY) == "post" else (
+            ADVICE_BUTTON.lower() if (session.get(ADVERTISING_PRODUCT_BRIEF_SESSION_KEY) or {}).get("video_style") == "advice" else "клип")
+    if low in {_ADVERTISING_FORMAT_CLIP_BUTTON.lower(), ADVICE_BUTTON.lower(), "совет"}:
+        style = "advice" if low != _ADVERTISING_FORMAT_CLIP_BUTTON.lower() else "story"
+        session.setdefault(ADVERTISING_PRODUCT_BRIEF_SESSION_KEY, {})["video_style"] = style
         session[ADVERTISING_FORMAT_SESSION_KEY] = "clip"
         session[SERIES_PENDING_NEXT_SESSION_KEY] = SERIES_NEXT_ADVERTISING_PLAN
         SESSIONS[chat_id] = session
-        await update.message.reply_text("Выбран формат «Клип»: подготовлю от 3 до 6 Veo-сцен по утверждённой кампании.")
+        await update.message.reply_text("Выбран «Клип — совет»: дочь задаёт вопрос, бабушка отвечает и показывает решение." if style == "advice" else "Выбран формат «Клип»: подготовлю от 3 до 6 Veo-сцен по утверждённой кампании.")
         await _ask_series_choice(update, session)
         SESSIONS[chat_id] = session
         return True
     if low == _ADVERTISING_FORMAT_POST_BUTTON.lower():
+        session.setdefault(ADVERTISING_PRODUCT_BRIEF_SESSION_KEY, {}).pop("video_style", None)
         return await _generate_advertising_post(
             update,
             context,
@@ -7806,7 +7812,7 @@ async def _handle_advertising_format_choice(
         )
     await _reply_text_with_optional_markup(
         update,
-        "Выберите формат кнопкой «Клип» или «Пост».",
+        "Выберите формат кнопкой «Клип», «Клип — совет» или «Пост».",
         reply_markup=_advertising_format_choice_markup(),
     )
     return True
