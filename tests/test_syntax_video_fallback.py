@@ -18,6 +18,11 @@ def _skip_syntax_frame_resize(monkeypatch):
     import app.syntax_telethon_fallback as telethon_fallback
 
     monkeypatch.setattr(telethon_fallback, "prepare_syntax_frame_bytes", lambda data: data)
+    # Navigation acknowledgement has its own delayed/unresponsive menu tests.
+    async def _ready_menu(*args, **kwargs):
+        return True
+    monkeypatch.setattr(telethon_fallback, "_wait_for_syntax_menu_reply", _ready_menu)
+
     async def _fake_configure_settings(_client, _target, **kwargs):
         return f"settings ok {kwargs.get('aspect_ratio')}"
 

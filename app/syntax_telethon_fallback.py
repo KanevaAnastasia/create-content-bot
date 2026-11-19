@@ -1898,20 +1898,49 @@ async def _submit_syntax_veo_webview(
     return None
 
 
+async def _wait_for_syntax_menu_reply(client: Any, target: Any, *, after_id: int,
+                                      expected_button: str, timeout_sec: float = 60) -> bool:
+    deadline = time.monotonic() + timeout_sec
+    while time.monotonic() < deadline:
+        messages = await client.get_messages(target, limit=20)
+        if messages is not None and not isinstance(messages, (list, tuple)):
+            messages = [messages]
+        for message in messages or []:
+            if getattr(message, "out", False) or int(getattr(message, "id", 0) or 0) <= after_id:
+                continue
+            for button in _syntax_message_buttons(message):
+                if (expected_button == "configure" and _syntax_button_is_configure(button)) or (
+                    _syntax_button_text(button).casefold() == expected_button.casefold()
+                ):
+                    return True
+        await asyncio.sleep(min(2.0, max(0.0, deadline - time.monotonic())))
+    return False
+
+
 async def _send_syntax_video_preflight(client: Any, target: Any, *, provider: str | None, model: str) -> int:
-    # /video is sufficient to select the tool and avoids resetting the whole
-    # Syntax conversation before every language dispatch.
+    # These are menu selections, not the paid WebView Generate button.
+    # Confirm each screen before sending the next selection or any media.
     provider_kind = _normalize_syntax_provider(provider, model)
     command = SYNTAX_PROVIDER_COMMANDS[provider_kind]
-    await client.send_message(target, "/video")
-    await asyncio.sleep(1.5)
-    command_message = await client.send_message(target, command)
-    await asyncio.sleep(1.5)
+    steps = [("/video", command), (command, "Сгенерировать" if provider_kind == SYNTAX_PROVIDER_VEO else "configure")]
     if provider_kind == SYNTAX_PROVIDER_VEO:
-        generate_message = await client.send_message(target, "Сгенерировать")
-        await asyncio.sleep(1.5)
-        return int(getattr(generate_message, "id", 0) or 0)
-    return int(getattr(command_message, "id", 0) or 0)
+        steps.append(("Сгенерировать", "configure"))
+    last_id = 0
+    for text, expected_button in steps:
+        first_id = 0
+        for attempt in range(2):
+            message = await client.send_message(target, text)
+            last_id = int(message.id)
+            first_id = first_id or last_id
+            if await _wait_for_syntax_menu_reply(client, target, after_id=first_id, expected_button=expected_button):
+                logger.info("syntax.menu_confirmed command=%s attempt=%s", text, attempt + 1)
+                break
+            logger.warning("syntax.menu_retry command=%s attempt=%s", text, attempt + 1)
+        else:
+            raise SyntaxVeoNotSubmittedError(
+                f"Syntax Veo not submitted: menu acknowledgement missing for {text!r}; no frame or prompt sent."
+            )
+    return last_id
 
 
 def _syntax_bot_requires_tool_selection(text: str) -> bool:
@@ -3059,12 +3088,12 @@ async def _run_batch_fallback_async(
         request_runtime: list[tuple[_BatchRequestState, int, set[int], str]] = []
         submission_status_ids: dict[str, set[int]] = {}
         for request in ready:
-            await _send_syntax_video_preflight(
-                client,
-                target,
-                provider=syntax_provider,
-                model=model,
-            )
+            try:
+                await _send_syntax_video_preflight(client, target, provider=syntax_provider, model=model)
+            except SyntaxVeoNotSubmittedError as exc:
+                results[request.key] = _result(success=False, video_bytes=None, video_uri=None,
+                    provider_message=str(exc), attempt_id=request.attempt_id)
+                continue
             sent_ids: set[int] = set()
             start_file = io.BytesIO(request.start_image)
             start_file.name = f"start_frame.{_image_ext(request.start_image)}"
