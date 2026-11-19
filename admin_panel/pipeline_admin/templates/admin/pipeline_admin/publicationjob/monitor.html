@@ -69,6 +69,7 @@
                 {% endif %}
                 {% if row.publish_error %}<div class="cf-monitor-error">{{ row.publish_error }}</div>{% endif %}
                 {% if row.youtube_reconnect_url %}<p><a class="button" href="{{ row.youtube_reconnect_url }}">Переподключить YouTube {{ row.language_upper }}</a></p>{% endif %}
+                {% if row.instagram_recovery_url %}<p><a class="button" href="{{ row.instagram_recovery_url }}">Восстановить Instagram {{ row.language_upper }}</a></p>{% endif %}
                 {% if row.retry_url %}
                   <form class="cf-retry-form" method="post" action="{{ row.retry_url }}">{% csrf_token %}<button class="cf-retry-button" type="submit">Повторить только эту площадку</button></form>
                 {% endif %}

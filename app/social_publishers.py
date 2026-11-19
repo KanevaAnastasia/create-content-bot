@@ -639,7 +639,7 @@ def _publish_instagram(
     base_url = f"https://graph.facebook.com/{version}"
     state = dict((job.payload_json or {}).get("instagram_upload") or {})
     url_fallback = project_env(project_slug, f"INSTAGRAM_URL_FALLBACK_{job.language.upper()}", "").lower()
-    url_fallback_enabled = url_fallback in {"zernio", "public_media"}
+    from .instagram_recovery import instagram_recovery_requested, temporary_instagram_video
 
     def save(**values: Any) -> None:
         state.update(values)
@@ -663,6 +663,13 @@ def _publish_instagram(
         raise PublicationNeedsReview("Instagram account changed after upload; reconcile the saved container first.")
     if state.get("media_id"):
         return str(state["media_id"])
+    try:
+        admin_recovery = instagram_recovery_requested(job)
+    except (OSError, ValueError) as exc:
+        raise PublicationNeedsReview(str(exc)) from exc
+    if admin_recovery:
+        url_fallback = "tmpfiles"
+    url_fallback_enabled = admin_recovery or url_fallback in {"zernio", "public_media"}
     identity = _verify_instagram_publish_identity(base_url, access_token, account_id)
     save(**identity)
     video_path = Path(job.video_path)
@@ -702,11 +709,14 @@ def _publish_instagram(
         )
     else:
         create_data["share_to_feed"] = "true"
-    fingerprint = hashlib.sha256(json.dumps({
-        "path": str(video_path.resolve()), "size": file_size,
-        "mtime": video_path.stat().st_mtime_ns,
-        "caption": create_data["caption"], "trial": is_trial_reel,
-    }, sort_keys=True).encode()).hexdigest()
+    def media_fingerprint(path: Path) -> str:
+        return hashlib.sha256(json.dumps({
+            "path": str(path.resolve()), "size": path.stat().st_size,
+            "mtime": path.stat().st_mtime_ns,
+            "caption": create_data["caption"], "trial": is_trial_reel,
+        }, sort_keys=True).encode()).hexdigest()
+
+    fingerprint = media_fingerprint(video_path)
     # A definitive rupload rejection selects the stricter recovery derivative
     # for a *new* container.  Meta can nevertheless finish the original
     # container after returning that rejection.  In that case the saved
@@ -722,11 +732,7 @@ def _publish_instagram(
             recovery_profile=not recovery_profile,
         )
         alternate_size = alternate_path.stat().st_size
-        alternate_fingerprint = hashlib.sha256(json.dumps({
-            "path": str(alternate_path.resolve()), "size": alternate_size,
-            "mtime": alternate_path.stat().st_mtime_ns,
-            "caption": create_data["caption"], "trial": is_trial_reel,
-        }, sort_keys=True).encode()).hexdigest()
+        alternate_fingerprint = media_fingerprint(alternate_path)
         if alternate_fingerprint == saved_fingerprint:
             video_path = alternate_path
             file_size = alternate_size
@@ -759,8 +765,12 @@ def _publish_instagram(
             previous.append(prior)
             use_url = state.get("upload_transport") == "url_pull" or (
                 url_fallback_enabled and state.get("stage") == "upload_rejected"
-            )
+            ) or admin_recovery
             state = {"account_id": account_id, "previous_containers": previous[-5:]}
+            if admin_recovery:
+                video_path = _instagram_compatible_video(Path(job.video_path), recovery_profile=True)
+                file_size = video_path.stat().st_size
+                fingerprint = media_fingerprint(video_path)
             if use_url:
                 save(upload_transport="url_pull", stage="awaiting_url_upload")
 
@@ -775,7 +785,17 @@ def _publish_instagram(
             ):
                 raise PublicationNeedsReview("Instagram public media source is not configured for this project.")
             create_data.pop("upload_type", None)
-            create_data["video_url"] = _instagram_hosted_video(video_path, project_slug)
+            if admin_recovery:
+                def save_source(source):
+                    job.payload_json = {**(job.payload_json or {}), "instagram_temporary_source": source}
+                    if persist:
+                        persist()
+
+                create_data["video_url"] = temporary_instagram_video(
+                    video_path, (job.payload_json or {}).get("instagram_temporary_source"), save_source,
+                )
+            else:
+                create_data["video_url"] = _instagram_hosted_video(video_path, project_slug)
         create_response = requests.post(
             f"{base_url}/{account_id}/media",
             data=create_data,

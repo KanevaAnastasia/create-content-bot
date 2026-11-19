@@ -19,6 +19,7 @@ from urllib.parse import quote, unquote, urlencode, urlparse
 
 from django import forms as django_forms
 from django.contrib import admin, messages
+from django.core.exceptions import PermissionDenied
 from django.db import close_old_connections, connection, transaction
 from django.db.models import Count, IntegerField, OuterRef, Subquery, Value
 from django.db.models.functions import Coalesce
@@ -33,6 +34,7 @@ from django.utils.safestring import mark_safe
 
 from app.artifact_store import persist_post_production_artifacts
 from app.db import SessionLocal
+from app.instagram_recovery import instagram_recovery_available, instagram_recovery_request
 from app.final_video_delivery import (
     all_final_artifacts_delivered,
     deliver_final_artifact_to_telegram,
@@ -5638,6 +5640,10 @@ def _publication_monitor_context(request, *, bundle_key: str = "") -> dict[str, 
                     if status in _PUBLICATION_ERROR_STATUSES and not vk_processing
                     else ""
                 ),
+                "instagram_recovery_url": (
+                    reverse("admin:pipeline_admin_publicationjob_instagram_recovery", args=[job.pk])
+                    if instagram_recovery_available(job) else ""
+                ),
                 "retry_explanation": (
                     "Можно безопасно повторить только эту площадку: остальные публикации запуска не затрагиваются."
                     if status in _PUBLICATION_ERROR_STATUSES and not vk_processing
@@ -5779,6 +5785,11 @@ class PublicationJobAdmin(admin.ModelAdmin):
                 self.admin_site.admin_view(self.retry_publication_job_view),
                 name="pipeline_admin_publicationjob_retry",
             ),
+            path(
+                "<uuid:job_id>/instagram-recovery/",
+                self.admin_site.admin_view(self.instagram_recovery_view),
+                name="pipeline_admin_publicationjob_instagram_recovery",
+            ),
         ]
         return custom + urls
 
@@ -5806,6 +5817,63 @@ class PublicationJobAdmin(admin.ModelAdmin):
             "publication_list_url": reverse("admin:pipeline_admin_publicationjob_changelist"),
         }
         return TemplateResponse(request, "admin/pipeline_admin/publicationjob/monitor.html", context)
+
+    def instagram_recovery_view(self, request, job_id):
+        job = self.get_object(request, str(job_id))
+        if job is None:
+            raise Http404("Publication job not found.")
+        if not self.has_change_permission(request, job):
+            raise PermissionDenied
+        monitor_url = _publication_monitor_url(_publication_root_bundle_key(job.bundle_key))
+        if not instagram_recovery_available(job):
+            self.message_user(request, "Восстановление недоступно: проверьте текущий статус публикации.", messages.WARNING)
+            return HttpResponseRedirect(monitor_url)
+        if request.method == "POST" and request.POST.get("confirm") == "tmpfiles":
+            old_values = None
+            queued_payload = None
+            try:
+                with transaction.atomic():
+                    locked = PublicationJob.objects.select_for_update().get(pk=job.pk)
+                    if not instagram_recovery_available(locked):
+                        self.message_user(request, "Статус уже изменился; восстановление не запущено.", messages.WARNING)
+                        return HttpResponseRedirect(monitor_url)
+                    old_values = {key: getattr(locked, key) for key in
+                                  ("status", "publish_error", "approved_at", "scheduled_at", "payload_json")}
+                    queued_payload = {
+                        **(locked.payload_json or {}),
+                        "instagram_url_recovery": instagram_recovery_request(locked, request.user.pk),
+                    }
+                    locked.payload_json = queued_payload
+                    locked.status = "approved"
+                    locked.publish_error = None
+                    locked.approved_at = timezone.now()
+                    locked.scheduled_at = None
+                    locked.updated_at = timezone.now()
+                    locked.save(update_fields=(*old_values, "updated_at"))
+                from .tasks import dispatch_publication_jobs
+
+                dispatch_publication_jobs([str(job.pk)])
+            except Exception as exc:
+                if old_values and queued_payload:
+                    with transaction.atomic():
+                        current = PublicationJob.objects.select_for_update().get(pk=job.pk)
+                        if current.status == "approved" and current.payload_json == queued_payload:
+                            for key, value in old_values.items():
+                                setattr(current, key, value)
+                            current.updated_at = timezone.now()
+                            current.save(update_fields=(*old_values, "updated_at"))
+                self.message_user(request, f"Не удалось запустить восстановление: {exc}", messages.ERROR)
+            else:
+                self.message_user(request, f"Восстановление Instagram {job.language.upper()} поставлено в очередь.", messages.SUCCESS)
+            return HttpResponseRedirect(monitor_url)
+        state = (job.payload_json or {}).get("instagram_upload") or {}
+        return TemplateResponse(request, "admin/pipeline_admin/publicationjob/instagram_recovery.html", {
+            **self.admin_site.each_context(request),
+            "title": f"Восстановление Instagram {job.language.upper()}",
+            "job": job,
+            "account": state.get("username") or state.get("account_id") or job.external_account_id,
+            "monitor_url": monitor_url,
+        })
 
     def retry_publication_job_view(self, request, job_id):
         job = self.get_object(request, str(job_id))

@@ -203,6 +203,16 @@ def test_publication_monitor_groups_trial_and_main_jobs(monkeypatch) -> None:
     )
     jobs[2].publish_error = "API error"
 
+    jobs[2].platform = "instagram"
+    jobs[2].payload_json = {"instagram_upload": {"stage": "upload_rejected"}}
+    monitor = admin_module._publication_monitor_context(request)
+    failed_row = next(row for row in monitor["rows"] if row["status"] == "failed")
+    assert failed_row["instagram_recovery_url"].endswith(f"/{jobs[2].pk}/instagram-recovery/")
+    assert not next(row for row in monitor["rows"] if row["status"] == "published")["instagram_recovery_url"]
+    jobs[2].payload_json["instagram_upload"]["publish_ambiguous"] = True
+    monitor = admin_module._publication_monitor_context(request)
+    assert not next(row for row in monitor["rows"] if row["status"] == "failed")["instagram_recovery_url"]
+
     jobs[2].platform = 'vk'
     jobs[2].language = 'ru'
     jobs[2].external_post_id = '-123_42'

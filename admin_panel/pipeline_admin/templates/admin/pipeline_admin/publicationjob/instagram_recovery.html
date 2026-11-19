@@ -1,0 +1,20 @@
+{% extends "admin/base_site.html" %}
+{% block content %}
+<div style="max-width:760px">
+  <p><a href="{{ monitor_url }}">← Контроль заливки</a></p>
+  <h1>{{ title }}</h1>
+  <p>Проект: <strong>{{ job.project.slug }}</strong> · Аккаунт: <strong>{{ account }}</strong></p>
+  <p>Ролик: <strong>{{ job.video_label|default:job.title }}</strong> · Язык: <strong>{{ job.language|upper }}</strong></p>
+  {% if job.payload_json.instagram_trial %}<p>Пробный Reel с ручным переводом в основную ленту.</p>{% endif %}
+  <details><summary>Описание публикации</summary><p style="white-space:pre-wrap">{{ job.description }}</p></details>
+  <p>Сначала проверим состояние загрузки в Instagram. Если ролик уже обработан, завершим его публикацию.</p>
+  <p>Если Instagram подтвердит отказ загрузки, подготовим совместимую копию и разместим её на
+    <strong>tmpfiles.org</strong> с удалением через час. До удаления файл будет доступен по ссылке.
+    Instagram заберёт его по этой ссылке. Доступ к аккаунту сервису хранения не передаётся.</p>
+  <p>Действие публикует только этот ролик в указанном аккаунте. Статус и ссылка на результат появятся на странице контроля.</p>
+  <form method="post">{% csrf_token %}
+    <button class="button" type="submit" name="confirm" value="tmpfiles">Восстановить и опубликовать</button>
+    <a href="{{ monitor_url }}">Вернуться</a>
+  </form>
+</div>
+{% endblock %}

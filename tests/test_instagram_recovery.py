@@ -2,12 +2,14 @@
 
 import copy
 import uuid
+from pathlib import Path
 from unittest.mock import Mock
 
 import pytest
 import requests
 
 from app.models import PublicationJob
+from app.instagram_recovery import instagram_recovery_request
 from app.social_publishers import (
     PublicationDeliveryError,
     PublicationNeedsReview,
@@ -79,6 +81,104 @@ def test_checkpoints_confirmed_publish_and_reuses_id(upload):
     assert _publish_instagram(job, "discipline", persist) == "published-media"
     assert len(calls) == before
     assert "secret" not in str(job.payload_json)
+
+
+def reject_initial_upload(upload, monkeypatch):
+    job, _, _, status, persist = upload
+    original = requests.post
+    status.update(status_code="IN_PROGRESS")
+
+    def post(url, **kwargs):
+        if "rupload.facebook.com" in url:
+            return response({"debug_info": {"retriable": False, "type": "ProcessingFailedError"}}, ok=False)
+        return original(url, **kwargs)
+
+    monkeypatch.setattr("app.social_publishers.requests.post", post)
+    with pytest.raises(PublicationDeliveryError):
+        _publish_instagram(job, "discipline", persist)
+    monkeypatch.setattr("app.social_publishers.requests.post", original)
+    job.payload_json["instagram_url_recovery"] = instagram_recovery_request(job, "operator")
+
+
+@pytest.mark.parametrize("language", ["ru", "en"])
+def test_admin_recovery_needs_no_env_and_keeps_account_language_caption(upload, monkeypatch, language):
+    job, calls, _, status, persist = upload
+    job.language = language
+    monkeypatch.setenv(f"PUBLISH_DISCIPLINE_INSTAGRAM_BUSINESS_ACCOUNT_ID_{language.upper()}", "account")
+    reject_initial_upload(upload, monkeypatch)
+    hosted = Mock(return_value="https://tmpfiles.org/dl/123/exact.mp4")
+    monkeypatch.setattr("app.instagram_recovery.temporary_instagram_video", hosted)
+    original = requests.post
+
+    def post(url, **kwargs):
+        if url.endswith("/account/media"):
+            assert kwargs["data"]["video_url"] == hosted.return_value
+            assert kwargs["data"]["caption"] == job.description
+            assert "upload_type" not in kwargs["data"]
+            status.update(status_code="FINISHED")
+        return original(url, **kwargs)
+
+    monkeypatch.setattr("app.social_publishers.requests.post", post)
+    assert _publish_instagram(job, "discipline", persist) == "published-media"
+    hosted.assert_called_once()
+    assert len([u for u, _ in calls if u.endswith("/media_publish")]) == 1
+    assert job.payload_json["instagram_upload"]["previous_containers"][0]["creation_id"] == "container"
+
+
+@pytest.mark.parametrize("remote_status", ["FINISHED", "PUBLISHED", "IN_PROGRESS"])
+def test_admin_recovery_checks_provider_before_hosting(upload, monkeypatch, remote_status):
+    job, calls, _, status, persist = upload
+    reject_initial_upload(upload, monkeypatch)
+    status.update(status_code=remote_status)
+    if remote_status == "IN_PROGRESS":
+        job.payload_json["instagram_upload"]["publish_ambiguous"] = True
+    hosted = Mock()
+    monkeypatch.setattr("app.instagram_recovery.temporary_instagram_video", hosted)
+    if remote_status == "FINISHED":
+        assert _publish_instagram(job, "discipline", persist) == "published-media"
+    else:
+        with pytest.raises(PublicationNeedsReview):
+            _publish_instagram(job, "discipline", persist)
+        assert not [u for u, _ in calls if u.endswith("/media_publish")]
+    hosted.assert_not_called()
+    assert len([u for u, _ in calls if u.endswith("/account/media")]) == 1
+
+
+def test_admin_recovery_storage_failure_retries_without_meta_duplicate(upload, monkeypatch):
+    job, calls, _, _, persist = upload
+    reject_initial_upload(upload, monkeypatch)
+    hosted = Mock(side_effect=ValueError("temporary host unavailable"))
+    monkeypatch.setattr("app.instagram_recovery.temporary_instagram_video", hosted)
+    for _ in range(2):
+        with pytest.raises(ValueError, match="host unavailable"):
+            _publish_instagram(job, "discipline", persist)
+    assert len([u for u, _ in calls if u.endswith("/account/media")]) == 1
+    assert job.payload_json["instagram_upload"]["stage"] == "awaiting_url_upload"
+
+
+def test_admin_recovery_always_hosts_compact_derivative_for_dead_container(upload, monkeypatch, tmp_path):
+    job, _, _, status, persist = upload
+    reject_initial_upload(upload, monkeypatch)
+    compact = tmp_path / "compact.mp4"
+    compact.write_bytes(b"small video")
+    monkeypatch.setattr("app.social_publishers._instagram_compatible_video",
+                        lambda path, **kw: compact if kw.get("recovery_profile") else path)
+    status.update(status_code="ERROR")
+    hosted = Mock(side_effect=ValueError("stop before Meta"))
+    monkeypatch.setattr("app.instagram_recovery.temporary_instagram_video", hosted)
+    with pytest.raises(ValueError, match="stop before Meta"):
+        _publish_instagram(job, "discipline", persist)
+    assert hosted.call_args.args[0] == compact
+
+
+def test_changed_admin_recovery_consent_stops_before_network(upload, monkeypatch):
+    job, calls, _, _, persist = upload
+    reject_initial_upload(upload, monkeypatch)
+    job.description = "changed after click"
+    before = len(calls)
+    with pytest.raises(PublicationNeedsReview, match="content changed"):
+        _publish_instagram(job, "discipline", persist)
+    assert len(calls) == before
 
 
 def test_internal_error_retries_only_same_ready_container(upload):
