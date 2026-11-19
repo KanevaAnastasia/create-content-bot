@@ -364,9 +364,11 @@ def test_rejected_upload_never_replaced_after_ambiguous_publish(upload, monkeypa
     assert len(calls) == before
 
 
-def test_project_enabled_url_fallback_publishes_only_new_ready_container(upload, monkeypatch):
+@pytest.mark.parametrize("transport", ["zernio", "public_media"])
+def test_project_enabled_url_fallback_publishes_only_new_ready_container(upload, monkeypatch, transport):
     job, calls, _, status, persist = upload
-    monkeypatch.setenv('PUBLISH_DISCIPLINE_INSTAGRAM_URL_FALLBACK_RU', 'zernio')
+    monkeypatch.setenv('PUBLISH_DISCIPLINE_INSTAGRAM_URL_FALLBACK_RU', transport)
+    monkeypatch.setenv('PUBLISH_DISCIPLINE_INSTAGRAM_MEDIA_BASE_URL', 'https://media.example.com')
     hosted = Mock(return_value='https://media.zernio.com/test.mp4')
     monkeypatch.setattr('app.social_publishers._instagram_hosted_video', hosted)
     original = requests.post
@@ -531,3 +533,45 @@ def test_ru_fallback_setting_does_not_enable_other_language(upload, monkeypatch)
     with pytest.raises(PublicationDeliveryError):
         _publish_instagram(job, 'discipline', persist)
     hosted.assert_not_called()
+
+
+def test_public_media_url_is_bound_to_exact_video(tmp_path, monkeypatch):
+    import hashlib
+    from app.social_publishers import _instagram_hosted_video
+    source = tmp_path / "video.mp4"
+    source.write_bytes(b"approved")
+    monkeypatch.setenv("PUBLISH_DISCIPLINE_INSTAGRAM_MEDIA_BASE_URL", "https://media.example.com/private-prefix/")
+    expected = hashlib.sha256(b"approved").hexdigest()
+    assert _instagram_hosted_video(source, "discipline") == f"https://media.example.com/private-prefix/{expected}.mp4"
+    source.write_bytes(b"changed")
+    assert expected not in _instagram_hosted_video(source, "discipline")
+
+
+@pytest.mark.parametrize("base", ["http://example.com", "https://user:secret@example.com", "https://example.com?key=secret", "https://example.com#fragment"])
+def test_public_media_base_rejects_unsafe_urls(tmp_path, monkeypatch, base):
+    from app.social_publishers import _instagram_hosted_video
+    monkeypatch.setenv("PUBLISH_DISCIPLINE_INSTAGRAM_MEDIA_BASE_URL", base)
+    with pytest.raises(PublicationNeedsReview):
+        _instagram_hosted_video(tmp_path / "unused.mp4", "discipline")
+
+
+def test_expiring_media_manifest_rejects_wrong_file_and_expired_url(tmp_path, monkeypatch):
+    import hashlib
+    import json
+    from datetime import datetime, timedelta, timezone
+    from app.social_publishers import _instagram_hosted_video
+    source = tmp_path / "video.mp4"
+    source.write_bytes(b"approved")
+    digest = hashlib.sha256(b"approved").hexdigest()
+    manifest = tmp_path / "sources.json"
+    monkeypatch.setenv("PUBLISH_DISCIPLINE_INSTAGRAM_MEDIA_URLS_FILE", str(manifest))
+    entry = {"url": "https://media.example.com/video.mp4", "expires_at": (datetime.now(timezone.utc) + timedelta(hours=1)).isoformat()}
+    manifest.write_text(json.dumps({digest: entry}))
+    assert _instagram_hosted_video(source, "discipline") == entry["url"]
+    entry["expires_at"] = (datetime.now(timezone.utc) - timedelta(seconds=1)).isoformat()
+    manifest.write_text(json.dumps({digest: entry}))
+    with pytest.raises(PublicationNeedsReview):
+        _instagram_hosted_video(source, "discipline")
+    manifest.write_text(json.dumps({"wrong-digest": entry}))
+    with pytest.raises(PublicationNeedsReview):
+        _instagram_hosted_video(source, "discipline")

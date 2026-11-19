@@ -638,7 +638,8 @@ def _publish_instagram(
     access_token = _instagram_access_token(project_slug, job.language)
     base_url = f"https://graph.facebook.com/{version}"
     state = dict((job.payload_json or {}).get("instagram_upload") or {})
-    url_fallback_enabled = project_env(project_slug, f"INSTAGRAM_URL_FALLBACK_{job.language.upper()}", "").lower() == "zernio"
+    url_fallback = project_env(project_slug, f"INSTAGRAM_URL_FALLBACK_{job.language.upper()}", "").lower()
+    url_fallback_enabled = url_fallback in {"zernio", "public_media"}
 
     def save(**values: Any) -> None:
         state.update(values)
@@ -768,6 +769,11 @@ def _publish_instagram(
         if use_url:
             if not url_fallback_enabled:
                 raise PublicationNeedsReview("Instagram URL fallback is disabled for this project; enable it before retrying.")
+            if url_fallback == "public_media" and not (
+                project_env(project_slug, "INSTAGRAM_MEDIA_BASE_URL", "")
+                or project_env(project_slug, "INSTAGRAM_MEDIA_URLS_FILE", "")
+            ):
+                raise PublicationNeedsReview("Instagram public media source is not configured for this project.")
             create_data.pop("upload_type", None)
             create_data["video_url"] = _instagram_hosted_video(video_path, project_slug)
         create_response = requests.post(
@@ -897,6 +903,31 @@ def _publish_instagram(
 
 def _instagram_hosted_video(video_path: Path, project_slug: str) -> str:
     """Use project-approved storage only after a definitive direct-upload rejection."""
+    manifest = project_env(project_slug, "INSTAGRAM_MEDIA_URLS_FILE", "")
+    if manifest:
+        digest = hashlib.sha256(video_path.read_bytes()).hexdigest()
+        try:
+            sources = json.loads(Path(manifest).read_text(encoding="utf-8"))
+            source = sources[digest]
+            expires = datetime.fromisoformat(source["expires_at"])
+            url = source["url"]
+            parsed = urlparse(url)
+            if (parsed.scheme != "https" or not parsed.hostname or parsed.username or parsed.password
+                    or parsed.fragment or expires <= datetime.now(timezone.utc) + timedelta(minutes=10)):
+                raise ValueError("Invalid or expired source")
+        except (OSError, ValueError, KeyError, TypeError, AttributeError):
+            raise PublicationNeedsReview("Instagram media source is missing, invalid, or expires in less than ten minutes; refresh it for this exact file.") from None
+        return url
+    media_base = project_env(project_slug, "INSTAGRAM_MEDIA_BASE_URL", "").rstrip("/")
+    if media_base:
+        parsed = urlparse(media_base)
+        if (parsed.scheme != "https" or not parsed.hostname or parsed.username or parsed.password
+                or parsed.query or parsed.fragment):
+            raise PublicationNeedsReview("Instagram media base must be an HTTPS URL without credentials, query, or fragment.")
+        # The dedicated media server exposes only explicitly selected files by
+        # content hash. A changed video cannot silently reuse an old URL.
+        digest = hashlib.sha256(video_path.read_bytes()).hexdigest()
+        return f"{media_base}/{digest}.mp4"
     upload_path = video_path
     if video_path.stat().st_size > 20 * 1024 * 1024:
         from .ai_approval_service import _resolve_ffmpeg
