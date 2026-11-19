@@ -11,6 +11,7 @@ import json
 import os
 from pathlib import Path
 import subprocess
+import tempfile
 import sys
 from datetime import datetime, timezone
 
@@ -23,14 +24,17 @@ from app.db import SessionLocal
 from app.env_utils import load_env_file
 from app.models import GenerationArtifact
 from app.post_production import _resolve_ffmpeg
-from app.story_alignment import history_alignment, load_story_audio_metadata, save_story_audio_metadata, valid_alignment
+from app.story_alignment import load_story_audio_metadata, save_story_audio_metadata, valid_alignment, response_alignment
 
 
 def pcm_digest(data: bytes) -> str:
-    result = subprocess.run(
-        [_resolve_ffmpeg(), "-v", "error", "-i", "pipe:0", "-f", "s16le", "-ar", "16000", "-ac", "1", "pipe:1"],
-        input=data, capture_output=True, check=True, timeout=120,
-    )
+    with tempfile.TemporaryDirectory(prefix="story_alignment_pcm_") as directory:
+        source = Path(directory) / "audio.mp3"
+        source.write_bytes(data)
+        result = subprocess.run(
+            [_resolve_ffmpeg(), "-nostdin", "-v", "error", "-i", str(source), "-f", "s16le", "-ar", "16000", "-ac", "1", "pipe:1"],
+            capture_output=True, check=True, timeout=120,
+        )
     if not result.stdout:
         raise RuntimeError("Audio contains no decoded samples")
     return hashlib.sha256(result.stdout).hexdigest()
@@ -73,15 +77,21 @@ def main() -> None:
             for row, _path, payload in pending
         ], ensure_ascii=False), encoding="utf-8")
         api = requests.Session()
+        api.headers["Accept"] = "application/json"
         history = None
 
         def get_json(url, **kwargs):
             api.headers["xi-api-key"] = os.environ["ELEVENLABS_API_KEY"]
-            response = api.get("https://api.elevenlabs.io/v1/" + url, timeout=60, **kwargs)
-            if response.status_code == 401:
-                raise RuntimeError("ElevenLabs history access denied. Enable History → Read (speech_history_read) for this API key.")
-            response.raise_for_status()
-            return response.json()
+            for attempt in range(3):
+                response = api.get("https://api.elevenlabs.io/v1/" + url, timeout=60, **kwargs)
+                if response.status_code == 401:
+                    raise RuntimeError("ElevenLabs history access denied. Enable History → Read (speech_history_read) for this API key.")
+                response.raise_for_status()
+                try:
+                    return response.json()
+                except ValueError:
+                    if attempt == 2:
+                        raise RuntimeError("ElevenLabs history returned invalid JSON after 3 read attempts") from None
 
         report = []
         for row, path, payload in pending:
@@ -89,7 +99,8 @@ def main() -> None:
             alignment = saved.get("alignment")
             recovered = saved if valid_alignment(alignment) else None
             if recovered is None:
-                if history is None:
+                known_id = saved.get("history_item_id") or payload.get("history_item_id")
+                if history is None and not known_id:
                     history = []
                     cursor = None
                     seen = set()
@@ -106,24 +117,30 @@ def main() -> None:
                             raise RuntimeError("ElevenLabs history pagination did not advance")
                         seen.add(cursor)
                 target = normalized_text(payload.get("voiceover_text"))
-                candidates = [item for item in history if target and normalized_text(
+                candidates = [{"history_item_id": known_id}] if known_id else [item for item in history if target and normalized_text(
                     item.get("text") or " ".join(turn.get("text", "") for turn in item.get("dialogue") or [])
                 ) == target]
                 local_digest = None
                 for candidate in candidates:
                     hid = candidate["history_item_id"]
                     detail = get_json("history/" + hid)
-                    alignments = detail.get("alignments") or {}
-                    alignment = history_alignment(alignments.get("normalized_alignment") or alignments.get("alignment"))
+                    alignment = response_alignment(detail)
                     if not alignment:
                         continue
-                    audio = api.get("https://api.elevenlabs.io/v1/history/" + hid + "/audio", timeout=90)
-                    audio.raise_for_status()
-                    local_digest = local_digest or pcm_digest(path.read_bytes())
-                    if pcm_digest(audio.content) != local_digest:
-                        continue
+                    for attempt in range(3):
+                        audio = api.get("https://api.elevenlabs.io/v1/history/" + hid + "/audio", timeout=90)
+                        audio.raise_for_status()
+                        if audio.headers.get("content-type", "").lower().startswith("audio/"):
+                            break
+                    else:
+                        raise RuntimeError("ElevenLabs history returned non-audio content after 3 read attempts")
+                    local_audio = path.read_bytes()
+                    if audio.content != local_audio:
+                        local_digest = local_digest or pcm_digest(local_audio)
+                        if pcm_digest(audio.content) != local_digest:
+                            continue
                     recovered = {
-                        "alignment": alignment, "history_item_id": hid,
+                        **saved, "alignment": alignment, "history_item_id": hid,
                         "request_id": detail.get("request_id"),
                         "alignment_recovery_source": "elevenlabs_history_pcm_sha256",
                     }

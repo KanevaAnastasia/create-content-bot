@@ -78,3 +78,16 @@ def history_alignment(value: Any) -> dict[str, Any]:
         return converted if valid_alignment(converted) else {}
     except (TypeError, ValueError, OverflowError):
         return {}
+
+
+def response_alignment(value: Any) -> dict[str, Any]:
+    """Select valid exact timing data, including nested history responses."""
+    if not isinstance(value, dict):
+        return {}
+    nested = value.get("alignments")
+    for source in (value, nested if isinstance(nested, dict) else {}):
+        for key in ("normalized_alignment", "alignment"):
+            alignment = history_alignment(source.get(key))
+            if alignment:
+                return alignment
+    return {}

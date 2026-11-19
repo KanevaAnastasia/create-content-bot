@@ -15,7 +15,6 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from .elevenlabs_tts import ElevenLabsAudioResult, generate_elevenlabs_speech
 from .llm_utils import GEMINI_MODEL_PROFILE_CREATIVE, extract_json_object, gemini_generate_sync
 
 
@@ -657,11 +656,21 @@ def _timed_dialogue_endpoint_result(
         raise RuntimeError(f"ElevenLabs timed TTS failed: HTTP {response.status_code}: {response.text[:1000]}")
     data = response.json()
     audio_b64 = str(data.get("audio_base64") or "").strip()
-    alignment = data.get("normalized_alignment") or data.get("alignment") or {}
+    from .story_alignment import response_alignment
+    alignment = response_alignment(data)
     if not audio_b64:
         raise RuntimeError("ElevenLabs timed TTS did not return audio_base64.")
-    if not isinstance(alignment, dict):
-        alignment = {}
+    if not alignment:
+        # Preserve the paid result and provider IDs for history recovery.
+        result = StoryAudioResult(
+            audio_bytes=base64.b64decode(audio_b64), content_type="audio/mpeg",
+            duration_sec=0.0, alignment={},
+            request_id=response.headers.get("request-id") or response.headers.get("x-request-id"),
+            history_item_id=response.headers.get("history-item-id"),
+            model_id=DEFAULT_ELEVENLABS_TTS_MODEL,
+        )
+        path = store_story_audio(0, result)
+        raise RuntimeError(f"ElevenLabs returned audio without valid timestamps. Saved for recovery: {path}")
     ends = alignment.get("character_end_times_seconds")
     duration = max((float(value) for value in ends or []), default=0.0)
     return StoryAudioResult(
@@ -719,29 +728,8 @@ def generate_story_audio(
     language: str = "ru",
     voice_id: str | None = None,
 ) -> StoryAudioResult:
-    """Generate one seamless narration; fall back gracefully if timestamps are unavailable."""
-    try:
-        result = _timed_endpoint_result(text, language=language, voice_id=voice_id)
-        if result.duration_sec > 0:
-            return result
-    except Exception:
-        # The ordinary endpoint remains supported by the project and is a safe fallback.
-        pass
-    fallback: ElevenLabsAudioResult = generate_elevenlabs_speech(
-        _clean_voiceover(text),
-        voice_id=voice_id,
-        language_code=str(language or "ru").strip().lower() or "ru",
-    )
-    duration = _duration_from_audio_bytes(fallback.audio_bytes)
-    return StoryAudioResult(
-        audio_bytes=fallback.audio_bytes,
-        content_type=fallback.content_type,
-        duration_sec=duration,
-        alignment={},
-        request_id=fallback.request_id,
-        history_item_id=fallback.history_item_id,
-        model_id=fallback.model_id,
-    )
+    """Generate narration with exact timestamps; never silently synthesize twice."""
+    return _timed_endpoint_result(text, language=language, voice_id=voice_id)
 
 
 def store_story_audio(chat_id: int, result: StoryAudioResult) -> str:
