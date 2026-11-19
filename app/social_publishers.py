@@ -672,7 +672,7 @@ def _publish_instagram(
     # next explicit retry may use an even smaller delivery profile.  This stays
     # within Meta's official direct API and avoids downgrading every normal Reel.
     recovery_profile = (
-        state.get("stage") == "upload_rejected"
+        state.get("stage") in {"upload_rejected", "awaiting_url_upload"}
         and not state.get("publish_ambiguous")
     )
     video_path = _instagram_compatible_video(video_path, recovery_profile=recovery_profile)

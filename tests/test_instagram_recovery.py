@@ -575,3 +575,18 @@ def test_expiring_media_manifest_rejects_wrong_file_and_expired_url(tmp_path, mo
     manifest.write_text(json.dumps({"wrong-digest": entry}))
     with pytest.raises(PublicationNeedsReview):
         _instagram_hosted_video(source, "discipline")
+
+
+def test_pending_url_recovery_keeps_compact_delivery_profile(upload, monkeypatch):
+    job, calls, _, status, persist = upload
+    job.payload_json = {"instagram_upload": {"account_id": "account", "upload_transport": "url_pull", "stage": "awaiting_url_upload"}}
+    monkeypatch.setenv("PUBLISH_DISCIPLINE_INSTAGRAM_URL_FALLBACK_RU", "public_media")
+    monkeypatch.setenv("PUBLISH_DISCIPLINE_INSTAGRAM_MEDIA_BASE_URL", "https://media.example.com")
+    from pathlib import Path
+    compatible = Mock(return_value=Path(job.video_path))
+    monkeypatch.setattr("app.social_publishers._instagram_compatible_video", compatible)
+    monkeypatch.setattr("app.social_publishers._instagram_hosted_video", Mock(return_value="https://media.example.com/exact.mp4"))
+    status.update(status_code="FINISHED")
+    assert _publish_instagram(job, "discipline", persist) == "published-media"
+    compatible.assert_called_once_with(Path(job.video_path), recovery_profile=True)
+    assert not any("rupload.facebook.com" in url for url, _ in calls)
