@@ -47,6 +47,7 @@ from app.generation_modes import (
     GENERATION_MODE_SILENCE,
     normalize_generation_mode,
 )
+from app.generation_store import saved_plan_scene_ids
 from app.guest_final_build import approved_guest_cartoon_scenes
 from app.media_file_store import local_path_from_media_uri, read_media_uri_bytes
 from app.post_production import (
@@ -103,6 +104,7 @@ from app.speech_alignment import (
 )
 from app.scene_media_candidates import resolve_latest_approved_scene_video_for_final_build
 from app.series_store import advance_series_after_successful_render
+from app.session_store import DIALOGUE_SNAPSHOT_ARTIFACT_TYPE, restore_production_plan_from_db
 
 from .forms import (
     PENDING_OVERLAY_TITLE_STYLE_KEY,
@@ -614,11 +616,6 @@ def _clean_overlay_title_by_lang(value: Any) -> dict[str, str]:
     }
 
 
-def _scene_db_ids_for_run(run_id) -> dict[int, str]:
-    rows = Scene.objects.filter(run_id=run_id).order_by("scene_order")
-    return {idx: str(row.id) for idx, row in enumerate(rows)}
-
-
 def _production_plan_for_session(session: dict[str, Any]) -> list[Any]:
     production = session.get("production") if isinstance(session, dict) else None
     plan = production.get("json_plan") if isinstance(production, dict) else None
@@ -671,145 +668,115 @@ def _renumber_scenes_for_run(run_id: Any) -> None:
             Scene.objects.filter(id=scene.id).update(scene_order=idx)
 
 
+def _sync_scene_plan_for_admin_edits(
+    session: dict[str, Any], scenes: list[Scene], override_payloads_by_scene_id: dict[str, dict[str, Any]],
+    added_scene_ids: set[str],
+) -> dict[str, Any]:
+    production = session.get("production")
+    if not isinstance(production, dict):
+        production = {}
+    old_plan = production.get("json_plan")
+    if not isinstance(old_plan, list):
+        old_plan = []
+    old_map_raw = session.get("scene_db_ids_by_index")
+    old_map = old_map_raw if isinstance(old_map_raw, dict) else {}
+
+    payloads_by_id: dict[str, dict[str, Any]] = {}
+    payloads_by_order: dict[int, dict[str, Any]] = {}
+    for raw_idx, raw_scene_id in old_map.items():
+        try:
+            idx = int(raw_idx)
+        except (TypeError, ValueError):
+            continue
+        if 0 <= idx < len(old_plan) and isinstance(old_plan[idx], dict):
+            payloads_by_id[str(raw_scene_id)] = copy.deepcopy(old_plan[idx])
+    for idx, item in enumerate(old_plan):
+        if not isinstance(item, dict):
+            continue
+        order = _coerce_scene_order_value(item.get("scene"), idx + 1)
+        payloads_by_order.setdefault(order, copy.deepcopy(item))
+
+    new_plan: list[dict[str, Any]] = []
+    new_map: dict[int, str] = {}
+    active_ids = set(saved_plan_scene_ids(session))
+    active_scenes = scenes
+    if active_ids:
+        active_ids.update(added_scene_ids)
+        active_scenes = [row for row in scenes if str(row.id) in active_ids]
+    for idx, scene in enumerate(active_scenes, start=1):
+        scene_id = str(scene.id)
+        old_payload = payloads_by_id.get(scene_id) if active_ids else payloads_by_order.get(int(scene.scene_order or idx))
+        payload = copy.deepcopy(override_payloads_by_scene_id.get(scene_id, old_payload) or {})
+        payload["scene"] = idx
+        payload["text"] = scene.text
+        payload["duration_sec"] = float(scene.duration_sec)
+        for key in ("start_frame_prompt", "start_frame_prompt_effective", "end_frame_prompt"):
+            value = getattr(scene, key, None)
+            if value:
+                payload[key] = value
+            else:
+                payload.pop(key, None)
+        for key in ("video_prompt_by_lang", "speech_by_lang", "syntax_prompt_by_lang", "prompt_meta_json"):
+            value = getattr(scene, key, None)
+            if isinstance(value, dict) and value:
+                payload[key] = value
+            elif key == "speech_by_lang" and isinstance(payload.get(key), dict) and payload[key]:
+                pass
+            else:
+                payload.pop(key, None)
+        new_plan.append(payload)
+        new_map[idx - 1] = scene_id
+
+    production["json_plan"] = new_plan
+    session["production"] = production
+    if "scenes_plan" in session:
+        session["scenes_plan"] = new_plan
+    session["scene_db_ids_by_index"] = new_map
+    if new_plan:
+        session["image_scene_index"] = min(_coerce_scene_order_value(session.get("image_scene_index"), 0), len(new_plan) - 1)
+    else:
+        session["image_scene_index"] = 0
+    return _strip_inline_media_payloads(session)
+
+
 def _sync_chat_sessions_for_run_scenes(
     run_id: Any,
     *,
     override_payloads_by_scene_id: dict[str, dict[str, Any]] | None = None,
+    added_scene_ids: set[str] | None = None,
 ) -> int:
     scenes = list(Scene.objects.filter(run_id=run_id).order_by("scene_order", "id"))
-    override_payloads_by_scene_id = override_payloads_by_scene_id or {}
+    overrides = override_payloads_by_scene_id or {}
+    added = added_scene_ids or set()
     updated = 0
     for chat_session in ChatSession.objects.filter(generation_run_id=run_id).order_by("updated_at"):
-        session = copy.deepcopy(chat_session.session_json or {})
-        production = session.get("production")
-        if not isinstance(production, dict):
-            production = {}
-        old_plan = production.get("json_plan")
-        if not isinstance(old_plan, list):
-            old_plan = []
-        old_map_raw = session.get("scene_db_ids_by_index")
-        old_map = old_map_raw if isinstance(old_map_raw, dict) else {}
-
-        payloads_by_id: dict[str, dict[str, Any]] = {}
-        payloads_by_order: dict[int, dict[str, Any]] = {}
-        for raw_idx, raw_scene_id in old_map.items():
-            try:
-                idx = int(raw_idx)
-            except (TypeError, ValueError):
-                continue
-            if 0 <= idx < len(old_plan) and isinstance(old_plan[idx], dict):
-                payloads_by_id[str(raw_scene_id)] = copy.deepcopy(old_plan[idx])
-        for idx, item in enumerate(old_plan):
-            if not isinstance(item, dict):
-                continue
-            order = _coerce_scene_order_value(item.get("scene"), idx + 1)
-            payloads_by_order.setdefault(order, copy.deepcopy(item))
-
-        new_plan: list[dict[str, Any]] = []
-        new_map: dict[int, str] = {}
-        for idx, scene in enumerate(scenes, start=1):
-            scene_id = str(scene.id)
-            payload = (
-                copy.deepcopy(override_payloads_by_scene_id.get(scene_id))
-                if scene_id in override_payloads_by_scene_id
-                else copy.deepcopy(payloads_by_id.get(scene_id) or payloads_by_order.get(int(scene.scene_order or idx)) or {})
-            )
-            if not isinstance(payload, dict):
-                payload = {}
-            payload["scene"] = idx
-            payload["text"] = scene.text
-            payload["duration_sec"] = float(scene.duration_sec)
-            for key in ("start_frame_prompt", "start_frame_prompt_effective", "end_frame_prompt"):
-                value = getattr(scene, key, None)
-                if value:
-                    payload[key] = value
-                else:
-                    payload.pop(key, None)
-            for key in ("video_prompt_by_lang", "speech_by_lang", "syntax_prompt_by_lang", "prompt_meta_json"):
-                value = getattr(scene, key, None)
-                if isinstance(value, dict) and value:
-                    payload[key] = value
-                elif key == "speech_by_lang" and isinstance(payload.get(key), dict) and payload[key]:
-                    pass
-                else:
-                    payload.pop(key, None)
-            new_plan.append(payload)
-            new_map[idx - 1] = scene_id
-
-        production["json_plan"] = new_plan
-        session["production"] = production
-        session["scene_db_ids_by_index"] = new_map
-        if new_plan:
-            session["image_scene_index"] = min(_coerce_scene_order_value(session.get("image_scene_index"), 0), len(new_plan) - 1)
-        else:
-            session["image_scene_index"] = 0
-        chat_session.session_json = _strip_inline_media_payloads(session)
+        chat_session.session_json = _sync_scene_plan_for_admin_edits(
+            copy.deepcopy(chat_session.session_json or {}), scenes, overrides, added,
+        )
         chat_session.generation_run_id = run_id
         chat_session.updated_at = timezone.now()
         chat_session.save(update_fields=["session_json", "generation_run_id", "updated_at"])
         updated += 1
+    for runtime in GenerationArtifact.objects.filter(run_id=run_id, artifact_type=DIALOGUE_SNAPSHOT_ARTIFACT_TYPE):
+        runtime.payload_json = _sync_scene_plan_for_admin_edits(
+            copy.deepcopy(runtime.payload_json or {}), scenes, overrides, added,
+        )
+        runtime.save(update_fields=["payload_json"])
     return updated
 
 
-def _production_scenes_from_db(run: GenerationRun) -> list[dict[str, Any]]:
-    scenes = list(Scene.objects.filter(run_id=run.id).order_by("scene_order"))
-    scene_ids = [scene.id for scene in scenes]
-    videos_by_scene: dict[str, list[SceneVideoCandidate]] = {str(scene_id): [] for scene_id in scene_ids}
-    for row in (
-        SceneVideoCandidate.objects.filter(scene_id__in=scene_ids)
-        .only(
-            "candidate_id",
-            "scene_id",
-            "language",
-            "created_at",
-            "liked",
-            "approved_for_production",
-            "speed_coef",
-            "source_image_candidate_id",
-        )
-        .order_by("created_at", "candidate_id")
-    ):
-        videos_by_scene.setdefault(str(row.scene_id), []).append(row)
-
-    out: list[dict[str, Any]] = []
-    for scene in scenes:
-        by_lang: dict[str, list[dict[str, Any]]] = {}
-        for row in videos_by_scene.get(str(scene.id), []):
-            lang = str(row.language or "ru").strip().lower() or "ru"
-            by_lang.setdefault(lang, []).append(
-                {
-                    "candidate_id": row.candidate_id,
-                    "language": lang,
-                    "created_at": row.created_at.isoformat() if row.created_at else "",
-                    "liked": bool(row.liked),
-                    "approved_for_production": bool(row.approved_for_production),
-                    "speed_coef": float(row.speed_coef),
-                    "source_image_candidate_id": row.source_image_candidate_id,
-                }
-            )
-        out.append(
-            {
-                "scene": int(scene.scene_order),
-                "text": scene.text,
-                "duration_sec": float(scene.duration_sec),
-                "start_frame_prompt": scene.start_frame_prompt or "",
-                "start_frame_prompt_effective": scene.start_frame_prompt_effective or "",
-                "end_frame_prompt": scene.end_frame_prompt or "",
-                "video_prompt_by_lang": scene.video_prompt_by_lang or {},
-                "speech_by_lang": scene.speech_by_lang or {},
-                "syntax_prompt_by_lang": scene.syntax_prompt_by_lang or {},
-                "prompt_meta_json": scene.prompt_meta_json or {},
-                "video_candidates_by_lang": by_lang,
-            }
-        )
-    return out
-
-
 def _checkpoint_session_for_admin_render(run: GenerationRun) -> dict[str, Any]:
+    # The run-scoped runtime snapshot survives a change of chat and history pruning.
+    runtime = GenerationArtifact.objects.filter(
+        run_id=run.id, artifact_type=DIALOGUE_SNAPSHOT_ARTIFACT_TYPE,
+    ).order_by("-created_at").values_list("payload_json", flat=True).first()
+    if (isinstance(runtime, dict) and str(runtime.get("generation_run_id") or run.id) == str(run.id)
+            and (saved_plan_scene_ids(runtime) or _production_plan_for_session(runtime))):
+        return copy.deepcopy(runtime)
     checkpoints = PipelineStepCheckpoint.objects.filter(generation_run_id=run.id).order_by("-created_at")
     for checkpoint in checkpoints:
         snapshot = checkpoint.session_snapshot_json
-        if isinstance(snapshot, dict) and snapshot:
+        if isinstance(snapshot, dict) and snapshot and str(snapshot.get("generation_run_id") or run.id) == str(run.id):
             return copy.deepcopy(snapshot)
     return {}
 
@@ -822,21 +789,19 @@ def _run_session_for_admin_render(
     chat_session = ChatSession.objects.filter(generation_run_id=run.id).order_by("-updated_at").first()
     if chat_session is not None:
         session = copy.deepcopy(chat_session.session_json or {})
+        if not saved_plan_scene_ids(session) and not _production_plan_for_session(session):
+            historical = _checkpoint_session_for_admin_render(run)
+            if saved_plan_scene_ids(historical):
+                session["scene_db_ids_by_index"] = historical["scene_db_ids_by_index"]
     else:
         session = _checkpoint_session_for_admin_render(run)
     session["generation_run_id"] = str(run.id)
-    if not isinstance(session.get("scene_db_ids_by_index"), dict) or not session["scene_db_ids_by_index"]:
-        session["scene_db_ids_by_index"] = rebuild_scene_db_ids_for_session(
-            session,
-            str(run.id),
-        ) or _scene_db_ids_for_run(run.id)
-
+    restore_production_plan_from_db(session, str(run.id))
+    if not session.get("scene_db_ids_by_index"):
+        session["scene_db_ids_by_index"] = rebuild_scene_db_ids_for_session(session, str(run.id))
     production = session.get("production")
     if not isinstance(production, dict):
-        production = {}
-    if not isinstance(production.get("json_plan"), list) or not production["json_plan"]:
-        production["json_plan"] = _production_scenes_from_db(run)
-    session["production"] = production
+        production = session["production"] = {}
     rebuild_production_session(session, str(run.id), include_media_blobs=include_media_blobs)
     production = session.get("production") if isinstance(session.get("production"), dict) else production
     if bool(session.get("guest_mode")) and str(run.workflow_type or "") == "cartoon":
@@ -893,6 +858,7 @@ def _admin_final_build_scenes_from_page(run: GenerationRun, scenes: list[dict[st
     except Exception:
         rows = []
     rows_by_order = {int(row.scene_order or idx): row for idx, row in enumerate(rows, start=1)}
+    rows_by_id = {str(row.id): row for row in rows if getattr(row, "id", None)}
     for idx, scene in enumerate(out, start=1):
         if not isinstance(scene, dict):
             continue
@@ -900,7 +866,8 @@ def _admin_final_build_scenes_from_page(run: GenerationRun, scenes: list[dict[st
             order = int(scene.get("scene") or idx)
         except (TypeError, ValueError):
             order = idx
-        row = rows_by_order.get(order)
+        scene_id = scene.get("scene_db_id")
+        row = rows_by_id.get(scene_id) if scene_id else rows_by_order.get(order)
         if row is not None:
             scene["scene"] = int(row.scene_order or order)
             scene["text"] = row.text
@@ -4556,7 +4523,9 @@ class GenerationRunAdmin(admin.ModelAdmin):
                         source="generation_run_admin_inline",
                     )
             _renumber_scenes_for_run(form.instance.pk)
-            _sync_chat_sessions_for_run_scenes(form.instance.pk)
+            _sync_chat_sessions_for_run_scenes(
+                form.instance.pk, added_scene_ids={str(row.pk) for row in formset.new_objects},
+            )
 
     @admin.display(description="Final title color")
     def overlay_title_color(self, obj: GenerationRun) -> str:
@@ -6615,7 +6584,10 @@ class SceneAdmin(admin.ModelAdmin):
             _renumber_scenes_for_run(old_run_id)
             _sync_chat_sessions_for_run_scenes(old_run_id)
         _renumber_scenes_for_run(obj.run_id)
-        _sync_chat_sessions_for_run_scenes(obj.run_id, override_payloads_by_scene_id=payloads)
+        _sync_chat_sessions_for_run_scenes(
+            obj.run_id, override_payloads_by_scene_id=payloads,
+            added_scene_ids={str(obj.id)} if old_run_id != obj.run_id else set(),
+        )
 
     @admin.display(description="Text history")
     def text_history(self, obj: Scene) -> str:

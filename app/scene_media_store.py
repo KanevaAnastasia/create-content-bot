@@ -12,8 +12,12 @@ from sqlalchemy.orm import load_only
 
 from .artifact_store import persist_generation_artifact
 from .db import SessionLocal
-from .generation_store import ensure_generation_run_for_session
-from .generation_store import merge_scene_prompt_payload
+from .generation_store import (
+    ensure_generation_run_for_session,
+    mapped_scene_rows,
+    merge_scene_prompt_payload,
+    saved_plan_scene_ids,
+)
 from .media_file_store import read_media_uri_bytes, store_scene_candidate_media
 from .models import GenerationArtifact, GenerationRun, Scene, SceneImageCandidate, SceneMediaMessageLink, SceneVideoCandidate
 from .scene_media_candidates import (
@@ -564,14 +568,13 @@ def rebuild_production_session(
         return None
     if not generation_run_id:
         return production
-    scene_map_raw = session.get("scene_db_ids_by_index")
-    scene_map = {int(k): str(v) for k, v in scene_map_raw.items()} if isinstance(scene_map_raw, dict) else {}
+    scene_map = dict(enumerate(saved_plan_scene_ids(session)))
     if not scene_map:
         return production
     try:
         run_uuid = uuid.UUID(str(generation_run_id))
     except (TypeError, ValueError, AttributeError):
-        run_uuid = None
+        return production
 
     scene_candidates_by_id: dict[str, list[SceneImageCandidate]] = defaultdict(list)
     video_candidates_by_id: dict[str, list[SceneVideoCandidate]] = defaultdict(list)
@@ -580,7 +583,7 @@ def rebuild_production_session(
     video_artifact_payloads_by_candidate_id: dict[str, dict[str, Any]] = {}
     video_prompt_artifacts_by_scene_id: dict[str, dict[str, str]] = defaultdict(dict)
     with SessionLocal() as db:
-        run = db.get(GenerationRun, run_uuid) if run_uuid is not None else None
+        run = db.get(GenerationRun, run_uuid)
         scene_ids = []
         for raw in scene_map.values():
             try:
@@ -589,7 +592,10 @@ def rebuild_production_session(
                 continue
         if not scene_ids:
             return production
-        scene_rows = db.execute(select(Scene).where(Scene.id.in_(scene_ids))).scalars().all()
+        scene_rows = db.execute(
+            select(Scene).where(Scene.run_id == run_uuid, Scene.id.in_(scene_ids))
+        ).scalars().all()
+        scene_ids = [row.id for row in scene_rows]
         image_stmt = select(SceneImageCandidate).where(SceneImageCandidate.scene_id.in_(scene_ids))
         video_stmt = select(SceneVideoCandidate).where(SceneVideoCandidate.scene_id.in_(scene_ids))
         if not include_media_blobs:
@@ -717,6 +723,7 @@ def rebuild_production_session(
         scene_id = scene_map.get(idx)
         if not scene_id:
             continue
+        scene["scene_db_id"] = scene_id
         merge_scene_prompt_payload(scene, prompt_payloads_by_id.get(scene_id, {}))
         image_candidates = sorted(
             scene_candidates_by_id.get(scene_id, []),
@@ -806,4 +813,4 @@ def rebuild_scene_db_ids_for_session(session: dict[str, Any], generation_run_id:
         rows = db.execute(
             select(Scene).where(Scene.run_id == run_uuid).order_by(Scene.scene_order.asc())
         ).scalars().all()
-    return {idx: str(row.id) for idx, row in enumerate(rows)}
+    return {idx: str(row.id) for idx, row in enumerate(mapped_scene_rows(session, rows) or rows)}

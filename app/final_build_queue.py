@@ -14,7 +14,7 @@ from .db import SessionLocal
 from .generation_store import ensure_generation_run_for_session
 from .models import ChatSession, GenerationArtifact, GenerationRun
 from .post_production import production_languages_for_scenes
-from .session_store import _chat_session_cache_payload, _serialize_value
+from .session_store import _chat_session_cache_payload, _serialize_value, persist_dialogue_snapshot
 
 
 FINAL_VIDEO_VARIANT_LABELS = {
@@ -112,6 +112,7 @@ def _persist_queue_session_snapshot(chat_id: int, session: dict[str, Any], run_i
             row.state = str(session.get("state") or "").strip() or row.state
             row.session_json = payload
             row.generation_run_id = run_id
+        persist_dialogue_snapshot(db, chat_id, run_id, session)
         run = db.get(GenerationRun, run_id)
         if run is not None:
             run.status = "final_render_pending"
@@ -208,21 +209,16 @@ def queue_final_builds_for_session(
     kick_worker: bool = True,
     advance_series_after_success: bool = False,
 ) -> dict[str, Any]:
-    run_id_str, _scene_map = ensure_generation_run_for_session(session)
-    if not run_id_str:
-        raise RuntimeError("No generation run is available for final build queue.")
-    session["generation_run_id"] = run_id_str
-    run_id = uuid.UUID(run_id_str)
-    _persist_queue_session_snapshot(chat_id, session, run_id)
-
+    if not scenes:
+        raise RuntimeError("No production scenes are available for final rendering.")
     normalized_languages = [
         str(language).strip().lower()
-        for language in (languages if languages is not None else production_languages_for_scenes(scenes))
+        for language in (languages if languages is not None else production_languages_for_scenes(scenes, require_ready=True))
         if str(language).strip()
     ]
     normalized_languages = list(dict.fromkeys(normalized_languages))
     if not normalized_languages:
-        raise RuntimeError("No complete language tracks are available for final production.")
+        raise RuntimeError("No languages were requested for final rendering.")
 
     requested_variants = [
         variant
@@ -231,6 +227,19 @@ def queue_final_builds_for_session(
     ] if variants is not None else list(FINAL_VIDEO_VARIANT_LABELS)
     if not requested_variants:
         raise RuntimeError("No final render variants were requested.")
+
+    # The render request is the approved cut. An earlier scenario draft can be longer.
+    session["scenes_plan"] = scenes
+    production = session.get("production")
+    if not isinstance(production, dict):
+        production = session["production"] = {}
+    production["json_plan"] = scenes
+    run_id_str, _scene_map = ensure_generation_run_for_session(session)
+    if not run_id_str:
+        raise RuntimeError("No generation run is available for final build queue.")
+    session["generation_run_id"] = run_id_str
+    run_id = uuid.UUID(run_id_str)
+    _persist_queue_session_snapshot(chat_id, session, run_id)
 
     statuses: dict[str, dict[str, str]] = {}
     for language in normalized_languages:

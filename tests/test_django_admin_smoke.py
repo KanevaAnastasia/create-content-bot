@@ -1653,7 +1653,8 @@ def test_django_admin_scene_sync_updates_chat_session_payload(monkeypatch):
 
     class SceneRows:
         def order_by(self, *_args):
-            return [scene]
+            removed = SimpleNamespace(**{**vars(scene), "id": uuid.uuid4(), "scene_order": 2})
+            return [scene, removed]
 
     class ChatRows:
         def order_by(self, *_args):
@@ -1662,6 +1663,7 @@ def test_django_admin_scene_sync_updates_chat_session_payload(monkeypatch):
     monkeypatch.setattr(admin_module.Scene.objects, "filter", lambda **_kwargs: SceneRows())
     monkeypatch.setattr(admin_module.ChatSession.objects, "filter", lambda **_kwargs: ChatRows())
 
+    monkeypatch.setattr(admin_module.GenerationArtifact.objects, "filter", lambda **kwargs: [])
     updated = admin_module._sync_chat_sessions_for_run_scenes(run_id)
 
     assert updated == 1

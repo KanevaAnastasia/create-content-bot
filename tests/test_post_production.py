@@ -606,6 +606,25 @@ def test_build_post_production_ignores_speed_for_speechless_kling(monkeypatch):
     assert out["renders_by_language"]["ru"]["clean"]["width"] == 1080
 
 
+def test_final_render_reports_a_real_gap_without_omitting_the_scene(monkeypatch, tmp_path):
+    scenes = [{}, {}]
+    path = tmp_path / "approved.mp4"
+    path.write_bytes(b"approved media")
+    video = register_video_candidate(scenes[0], language="en", video_bytes=b"clip")
+    video.update(approved_for_production=True, media_uri=path.as_uri())
+    video.pop("video_b64")
+    monkeypatch.setattr(post_production, "_resolve_ffmpeg", lambda: "ffmpeg")
+    monkeypatch.setattr(post_production, "_resolve_music_path", lambda _: (None, 0.0))
+    with pytest.raises(RuntimeError, match=r"EN \(2\)"):
+        post_production.build_post_production(scenes, target_languages=["en"], target_variants=["clean"])
+
+    second = register_video_candidate(scenes[1], language="en", video_bytes=b"clip")
+    second.update(approved_for_production=True, media_uri=(tmp_path / "missing.mp4").as_uri())
+    second.pop("video_b64")
+    with pytest.raises(RuntimeError, match=f"EN scene 2 .*{second['candidate_id']}"):
+        post_production.build_post_production(scenes, target_languages=["en"], target_variants=["clean"])
+
+
 def test_production_languages_require_approved_scene_video_candidates():
     scenes = [
         {"duration_sec": 8, "text": "Первая сцена"},

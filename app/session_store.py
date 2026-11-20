@@ -10,7 +10,12 @@ from typing import Any
 from sqlalchemy import select
 
 from .db import SessionLocal
-from .generation_store import ensure_generation_run_for_session, merge_scene_prompt_payload, overlay_title_by_lang_for_run
+from .generation_store import (
+    ensure_generation_run_for_session,
+    mapped_scene_rows,
+    merge_scene_prompt_payload,
+    overlay_title_by_lang_for_run,
+)
 from .models import ChatSession, GenerationArtifact, GenerationRun, Scene
 from .scene_media_store import persist_scene_video_prompts, rebuild_production_session, rebuild_scene_db_ids_for_session
 
@@ -370,7 +375,7 @@ def _restore_pending_inputs_from_artifacts(session: dict[str, Any], run_id_str: 
             session[key] = pending
 
 
-def _ensure_archive_production_shell(session: dict[str, Any], run_id_str: str | None) -> None:
+def restore_production_plan_from_db(session: dict[str, Any], run_id_str: str | None) -> None:
     if not run_id_str:
         return
     production = session.get("production")
@@ -389,7 +394,7 @@ def _ensure_archive_production_shell(session: dict[str, Any], run_id_str: str | 
         return
     scene_map: dict[int, str] = {}
     json_plan: list[dict[str, Any]] = []
-    for idx, row in enumerate(rows):
+    for idx, row in enumerate(mapped_scene_rows(session, rows) or rows):
         scene_map[idx] = str(row.id)
         scene = {
             "scene": int(row.scene_order),
@@ -406,9 +411,11 @@ def _ensure_archive_production_shell(session: dict[str, Any], run_id_str: str | 
                 scene[key] = dict(value)
         merge_scene_prompt_payload(scene, scene)
         json_plan.append(scene)
-    if not isinstance(session.get("scene_db_ids_by_index"), dict):
-        session["scene_db_ids_by_index"] = scene_map
-    session["production"] = {"json_plan": json_plan}
+    session["scene_db_ids_by_index"] = scene_map
+    if not isinstance(production, dict):
+        production = {}
+    production["json_plan"] = json_plan
+    session["production"] = production
 
 
 def _ensure_scene_plan_from_production(session: dict[str, Any]) -> None:
@@ -440,6 +447,24 @@ def _restore_overlay_title_by_lang_from_artifact(session: dict[str, Any], genera
     production["overlay_title_by_lang"] = dict(title_by_lang)
     session["production"] = production
     session["overlay_title_by_lang"] = dict(title_by_lang)
+
+
+def persist_dialogue_snapshot(db, chat_id: int, run_id: uuid.UUID, session: dict[str, Any]) -> None:
+    """Keep the ordered plan and UI choices after the chat moves to another run."""
+    uri = f"db://chat_sessions/{int(chat_id)}/runtime"
+    checkpoint = db.execute(select(GenerationArtifact).where(
+        GenerationArtifact.run_id == run_id,
+        GenerationArtifact.artifact_type == DIALOGUE_SNAPSHOT_ARTIFACT_TYPE,
+        GenerationArtifact.uri == uri,
+    )).scalars().first()
+    payload = _serialize_value(_strip_inline_media_payloads(session))
+    if checkpoint is None:
+        db.add(GenerationArtifact(
+            run_id=run_id, artifact_type=DIALOGUE_SNAPSHOT_ARTIFACT_TYPE, uri=uri,
+            label="Dialogue runtime checkpoint", mime_type="application/json", payload_json=payload,
+        ))
+    else:
+        checkpoint.payload_json = payload
 
 
 def save_session(chat_id: int, session: dict[str, Any]) -> None:
@@ -489,23 +514,7 @@ def save_session(chat_id: int, session: dict[str, Any]) -> None:
         row.session_json = payload
         row.generation_run_id = uuid.UUID(run_id_str) if run_id_str else None
         if row.generation_run_id is not None:
-            # Keep UI decisions not represented by normalized model columns.
-            # Binary media remains in the existing candidate/artifact storage.
-            checkpoint_uri = f"db://chat_sessions/{int(chat_id)}/runtime"
-            checkpoint = db.execute(select(GenerationArtifact).where(
-                GenerationArtifact.run_id == row.generation_run_id,
-                GenerationArtifact.artifact_type == DIALOGUE_SNAPSHOT_ARTIFACT_TYPE,
-                GenerationArtifact.uri == checkpoint_uri,
-            )).scalars().first()
-            checkpoint_payload = _serialize_value(_strip_inline_media_payloads(session))
-            if checkpoint is None:
-                checkpoint = GenerationArtifact(run_id=row.generation_run_id,
-                    artifact_type=DIALOGUE_SNAPSHOT_ARTIFACT_TYPE, uri=checkpoint_uri,
-                    label="Dialogue runtime checkpoint", mime_type="application/json",
-                    payload_json=checkpoint_payload)
-                db.add(checkpoint)
-            else:
-                checkpoint.payload_json = checkpoint_payload
+            persist_dialogue_snapshot(db, chat_id, row.generation_run_id, session)
             run = db.get(GenerationRun, row.generation_run_id)
             if run is not None:
                 try:
@@ -575,7 +584,7 @@ def _restore_missing_runtime_fields(current: dict, snapshot: dict) -> None:
     for key, value in snapshot.items():
         if key not in current:
             current[key] = value
-        elif key in {"speech_budget_override_by_lang", "speech_origin_by_lang", "speech_by_lang",
+        elif key in {"scene_db_ids_by_index", "speech_budget_override_by_lang", "speech_origin_by_lang", "speech_by_lang",
                      "video_prompt_by_lang", "syntax_prompt_by_lang", "prompt_meta_json"}:
             continue  # Explicit DB edits/cleared approvals override older runtime metadata.
         elif isinstance(current[key], dict) and isinstance(value, dict):
@@ -620,9 +629,11 @@ def load_session(chat_id: int) -> dict[str, Any] | None:
                 session["scene_media_substep"] = str(run.current_media_substep)
             if run.current_media_language_index is not None:
                 session["scene_media_language_index"] = int(run.current_media_language_index)
-        if not isinstance(session.get("scene_db_ids_by_index"), dict):
+        if not session.get("scene_db_ids_by_index") and runtime_snapshot.get("scene_db_ids_by_index"):
+            session["scene_db_ids_by_index"] = runtime_snapshot["scene_db_ids_by_index"]
+        restore_production_plan_from_db(session, generation_run_id)
+        if not session.get("scene_db_ids_by_index"):
             session["scene_db_ids_by_index"] = rebuild_scene_db_ids_for_session(session, generation_run_id)
-        _ensure_archive_production_shell(session, generation_run_id)
         rebuild_production_session(session, generation_run_id)
         _restore_overlay_title_by_lang_from_artifact(session, generation_run_id)
         _ensure_scene_plan_from_production(session)

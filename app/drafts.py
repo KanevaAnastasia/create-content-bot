@@ -9,7 +9,7 @@ from typing import Any
 from sqlalchemy import select
 
 from .db import SessionLocal
-from .generation_store import ensure_generation_run_for_session, overlay_title_by_lang_for_run
+from .generation_store import ensure_generation_run_for_session, mapped_scene_rows, overlay_title_by_lang_for_run
 from .models import GenerationArtifact, GenerationDraft, GenerationRun, Scene, SceneImageCandidate, SceneVideoCandidate
 from .scene_media_store import rebuild_production_session, rebuild_scene_db_ids_for_session
 from .session_store import _deserialize_value, _serialize_value, _strip_inline_media_payloads
@@ -92,6 +92,7 @@ def _session_from_generation_run(snapshot: dict[str, Any], run_id: str) -> dict[
         scene_rows = db.execute(
             select(Scene).where(Scene.run_id == run_uuid).order_by(Scene.scene_order.asc())
         ).scalars().all()
+        scene_rows = mapped_scene_rows(snapshot, scene_rows) or scene_rows
         scene_ids = [row.id for row in scene_rows]
         languages = {
             str(row.language or "").strip().lower()

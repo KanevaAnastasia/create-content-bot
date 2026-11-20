@@ -284,6 +284,58 @@ def test_save_session_syncs_existing_run_scene_plan_revision(monkeypatch):
     assert revisions[0].new_text == "Не знаете куда девать яблоки? Присаживайтесь, будем делать пастилу!"
 
 
+def test_shortened_plan_survives_queue_reload_and_expansion(monkeypatch):
+    from app.final_build_queue import queue_final_builds_for_session
+    from app.post_production import production_languages_for_scenes
+    from app.scene_media_candidates import resolve_latest_approved_scene_video_for_final_build
+
+    _install_sqlite(monkeypatch)
+    original = [{"scene": n, "text": f"Сцена {n}", "duration_sec": 8} for n in range(1, 7)]
+    session = {"state": "ready_for_production", "scenes_plan": original}
+    session_store.save_session(616, session)
+    run_id = uuid.UUID(session["generation_run_id"])
+    original_ids = dict(session["scene_db_ids_by_index"])
+    cut = [dict(scene) for scene in original[:4]]
+    session["production"] = {"json_plan": cut}
+    with db.SessionLocal() as database:
+        for index, scene in enumerate(cut):
+            for lang in ("ru", "en"):
+                video = register_video_candidate(scene, language=lang, video_bytes=b"clip")
+                video["approved_for_production"] = True
+                database.add(SceneVideoCandidate(
+                    scene_id=uuid.UUID(original_ids[index]), candidate_id=video["candidate_id"],
+                    language=lang, video_blob=b"clip", approved_for_production=True,
+                ))
+        database.commit()
+
+    queued = queue_final_builds_for_session(616, session, cut, variants=["clean"], kick_worker=False)
+    assert queued["languages"] == ["ru", "en"]
+    restored = session_store.load_session(616)
+    scenes = restored["production"]["json_plan"]
+    assert len(scenes) == len(restored["scenes_plan"]) == 4
+    assert set(production_languages_for_scenes(scenes)) == {"ru", "en"}
+    for index, scene in enumerate(scenes):
+        for lang in ("ru", "en"):
+            selected = resolve_latest_approved_scene_video_for_final_build(scene, lang)
+            assert selected["candidate_id"] == cut[index]["video_candidates_by_lang"][lang][0]["candidate_id"]
+    with db.SessionLocal() as database:
+        runtime = database.query(GenerationArtifact).filter_by(
+            run_id=run_id, artifact_type=session_store.DIALOGUE_SNAPSHOT_ARTIFACT_TYPE,
+        ).one().payload_json
+    assert len(runtime["scene_db_ids_by_index"]) == len(runtime["production"]["json_plan"]) == 4
+    # A subsequently added scene gets its own identity even when an old draft occupied slot five.
+    expanded = [*scenes, {"scene": 5, "text": "Новая сцена", "duration_sec": 8}]
+    restored["production"]["json_plan"] = restored["scenes_plan"] = expanded
+    session_store.save_session(616, restored)
+    assert restored["scene_db_ids_by_index"][4] not in original_ids.values()
+    reloaded = session_store.load_session(616)["production"]["json_plan"]
+    assert [item["text"] for item in reloaded] == [item["text"] for item in expanded]
+    assert production_languages_for_scenes(reloaded) == []
+    with db.SessionLocal() as database:
+        assert database.get(Scene, uuid.UUID(original_ids[4])).text == "Сцена 5"
+        assert database.query(Scene).filter_by(run_id=run_id).count() == 7
+
+
 def test_load_session_restores_scene_refine_context_from_existing_run(monkeypatch):
     _install_sqlite(monkeypatch)
 

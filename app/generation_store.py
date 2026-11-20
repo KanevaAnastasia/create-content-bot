@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import re
 import uuid
+from collections.abc import Sequence
 from typing import Any
 
 import sqlalchemy as sa
@@ -512,16 +513,41 @@ def _apply_run_cursor(run: GenerationRun, session: dict[str, Any]) -> bool:
     return changed
 
 
-def _update_scene_prompt_rows(db, run_id: uuid.UUID, scenes_plan: list[dict[str, Any]]) -> dict[int, str]:
+def saved_plan_scene_ids(session: dict[str, Any]) -> list[str]:
+    """Read the zero-based scene map from either a live session or a JSON snapshot."""
+    mapping = session.get("scene_db_ids_by_index")
+    if not isinstance(mapping, dict) or not mapping:
+        return []
+    ids = [str(mapping.get(i) or mapping.get(str(i)) or "") for i in range(len(mapping))]
+    return ids if all(ids) and len(set(ids)) == len(ids) else []
+
+
+def mapped_scene_rows(session: dict[str, Any], rows: Sequence[Scene]) -> list[Scene]:
+    """Resolve the entire saved plan against rows from one run, in its saved order."""
+    by_id = {str(row.id): row for row in rows}
+    ids = saved_plan_scene_ids(session)
+    return [by_id[key] for key in ids] if all(key in by_id for key in ids) else []
+
+
+def _update_scene_prompt_rows(
+    db, run_id: uuid.UUID, scenes_plan: list[dict[str, Any]], session: dict[str, Any],
+) -> dict[int, str]:
     rows = db.execute(select(Scene).where(Scene.run_id == run_id).order_by(Scene.scene_order.asc())).scalars().all()
     rows_by_order = {int(row.scene_order): row for row in rows}
+    mapped = mapped_scene_rows(session, rows)
     scene_map: dict[int, str] = {}
     for idx, scene in enumerate(scenes_plan):
         if not isinstance(scene, dict):
             continue
         order = idx + 1
-        row = rows_by_order.get(order)
+        if mapped:
+            row = mapped[idx] if idx < len(mapped) else None
+        else:
+            row = rows_by_order.get(order)
         if row is None:
+            # A removed draft scene may still own this ordinal and its approved media.
+            if order in rows_by_order:
+                order = max(rows_by_order) + 1
             row = Scene(
                 run_id=run_id,
                 scene_order=order,
@@ -668,7 +694,7 @@ def ensure_generation_run_for_session(session: dict[str, Any]) -> tuple[str | No
                         run.project_id = resolve_project_id(session.get("selected_project_key"))
                         changed = run.project_id is not None or changed
                     changed = _apply_run_cursor(run, session) or changed
-                    scene_map = _update_scene_prompt_rows(db, run.id, scenes_plan) if scenes_plan else {}
+                    scene_map = _update_scene_prompt_rows(db, run.id, scenes_plan, session) if scenes_plan else {}
                     if scene_map:
                         session["scene_db_ids_by_index"] = scene_map
                         raw_map = scene_map

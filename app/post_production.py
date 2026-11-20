@@ -31,6 +31,7 @@ from .scene_media_candidates import (
     default_scene_video_speed_coef,
     parse_speed_coef,
     resolve_latest_approved_scene_video_for_final_build,
+    video_candidate_bytes,
 )
 
 logger = logging.getLogger("bot.video")
@@ -3670,16 +3671,32 @@ def _production_languages(scene: dict[str, Any]) -> list[str]:
     return out or ["ru"]
 
 
-def production_languages_for_scenes(scenes: list[dict[str, Any]]) -> list[str]:
-    union: list[str] = []
-    for scene in scenes:
-        for language in _production_languages(scene):
-            if language not in union:
-                union.append(language)
-    ready: list[str] = []
-    for language in union:
-        if all(resolve_latest_approved_scene_video_for_final_build(scene, language) is not None for scene in scenes):
-            ready.append(language)
+def production_languages_for_scenes(
+    scenes: list[dict[str, Any]],
+    target_languages: list[str] | tuple[str, ...] | set[str] | None = None,
+    *,
+    require_ready: bool = False,
+) -> list[str]:
+    tracks = (
+        dict.fromkeys(str(lang).strip().lower() for lang in target_languages if str(lang).strip())
+        if target_languages is not None
+        else dict.fromkeys(lang for scene in scenes for lang in _production_languages(scene))
+    )
+    ready = []
+    missing = []
+    for lang in tracks:
+        orders = [
+            str(index) for index, scene in enumerate(scenes, start=1)
+            if resolve_latest_approved_scene_video_for_final_build(scene, lang) is None
+        ]
+        if orders:
+            missing.append(f"{lang.upper()} ({', '.join(orders)})")
+        elif scenes:
+            ready.append(lang)
+    if require_ready and not ready:
+        if missing:
+            raise RuntimeError("Missing approved scene videos for " + ", ".join(missing) + ".")
+        raise RuntimeError("No scenes or languages were selected for final rendering.")
     return ready
 
 
@@ -3703,12 +3720,7 @@ def build_post_production(
     ffmpeg = _resolve_ffmpeg()
     if not ffmpeg:
         raise RuntimeError("ffmpeg is not available")
-    languages = production_languages_for_scenes(scenes)
-    if target_languages:
-        wanted_languages = {str(item).strip().lower() for item in target_languages if str(item).strip()}
-        languages = [language for language in languages if language in wanted_languages]
-    if not languages:
-        raise RuntimeError("No complete language tracks are available for final production.")
+    languages = production_languages_for_scenes(scenes, target_languages or None, require_ready=True)
     allowed_variants = {"clean", "upscaled_4k", "subtitled_music", "titled_subtitled_music"}
     requested_variants = (
         {str(item).strip() for item in target_variants if str(item).strip()}
@@ -3778,15 +3790,13 @@ def build_post_production(
         selected_segments: list[dict[str, Any]] = []
         for scene_index, scene in enumerate(scenes):
             selected = resolve_latest_approved_scene_video_for_final_build(scene, language)
-            if selected is None:
-                continue
-            video_b64 = str(selected.get("video_b64") or "").strip()
-            if not video_b64:
-                continue
-            try:
-                video_bytes = base64.b64decode(video_b64)
-            except Exception:
-                continue
+            video_bytes = video_candidate_bytes(selected)
+            if not video_bytes:
+                candidate_id = (selected or {}).get("candidate_id") or "unknown"
+                raise RuntimeError(
+                    f"Missing video file for {language.upper()} scene {scene_index + 1} "
+                    f"(approved candidate {candidate_id})."
+                )
             speed_coef = _final_scene_speed_coef(scene, selected)
             source_duration = float(scene.get("duration_sec") or 0) or 0.0
             try:
