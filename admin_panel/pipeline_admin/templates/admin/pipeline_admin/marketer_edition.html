@@ -1,0 +1,7 @@
+{% extends "admin/pipeline_admin/marketer.html" %}
+{% load tz %}
+{% block content %}{% localtime off %}<div class="mk">
+<p><a href="{% url 'marketer' %}?project={{ project.id }}">Открыть текущий отчёт {{ project.title }}</a></p>
+<p>Сохранённый план · {{ plan_time|date:"d.m.Y H:i" }} МСК{% if brief_plan.pilot %} · резервный план{% endif %}</p>
+{% include "admin/pipeline_admin/marketer_advice.html" %}
+</div>{% endlocaltime %}{% endblock %}

@@ -5,6 +5,32 @@ from django.utils.html import escape
 from django.utils.safestring import mark_safe
 
 
+def readable_plan(plan):
+    """Translate internal evidence fields in saved and newly generated editorial copy."""
+    if not isinstance(plan, dict):
+        return None
+
+    def reader_text(text):
+        text = re.sub(r"\b([Сс]) control_48h\b", r"\1 ориентиром на вторые сутки из карточки", text)
+        text = re.sub(r"\b([Оо])риентир control_48h\b", r"\1риентир на вторые сутки в карточке", text)
+        text = re.sub(r"\bcontrol_48h\b", "ориентир на вторые сутки", text)
+        text = re.sub(r"\b([Бб])ез video_study\b", r"\1ез разбора кадров и звука", text)
+        return re.sub(r"\bvideo_study\b", "разбор кадров и звука", text)
+
+    def fields(obj, names):
+        return {**obj, **{name: reader_text(obj[name]) for name in names if isinstance(obj.get(name), str)}}
+
+    result = fields(plan, ("summary", "limitations"))
+    result["actions"] = [fields(card, ("title", "action", "evidence", "check"))
+                         for card in plan.get("actions", []) if isinstance(card, dict)]
+    for card in result["actions"]:
+        if card.get("metric") == "views":
+            card["benchmark"] = next((s["control"] for s in card.get("sources", [])
+                                      if s.get("control") and s.get("platform") == card.get("platform")
+                                      and s.get("language") == card.get("language")), None)
+    return result
+
+
 def format_brief(value):
     # Escape first. No model-provided HTML, images, CSS or links are executable.
     output, items = [], []

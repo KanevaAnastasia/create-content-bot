@@ -1,7 +1,21 @@
-<section class="mk-card" id="ai-plan"><h2>3 важных совета на сегодня</h2>
-<p class="muted">Каждый день в 09:00 МСК запускается сбор статистики, затем — анализ просмотров, реакций, удержания и доступных комментариев. Советы появляются после завершения анализа.</p>
-{% if can_change and project %}<form method="post">{% csrf_token %}<input type="hidden" name="project" value="{{ project.id }}"><input type="hidden" name="language" value="ru"><button name="action" value="brief">Обновить три совета</button><small> Использует настроенный AI и его бюджет.</small></form>{% endif %}
+<section class="mk-card" id="ai-plan"><h2>Что снимать в ближайшие два дня</h2>
+{% if report.strategy_notice %}<p>{{ report.strategy_notice }}</p>{% endif %}
 {% if report.brief_error %}<p class="warning">{{ report.brief_error }}</p>{% endif %}
-{% if brief_stale %}<p class="muted">После этого анализа статистика обновлялась. Советы относятся к предыдущему срезу.</p>{% endif %}
-{% if brief_plan %}<p class="plan-summary">{{ brief_plan.summary }}</p><div class="mk-grid">{% for card in brief_plan.actions %}<article class="mk-card plan-card plan-{{ card.priority }}"><small>СОВЕТ {{ forloop.counter }}</small><h3>{{ card.title }}</h3><p>{{ card.action }}</p><div class="plan-label">ПОЧЕМУ ЭТО ВАЖНО</div><p>{{ card.evidence }}</p><div class="plan-label">КАК ОЦЕНИТЬ РЕЗУЛЬТАТ</div><p>{{ card.check }}</p></article>{% endfor %}</div><details><summary>Ограничения анализа</summary><p>{{ brief_plan.limitations }}</p></details>
-{% else %}<p>Анализ ещё не готов. Здесь появятся три конкретных рекомендации по контенту, а не технические задания.</p>{% endif %}</section>
+{% if brief_stale and not brief_plan.pilot %}<p class="warning">Этот план составлен до последнего изменения источников. Обновите анализ, чтобы учесть свежие данные.</p>{% endif %}
+{% if legacy_plan %}<details><summary>Предыдущие советы · {{ plan_time|date:"d.m.Y" }}</summary>{% endif %}
+{% if brief_plan %}
+{% if plan_time and not brief_plan.pilot %}<small>План от {{ plan_time|date:"d.m.Y H:i" }} МСК{% if report.brief_provider == "openai" %} · редактор OpenAI{% endif %}</small>{% endif %}
+<p class="plan-summary">{{ brief_plan.summary }}</p>
+{% if review_note %}<p class="source"><b>После проверки ревьюером</b><br>{{ review_note }}</p>{% endif %}
+<div class="mk-grid">{% for card in brief_plan.actions %}<article class="mk-card plan-card plan-{{ card.priority }}">
+<small>{% if forloop.first %}Сегодня{% elif forloop.last %}Развитие серии{% else %}Завтра{% endif %}{% if card.platform %} · {{ card.platform }} {{ card.language|upper }}{% endif %}</small>
+<h3>{{ card.title }}</h3><p>{{ card.action }}</p><h4>Почему стоит проверить</h4><p>{{ card.evidence }}</p>
+<h4>Как принять решение</h4>{% if card.measure %}<p><b>Первый замер через 48 часов</b> · {{ card.measure }}. {% if card.metric == "watch_percentage" %}Если Analytics ещё обрабатывает данные, отложите вывод до появления показателя.{% endif %}</p>{% endif %}<p>{{ card.check }}</p>
+{% if card.benchmark %}<p><b>Ориентир на вторые сутки</b> · {{ card.benchmark.median|floatformat:"-1g" }} просмотров, медиана {{ card.benchmark.n }} сопоставимых публикаций в возрасте 36–60 часов.</p>{% endif %}
+{% if card.sources %}<details><summary>Ролики и цифры · {{ card.sources|length }}</summary>{% for source in card.sources %}{% include "admin/pipeline_admin/marketer_source.html" %}{% endfor %}</details>{% endif %}</article>{% endfor %}</div>
+{% if brief_plan.limitations %}<p class="muted">{{ brief_plan.limitations }}</p>{% endif %}
+{% elif brief_html %}{{ brief_html }}{% else %}<p>Запустите анализ проекта. Он подберёт примеры и предложит два выпуска и эксперимент для серии.</p>{% endif %}
+{% if legacy_plan %}</details>{% endif %}
+{% if report.previous_brief.plan.summary %}<details><summary>Предыдущий план · {{ report.previous_brief.day }}</summary><p>{{ report.previous_brief.plan.summary }}</p>{% for card in report.previous_brief.plan.actions %}<p><b>{{ card.title }}</b> {{ card.check }}</p>{% endfor %}</details>{% endif %}
+</section>
+{% if report.plan_history %}<details class="mk-card"><summary>История планов съёмки · {{ report.plan_history|length }}</summary>{% for e in report.plan_history reversed %}<p><a href="?project={{ project.id }}&amp;plan={{ e.id }}#ai-plan">{{ e.day }} · {{ e.plan.summary }}</a></p>{% endfor %}</details>{% endif %}

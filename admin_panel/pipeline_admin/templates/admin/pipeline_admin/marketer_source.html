@@ -1,0 +1,9 @@
+<div class="source">
+<small>{{ source.kind }} · {{ source.platform }} {{ source.language|default:""|upper }}{% if source.trial %} · Trial{% endif %}</small>
+<p>{% if source.url %}<a href="{{ source.url }}" target="_blank" rel="noopener noreferrer">{{ source.title }}</a>{% else %}{{ source.title }}{% endif %}</p>
+{% if source.facts %}<p>{{ source.facts }}</p>{% endif %}
+{% if source.observed_at %}<small>Замер {{ source.observed_at|slice:":10" }}</small>{% endif %}
+{% if source.control %}<p>Ориентир на вторые сутки: {{ source.control.median|floatformat:"-1g" }} просмотров, медиана {{ source.control.n }} других публикаций в возрасте 36–60 часов.</p>{% endif %}
+{% if source.quotes %}<details><summary>Комментарии под этой публикацией</summary>{% for quote in source.quotes %}<blockquote>{{ quote }}</blockquote>{% endfor %}</details>{% endif %}
+{% if source.study %}<details><summary>Что происходит в видео</summary><p>{{ source.study.opening }} {{ source.study.development }} {{ source.study.ending }}</p></details>{% endif %}
+</div>

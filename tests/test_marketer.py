@@ -155,11 +155,11 @@ def test_niche_empty_results_does_not_call_videos(monkeypatch):
 def test_ai_only_sends_allowlisted_report_fields(monkeypatch):
     import app.llm_utils
     seen = []
-    plan = {"summary": "План", "actions": [{"title": "Тест", "action": "Хук", "evidence": "Нет данных", "check": "Через 7 дней"}] * 3}
+    plan = {"summary": "План", "actions": [{"title": "Тест", "action": "Хук", "evidence": "Нет данных", "check": "Через 7 дней", "source_ids": ["O1"], "platform": "youtube", "language": "ru"}] * 3}
     monkeypatch.setattr(app.llm_utils, "gemini_generate_sync", lambda prompt, **kw: seen.append(prompt) or __import__('json').dumps(plan))
     data = row("a", 10, access_token="DO_NOT_SEND", payload_json={"secret": "DO_NOT_SEND"},
                comments_sample={"count": 12, "more": True,
-                                "items": [{"text": "Покажите замену сахара", "username": "DO_NOT_SEND"}] * 12})
+                                "items": [{"text": f"Покажите замену сахара {n}", "username": "DO_NOT_SEND"} for n in range(12)]})
     assert m.marketing_brief("Проект", [data], [], "")["summary"] == "План"
     assert "DO_NOT_SEND" not in seen[0]
     assert "недоверенные" in seen[0]
@@ -184,6 +184,40 @@ def test_plan_cards_and_subscribers_render_safely(page):
     assert "90 дней" in html
 
 
+def test_saved_plan_explains_technical_fields_and_displays_matching_early_benchmark(page):
+    from django.template.loader import render_to_string
+    sample = {"median": 7118, "n": 9}
+    refs = [{"platform": "vk", "language": "en", "control": {"median": 999, "n": 3}},
+            {"platform": "vk", "language": "ru", "control": sample}]
+    card = {"metric": "views", "platform": "vk", "language": "ru", "sources": refs,
+            "check": "Сравнить с control_48h выпуска."}
+    original = {"summary": "Снимите ответ.", "limitations": "Без video_study вывод ограничен.",
+                "actions": [card, {**card, "metric": "watch_percentage"}]}
+    plan = page.readable_plan(original)
+    assert plan["actions"][0]["benchmark"] == sample
+    assert "benchmark" not in plan["actions"][1]
+    assert "control_48h" in original["actions"][0]["check"]
+    html = render_to_string("admin/pipeline_admin/marketer_edition.html",
+                            {"project": SimpleNamespace(id=uuid.uuid4()), "brief_plan": plan,
+                             "review_note": "Измерьте объём ячейки."})
+    assert "Без разбора кадров и звука" in html and "с ориентиром на вторые сутки" in html
+    assert "control_48h" not in html and "video_study" not in html
+    assert "медиана 9 сопоставимых публикаций" in html
+    assert "Измерьте объём ячейки." in html
+
+
+def test_review_is_bound_to_the_saved_project_edition_across_worker_updates(page):
+    project_id, other_id = uuid.uuid4(), uuid.uuid4()
+    task = page.reserve_report(project_id, "analyze")
+    editions = [{"id": task, "plan": {"summary": "Первый"}}]
+    assert page.update_report(project_id, task, plan_history=editions)
+    page.record_edition_review(project_id, task, "Проверена цитата в VK.")
+    assert page.update_report(project_id, task, plan_history=editions + [{"id": "next", "plan": {"summary": "Следующий"}}])
+    assert page.read_report(project_id)["edition_reviews"] == {task: "Проверена цитата в VK."}
+    with pytest.raises(ValueError, match="истории этого проекта"):
+        page.record_edition_review(other_id, task, "Другая цитата")
+
+
 def test_background_report_keeps_project_scope(page, monkeypatch):
     project_id = uuid.uuid4()
     t = page.reserve_report(project_id, "refresh")
@@ -196,7 +230,8 @@ def test_background_report_keeps_project_scope(page, monkeypatch):
     calls = []
     monkeypatch.setattr(page.PublicationJob.objects, "filter", lambda **kwargs: calls.append(kwargs) or Query())
     page.run_report(project_id, t, "refresh")
-    assert calls == [{"project": project, "status": "published"}]
+    assert len(calls) == 1 and calls[0]["project"] == project and calls[0]["status"] == "published"
+    assert calls[0]["published_at__gte"].tzinfo is not None
     assert page.read_report(project_id)["state"] == "done"
 
 
@@ -211,7 +246,16 @@ def test_marketer_queue_cannot_receive_publication_routes(page):
 def test_refresh_collects_new_youtube_behaviour(page, monkeypatch, action, fail_ai):
     pid = uuid.uuid4()
     task = page.reserve_report(pid, "refresh")
-    project = SimpleNamespace(id=pid, slug="discipline", title="Discipline")
+    project = SimpleNamespace(id=pid, slug="discipline", title="Discipline", description="Stories")
+    monkeypatch.setattr(page, "project_env", lambda *args: "")
+    monkeypatch.setattr(page.ContentSeries.objects, "filter", lambda **kw: SimpleNamespace(values_list=lambda *a, **k: []))
+    hit = {"title": "A related story", "url": "https://www.youtube.com/watch?v=abcdef12345", "platform": "youtube"}
+    monkeypatch.setattr(page, "collect_market", lambda *a, **kw: {"at": "2026-11-20T06:00:00Z", "favorites": [], "items": [hit], "searches": []})
+    def screen(profile, market, old):
+        hit["editorial_review"] = {"fit": "direct", "idea": "Another test"}
+        return {}
+    monkeypatch.setattr(page, "review_market", screen)
+    monkeypatch.setattr(page, "review_sources", lambda *a: {})
     monkeypatch.setattr(page.Project.objects, "get", lambda **kw: project)
     class Query:
         def select_related(self, *a): return self
@@ -226,6 +270,7 @@ def test_refresh_collects_new_youtube_behaviour(page, monkeypatch, action, fail_
     seen = []
     page.update_report(pid, task, brief={"summary": "old"})
     def brief(title, rows, niche, query):
+        assert niche == [hit]
         seen.append(rows)
         if fail_ai:
             raise RuntimeError("AI unavailable")
@@ -240,6 +285,8 @@ def test_refresh_collects_new_youtube_behaviour(page, monkeypatch, action, fail_
         assert seen[0][0]["metrics"]["views"] == 4
         assert result["brief"]["summary"] == ("old" if fail_ai else "new")
         assert bool(result.get("brief_error")) == fail_ai
+        assert result["pilot"]["actions"] and result["market"]["items"] == [hit]
+        assert result["plan_history"][-1]["id"] == task
 
 
 def test_homepage_marketer_link_matches_registered_route(page):
@@ -269,3 +316,15 @@ def test_youtube_destination_link_pins_en_even_with_ru_post(page, monkeypatch):
     assert response.status_code == 302
     assert captured[0]['language'] == 'en'
     assert captured[0]['project_slug'] == 'grandma_kitchen'
+
+
+def test_reference_edits_do_not_overwrite_a_running_project_or_another_project(page):
+    pid, other = uuid.uuid4(), uuid.uuid4()
+    task = page.reserve_report(pid, "analyze")
+    refs = [{"url": "https://www.youtube.com/watch?v=12345678901", "note": "Начало"}]
+    assert page.save_references(pid, refs, 0)
+    assert not page.save_references(pid, [], 0)
+    assert page.update_report(pid, task, state="done", market_reference_revision=0)
+    assert page.read_report(pid)["references"] == refs
+    assert page.read_report(pid)["reference_revision"] == 1
+    assert not page.read_report(other)

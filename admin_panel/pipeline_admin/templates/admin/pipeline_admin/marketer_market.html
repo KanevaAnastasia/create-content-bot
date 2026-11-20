@@ -1,0 +1,30 @@
+<section class="mk-card" id="evidence"><h2>На какие свои ролики опереться</h2>
+<div class="mk-grid">{% for source in notes.leaders %}{% include "admin/pipeline_admin/marketer_source.html" %}{% empty %}<p>После первого анализа здесь появятся публикации из сопоставимых групп.</p>{% endfor %}</div>
+<h3>Что спрашивают зрители</h3>
+{% for q in notes.questions %}<blockquote>{{ q.text }}<p><small>Получено реплик под этим роликом: {{ q.count }}{% if q.more %}, у площадки есть ещё{% endif %}.</small> {% if q.source.url %}<a href="{{ q.source.url }}" target="_blank" rel="noopener noreferrer">{{ q.source.title }}</a>{% endif %}</p></blockquote>
+{% empty %}<p>В доступной выборке пока нет вопросов или просьб, которые можно показать с источником.</p>{% endfor %}
+</section>
+<section class="mk-card mk-market" id="market"><h2>Какие ролики нашлись на рынке</h2>
+{% if market.at %}<p>Поиск от {{ market_time|date:"d.m.Y H:i" }} МСК. По теме найдено {{ market.items|length }}, изучено редактором {{ market.screened|default:"0" }}, отобрано для блога {{ selected_items|length }}. Поиск охватывает короткие видео YouTube и, при подключении, VK за 90 дней. За неделю сохраняются находки предыдущих поисков.</p>
+<details><summary>Запросы, охват и доступность площадок</summary>{% for run in market.searches %}<p>{{ run.platform }} · {{ run.language|upper }} · «{{ run.query }}» · получено {{ run.found }}, прошло отбор {{ run.matched }}. {% if run.warning %}<span class="warning">{{ run.warning }}</span>{% endif %}</p>{% endfor %}</details>
+{% else %}<p>Поиск запустится автоматически вместе с анализом проекта.</p>{% endif %}
+{% if video_notice %}<p class="muted">{{ video_notice }} Редактор использует сведения о публикациях и доступные комментарии.</p>{% endif %}
+{% if market.screen_warning %}<p class="warning">{{ market.screen_warning }}</p>{% endif %}
+{% for item in selected_items %}{% if forloop.counter == 5 %}<details><summary>Остальные находки</summary>{% endif %}
+<article class="source"><h3><a href="{{ item.url }}" target="_blank" rel="noopener noreferrer">{{ item.title }}</a></h3>
+<p>{{ item.platform }} · {{ item.channel }} · {{ item.views|floatformat:"-1g"|default:"—" }} просмотров · {{ item.duration_seconds|floatformat:"0" }} сек.</p>
+<p>{{ item.editorial_review.reason }}</p><p><b>Что попробовать в блоге.</b> {{ item.editorial_review.idea }}</p>
+<p>{% if item.growth_per_day != None %}Изменение между двумя замерами в пересчёте на сутки: {{ item.growth_per_day|floatformat:"0g" }} просмотров.{% else %}В среднем с публикации {{ item.views_per_day|default_if_none:"—" }} просмотров в день.{% endif %} <small>Срез {{ item.observed_at|slice:":10" }}.</small></p>
+{% if item.study.opening %}<p><b>Начало.</b> {{ item.study.opening }} <b>Дальше.</b> {{ item.study.development }} <b>Финал.</b> {{ item.study.ending }}</p>{% elif item.study.warning %}<small>{{ item.study.warning }}</small>{% else %}<small>Доступны название, описание и публичные показатели.</small>{% endif %}
+{% if item.comments_sample.groups %}<details><summary>Реакции зрителей этого ролика</summary>{% for g in item.comments_sample.groups %}<p>{{ g.title }} · {{ g.count }}</p>{% for c in g.examples %}<blockquote>{{ c.text }}</blockquote>{% endfor %}{% endfor %}</details>{% endif %}
+</article>{% if forloop.last and forloop.counter >= 5 %}</details>{% endif %}{% empty %}{% if market.at %}<p>Подходящих примеров пока нет. Свои публикации и сохранённые ссылки доступны для планирования.</p>{% endif %}{% endfor %}
+{% if remaining_items %}<details><summary>Исключённые и ещё не проверенные · {{ remaining_items|length }}</summary>{% for item in remaining_items %}<p><a href="{{ item.url }}" target="_blank" rel="noopener noreferrer">{{ item.title }}</a> · {{ item.editorial_review.reason|default:"Редактор пока не проверил соответствие стилю." }}</p>{% endfor %}</details>{% endif %}
+</section>
+<section class="mk-card" id="references"><h2>Ролики, которые мне нравятся</h2>
+<p>Эта подборка принадлежит проекту {{ project.title }}. Анализ начинает с неё и работает также при пустом списке.</p>
+{% if references_stale %}<p>Подборка изменилась после предыдущего поиска.</p>{% endif %}
+{% for item in market.favorites %}<div class="source"><a href="{{ item.url }}" target="_blank" rel="noopener noreferrer">{{ item.title|default:item.url }}</a>{% if item.note %}<p>{{ item.note }}</p>{% endif %}{% if item.warning %}<p class="warning">{{ item.warning }}</p>{% endif %}{% if item.study.opening %}<p>{{ item.study.opening }} {{ item.study.development }} {{ item.study.ending }}</p>{% endif %}</div>{% endfor %}
+{% if can_change and project %}<form method="post">{% csrf_token %}<input type="hidden" name="project" value="{{ project.id }}">{{ form.reference_revision }}
+<label for="{{ form.references.id_for_label }}">По одной полной ссылке на строку. При желании добавьте | и заметку.</label>
+{{ form.references }}<div class="mk-actions"><button name="action" value="references">Сохранить подборку</button></div></form>{% endif %}
+</section>

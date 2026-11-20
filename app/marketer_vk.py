@@ -9,7 +9,7 @@ _read_lock = threading.Lock()
 def read_vk(slug, method, token, **params):
     from .social_publishers import _vk_call
     from .marketer import MetricsUnavailable
-    if method not in {"groups.getById", "video.get", "wall.getById"}:
+    if method not in {"groups.getById", "video.get", "video.search", "video.getComments", "wall.getById"}:
         raise ValueError("Read-only VK method required")
     # Both projects can share one VK user: avoid parallel request bursts.
     with _read_lock:
@@ -59,3 +59,19 @@ def video_metrics(job, token):
                   likes=number((item.get("likes") or {}).get("count")),
                   shares=number((item.get("reposts") or {}).get("count")))
     return values
+
+
+def video_comments(slug, video_id, token, count):
+    from datetime import datetime, timezone
+    from .marketer import MetricsUnavailable
+    from .marketer_comments import summarize_comments
+    if count == 0:
+        return summarize_comments([])
+    owner, ident = video_id.split("_")
+    try:
+        data = read_vk(slug, "video.getComments", token, owner_id=owner, video_id=ident, count=30, sort="desc")
+        items = [{"text": r.get("text"), "timestamp": datetime.fromtimestamp(r["date"], timezone.utc).isoformat() if r.get("date") else ""}
+                 for r in data.get("items", []) if r.get("text")]
+        return summarize_comments(items, (data.get("count") or 0) > len(items))
+    except MetricsUnavailable as exc:
+        return {"warning": str(exc)}
