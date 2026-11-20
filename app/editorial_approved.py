@@ -162,6 +162,9 @@ def ass_events(cue,style,width,height,base_style):
         return f'Dialogue: {layer},{_timestamp(t0)},{_timestamp(t1)},{base_style},{name},0,0,0,,{tags}{path}{{\\p0}}'
     alpha=round(255*(1-opacity))
     output=[event(0,start,end,f'{{\\an7\\pos(0,0)\\bord0\\shad0\\1c&H000000&\\1a&H{alpha:02X}&\\p1}}',f'm 0 0 l {width} 0 {width} {height} 0 {height}')]
+    from . import editorial_font_selection as selected
+    revised = style.get('editorial_font_revision') == selected.REVISION
+    semantic_parts = tuple(zip(roles, parts))
     offset=0
     for role,text in zip(roles,parts):
         count=len(text.split())
@@ -171,7 +174,9 @@ def ass_events(cue,style,width,height,base_style):
         for visible,t0,t1 in states:
             if t1<=t0:
                 continue
-            for color,path in drawings(sid,lang,role,text,visible):
+            ink = (selected.drawings(sid,lang,semantic_parts,role,visible) if revised
+                   else drawings(sid,lang,role,text,visible))
+            for color,path in ink:
                 bgr=color[5:7]+color[3:5]+color[1:3]
                 tags=(f'{{\\an7\\pos(0,0)\\fscx{width/W*100:.5f}\\fscy{height/H*100:.5f}'
                       f'\\bord0\\shad0\\1c&H{bgr}&\\1a&H00&\\p1}}')

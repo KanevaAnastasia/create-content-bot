@@ -1,0 +1,482 @@
+{
+  "fonts": {
+    "young": {
+      "name": "The Youngest Script",
+      "file": "editorial_local/The Youngest Script-Rg.ttf",
+      "sha256": "1d1460884ac28f94f6edc2b3aac0ee83de6a5a1e4e258d391ffc5e900b27c5c0",
+      "source": "https://mycreativeland.com/family/the-youngest/regular/"
+    },
+    "man": {
+      "name": "Manrope",
+      "file": "CF-Manrope.ttf",
+      "sha256": "2b934e0c5120340d51eaa45f4cdd4c21abdf16efee8e39e3ee116c53f82fbe1f",
+      "source": "https://online-fonts.com/fonts/manrope"
+    },
+    "steelB": {
+      "name": "Steelfish Bold",
+      "file": "editorial_local/Steelfish Bd.otf",
+      "sha256": "6f498ce85ef9cbb37ec0af9308840f5eaa7a62a7a3da94825328c3aa8eb33845",
+      "source": "https://www.dafont.com/steelfish.font"
+    },
+    "tex": {
+      "name": "TeX Gyre Adventor Italic",
+      "file": "editorial_local/TeXGyreAdventor-Italic.ttf",
+      "sha256": "dab61a5d220986c5ea1a01e62a3433273a14e738e4a95218e0f169729f0f09a0",
+      "source": "https://www.gust.org.pl/projects/e-foundry/tex-gyre/adventor"
+    },
+    "bebB": {
+      "name": "Bebas Neue Bold",
+      "file": "editorial_local/BebasNeue-BebasNeueBold.ttf",
+      "sha256": "b0e717b380bdf85b2885e60e73ea50d9e03283a687aca224999f5c3fe0fe8b3e",
+      "source": "https://www.fontfabric.com/fonts/bebas-neue/"
+    },
+    "archive3a": {
+      "name": "CF Reviewed 3 1",
+      "file": "editorial_approved/CF Reviewed 3 1.ttf",
+      "sha256": "6e22cbbd89d381fa42dc3b4c6d69f7e950b80dd9fdc46e01cd3fd84751b7ccce"
+    },
+    "archive3b": {
+      "name": "CF Reviewed 3 2",
+      "file": "editorial_approved/CF Reviewed 3 2.ttf",
+      "sha256": "bce55158a06b45eff38b2707cde1bc716e02cfe26def42d5a7063de31c379816"
+    },
+    "archive3c": {
+      "name": "CF Reviewed 3 3",
+      "file": "editorial_approved/CF Reviewed 3 3.ttf",
+      "sha256": "1b92ff0e0807ad343029a14f5cba5260402fec9eea79030d065a1b46988687b5"
+    },
+    "playi": {
+      "name": "Playfair Display Italic",
+      "file": "editorial_selected/PlayfairItalic.ttf",
+      "sha256": "a5e26dc5e2e77fb2803a0bf02fd4f81ee136ec8dea863ccdb0c59a263b21378b",
+      "weight": 650,
+      "source": "https://online-fonts.com/fonts/playfair-display"
+    },
+    "did": {
+      "name": "Didot Bold",
+      "file": "editorial_local/Didot Bold.ttf",
+      "sha256": "419cbbdaf68a7e8e88852d24f7a4d4f68301358ebd6c4919120a60eeb8308cb2",
+      "source": "https://support.apple.com/en-us/120414"
+    },
+    "mur": {
+      "name": "Le Murmure",
+      "file": "editorial_selected/LeMurmure.otf",
+      "sha256": "cd4fe11f22a2b0756faf03f4a09ddf46d7e5f9d3f66f71324e69aae178d90f69",
+      "source": "https://online-fonts.com/fonts/le-murmure"
+    },
+    "ci": {
+      "name": "Cormorant Garamond SemiBold Italic",
+      "file": "CF-CormorantItalic.ttf",
+      "sha256": "f46585fdaf88f3af2ac0ebe7f821d80c6ac5c2ea3065abd2bd6acd83f3a7f8bb",
+      "source": "https://online-fonts.com/fonts/cormorant-garamond"
+    },
+    "at": {
+      "name": "Atziluth Script",
+      "file": "editorial_local/Atziluth Script.otf",
+      "sha256": "8601353dd2a1904af0ee3b1d635ad12b2feda3cd63c5acacdde9b12f4629a857",
+      "source": "https://online-fonts.com/fonts/atziluth-script"
+    }
+  },
+  "styles": {
+    "1": {
+      "fonts": [
+        "young",
+        "man",
+        "steelB"
+      ],
+      "variant": "А",
+      "ru": [
+        {
+          "text": "Почему",
+          "box": [
+            76,
+            606,
+            683,
+            855
+          ],
+          "color": "#EC5424"
+        },
+        {
+          "text": "не",
+          "box": [
+            113,
+            831,
+            213,
+            883
+          ],
+          "color": "#FFFAF1"
+        },
+        {
+          "text": "ТЫ?",
+          "box": [
+            213,
+            779,
+            593,
+            1087
+          ],
+          "color": "#FFFAF1"
+        }
+      ],
+      "en": [
+        {
+          "text": "Why",
+          "box": [
+            144,
+            584,
+            621,
+            854
+          ],
+          "color": "#EA5527"
+        },
+        {
+          "text": "not",
+          "box": [
+            105,
+            820,
+            217,
+            881
+          ],
+          "color": "#FFFAF1"
+        },
+        {
+          "text": "YOU?",
+          "box": [
+            228,
+            778,
+            653,
+            1093
+          ],
+          "color": "#FFFAF1"
+        }
+      ]
+    },
+    "2": {
+      "fonts": [
+        "young",
+        "tex",
+        "bebB"
+      ],
+      "variant": "В",
+      "ru": [
+        {
+          "text": "Почему",
+          "box": [
+            34,
+            213,
+            686,
+            509
+          ],
+          "color": "#FCC238"
+        },
+        {
+          "text": "не",
+          "box": [
+            275,
+            648,
+            445,
+            730
+          ],
+          "color": "#FAF4E2"
+        },
+        {
+          "text": "ТЫ?",
+          "box": [
+            139,
+            756,
+            602,
+            1136
+          ],
+          "color": "#FCF8F3"
+        }
+      ],
+      "en": [
+        {
+          "text": "Why",
+          "box": [
+            92,
+            192,
+            666,
+            518
+          ],
+          "color": "#FCC339"
+        },
+        {
+          "text": "not",
+          "box": [
+            265,
+            631,
+            472,
+            733
+          ],
+          "color": "#FAF4E1"
+        },
+        {
+          "text": "YOU?",
+          "box": [
+            98,
+            756,
+            638,
+            1140
+          ],
+          "color": "#FCF8F3"
+        }
+      ]
+    },
+    "3": {
+      "fonts": [
+        "archive3a",
+        "archive3b",
+        "archive3c"
+      ],
+      "variant": null,
+      "ru": [
+        {
+          "text": "ПОЧЕМУ",
+          "box": [
+            98,
+            267,
+            660,
+            492
+          ],
+          "color": "#FAF7F4"
+        },
+        {
+          "text": "не",
+          "box": [
+            220,
+            665,
+            376,
+            759
+          ],
+          "color": "#F9F6F4",
+          "swash": {
+            "file": "swash-3-ru-1.png",
+            "box": [
+              204,
+              750,
+              449,
+              808
+            ],
+            "color": "#FC3259"
+          }
+        },
+        {
+          "text": "ты?",
+          "box": [
+            63,
+            709,
+            699,
+            1043
+          ],
+          "color": "#FC3259",
+          "swash": {
+            "file": "swash-3-ru-2.png",
+            "box": [
+              172,
+              972,
+              557,
+              1066
+            ],
+            "color": "#FC3259"
+          }
+        }
+      ],
+      "en": [
+        {
+          "text": "WHY",
+          "box": [
+            187,
+            270,
+            573,
+            503
+          ],
+          "color": "#FAF7F4"
+        },
+        {
+          "text": "not",
+          "box": [
+            227,
+            662,
+            441,
+            770
+          ],
+          "color": "#F9F6F4"
+        },
+        {
+          "text": "you?",
+          "box": [
+            99,
+            709,
+            702,
+            1117
+          ],
+          "color": "#FC3258",
+          "swash": {
+            "file": "swash-3-en-2.png",
+            "box": [
+              244,
+              958,
+              557,
+              1037
+            ],
+            "color": "#FC3258"
+          }
+        }
+      ]
+    },
+    "5": {
+      "fonts": [
+        "playi",
+        "young",
+        "did"
+      ],
+      "variant": "Б",
+      "ru": [
+        {
+          "text": "ПОЧЕМУ",
+          "box": [
+            57,
+            613,
+            681,
+            726
+          ],
+          "color": "#F8E1C0"
+        },
+        {
+          "text": "не",
+          "box": [
+            113,
+            732,
+            542,
+            842
+          ],
+          "color": "#E76830"
+        },
+        {
+          "text": "ТЫ?",
+          "box": [
+            64,
+            833,
+            618,
+            1058
+          ],
+          "color": "#F8E2C1"
+        }
+      ],
+      "en": [
+        {
+          "text": "WHY",
+          "box": [
+            152,
+            612,
+            593,
+            739
+          ],
+          "color": "#F9E2C0"
+        },
+        {
+          "text": "not",
+          "box": [
+            71,
+            695,
+            516,
+            826
+          ],
+          "color": "#E5672F"
+        },
+        {
+          "text": "YOU?",
+          "box": [
+            41,
+            832,
+            676,
+            1066
+          ],
+          "color": "#F8E2C0"
+        }
+      ]
+    },
+    "9": {
+      "fonts": [
+        "mur",
+        "ci",
+        "at"
+      ],
+      "variant": "А",
+      "ru": [
+        {
+          "text": "ПОЧЕМУ",
+          "box": [
+            151,
+            279,
+            643,
+            565
+          ],
+          "color": "#FDF9F6"
+        },
+        {
+          "text": "не",
+          "box": [
+            119,
+            662,
+            247,
+            730
+          ],
+          "color": "#FAF8F5"
+        },
+        {
+          "text": "ты?",
+          "box": [
+            76,
+            698,
+            701,
+            965
+          ],
+          "color": "#53C3FC",
+          "swash": {
+            "file": "swash-9-ru-2.png",
+            "box": [
+              113,
+              934,
+              634,
+              1098
+            ],
+            "color": "#53C3FC"
+          }
+        }
+      ],
+      "en": [
+        {
+          "text": "WHY",
+          "box": [
+            207,
+            275,
+            555,
+            563
+          ],
+          "color": "#FDF9F6"
+        },
+        {
+          "text": "not",
+          "box": [
+            95,
+            645,
+            273,
+            735
+          ],
+          "color": "#FBF8F6"
+        },
+        {
+          "text": "you?",
+          "box": [
+            43,
+            694,
+            702,
+            1125
+          ],
+          "color": "#52C2FC"
+        }
+      ]
+    }
+  }
+}

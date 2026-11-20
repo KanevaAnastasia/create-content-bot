@@ -1,6 +1,7 @@
 """Per-frame foreground segmentation and layered title composition, fully local."""
 from __future__ import annotations
 
+from functools import lru_cache
 import hashlib
 import json
 import logging
@@ -60,6 +61,15 @@ def foreground_mask(frame: Image.Image) -> Image.Image:
     mask = np.uint8(np.clip(mask, 0, 1)*255)
     return Image.fromarray(mask).resize(frame.size, Image.Resampling.LANCZOS)
 
+
+@lru_cache(maxsize=2)
+def _still_mask(size, rgb):
+    return foreground_mask(Image.frombytes('RGB', size, rgb))
+
+
+def still_foreground_mask(frame):
+    rgb = frame.convert('RGB')
+    return _still_mask(rgb.size, rgb.tobytes())
 
 
 def track_mask(previous, current, mask):
@@ -188,19 +198,24 @@ def build_mask_video(ffmpeg: str, source: Path, intervals, *, segment=None) -> P
         return target
 
 
+def depth_filter_graph(base, back, width, height):
+    from .post_production import _subtitle_filter
+    return (f'[0:v]split[background][foreground];'
+           f'[background]{_subtitle_filter(back)},format=gbrp[background_text];'
+           f'[foreground]{_subtitle_filter(base)},format=gbrp[foreground_dim];'
+           f'[1:v]scale={width}:{height}:flags=lanczos,format=gbrp[mask];'
+           '[background_text][foreground_dim][mask]maskedmerge[video]')
+
+
 def render_background(ffmpeg: str, source: Path, ass_path: Path, directory: Path):
-    from .post_production import _subtitle_filter, _run_ffmpeg, _video_dimensions, FFMPEG_UPSCALE_TIMEOUT_SEC
+    from .post_production import _run_ffmpeg, _video_dimensions, FFMPEG_UPSCALE_TIMEOUT_SEC
     base,back,front,intervals=split_ass(ass_path,directory)
     mask=build_mask_video(ffmpeg,source,intervals)
     width,height=_video_dimensions(source)
     if not width or not height:
         raise RuntimeError('Не удалось определить размер видео для маски персонажа.')
     output=directory/'depth_background.mp4'
-    graph=(f'[0:v]split[background][foreground];'
-           f'[background]{_subtitle_filter(back)},format=gbrp[background_text];'
-           f'[foreground]{_subtitle_filter(base)},format=gbrp[foreground_dim];'
-           f'[1:v]scale={width}:{height}:flags=lanczos,format=gbrp[mask];'
-           '[background_text][foreground_dim][mask]maskedmerge[video]')
+    graph = depth_filter_graph(base, back, width, height)
     _run_ffmpeg([ffmpeg,'-y','-i',str(source),'-i',str(mask),'-filter_complex',graph,
                  '-map','[video]','-map','0:a?','-c:v','libx264','-preset','medium','-crf','18',
                  '-pix_fmt','yuv420p','-c:a','copy','-movflags','+faststart',str(output)],

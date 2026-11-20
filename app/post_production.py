@@ -3458,11 +3458,21 @@ def render_title_overlay_preview(
             ass_path, [], title_cues=[cue for cue in cues if cue is not None],
             title_style=title_style, video_width=background.width, video_height=background.height,
         )
-        _run_ffmpeg(
-            [_resolve_ffmpeg(), "-y", "-i", str(source), "-vf", _subtitle_filter(ass_path),
-             "-frames:v", "1", str(destination)],
-            timeout=FFMPEG_SHORT_TIMEOUT_SEC, stage="title_preview",
-        )
+        from .title_depth import depth_filter_graph, has_depth, split_ass, still_foreground_mask
+
+        ffmpeg = _resolve_ffmpeg()
+        inputs = [ffmpeg, "-y", "-i", str(source)]
+        if has_depth(ass_path):
+            base, back, front, _ = split_ass(ass_path, directory)
+            mask_path = directory / "foreground.png"
+            still_foreground_mask(background).save(mask_path)
+            graph = depth_filter_graph(base, back, background.width, background.height)
+            inputs += ["-i", str(mask_path), "-filter_complex",
+                       graph + f";[video]{_subtitle_filter(front)}[preview]", "-map", "[preview]"]
+        else:
+            inputs += ["-vf", _subtitle_filter(ass_path)]
+        _run_ffmpeg(inputs + ["-frames:v", "1", str(destination)],
+                    timeout=FFMPEG_SHORT_TIMEOUT_SEC, stage="title_preview")
         return destination.read_bytes()
 
 

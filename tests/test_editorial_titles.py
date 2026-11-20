@@ -62,6 +62,8 @@ def test_picker_does_not_approve_without_explicit_style(monkeypatch):
     monkeypatch.setattr(picker, '_send_card', send)
     assert asyncio.run(picker.handle_picker_input(update, session, 'Стиль 9')) is True
     assert session['overlay_title_style'][titles.STYLE_KEY] == '9'
+    assert session['overlay_title_style']['editorial_font_revision'] == picker.REVISION
+    assert send.await_args.args[2]['editorial_font_revision'] == picker.REVISION
     assert asyncio.run(picker.handle_picker_input(update, session, 'ОК')) is False
     assert send.await_count == 1
 
@@ -101,4 +103,5 @@ def test_discipline_style_approval_resumes_scene_review(monkeypatch):
     asyncio.run(scene._handle_waiting_overlay_title_style_approval_state(update, None, chat_id=1, session=session, text='ОК'))
     assert session['state'] == scene.STATE_WAITING_SCENE_APPROVAL
     assert session['overlay_title_style'][titles.STYLE_KEY] == '9'
+    assert 'editorial_font_revision' not in session['overlay_title_style']
     assert scene.OVERLAY_TITLE_PENDING_NEXT_SESSION_KEY not in session

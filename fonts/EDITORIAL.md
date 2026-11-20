@@ -1,7 +1,17 @@
 # Current approved titles
 
-Styles 1/2/3/5/9 now use the frozen `editorial_approved/` assets via
-`app/editorial_approved.py`. These override the legacy ASS font presets below.
+New selections of styles 1, 2, 3, 5 and 9 use `editorial_selected/selection.json`.
+It records the typeface, weight, SHA-256, bounding box and ink color for each role.
+The picker stores the revision in the draft. Drafts saved before this revision
+use their existing artwork in `editorial_approved/`.
+
+Both the preview and the final video use the same ASS paths. For the reference
+title, the paths come from the saved lettering masks. For other text, the renderer
+loads the exact font files in local Playwright Chromium and shapes each semantic
+part. The brush strokes in style 3 are separate masks and appear with the
+corresponding word. On a new render host, provision the manifest entries in
+`fonts/editorial_local/` from the licensed desktop collection and install
+Playwright Chromium. The renderer checks each file against its recorded hash.
 See `docs/discipline-formats.md` for timing and automatic foreground compositing.
 
 # Legacy presets (kept for older drafts)

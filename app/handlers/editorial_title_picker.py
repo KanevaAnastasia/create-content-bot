@@ -9,6 +9,7 @@ from PIL import Image, ImageDraw, ImageFont
 from telegram import ReplyKeyboardMarkup
 
 from ..editorial_titles import FONT_DIR, STYLE_IDS, STYLES, STYLE_KEY, PARTS_KEY, DEFAULT_DIM, propose_parts, valid_parts
+from ..editorial_font_selection import REVISION
 from ..post_production import render_title_overlay_preview
 from .handlers_generation_utils import OVERLAY_TITLE_BY_LANG_SESSION_KEY, OVERLAY_TITLE_STYLE_SESSION_KEY
 
@@ -56,7 +57,7 @@ async def ask_picker(update, session, *, all_styles=True):
     parts = style.get(PARTS_KEY) or {}
     if not all(valid_parts(title, parts.get(lang)) for lang, title in titles.items()):
         parts = await propose_parts(titles)
-    style.update({PARTS_KEY: parts, 'dim_opacity': style.get('dim_opacity', DEFAULT_DIM)})
+    style.update({'editorial_font_revision': REVISION, PARTS_KEY: parts, 'dim_opacity': style.get('dim_opacity', DEFAULT_DIM)})
     session[OVERLAY_TITLE_STYLE_SESSION_KEY] = style
     await update.message.reply_text('Выберите оформление заголовка. На карточках ваш текст; фон — первый сгенерированный кадр.')
     for style_id in STYLE_IDS if all_styles else (str(style.get(STYLE_KEY) or '1'),):
@@ -83,6 +84,7 @@ async def handle_picker_input(update, session, text):
     choice = re.fullmatch(r'(?:стиль\s*)?(1|2|3|5|9)', low)
     if choice:
         style[STYLE_KEY] = choice.group(1)
+        style['editorial_font_revision'] = REVISION
     elif '|' in text:
         match = re.match(r'\s*(RU|EN)\s*:\s*(.*)', text, re.I | re.S)
         language, body = (match.group(1).lower(), match.group(2)) if match else ('ru', text)
