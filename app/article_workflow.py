@@ -30,6 +30,16 @@ def keyboard(row, buttons):
                                  for label, action in buttons])
 
 
+def topic_fields(row, topic):
+    if row.get("topic") == topic:
+        return {"topic": topic}
+    versions = list(row.get("versions", []))
+    if row.get("text") or row.get("images"):
+        versions.append({key: row[key] for key in ("topic", "text", "teaser", "image_prompt", "images") if key in row})
+    return {"topic": topic, "versions": versions, "text": "", "teaser": "", "image_prompt": "", "images": {},
+            "feedback": "", "image_feedback": "", "text_approved": False, "images_approved": False}
+
+
 async def show(bot, chat_id, row):
     state = row["state"]
     target = store.target_for(row)
@@ -42,12 +52,17 @@ async def show(bot, chat_id, row):
         buttons = [(str(n) + '. ' + t["title"], f"choose{n-1}") for n, t in enumerate(row["topics"], 1)]
         buttons += [("Другие пять тем", "more"), ("Своя тема / пожелания", "custom")]
     elif state == "topic":
-        text = f'Тема: {row["topic"]["title"]}\n\n{row["topic"].get("angle", "")}\n\nПосле согласования подготовлю текст через GPT.'
-        buttons = [("Тему согласовываю, написать статью", "draft"), ("Изменить тему", "custom")]
+        saved_text = bool(row.get("text"))
+        next_step = "После согласования покажу сохранённый текст." if saved_text else "После согласования подготовлю текст через GPT."
+        text = f'Тема: {row["topic"]["title"]}\n\n{row["topic"].get("angle", "")}\n\n{next_step}'
+        label = "Тему согласовываю, показать текст" if saved_text else "Тему согласовываю, написать статью"
+        buttons = [(label, "draft"), ("Изменить тему", "custom")]
     elif state == "text":
         await bot.send_message(chat_id=chat_id, text=row["text"])
         text = f'Короткий анонс для сториз:\n{row["teaser"]}\n\nСогласуйте текст и анонс. Затем подготовлю две картинки с Тимошей.'
-        buttons = [("Текст согласован, сделать картинки", "images"), ("Исправить текст или анонс", "edit")]
+        saved_images = all(Path(row.get("images", {}).get(k, "")).is_file() for k in ("horizontal", "vertical"))
+        label = "Текст согласован, показать картинки" if saved_images else "Текст согласован, сделать картинки"
+        buttons = [(label, "images"), ("Исправить текст или анонс", "edit")]
     elif state in {"images", "ready"}:
         for key, label in (("horizontal", "Горизонтальная картинка для статьи"), ("vertical", "Вертикальная картинка для сториз")):
             with Path(row["images"][key]).open("rb") as photo:
@@ -72,9 +87,11 @@ async def show(bot, chat_id, row):
         text = "Статья опубликована: " + row["url"]
         buttons = [("Прислать комплект для сториз ещё раз", "handoff")]
     elif state == "cancelled":
-        text = "Эта статья отменена. Следующие темы придут по расписанию."
+        text = "Статья отменена. Можно вернуться к сохранённому шагу кнопкой ниже. Следующие темы придут по расписанию."
     else:
         text = "Этот этап сейчас выполняется. Результат пришлю сюда."
+    if store.previous_state(row) is not None:
+        buttons += [("Предыдущий шаг", "back")]
     if state in {"topics", "topic", "text", "images", "ready", "failed"}:
         buttons += [("Отменить эту статью", "cancel")]
     await bot.send_message(chat_id=chat_id, text=test_notice + text, reply_markup=keyboard(row, buttons) if buttons else None,
@@ -174,11 +191,22 @@ async def callback(update, context):
                 index = int(action.removeprefix("choose"))
                 if not 0 <= index < 5:
                     raise ValueError("Неверный номер темы.")
-                row = store.change(iid, row["revision"], allowed={"topics"}, state="topic", topic=row["topics"][index])
+                row = store.change(iid, row["revision"], allowed={"topics"}, state="topic",
+                                   **topic_fields(row, row["topics"][index]))
             elif action in {"more", "draft", "images", "retry"}:
                 op = {"more": "topics", "draft": "draft", "images": "images", "retry": row.get("operation")}[action]
                 valid = {"more": {"topics"}, "draft": {"topic"}, "images": {"text"}, "retry": {"failed"}}
-                extra = {"image_version": row.get("image_version", 0) + 1, "text_approved": True} if action == "images" else {}
+                if action == "draft" and row["state"] == "topic" and row.get("text"):
+                    row = store.change(iid, row["revision"], allowed={"topic"}, state="text")
+                    await show(context.bot, chat_id, row)
+                    return
+                if (action == "images" and row["state"] == "text"
+                        and all(Path(row.get("images", {}).get(k, "")).is_file() for k in ("horizontal", "vertical"))):
+                    row = store.change(iid, row["revision"], allowed={"text"}, state="images", text_approved=True, images_approved=False)
+                    await show(context.bot, chat_id, row)
+                    return
+                extra = {"image_version": row.get("image_version", 0) + (0 if row.get("images") else 1),
+                         "text_approved": True} if action == "images" else {}
                 row = store.change(iid, row["revision"], allowed=valid[action], state="working", operation=op, **extra)
                 await query.message.reply_text("Готовлю следующий этап. Результат сохраню и пришлю сюда.")
                 await generate(context.bot, chat_id, row)
@@ -213,8 +241,11 @@ async def callback(update, context):
             elif action == "handoff" and row["state"] == "published":
                 await deliver_handoff(context.bot, chat_id, row, again=True)
                 return
+            elif action == "back":
+                row = store.go_back(iid, row["revision"])
             elif action == "cancel":
-                row = store.change(iid, row["revision"], allowed={"topics", "topic", "text", "images", "ready", "failed"}, state="cancelled")
+                row = store.change(iid, row["revision"], allowed={"topics", "topic", "text", "images", "ready", "failed"},
+                                   state="cancelled", cancelled_from=row["state"])
             else:
                 raise ValueError("Этот шаг недоступен. Откройте /articles.")
             await show(context.bot, chat_id, row)
@@ -251,7 +282,7 @@ async def apply_reply(update, context, ref):
                 raise ValueError("Напишите правку длиной до 3500 символов.")
             if ref["kind"] == "custom":
                 row = store.change(row["id"], row["revision"], allowed={"topics", "topic"}, state="topic",
-                                   topic={"title": feedback.split("\n")[0][:100], "angle": feedback})
+                                   **topic_fields(row, {"title": feedback.split("\n")[0][:100], "angle": feedback}))
                 await show(context.bot, update.effective_chat.id, row)
             else:
                 image_edit = ref["kind"] in {"imageedit", "edit_h", "edit_v"}

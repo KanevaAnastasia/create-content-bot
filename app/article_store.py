@@ -118,6 +118,37 @@ def issue(iid):
     return snapshot()["issues"][iid]
 
 
+def previous_state(row):
+    state = row["state"]
+    if state == "cancelled":
+        saved = row.get("cancelled_from")
+        if saved in {"topics", "topic", "text", "images", "ready", "failed"}:
+            return saved
+        # Older cancellations did not record the source step.
+        return "text" if row.get("text") else "topic" if row.get("topic") else "topics" if row.get("topics") else None
+    if state == "failed":
+        if row.get("operation") == "topics":
+            return "topics" if row.get("topics") else None
+        return "text" if row.get("text") else "topic" if row.get("topic") else "topics" if row.get("topics") else None
+    return {"topic": "topics", "text": "topic", "images": "text", "ready": "images"}.get(state)
+
+
+def go_back(iid, revision):
+    with transaction() as data:
+        row = data["issues"][iid]
+        target = previous_state(row)
+        if row["revision"] != revision or target is None:
+            raise ValueError("Предыдущий шаг недоступен.")
+        if row["state"] == "cancelled" and any(pending(r) for key, r in data["issues"].items() if key != iid):
+            raise ValueError("Сначала завершите текущую статью.")
+        row.update(state=target, revision=revision + 1)
+        if target in {"topics", "topic", "text"}:
+            row.update(text_approved=False, images_approved=False)
+        elif target == "images":
+            row["images_approved"] = False
+        return copy.deepcopy(row)
+
+
 def change(iid, revision, *, allowed, **fields):
     with transaction() as data:
         row = data["issues"][iid]

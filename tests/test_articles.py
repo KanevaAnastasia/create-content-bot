@@ -519,3 +519,99 @@ def test_article_request_uses_responses_api_with_full_policy_and_no_second_pass(
         assert url == "https://api.openai.com/v1/responses"
         assert payload["model"] == "gpt-6-astra"
         assert payload["input"][0]["content"][0]["text"].startswith(HUMAN_WRITING_RULES + "\n\n")
+
+
+@pytest.mark.parametrize("state,previous", [("topic", "topics"), ("text", "topic"), ("images", "text"), ("ready", "images")])
+def test_back_keeps_materials_and_requires_reapproval(setup, monkeypatch, state, previous):
+    row = make_row(state, text="Saved text", teaser="Saved teaser", images={"horizontal": "h.jpg", "vertical": "v.jpg"},
+                   text_approved=True, images_approved=True)
+    monkeypatch.setattr(flow, "show", AsyncMock())
+    generate, publish = AsyncMock(), AsyncMock()
+    monkeypatch.setattr(flow, "generate", generate)
+    monkeypatch.setattr(flow, "publish", publish)
+    asyncio.run(flow.callback(update(row, "back"), NS(bot=bot())))
+    saved = store.issue(row["id"])
+    assert saved["state"] == previous
+    assert saved["text"] == row["text"] and saved["images"] == row["images"]
+    assert not saved["images_approved"]
+    if previous in {"topics", "topic", "text"}:
+        assert not saved["text_approved"]
+    assert saved["revision"] == row["revision"] + 1
+    generate.assert_not_called()
+    publish.assert_not_called()
+
+
+def test_cancel_screen_can_restore_the_step_and_legacy_cancellation(setup):
+    row = make_row("topic")
+    b = bot()
+    asyncio.run(flow.callback(update(row, "cancel"), NS(bot=b)))
+    cancelled = store.issue(row["id"])
+    assert cancelled["cancelled_from"] == "topic"
+    buttons = b.send_message.call_args.kwargs["reply_markup"].inline_keyboard
+    assert buttons[0][0].text == "Предыдущий шаг"
+    asyncio.run(flow.callback(update(cancelled, "back"), NS(bot=b)))
+    assert store.issue(row["id"])["state"] == "topic"
+    with store.transaction() as data:
+        current = data["issues"][row["id"]]
+        current["state"] = "cancelled"
+        current.pop("cancelled_from")
+    assert store.go_back(row["id"], current["revision"])["state"] == "topic"
+
+
+@pytest.mark.parametrize("state", ["publishing", "publication_uncertain", "published", "working"])
+def test_back_cannot_cross_publication_or_running_generation(setup, state):
+    row = make_row(state)
+    assert store.previous_state(row) is None
+    with pytest.raises(ValueError):
+        store.go_back(row["id"], row["revision"])
+
+
+def test_cancelled_article_cannot_resume_over_new_active_issue(setup):
+    old = make_row("cancelled")
+    current = store.claim_due(START + timedelta(days=3))
+    with pytest.raises(ValueError):
+        store.go_back(old["id"], old["revision"])
+    assert store.current()["id"] == current["id"]
+
+
+def test_back_rejects_stale_buttons(setup):
+    row = make_row("text", text="Saved text")
+    store.go_back(row["id"], row["revision"])
+    with pytest.raises(ValueError):
+        store.go_back(row["id"], row["revision"])
+
+
+def test_forward_after_back_reuses_existing_text_and_images(setup, monkeypatch):
+    photo = setup / "saved.jpg"
+    photo.write_bytes(b"saved")
+    row = make_row("topic", text="Saved article", teaser="Saved teaser", image_version=2,
+                   images={"horizontal": str(photo), "vertical": str(photo)})
+    forbidden = AsyncMock(side_effect=AssertionError("Saved material must not be regenerated"))
+    monkeypatch.setattr(flow, "generate", forbidden)
+    asyncio.run(flow.callback(update(row, "draft"), NS(bot=bot())))
+    saved = store.issue(row["id"])
+    assert saved["state"] == "text"
+    asyncio.run(flow.callback(update(saved, "images"), NS(bot=bot())))
+    saved = store.issue(row["id"])
+    assert saved["state"] == "images" and saved["text_approved"]
+    assert saved["images"] == row["images"] and saved["image_version"] == 2
+    forbidden.assert_not_called()
+
+
+def test_selecting_different_topic_archives_old_material_and_clears_approvals(setup):
+    row = make_row("topics", text="Old article", teaser="Old teaser", image_prompt="Old scene", feedback="Old correction",
+                   images={"horizontal": "old.jpg"}, text_approved=True, images_approved=True)
+    asyncio.run(flow.callback(update(row, "choose1"), NS(bot=bot())))
+    saved = store.issue(row["id"])
+    assert saved["topic"] == row["topics"][1]
+    assert not saved["text"] and not saved["images"] and not saved["feedback"]
+    assert not saved["text_approved"] and not saved["images_approved"]
+    assert saved["versions"][-1]["text"] == "Old article"
+    assert saved["versions"][-1]["images"] == {"horizontal": "old.jpg"}
+
+
+def test_back_from_failed_image_generation_keeps_partial_output(setup):
+    row = make_row("failed", text="Saved text", images={"horizontal": "saved.jpg"}, operation="images")
+    saved = store.go_back(row["id"], row["revision"])
+    assert saved["state"] == "text"
+    assert saved["images"] == {"horizontal": "saved.jpg"}
