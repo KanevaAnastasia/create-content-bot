@@ -242,8 +242,8 @@ def test_marketer_queue_cannot_receive_publication_routes(page):
     assert queue.routing_key == 'marketer'
 
 
-@pytest.mark.parametrize("action,fail_ai", [("refresh", False), ("daily", False), ("daily", True)])
-def test_refresh_collects_new_youtube_behaviour(page, monkeypatch, action, fail_ai):
+@pytest.mark.parametrize("action,fail_ai", [("refresh", False), ("daily", False), ("daily", True), ("analyze", False)])
+def test_quick_refresh_preserves_behaviour_and_full_analysis_updates_it(page, monkeypatch, action, fail_ai):
     pid = uuid.uuid4()
     task = page.reserve_report(pid, "refresh")
     project = SimpleNamespace(id=pid, slug="discipline", title="Discipline", description="Stories")
@@ -266,9 +266,13 @@ def test_refresh_collects_new_youtube_behaviour(page, monkeypatch, action, fail_
     monkeypatch.setattr(page, "_youtube_access_token", lambda *a: "token")
     monkeypatch.setattr(page, "collect_metrics", lambda *a: {"metrics": {"views": 4}})
     monkeypatch.setattr(page, "collect_followers", lambda *a: {"platform": "youtube", "language": "ru", "account_id": "c", "followers": 2})
-    monkeypatch.setattr(page, "collect_behaviour", lambda *a: {"subscribers_gained": 1})
+    behaviour_calls = []
+    def behaviour(*args):
+        behaviour_calls.append(args)
+        return {"subscribers_gained": 1}
+    monkeypatch.setattr(page, "collect_behaviour", behaviour)
     seen = []
-    page.update_report(pid, task, brief={"summary": "old"})
+    page.update_report(pid, task, brief={"summary": "old"}, rows=[{"id": "new", "behaviour": {"subscribers_gained": 3, "period": "previous period"}}])
     def brief(title, rows, niche, query):
         assert niche == [hit]
         seen.append(rows)
@@ -279,9 +283,14 @@ def test_refresh_collects_new_youtube_behaviour(page, monkeypatch, action, fail_
     page.run_report(pid, task, action)
     result = page.read_report(pid)
     assert result["state"] == "done"
-    assert result["rows"][0]["behaviour"]["subscribers_gained"] == 1
-    assert bool(seen) == (action == "daily")
-    if action == "daily":
+    assert len(behaviour_calls) == (0 if action == "refresh" else 1)
+    assert result["rows"][0]["behaviour"]["subscribers_gained"] == (3 if action == "refresh" else 1)
+    assert bool(seen) == (action in {"daily", "analyze"})
+    if action == "refresh":
+        assert result["rows"][0]["behaviour"]["period"] == "previous period"
+        assert result["brief"] == {"summary": "old"}
+        assert "market" not in result
+    else:
         assert seen[0][0]["metrics"]["views"] == 4
         assert result["brief"]["summary"] == ("old" if fail_ai else "new")
         assert bool(result.get("brief_error")) == fail_ai

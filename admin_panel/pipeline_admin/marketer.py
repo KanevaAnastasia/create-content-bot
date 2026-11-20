@@ -298,7 +298,7 @@ def run_report(project_id, task_id, action, query="", language="ru"):
                     result.update(collect_metrics(row, token))
                 except MetricsUnavailable as exc:
                     result.update(metrics=dict.fromkeys(METRICS), warnings=[str(exc)])
-                if row["platform"] == "youtube":
+                if row["platform"] == "youtube" and action != "refresh":
                     try:
                         result["behaviour"] = collect_behaviour(row, tokens[("youtube", row["language"])])
                     except Exception:

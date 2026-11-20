@@ -11,10 +11,10 @@
 {% block content %}{% localtime off %}<div class="mk">
 <section class="mk-hero"><h1>Маркетолог</h1><p>{{ project.title }}{% if overview.updated %} · статистика на {{ overview.updated|date:"d.m.Y H:i" }} МСК{% endif %}</p>
 <div class="mk-actions"><form method="get"><label for="project-view">Блог</label><select name="project" id="project-view">{% for p in projects %}<option value="{{ p.id }}" {% if project.id == p.id %}selected{% endif %}>{{ p.title }}</option>{% endfor %}</select> <button>Открыть</button></form>
-{% if can_change and project %}<form method="post" class="mk-run">{% csrf_token %}<input type="hidden" name="project" value="{{ project.id }}"><button name="action" value="analyze" {% if pending %}disabled{% endif %}>Анализировать проект и рынок</button></form>{% endif %}</div>
+{% if can_change and project %}<form method="post" class="mk-run">{% csrf_token %}<input type="hidden" name="project" value="{{ project.id }}"><button name="action" value="refresh" {% if pending %}disabled{% endif %}>Обновить данные</button> <button name="action" value="analyze" {% if pending %}disabled{% endif %}>Анализировать проект и рынок</button><p><small>Обновление данных собирает свежие показатели. Полный анализ также исследует рынок и составляет план съёмок.</small></p></form>{% endif %}</div>
 <p>Просмотры получены для {{ overview.available }} из {{ rows|length }} публикаций. Дней наблюдения {{ overview.days }}.</p></section>
 <nav><a href="#ai-plan">Что снимать</a><a href="#evidence">Свои ролики и зрители</a><a href="#market">Рынок</a><a href="#references">Моя подборка</a><a href="#audience">Аудитория</a><a href="#videos">Все ролики</a></nav>
-{% if pending %}<p class="warning">Анализ идёт. <a href="?project={{ project.id }}">Проверить готовность</a></p>{% endif %}
+{% if pending %}<p class="warning">{% if report.action == 'refresh' %}Данные обновляются.{% else %}Анализ идёт.{% endif %} <a href="?project={{ project.id }}">Проверить готовность</a></p>{% endif %}
 {% if stale %}<p class="warning">Сбор не завершился за 20 минут. Можно запустить его повторно.</p>{% endif %}
 {% if report.error %}<p class="warning">{{ report.error }}</p>{% endif %}
 {% if form.errors %}<div class="warning" role="alert">{{ form.errors }}</div>{% endif %}
