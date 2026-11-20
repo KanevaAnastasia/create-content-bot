@@ -30,24 +30,31 @@ STYLE = """Пиши для русскоязычного Telegram-канала «
 CULINARY_SECTIONS = ("baking", "everyday_meals", "cooking_techniques", "ingredients", "food_storage",
                     "flavor", "meal_prep", "kitchen_tools", "seasonal_food")
 HOUSEHOLD_SECTIONS = ("laundry", "cleaning", "home_organization", "home_comfort")
-TOPIC_SCORES = ("recognizability", "practical_value", "save_worthiness", "share_worthiness")
-TOPIC_SELECTION = """Сначала подготовь 20 кандидатов: 16 кулинарных и 4 бытовых.
-Кулинарные кандидаты должны охватить не менее восьми разных разделов:
+TOPIC_TITLE_LIMIT = 40
+TEASER_LIMIT = 60
+TOPIC_SELECTION = """Подбери пять сильных тем для обычных домашних хозяек: ровно 4 кулинарные и 1 бытовую.
+При отборе рассмотри широкий круг повседневных ситуаций из разных разделов:
 выпечка, повседневные блюда, приёмы готовки, выбор и замены продуктов, хранение еды,
 вкус и текстура, заготовки и остатки еды, кухонная посуда и техника, сезонная кухня.
-Не своди подборку к исправлению ошибок: нужны также удачные приёмы, сравнения,
-неочевидные причины знакомых явлений, экономия времени и идеи для повседневного стола.
 Бытовые темы: стирка, уборка, хранение вещей и домашний уют.
-Для каждого кандидата оцени от 1 до 5: узнаваемость ситуации у широкой аудитории,
-практическую пользу, желание сохранить и желание переслать близким.
-Это редакционная оценка потенциала, не статистика и не обещание вирусности.
-Высокая оценка требует понятной причины: частая проблема, ощутимая экономия,
-проверяемый результат или полезное объяснение, которым хочется поделиться.
-Заголовок должен сразу называть предмет и пользу или интригующую причину.
-Без дешёвого кликбейта, запугивания, выдуманных секретов и обещаний чудес.
-Не называй тему трендом без актуальных данных. Не выдумывай просмотры и проценты.
-Не подгоняй оценки под одинаковые пятёрки. Учитывай уже предложенные и вышедшие темы.
-Из кандидатов программа выберет четыре кулинарные темы из разных разделов и одну бытовую.
+Выдай только итоговые пять тем. Не выводи длинный список кандидатов и таблицы самооценок.
+Главный критерий: хозяйка сразу узнаёт СВОЮ частую неприятность или ежедневную задачу
+и хочет открыть статью сейчас, сохранить решение или переслать его близким.
+Приоритет у испорченного ужина, неудачной выпечки, потраченных продуктов,
+неприятного запаха, лишней работы и других ощутимых проблем обычного дома.
+Выбери четыре разные кулинарные ситуации из разных разделов; не делай все темы про одно блюдо.
+Сначала выбирай узнаваемую проблему, затем раздел. Не заполняй разделы узкими темами ради разнообразия.
+Сравнение видов крахмала, правила хранения начатого сыра, гарнир на два ужина
+слишком справочные и слабые для этой подборки. Названия предмета и слова «как» недостаточно.
+Заголовок: одна конкретная неприятность, неожиданный вопрос или желанный результат.
+Короткая разговорная фраза, обычно 25–35 символов, максимум 40 вместе с пробелами.
+Не соединяй проблему и длинную инструкцию через двоеточие. Подробности перенеси в angle.
+Примеры силы и длины, не обязательные темы: «Почему оладьи опять осели?»,
+«Котлеты сухие даже с подливкой?», «Полотенца чистые, а пахнут сыростью».
+Без выдуманных секретов, «все делают неправильно», запугивания и обещаний чудес.
+Потенциал сохранений и пересылок оценивай при выборе; не объявляй темы вирусными
+или трендовыми без данных, не выдумывай статистику. Учитывай прежние темы по смыслу.
+angle: одно короткое предложение о конкретном решении, не пересказ будущей статьи.
 """
 
 
@@ -55,55 +62,49 @@ def utf16_length(text):
     return len(text.encode("utf-16-le")) // 2
 
 
-def source_context(config):
+def source_context(config, *, include_examples=True):
     samples = json.loads(Path(config["samples_path"]).read_text())
     history = []
     for row in config["issues"].values():
         history.append(row.get("topic", {}).get("title", ""))
         history.extend(t["title"] for t in row.get("topics", []))
         history.extend(row.get("past_topic_titles", []))
-    return {"examples": [p["text"] for p in samples["posts"] if p["id"] in (19, 17)],
-            "already_used": [p["text"].split("\n")[0] for p in samples["posts"]] + history}
+    context = {"already_used": list(dict.fromkeys(
+        title for title in [p["text"].split("\n")[0] for p in samples["posts"]] + history if title.strip()))}
+    if include_examples:
+        context["examples"] = [p["text"] for p in samples["posts"] if p["id"] in (19, 17)]
+    return context
 
 
 def topics(config, feedback=""):
-    context = source_context(config)
-    prompt = (STYLE + '\n' + TOPIC_SELECTION + '\nВерни JSON {"candidates": [{"title": "...", "angle": "...", '
-              '"category": "culinary или household", "section": "...", "scores": {...}}]}.'
-              '\nЗаголовок до 100 символов. angle до 220: что конкретно узнает читатель, без служебной оценки.'
+    context = source_context(config, include_examples=False)
+    prompt = (STYLE + '\n' + TOPIC_SELECTION + '\nВерни JSON {"topics": [{"title": "...", "angle": "...", '
+              '"category": "culinary или household", "section": "..."}]}.'
+              f'\nРовно пять тем. Заголовок до {TOPIC_TITLE_LIMIT} символов. angle до 140 символов.'
               '\nДопустимые section для culinary: ' + ', '.join(CULINARY_SECTIONS) +
               '\nДопустимые section для household: ' + ', '.join(HOUSEHOLD_SECTIONS) +
-              '\nКлючи scores, каждое значение целое от 1 до 5: ' + ', '.join(TOPIC_SCORES) +
               '\nКомментарий владельца: ' + feedback + '\nКонтекст:\n' + json.dumps(context, ensure_ascii=False))
-    candidates = extract_json_object(openai_generate_sync(prompt)).get("candidates")
-    if not isinstance(candidates, list) or len(candidates) != 20:
-        raise ValueError("GPT не вернул 20 кандидатов для отбора тем.")
+    candidates = extract_json_object(openai_generate_sync(prompt)).get("topics")
+    if not isinstance(candidates, list) or len(candidates) != 5:
+        raise ValueError("GPT не вернул пять тем.")
     titles = {title.strip().casefold() for title in context["already_used"] if title.strip()}
     for value in candidates:
         if not isinstance(value, dict) or not isinstance(value.get("title"), str) or not isinstance(value.get("angle"), str):
             raise ValueError("Некорректный ответ GPT с темами.")
-        key = value["title"].strip().casefold()
-        if not key or key in titles or len(value["title"]) > 100 or not 1 <= len(value["angle"]) <= 220:
+        value["title"], value["angle"] = value["title"].strip(), value["angle"].strip()
+        key = value["title"].casefold()
+        if (not key or key in titles or len(value["title"]) > TOPIC_TITLE_LIMIT or '\n' in value["title"]
+                or not 1 <= len(value["angle"]) <= 140):
             raise ValueError("Темы повторяются или превышают допустимую длину.")
         titles.add(key)
         sections = CULINARY_SECTIONS if value.get("category") == "culinary" else HOUSEHOLD_SECTIONS if value.get("category") == "household" else ()
-        scores = value.get("scores")
-        if (value.get("section") not in sections or not isinstance(scores, dict) or set(scores) != set(TOPIC_SCORES)
-                or any(type(score) is not int or not 1 <= score <= 5 for score in scores.values())):
-            raise ValueError("Некорректный раздел или оценка кандидата.")
+        if value.get("section") not in sections:
+            raise ValueError("Некорректный раздел темы.")
     culinary = [v for v in candidates if v["category"] == "culinary"]
     household = [v for v in candidates if v["category"] == "household"]
-    if len(culinary) != 16 or len(household) != 4 or len({v["section"] for v in culinary}) < 8:
-        raise ValueError("Нужен широкий выбор кулинарных тем и соотношение 16 к 4 среди кандидатов.")
-    selected, sections = [], set()
-    for value in sorted(culinary, key=lambda v: sum(v["scores"].values()), reverse=True):
-        if value["section"] not in sections:
-            selected.append(value)
-            sections.add(value["section"])
-        if len(selected) == 4:
-            break
-    selected.append(max(household, key=lambda v: sum(v["scores"].values())))
-    return selected
+    if len(culinary) != 4 or len(household) != 1 or len({v["section"] for v in culinary}) != 4:
+        raise ValueError("Нужны четыре разные кулинарные темы и одна бытовая.")
+    return culinary + household
 
 
 def draft(config, row):
@@ -111,8 +112,10 @@ def draft(config, row):
         STYLE + '\nНапиши полную статью по СОГЛАСОВАННОЙ теме. Верни JSON с полями text, teaser, image_prompt.'
         '\ntext включает заголовок и всю статью, от 1800 до 3600 символов. Обычный текст без Markdown-разметки.'
         '\nПри правках сохраняй то, что не просили менять. Не сокращай механически и не обрывай предложения.'
-        '\nteaser: короткий рекламный анонс для сториз до 100 символов, с конкретной пользой, без хэштегов и URL.'
-        '\nПримеры анонса: «Как сделать полотенца снова пушистыми», «Что делать, чтобы пирог не подгорал снизу».'
+        '\nteaser: одна короткая разговорная фраза для сториз, обычно 25–45 символов, максимум 60.'
+        '\nНазови предмет и знакомую проблему или пользу. Можно коротким вопросом. Без вступления, пересказа статьи,'
+        ' перечня советов, призыва читать, хэштегов и URL. Не дописывай объяснение после вопроса.'
+        '\nПримеры анонса: «Что сделать с засохшим хлебом?», «Как вернуть полотенцам мягкость?», «Почему подгорает пирог?».'
         '\nimage_prompt: один конкретный сюжет по статье, уютная иллюстрация с бабушкой и рыжим котом Тимошей.'
         '\nВ примерах стиля не копируй факты в новую тему.\n' + json.dumps({
             "topic": row["topic"], "previous": row.get("text", ""), "previous_teaser": row.get("teaser", ""),
@@ -125,45 +128,64 @@ def draft(config, row):
         result[key] = result[key].strip()
     if not 500 <= utf16_length(result["text"]) <= 3800:
         raise ValueError("Текст не помещается в публикацию. Нужна редактура, текст не обрезан.")
-    if len(result["teaser"]) > 100 or len(result["image_prompt"]) > 2500:
+    if len(result["teaser"]) > TEASER_LIMIT or '\n' in result["teaser"] or len(result["image_prompt"]) > 2500:
         raise ValueError("Анонс или описание иллюстрации слишком длинные.")
     return result
+
+
+def crop_square(row, position=None):
+    """Derive the Telegram cover locally; position is a percentage of vertical travel."""
+    position = row.get("square_crop", 50) if position is None else position
+    if type(position) is not int or not 0 <= position <= 100:
+        raise ValueError("Неверное положение квадратного кадра.")
+    vertical = Path(row["images"]["vertical"])
+    folder = store.ROOT / row["id"] / f'images-{row["image_version"]}'
+    folder.mkdir(parents=True, exist_ok=True)
+    square = folder / f"square-{position}.jpg"
+    with Image.open(vertical) as img:
+        if img.height < img.width:
+            raise ValueError("Для квадратного кадра нужен вертикальный оригинал.")
+        top = round((img.height - img.width) * position / 100)
+        temporary = square.with_suffix(".partial")
+        img.convert("RGB").crop((0, top, img.width, top + img.width)).save(temporary, format="JPEG", quality=94)
+        temporary.replace(square)
+    return {"vertical": str(vertical), "square": str(square)}
 
 
 def generate_missing_images(config, row):
     from .vertex_images import generate_image_vertex
 
-    refs = [Path(p).read_bytes() for p in config["reference_paths"]]
-    if not refs:
-        raise ValueError("Нет утверждённых образцов внешности кота и бабушки.")
-    images = dict(row.get("images", {}))
     folder = store.ROOT / row["id"] / f'images-{row["image_version"]}'
     folder.mkdir(parents=True, exist_ok=True)
-    for orientation, ratio in (("horizontal", "16:9"), ("vertical", "9:16")):
-        path = folder / f"{orientation}.jpg"
-        if orientation in images and Path(images[orientation]).is_file():
-            continue
-        # An output written before interruption can be reused without another paid request.
-        if not path.is_file():
-            prompt = ("Create a cozy high quality 3D storybook illustration for a home advice article. "
-                      "Match the same grandmother and orange fluffy cat Timosha from the supplied references: "
-                      "round glasses, floral headscarf, blue dress, floral apron, warm wooden home. "
-                      "The orange cat MUST be clearly visible, with consistent face and proportions. "
-                      "Show the specific article subject prominently. No lettering, logos or watermarks. "
-                      "Use references only for character identity and visual style, not their old props. "
-                      + row["image_prompt"] + "\nRequested image correction: " + row.get("image_feedback", ""))
-            if orientation == "vertical":
-                prompt += " Leave breathing room at top and bottom for a short story headline and link sticker."
-            current_refs = refs + ([Path(images["horizontal"]).read_bytes()] if orientation == "vertical" else [])
-            raw = generate_image_vertex(prompt, reference_images=current_refs, aspect_ratio=ratio)
-            with Image.open(io.BytesIO(raw)) as img:
-                target = 16 / 9 if orientation == "horizontal" else 9 / 16
-                if abs(img.width / img.height - target) > .06:
-                    raise ValueError("Генератор вернул неверную ориентацию. Нужен новый вариант этого изображения.")
-                # Encoding only; composition is not cropped or altered.
-                temporary = path.with_suffix(".partial")
-                img.convert("RGB").save(temporary, format="JPEG", quality=94)
-                temporary.replace(path)
-        images[orientation] = str(path)
-        store.checkpoint(row["id"], images=images)
+    vertical = Path(row.get("images", {}).get("vertical", folder / "vertical.jpg"))
+    if not vertical.is_file():
+        vertical = folder / "vertical.jpg"
+    # Reuse a saved original after a crop failure or interrupted checkpoint.
+    if not vertical.is_file():
+        refs = [Path(p).read_bytes() for p in config["reference_paths"]]
+        if not refs:
+            raise ValueError("Нет утверждённых образцов внешности кота и бабушки.")
+        prompt = ("Create one vertical 9:16 high quality 3D storybook illustration for a home advice article. "
+                  "Match the exact visual style, materials, lighting and characters from the supplied references: "
+                  "the grandmother with round glasses, floral headscarf, blue dress and floral apron, "
+                  "and her orange fluffy cat Timosha, in a warm wooden home. "
+                  "The cat MUST be clearly visible, with consistent face and proportions. "
+                  "Show the specific article subject prominently. Use references for character identity and style, "
+                  "not their old props. COMPOSITION: the centered square crop of this vertical image will be used "
+                  "as a second cover. Keep the grandmother's entire head and hands, the whole cat and the main "
+                  "article subject within that central square, the middle 56% of the image height. "
+                  "Group them close together at the same height. Use only natural background above and below. "
+                  "Do not draw crop guides, frames, empty labels, banners, panels, lettering, logos or watermarks. "
+                  + row["image_prompt"] + "\nRequested image correction: " + row.get("image_feedback", ""))
+        raw = generate_image_vertex(prompt, reference_images=refs, aspect_ratio="9:16")
+        with Image.open(io.BytesIO(raw)) as img:
+            if abs(img.width / img.height - 9 / 16) > .06:
+                raise ValueError("Генератор вернул неверную ориентацию. Нужен вертикальный оригинал 9:16.")
+            temporary = vertical.with_suffix(".partial")
+            img.convert("RGB").save(temporary, format="JPEG", quality=94)
+            temporary.replace(vertical)
+    images = {"vertical": str(vertical)}
+    store.checkpoint(row["id"], images=images)
+    images = crop_square(dict(row, images=images))
+    store.checkpoint(row["id"], images=images)
     return images

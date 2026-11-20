@@ -6,6 +6,7 @@ from datetime import datetime, timezone, timedelta
 import logging
 from pathlib import Path
 import secrets
+from time import monotonic
 
 from telegram import ForceReply, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import ApplicationHandlerStop
@@ -37,10 +38,11 @@ def topic_fields(row, topic):
     if row.get("text") or row.get("images"):
         versions.append({key: row[key] for key in ("topic", "text", "teaser", "image_prompt", "images") if key in row})
     return {"topic": topic, "versions": versions, "text": "", "teaser": "", "image_prompt": "", "images": {},
-            "feedback": "", "image_feedback": "", "text_approved": False, "images_approved": False}
+            "feedback": "", "image_feedback": "", "square_crop": 50, "text_approved": False, "images_approved": False}
 
 
 async def show(bot, chat_id, row):
+    started = monotonic()
     state = row["state"]
     target = store.target_for(row)
     destination = target.get("title") or target.get("username") or str(target["channel_id"])
@@ -51,6 +53,8 @@ async def show(bot, chat_id, row):
             f'{n}. {t["title"]}\n{t["angle"]}' for n, t in enumerate(row["topics"], 1))
         buttons = [(str(n) + '. ' + t["title"], f"choose{n-1}") for n, t in enumerate(row["topics"], 1)]
         buttons += [("Другие пять тем", "more"), ("Своя тема / пожелания", "custom")]
+        if row.get("text") and row.get("topic"):
+            buttons += [("Вернуться к сохранённой статье", "resume")]
     elif state == "topic":
         saved_text = bool(row.get("text"))
         next_step = "После согласования покажу сохранённый текст." if saved_text else "После согласования подготовлю текст через GPT."
@@ -59,24 +63,29 @@ async def show(bot, chat_id, row):
         buttons = [(label, "draft"), ("Изменить тему", "custom")]
     elif state == "text":
         await bot.send_message(chat_id=chat_id, text=row["text"])
-        text = f'Короткий анонс для сториз:\n{row["teaser"]}\n\nСогласуйте текст и анонс. Затем подготовлю две картинки с Тимошей.'
-        saved_images = all(Path(row.get("images", {}).get(k, "")).is_file() for k in ("horizontal", "vertical"))
+        text = f'Короткий анонс для сториз:\n{row["teaser"]}\n\nСогласуйте текст и анонс. Затем покажу квадрат для Telegram и вертикальный вариант для сториз.'
+        saved_images = all(Path(row.get("images", {}).get(k, "")).is_file() for k in ("square", "vertical"))
         label = "Текст согласован, показать картинки" if saved_images else "Текст согласован, сделать картинки"
         buttons = [(label, "images"), ("Исправить текст или анонс", "edit")]
     elif state in {"images", "ready"}:
-        for key, label in (("horizontal", "Горизонтальная картинка для статьи"), ("vertical", "Вертикальная картинка для сториз")):
-            with Path(row["images"][key]).open("rb") as photo:
-                await bot.send_photo(chat_id=chat_id, photo=photo, caption=label)
         if state == "images":
+            for key, label in (("square", "Квадратная картинка 1:1 для Telegram"),
+                               ("vertical", "Вертикальная картинка 9:16 для сториз")):
+                with Path(row["images"][key]).open("rb") as photo:
+                    await bot.send_photo(chat_id=chat_id, photo=photo, caption=label)
             text = "Проверьте обе картинки: кот, тема статьи и композиция. Можно внести правки."
             buttons = [("Обе картинки согласованы", "approve")]
         else:
             text = (f'Готово к публикации в канале «{destination}»\n'
-                    f'Тема: {row["topic"]["title"]}\n\nПубликация содержит согласованный текст и горизонтальную картинку. '
+                    f'Тема: {row["topic"]["title"]}\n\nПубликация содержит согласованный текст и квадратную картинку 1:1. '
                     'После неё пришлю вертикальную картинку, ссылку и короткий анонс тремя отдельными сообщениями.')
             publish_label = f"Опубликовать в {destination}" if row.get("test_mode") else "Опубликовать статью в канале"
             buttons = [(publish_label, "publish"), ("Исправить текст", "edit")]
-        buttons += [("Изменить горизонтальную", "edit_h"), ("Изменить вертикальную", "edit_v"), ("Изменить обе картинки", "imageedit")]
+        buttons += [("Исправить изображение", "imageedit")]
+        if row.get("square_crop", 50) > 0:
+            buttons += [("Квадрат: сдвинуть выше", "crop_up")]
+        if row.get("square_crop", 50) < 100:
+            buttons += [("Квадрат: сдвинуть ниже", "crop_down")]
     elif state == "failed":
         text = row.get("error", "Не удалось завершить этап.") + "\nСохранённые материалы не потеряны."
         buttons = [("Повторить незавершённый этап", "retry")]
@@ -97,6 +106,7 @@ async def show(bot, chat_id, row):
     await bot.send_message(chat_id=chat_id, text=test_notice + text, reply_markup=keyboard(row, buttons) if buttons else None,
                            disable_web_page_preview=True)
     store.checkpoint(row["id"], shown_revision=row["revision"])
+    logger.info("article.show issue=%s state=%s revision=%s elapsed=%.2fs", row["id"], state, row["revision"], monotonic() - started)
 
 
 async def deliver_handoff(bot, chat_id, row, *, again=False):
@@ -115,6 +125,8 @@ async def deliver_handoff(bot, chat_id, row, *, again=False):
 
 async def generate(bot, chat_id, row, *, show_result=True):
     op = row["operation"]
+    started = monotonic()
+    logger.info("article.generation_started issue=%s operation=%s", row["id"], op)
     try:
         config = store.snapshot()
         if op == "topics":
@@ -137,6 +149,8 @@ async def generate(bot, chat_id, row, *, show_result=True):
         # Raw upstream errors can include credentials; never echo them to Telegram.
         row = store.change(row["id"], row["revision"], allowed={"working"}, state="failed",
                            error="Не удалось завершить подготовку. Можно повторить только этот этап.")
+    logger.info("article.generation_finished issue=%s operation=%s state=%s elapsed=%.2fs",
+                row["id"], op, row["state"], monotonic() - started)
     if show_result:
         await show(bot, chat_id, row)
 
@@ -144,9 +158,7 @@ async def generate(bot, chat_id, row, *, show_result=True):
 async def request_edit(bot, chat_id, row, kind):
     prompts = {"custom": "Напишите тему статьи или пожелания к теме ответом на это сообщение.",
                "edit": "Какие изменения внести в текст или короткий анонс? Ответьте на это сообщение.",
-               "imageedit": "Что изменить на картинках? Ответьте на это сообщение. Текст статьи сохранится."}
-    prompts["edit_h"] = "Что изменить на горизонтальной картинке? Вертикальная сохранится. Ответьте на это сообщение."
-    prompts["edit_v"] = "Что изменить на вертикальной картинке? Горизонтальная сохранится. Ответьте на это сообщение."
+               "imageedit": "Что изменить на изображении? Подготовлю новый вертикальный оригинал и квадрат из него. Текст статьи сохранится. Ответьте на это сообщение."}
     msg = await bot.send_message(chat_id=chat_id, text=prompts[kind], reply_markup=ForceReply(selective=True))
     store.remember_reply(msg.message_id, row, kind)
 
@@ -180,9 +192,9 @@ async def callback(update, context):
             if row["revision"] != int(revision):
                 raise ValueError("Эта кнопка относится к предыдущей версии. Откройте /articles.")
             chat_id = update.effective_chat.id
-            if action in {"custom", "edit", "imageedit", "edit_h", "edit_v"}:
+            if action in {"custom", "edit", "imageedit"}:
                 valid = {"custom": {"topics", "topic"}, "edit": {"text", "ready"},
-                         "imageedit": {"images", "ready"}, "edit_h": {"images", "ready"}, "edit_v": {"images", "ready"}}
+                         "imageedit": {"images", "ready"}}
                 if row["state"] not in valid[action]:
                     raise ValueError("Этот этап уже изменился. Откройте /articles.")
                 await request_edit(context.bot, chat_id, row, action)
@@ -193,6 +205,10 @@ async def callback(update, context):
                     raise ValueError("Неверный номер темы.")
                 row = store.change(iid, row["revision"], allowed={"topics"}, state="topic",
                                    **topic_fields(row, row["topics"][index]))
+            elif action == "resume":
+                if not row.get("text") or not row.get("topic"):
+                    raise ValueError("Нет сохранённой статьи.")
+                row = store.change(iid, row["revision"], allowed={"topics"}, state="topic")
             elif action in {"more", "draft", "images", "retry"}:
                 op = {"more": "topics", "draft": "draft", "images": "images", "retry": row.get("operation")}[action]
                 valid = {"more": {"topics"}, "draft": {"topic"}, "images": {"text"}, "retry": {"failed"}}
@@ -201,18 +217,28 @@ async def callback(update, context):
                     await show(context.bot, chat_id, row)
                     return
                 if (action == "images" and row["state"] == "text"
-                        and all(Path(row.get("images", {}).get(k, "")).is_file() for k in ("horizontal", "vertical"))):
+                        and all(Path(row.get("images", {}).get(k, "")).is_file() for k in ("square", "vertical"))):
                     row = store.change(iid, row["revision"], allowed={"text"}, state="images", text_approved=True, images_approved=False)
                     await show(context.bot, chat_id, row)
                     return
                 extra = {"image_version": row.get("image_version", 0) + (0 if row.get("images") else 1),
                          "text_approved": True} if action == "images" else {}
                 row = store.change(iid, row["revision"], allowed=valid[action], state="working", operation=op, **extra)
-                await query.message.reply_text("Готовлю следующий этап. Результат сохраню и пришлю сюда.")
+                progress = {"topics": "Подбираю пять новых тем: четыре кулинарные и одну бытовую.",
+                            "draft": "Пишу статью по согласованной теме. Пришлю текст и короткий анонс для правок.",
+                            "images": "Рисую один вертикальный оригинал с бабушкой и Тимошей по вашим референсам. Квадрат для Telegram вырежу из него без второй генерации."}
+                await query.message.reply_text(progress[op])
                 await generate(context.bot, chat_id, row)
                 return
             elif action == "approve":
                 row = store.change(iid, row["revision"], allowed={"images"}, state="ready", images_approved=True)
+            elif action in {"crop_up", "crop_down"}:
+                if row["state"] not in {"images", "ready"}:
+                    raise ValueError("Кадрирование недоступно на этом шаге.")
+                position = max(0, min(100, row.get("square_crop", 50) + (-10 if action == "crop_up" else 10)))
+                images = await asyncio.to_thread(generation.crop_square, row, position)
+                row = store.change(iid, row["revision"], allowed={"images", "ready"}, state="images",
+                                   images=images, square_crop=position, images_approved=False)
             elif action in {"publish", "check"}:
                 if action == "publish":
                     if not row.get("text_approved") or not row.get("images_approved"):
@@ -277,6 +303,8 @@ async def apply_reply(update, context, ref):
             row = store.issue(ref["id"])
             if row["revision"] != ref["revision"]:
                 raise ValueError("Ответ относится к старой версии.")
+            if ref["kind"] not in {"custom", "edit", "imageedit"}:
+                raise ValueError("Откройте актуальную кнопку изменения.")
             feedback = (message.text or "").strip()
             if not feedback or generation.utf16_length(feedback) > 3500:
                 raise ValueError("Напишите правку длиной до 3500 символов.")
@@ -285,10 +313,8 @@ async def apply_reply(update, context, ref):
                                    **topic_fields(row, {"title": feedback.split("\n")[0][:100], "angle": feedback}))
                 await show(context.bot, update.effective_chat.id, row)
             else:
-                image_edit = ref["kind"] in {"imageedit", "edit_h", "edit_v"}
-                keep = "vertical" if ref["kind"] == "edit_h" else "horizontal" if ref["kind"] == "edit_v" else None
-                preserved = {k: p for k, p in row.get("images", {}).items() if k == keep}
-                fields = ({"image_feedback": feedback, "images": preserved, "images_approved": False,
+                image_edit = ref["kind"] == "imageedit"
+                fields = ({"image_feedback": feedback, "images": {}, "square_crop": 50, "images_approved": False,
                            "versions": row["versions"] + [{"images": row.get("images", {})}],
                            "image_version": row.get("image_version", 0) + 1} if image_edit else
                           {"feedback": feedback, "text_approved": False, "images_approved": False})

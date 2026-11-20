@@ -104,7 +104,7 @@ async def _publish_connected(client, channel, me, row, submission, *, check_only
     if utf16_length(row["text"]) > limit:
         raise ValueError("Текст не помещается в подпись текущего Telegram-аккаунта. Нужна редактура.")
     from telethon import functions, types
-    uploaded = await client.upload_file(row["images"]["horizontal"])
+    uploaded = await client.upload_file(row["images"]["square"])
     submission["started"] = True
     result = await client(functions.messages.SendMediaRequest(
         peer=channel, media=types.InputMediaUploadedPhoto(file=uploaded), message=row["text"],
