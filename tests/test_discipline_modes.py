@@ -11,7 +11,7 @@ from app.session_store import _chat_session_cache_payload
 from app import editorial_approved as approved
 
 
-@pytest.mark.parametrize('label,mode',[('О Васе',modes.VASYA),('А что если…',modes.REFRAME)])
+@pytest.mark.parametrize('mode,label', modes.LABELS.items())
 def test_mode_selection_survives_resume_and_disables_dialogue(monkeypatch,label,mode):
     monkeypatch.setattr(start,'SESSIONS',{})
     session={'selected_project_key':'discipline','series_pending_recipe':'Не успеваю читать'}
@@ -39,6 +39,69 @@ def test_vasya_visual_direction_is_schematic_2d():
     assert '2D-анимацию' in direction
     assert 'плоские геометрические формы' in direction
     assert 'фотореализм' in direction
+
+
+@pytest.mark.parametrize('mode', modes.SHORT_FORMATS)
+def test_short_format_selects_its_illustration_and_script(monkeypatch, mode):
+    session = {'selected_project_key': 'discipline', modes.MODE_KEY: mode}
+    run = AsyncMock(return_value=True)
+    monkeypatch.setattr(start, '_start_initial_story_voiceover', run)
+    msg = SimpleNamespace(reply_text=AsyncMock())
+    asyncio.run(start._handle_waiting_story_english_choice_state(
+        SimpleNamespace(message=msg), None, chat_id=1, session=session, text='Нет'))
+    assert session[start.STORY_VISUAL_STYLE_SESSION_KEY] == modes.SHORT_FORMATS[mode].style_key
+    run.assert_awaited_once()
+    prompts = []
+    def writer(prompt, **kwargs):
+        prompts.append(prompt)
+        return '{"title":"Книга","voiceover_text":"Вася открыл книгу."}'
+    monkeypatch.setattr(story_generation, 'gemini_generate_sync', writer)
+    story_generation.generate_story_voiceover('Книга', discipline_mode=mode)
+    assert '18–28' in prompts[0] and '45 до 110' not in prompts[0]
+    assert modes.SHORT_FORMATS[mode].script in prompts[0]
+    assert modes.LABELS[mode] not in start.project_mode_labels('grandma_kitchen')
+
+
+def test_continuous_plan_preserves_timeline_camera_cast_and_mode_on_restore(monkeypatch):
+    from app.generation_store import merge_scene_prompt_payload, SCENE_META_SNAPSHOT_KEYS
+    cast = [
+        {'id': 'vasily', 'display_name': 'Василий', 'description': 'герой'},
+        {'id': 'knopka', 'display_name': 'Кнопка', 'description': 'спутница'},
+    ]
+    def generator(prompt, **kwargs):
+        return json.dumps({'characters': [{'id':'guest', 'description':'foreign character'}],
+                           'scenes': [{'characters':['guest'], 'visual':'Вася тянется к книге.'}]})
+    monkeypatch.setattr(story_generation, 'gemini_generate_sync', generator)
+    args = dict(source_story='Книга', voiceover_text='Вася взял книгу.', duration_sec=20.3,
+                alignment={}, project_characters=cast, project_slug='discipline', discipline_mode=modes.FLOW)
+    plan = story_generation.generate_story_scene_plan(**args)['json_plan']
+    assert len(plan) == 5
+    assert all(s['duration_sec'] == 4 and s['camera_direction'] == 'locked-off camera' for s in plan)
+    assert all(s['characters'] == ['vasily','knopka'] for s in plan)
+    assert sum(s['timeline_duration_sec'] for s in plan) == pytest.approx(20.3)
+    produced = story_generation.generate_story_production(scenes_plan=plan)['json_plan']
+    assert all(s['video_prompt'].startswith('4-second') and 'locked-off camera' in s['video_prompt'] for s in produced)
+    assert modes.MODE_KEY in SCENE_META_SNAPSHOT_KEYS
+    scene = {}
+    merge_scene_prompt_payload(scene, {'prompt_meta_json': {modes.MODE_KEY: produced[1][modes.MODE_KEY]}})
+    assert scene[modes.MODE_KEY] == modes.FLOW
+    plan = story_generation.generate_story_scene_plan(**{**args, 'project_slug':'another'})['json_plan']
+    assert all(modes.MODE_KEY not in s and s['duration_sec'] == 3 for s in plan)
+
+
+@pytest.mark.parametrize("mode", modes.SHORT_FORMATS)
+def test_short_format_reaches_both_media_prompts_with_minimal_model_response(monkeypatch, mode):
+    from app.handlers.handlers_media_core import _image_scene_prompt
+
+    fmt = modes.SHORT_FORMATS[mode]
+    minimal = {"start_frame_prompt_ru": "Вася и Кнопка держат книгу на столе.",
+               "video_prompt_en": "4-second Kling 3.0 image-to-video shot. No audio. Slowly open the book."}
+    monkeypatch.setattr(story_generation, "gemini_generate_sync", lambda *a, **kw: json.dumps({"prompts": [minimal]}))
+    scene = {modes.MODE_KEY: mode, "duration_sec": 4, "story_visual_style_key": fmt.style_key}
+    produced = story_generation.generate_story_production(scenes_plan=[scene])["json_plan"][0]
+    assert fmt.frame in _image_scene_prompt(produced)
+    assert fmt.motion in produced["video_prompt_by_lang"]["ru"]
+    assert "Slowly open the book" in produced["video_prompt"]
 
 
 def test_forced_story_workspace_still_offers_discipline_modes(monkeypatch):

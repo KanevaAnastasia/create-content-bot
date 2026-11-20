@@ -21,6 +21,7 @@ from typing import Any
 from PIL import Image, ImageDraw, ImageFont
 from sqlalchemy import select
 
+from .discipline_modes import FLOW, MODE_KEY
 from .ai_approval_service import _resolve_ffmpeg
 from .db import SessionLocal
 from .series_theme import holiday_dish_color, holiday_font, holiday_music, holiday_music_filter, themed_fonts
@@ -466,6 +467,7 @@ def selected_scene_video_fingerprint_for_language(scenes: list[dict[str, Any]], 
                 "duration_sec": scene.get("duration_sec"),
                 "timeline_duration_sec": scene.get("timeline_duration_sec"),
                 "timeline_duration_by_lang": scene.get("timeline_duration_by_lang"),
+                **({MODE_KEY: FLOW} if scene.get(MODE_KEY) == FLOW else {}),
             }
         )
     raw = json.dumps(selected, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
@@ -3116,9 +3118,13 @@ def _normalize_segment(
     target_width: int = TARGET_WIDTH,
     target_height: int = TARGET_HEIGHT,
     target_duration_sec: float | None = None,
+    fit_full_clip: bool = False,
 ) -> None:
     source_duration = float(_media_duration(src_path) or 0.0)
     requested_duration = max(0.0, float(target_duration_sec or 0.0))
+    if fit_full_clip and requested_duration > 0 and source_duration > 0:
+        # The following shot starts at this take's last frame in both languages.
+        speed_coef = source_duration / requested_duration
     normalized_duration = (
         requested_duration
         if requested_duration > 0
@@ -3126,14 +3132,26 @@ def _normalize_segment(
     )
     aligned_duration = _frame_aligned_duration(normalized_duration, fps=30)
     duration_arg = f"{aligned_duration:.6f}" if aligned_duration > 0 else ""
-    vf = (
+    spatial_filter = (
         f"scale={int(target_width)}:{int(target_height)}:force_original_aspect_ratio=increase,"
-        f"crop={int(target_width)}:{int(target_height)},setpts=PTS/{speed_coef:.6f},"
-        "fps=30,tpad=stop_mode=clone:stop_duration=0.100000"
+        f"crop={int(target_width)}:{int(target_height)}"
     )
+    vf = f"{spatial_filter},setpts=PTS/{speed_coef:.6f},fps=30,tpad=stop_mode=clone:stop_duration=0.100000"
     if duration_arg:
         vf = f"{vf},trim=duration={duration_arg}"
     vf = f"{vf},settb=AVTB,setpts=N/(30*TB)"
+    if fit_full_clip and requested_duration > 0 and source_duration > 0:
+        # FPS conversion may discard the last input frame when speeding up. Pin the
+        # final decoded pose explicitly because it seeds the following Kling take.
+        body_frames = max(0, round(aligned_duration * 30) - 1)
+        tail = f"trim=start={max(0, source_duration - 1):.6f},reverse,trim=end_frame=1,{spatial_filter},settb=AVTB,setpts=0"
+        if body_frames:
+            vf = (
+                f"split[body][tail];[body]{vf},trim=end_frame={body_frames}[fit];"
+                f"[tail]{tail}[last];[fit][last]concat=n=2:v=1:a=0,settb=AVTB,setpts=N/(30*TB)"
+            )
+        else:
+            vf = tail
     af = _atempo_filter(speed_coef)
     has_audio = _has_audio_stream(src_path)
     if duration_arg:
@@ -3903,6 +3921,7 @@ def build_post_production(
                         speed_coef=float(item["speed_coef"]),
                         target_width=target_width,
                         target_height=target_height,
+                        **({"fit_full_clip": True} if item["scene"].get(MODE_KEY) == FLOW else {}),
                         target_duration_sec=(
                             float(item["target_duration"] or 0.0)
                             if item.get("target_duration") is not None

@@ -60,6 +60,7 @@ from .handlers_generation_utils import (
 from .handlers_keyboards import DRAFT_BUTTON_SAVE, reply_text_without_keyboard, safe_reply_text
 from .handlers_state_media import send_social_descriptions_for_recipe
 from ..project_modes import PENDING_MODE_KEY, project_mode_rows, project_mode_labels
+from ..discipline_modes import LABELS, MODE_KEY, SHORT_FORMATS, active_mode, mode_from_label
 from ..directorial_notes import direction_for_session
 from ..dish_visuals import build_dish_visual_brief
 from ..llm_utils import GEMINI_MODEL_PROFILE_EDIT, extract_json_object
@@ -1363,6 +1364,10 @@ async def _handle_waiting_story_english_choice_state(
             reply_markup=_story_english_choice_markup(),
         )
         return True
+    short_format = SHORT_FORMATS.get(active_mode(session))
+    if short_format:
+        session[STORY_VISUAL_STYLE_SESSION_KEY] = short_format.style_key
+        return await _start_initial_story_voiceover(update, context, chat_id=chat_id, session=session)
     session["state"] = STATE_WAITING_STORY_STYLE_CHOICE
     SESSIONS[chat_id] = session
     session.pop(PAGE_KEY, None)
@@ -1475,9 +1480,7 @@ async def _handle_waiting_generation_mode_state(
         low in {_STORY_REGENERATE_BUTTON.lower(), "перегенерировать историю"}
         and normalize_generation_mode(session.get(GENERATION_MODE_SESSION_KEY)) == GENERATION_MODE_STORY
     )
-    from ..discipline_modes import MODE_KEY, VASYA, REFRAME, LABELS
-    requested_format = {"о васе": VASYA, "а что если…": REFRAME, "а что если": REFRAME,
-                        "а что если...": REFRAME}.get(low)
+    requested_format = mode_from_label(low)
     if requested_format and session.get(_PROJECT_KEY_SESSION) != "discipline":
         await update.message.reply_text("Этот режим доступен в проекте «Дисциплина».")
         return True
@@ -1557,7 +1560,9 @@ async def _handle_waiting_generation_mode_state(
         )
     else:
         message = "Ок, запускаю обычный режим."
-    if requested_format:
+    if requested_format in SHORT_FORMATS:
+        message = f"«{LABELS[requested_format]}». {SHORT_FORMATS[requested_format].description} Сначала согласуем текст."
+    elif requested_format:
         message = (f"Режим «{LABELS[requested_format]}»: раскладываем вашу тему на проблему, поворот и решение. "
                    "Сначала согласуем сценарий, затем озвучку и наглядный видеоряд. Оформление заголовка выберете по карточкам.")
     await update.message.reply_text(message)

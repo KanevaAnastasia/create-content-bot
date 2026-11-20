@@ -6337,6 +6337,17 @@ async def _scene_media_start_not_ok(
     return True
 
 
+async def _approve_planned_scene_start(
+    update: Update, *, session: dict, scene: dict, idx: int,
+    **context_args,
+) -> bool:
+    from ..discipline_modes import FLOW, MODE_KEY
+
+    if idx > 0 and scene.get(MODE_KEY) == FLOW:
+        return await _continue_scene_from_previous_video(update, session=session, scene=scene, idx=idx)
+    return await _scene_media_start_ok(update, session=session, scene=scene, idx=idx, **context_args)
+
+
 async def _scene_media_start_ok(
     update: Update,
     *,
@@ -8303,7 +8314,7 @@ async def _run_scene_media_auto_approve(
         )
 
         if sub == SCENE_MEDIA_SUBSTEP_START:
-            await _scene_media_start_ok(update, session=session, scene=scene, idx=idx)
+            await _approve_planned_scene_start(update, session=session, scene=scene, idx=idx)
         elif sub == SCENE_MEDIA_SUBSTEP_START_IMAGE_APPROVAL:
             session["scene_media_substep"] = (
                 SCENE_MEDIA_SUBSTEP_END if _scene_needs_end_frame_step(scene) else SCENE_MEDIA_SUBSTEP_VIDEO
@@ -8402,7 +8413,7 @@ async def _run_scene_media_ai_approve(
         )
 
         if sub == SCENE_MEDIA_SUBSTEP_START:
-            await _scene_media_start_ok(
+            await _approve_planned_scene_start(
                 update,
                 context=context,
                 chat_id=chat_id,
@@ -10410,7 +10421,7 @@ async def _handle_waiting_scene_media_state(
             return True
     if sub == SCENE_MEDIA_SUBSTEP_START:
         return await (
-            _scene_media_start_ok(update, context=context, chat_id=chat_id, session=session, scene=scene, idx=idx)
+            _approve_planned_scene_start(update, context=context, chat_id=chat_id, session=session, scene=scene, idx=idx)
             if is_ok
             else _scene_media_start_not_ok(update, context, chat_id=chat_id, session=session, scene=scene, text=text)
         )

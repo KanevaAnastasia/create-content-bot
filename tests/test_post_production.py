@@ -1867,6 +1867,30 @@ def test_normalize_story_segment_trims_three_second_clip_to_exact_timeline_windo
     assert "atrim=duration=2.400000" in filter_complex
 
 
+def test_continuous_take_keeps_ending_pose_in_shorter_narration_window(tmp_path):
+    from io import BytesIO
+    from PIL import Image
+    from app.video_frame_extraction import extract_last_video_frame
+
+    ffmpeg = post_production._resolve_ffmpeg()
+    if not ffmpeg:
+        pytest.skip("ffmpeg is unavailable")
+    src = tmp_path / "take.mp4"
+    dest = tmp_path / "master.mp4"
+    subprocess.run([
+        ffmpeg, "-v", "error", "-f", "lavfi", "-i", "color=black:s=64x96:d=2:r=30",
+        "-vf", "drawbox=color=white:t=fill:enable='eq(n,59)'",
+        "-c:v", "libx264", "-pix_fmt", "yuv420p", str(src),
+    ], check=True)
+    post_production._normalize_segment(
+        ffmpeg=ffmpeg, src_path=src, dest_path=dest, speed_coef=1.0,
+        target_width=64, target_height=96, target_duration_sec=1, fit_full_clip=True,
+    )
+    last = Image.open(BytesIO(extract_last_video_frame(video_path=dest))).convert("L")
+    assert last.getpixel((32, 48)) > 240
+    assert post_production._media_duration(dest) == pytest.approx(1, abs=1/30)
+
+
 def test_has_audio_stream_falls_back_to_ffmpeg_input_probe(monkeypatch, tmp_path):
     video = tmp_path / "clip.mp4"
     video.write_bytes(b"video")

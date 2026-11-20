@@ -26,6 +26,7 @@ SCENE_PROMPT_JSON_KEYS = (
     "prompt_meta_json",
 )
 SCENE_META_SNAPSHOT_KEYS = (
+    "discipline_narrative_mode",
     "discipline_cast_override",
     "story_camera_reveal_requested",
     "continuation_source_video_candidate_id",

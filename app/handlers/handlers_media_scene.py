@@ -602,10 +602,14 @@ async def _send_next_scene_media_step(update: Update, session: dict) -> None:
     _persist_visible_scene_media_cursor(update, session)
     if sub == SCENE_MEDIA_SUBSTEP_START:
         from ..scene_media_candidates import continuation_source_for_scene
+        from ..discipline_modes import FLOW, MODE_KEY
         can_continue = continuation_source_for_scene(session, scenes, idx) is not None
+        step_text = _image_approval_text(scene, idx + 1, total, include_continue_previous=can_continue)
+        if idx > 0 and scene.get(MODE_KEY) == FLOW:
+            step_text = "Плавная 2D-история. «ОК» возьмёт последний кадр утверждённого предыдущего клипа.\n\n" + step_text
         await _reply_text_with_optional_markup(
             update,
-            _image_approval_text(scene, idx + 1, total, include_continue_previous=can_continue),
+            step_text,
             reply_markup=scene_image_approval_markup(
                 include_continue_previous=can_continue,
                 session=session,

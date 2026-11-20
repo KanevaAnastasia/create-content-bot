@@ -15,6 +15,9 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from .discipline_modes import (
+    FLOW, LABELS, MODE_KEY, REFRAME, SHORT_FORMATS, opening_sentence, script_direction, visual_direction,
+)
 from .llm_utils import GEMINI_MODEL_PROFILE_CREATIVE, extract_json_object, gemini_generate_sync
 
 
@@ -422,10 +425,15 @@ def generate_story_voiceover(
         "previous_voiceover": str(previous_text or "").strip(),
         "user_feedback": str(user_feedback or "").strip(),
     }
+    length_direction = (
+        "Целевая длительность 18–28 секунд спокойной речи, ориентир 38–60 русских слов. "
+        if discipline_mode in SHORT_FORMATS else
+        "Озвучка должна занимать от 45 до 110 секунд естественной спокойной речи и точно укладываться в две минуты. "
+    )
     prompt = (
         "Ты пишешь русскую закадровую озвучку для короткой визуальной истории. "
         "Верни только строгий JSON-объект с ключами title и voiceover_text.\n"
-        "Озвучка должна занимать от 45 до 110 секунд естественной спокойной речи и точно укладываться в две минуты. "
+        f"{length_direction}"
         "Выбирай длину по объёму исходной истории: не растягивай короткую тему, но и не выбрасывай важные мысли из большой. "
         f"Не более {STORY_VOICEOVER_MAX_WORDS} слов и {STORY_VOICEOVER_MAX_CHARS} знаков с пробелами. "
         "Оба ограничения жёсткие. Один цельный голос, без реплик персонажей, ремарок, "
@@ -436,7 +444,6 @@ def generate_story_voiceover(
         "без сложных аббревиатур. Если дан feedback, перепиши previous_voiceover по нему, сохранив факты источника.\n\n"
         + json.dumps(payload, ensure_ascii=False, indent=2)
     )
-    from .discipline_modes import script_direction, REFRAME, opening_sentence
     direction = script_direction(discipline_mode)
     if direction:
         prompt += "\nПриоритетная структура выбранного формата:\n" + direction
@@ -1085,7 +1092,7 @@ def enforce_discipline_narrative_cast(scenes, project_characters):
             continue
         cast_scenes.append(scene)
         ids = [aliases.get(str(value).casefold(), str(value)) for value in scene.get("characters") or []]
-        scene["characters"] = list(dict.fromkeys([vasily, *ids]))
+        scene["characters"] = [vasily, knopka] if scene.get(MODE_KEY) in SHORT_FORMATS else list(dict.fromkeys([vasily, *ids]))
     _apply_discipline_cast_policy(
         cast_scenes, project_characters=project_characters, primary_id=vasily, anastasia_id=anastasia,
         character_descriptions={c["id"]: c.get("description", "") for c in project_characters},
@@ -1146,15 +1153,21 @@ def _normalize_story_character_bible(value: Any) -> list[dict[str, Any]]:
     return out
 
 
-def _expand_semantic_beats_to_clips(beats: list[dict[str, Any]]) -> list[dict[str, Any]]:
+def _expand_semantic_beats_to_clips(
+    beats: list[dict[str, Any]], *, continuous: bool = False,
+) -> list[dict[str, Any]]:
     if not beats:
         return []
     duration = max(float(beat.get("end_sec") or 0.0) for beat in beats)
-    clip_count_total = max(1, int(math.ceil(duration / STORY_CLIP_DURATION_SEC)))
+    # For one continuous shot, spread the narration evenly over whole four-second takes.
+    # This avoids commissioning an extra take for a fraction of a second at the end.
+    generated = 4.0 if continuous else STORY_CLIP_DURATION_SEC
+    clip_count_total = max(1, round(duration / generated) if continuous else math.ceil(duration / generated))
+    step = duration / clip_count_total if continuous else generated
     assignments: list[tuple[dict[str, Any], float, float]] = []
     for clip_index in range(clip_count_total):
-        start = clip_index * STORY_CLIP_DURATION_SEC
-        end = min(duration, start + STORY_CLIP_DURATION_SEC)
+        start = clip_index * step
+        end = min(duration, (clip_index + 1) * step)
         beat = max(
             beats,
             key=lambda item: max(
@@ -1179,7 +1192,7 @@ def _expand_semantic_beats_to_clips(beats: list[dict[str, Any]]) -> list[dict[st
                 "scene": scene_number,
                 "start_sec": round(start, 3),
                 "end_sec": round(end, 3),
-                "generation_duration_sec": STORY_CLIP_DURATION_SEC,
+                "generation_duration_sec": generated,
                 "narration_excerpt": str(beat.get("narration_excerpt") or ""),
                 "semantic_beat": beat_number,
                 "semantic_clip_index": per_beat_cursor[beat_number],
@@ -1421,11 +1434,15 @@ def generate_story_scene_plan(
     generation_mode: str | None = None,
     discipline_mode: str | None = None,
 ) -> dict[str, Any]:
-    style_key = normalize_story_visual_style(story_visual_style)
+    normalized_project_slug = str(project_slug or "").strip().lower()
+    discipline_project = normalized_project_slug == "discipline"
+    narrative_format = discipline_mode if discipline_project and discipline_mode in LABELS else ""
+    short_format = SHORT_FORMATS.get(narrative_format)
+    continuous = narrative_format == FLOW
+    style_key = normalize_story_visual_style(short_format.style_key if short_format else story_visual_style)
     style_config = story_visual_style_config(style_key)
     selected_visual_style = style_config["prompt"]
     reference_style_only = story_style_uses_character_references_only(style_key)
-    normalized_project_slug = str(project_slug or "").strip().lower()
     normalized_generation_mode = str(generation_mode or "").strip().lower()
     from .project_profiles import resolve_project_final_scene_prompt, resolve_project_title_preset
 
@@ -1445,9 +1462,6 @@ def generate_story_scene_plan(
         and str(project_title_preset.get("type") or "").strip() == "localized_end_title"
         else {}
     )
-    discipline_project = normalized_project_slug == "discipline"
-    from .discipline_modes import LABELS, visual_direction
-    narrative_format = discipline_mode if discipline_project and discipline_mode in LABELS else ""
     grandma_project = normalized_project_slug in {"grandma_kitchen", "grandma_cat_cooking"}
     fixed_project_characters = _normalize_story_character_bible(project_characters or [])
     fixed_character_ids = {item["id"] for item in fixed_project_characters}
@@ -1462,14 +1476,15 @@ def generate_story_scene_plan(
     legacy_grandma_cast = not fixed_project_characters and not discipline_project
     grandma_story = legacy_grandma_cast or grandma_project
     semantic_beats = build_semantic_narration_beats(voiceover_text, duration_sec, alignment)
-    windows = _expand_semantic_beats_to_clips(semantic_beats)
+    windows = _expand_semantic_beats_to_clips(semantic_beats, continuous=continuous)
     if normalized_generation_mode == "visualization":
         windows = _apply_visualization_final_clip_policy(windows, visualization_output_policy)
+    clips_key = "continuous_clips" if continuous else "three_second_clips"
     payload = {
         "source_story": source_story,
         "approved_voiceover": voiceover_text,
         "semantic_beats": semantic_beats,
-        "three_second_clips": windows,
+        clips_key: windows,
         "previous_scenes": previous_scenes or [],
         "user_feedback": str(user_feedback or "").strip(),
         "project_characters": fixed_project_characters,
@@ -1526,11 +1541,41 @@ def generate_story_scene_plan(
     if narrative_format:
         project_character_direction = visual_direction(narrative_format)
         project_character_direction += " Используй только точные id Василия и Кнопки из project_characters, не придумывай им новые id."
+    if short_format:
+        project_character_direction += " В этих выпусках весь актёрский состав ограничен project_characters."
+    if continuous:
+        project_character_direction += " Начни с Василия и Кнопки вместе и держи их в одной декорации до конца."
     if project_final_scene_rule:
         project_character_direction += (
             " Обязательное постоянное правило финальной сцены этого проекта: "
             f"{project_final_scene_rule} "
         )
+    camera_instruction = (
+        "Всю историю снимай в одной декорации неподвижной камерой с одной точки. "
+        "В camera_direction каждого клипа указывай locked-off camera. Положение, свет и палитра постоянны. "
+        "Варьируй действие и позу, сохраняя один главный визуальный факт в кадре. "
+        if continuous else
+        "Чередуй общий, средний, крупный и макро-планы; сохраняй один главный визуальный факт на кадр. "
+        "В camera_direction обязательно укажи конкретное движение или способ съёмки на английском. "
+        f"Для самого первого clip_visual всегда используй {STORY_SAFE_ZOOM_IN_DIRECTION}. "
+        "Никогда не используй tilt up, pan up или движение снизу вверх: они заставляют image-to-video дорисовывать область "
+        "за исходным кадром, особенно потолок. Любое такое движение заменяй оптическим приближением строго внутри границ исходного изображения. "
+        "В следующих клипах осмысленно чередуй tracking shot, POV shot, optical zoom-in within the existing frame, "
+        "over-the-shoulder shot, gentle orbit shot и другие подходящие кинематографичные варианты. "
+        "Не повторяй одно и то же движение камеры в соседних клипах и не выбирай приём, который противоречит действию сцены."
+    )
+    location_instruction = (
+        "В каждом клипе сохраняй исходную локацию и выставляй location_transition=false. "
+        if continuous else
+        "Сменить место внутри ролика можно только как ясное сюжетное событие: герои вышли из дома, пришли в ресторан, спортивный зал, "
+        "парк, офис или другое нужное для действия место. Для первого кадра новой локации поставь location_transition=true и в "
+        "transition_note кратко объясни переход и его связь с narration_excerpt. После перехода зафиксируй новую локацию и сохраняй её "
+        "в последующих клипах до следующего так же обоснованного перехода. Не меняй фон только ради визуального разнообразия и не делай "
+        "необъяснимых скачков между местами. Если источник действительно требует "
+        "исторического перехода, зафиксируй отдельно одну historical_environment для всего исторического слоя; не добавляй такой переход "
+        "без сюжетной необходимости. Для location всегда называй конкретное место, для lighting — характер света, для color_palette — "
+        "2–4 ведущих цвета. Не меняй время суток или цветовую основу внутри одного временного слоя. "
+    )
     prompt = (
         "Ты режиссёр короткой немой визуальной истории под уже утверждённую закадровую дорожку. "
         "Верни только JSON-объект с ключами characters, scenario_environment, historical_environment и beats. "
@@ -1541,32 +1586,17 @@ def generate_story_scene_plan(
         "Для одного героя в разных возрастах создай отдельные id (например antonin_young и antonin_adult), но одинаковый "
         "same_person_group. Поля: id, display_name, role, age_stage, same_person_group, description, reference_prompt, "
         "requires_reference. Description фиксирует лицо, волосы, телосложение и отличительные признаки; одежда исторически точна.\n"
-        "Каждый beat: beat, visual_concept, clip_visuals. Число clip_visuals равно числу three_second_clips "
+        f"Каждый beat: beat, visual_concept, clip_visuals. Число clip_visuals равно числу {clips_key} "
         "этого semantic_beat. Каждый clip_visual: visual, shot_type, camera_direction, location, lighting, color_palette, "
         "grandma_age (young/current/none), cat_present, time_period (present/past), "
         "characters (grandma, cat и/или id из characters), continuity_anchors, location_segment, "
         "location_transition (true/false), transition_note.\n"
         "Все clip_visuals одного beat подтверждают ПОЛНЫЙ смысл narration_excerpt, а не отдельные обрывки слов. "
         "Первый clip_visual сразу устанавливает весь смысловой тезис; следующие развивают его визуально. "
-        "Чередуй общий, средний, крупный и макро-планы; сохраняй один главный визуальный факт на кадр. "
-        "В camera_direction обязательно укажи конкретное движение или способ съёмки на английском. "
-        f"Для самого первого clip_visual всегда используй {STORY_SAFE_ZOOM_IN_DIRECTION}. "
-        "Никогда не используй tilt up, pan up или движение снизу вверх: они заставляют image-to-video дорисовывать область "
-        "за исходным кадром, особенно потолок. Любое такое движение заменяй оптическим приближением строго внутри границ исходного изображения. "
-        "В следующих клипах осмысленно чередуй tracking shot, POV shot, optical zoom-in within the existing frame, "
-        "over-the-shoulder shot, gentle orbit shot и другие подходящие кинематографичные варианты. "
-        "Не повторяй одно и то же движение камеры в соседних клипах и не выбирай приём, который противоречит действию сцены. "
+        f"{camera_instruction}"
         "Выбери основную начальную физическую локацию современного слоя и верни её в scenario_environment с полями location, "
-        "lighting и color_palette. По умолчанию все следующие clip_visuals сохраняют ту же архитектуру, ключевой реквизит, "
-        "световую основу и палитру; меняй ракурс, крупность, движение камеры, действие и зоны внутри этого пространства. "
-        "Сменить место внутри ролика можно только как ясное сюжетное событие: герои вышли из дома, пришли в ресторан, спортивный зал, "
-        "парк, офис или другое нужное для действия место. Для первого кадра новой локации поставь location_transition=true и в "
-        "transition_note кратко объясни переход и его связь с narration_excerpt. После перехода зафиксируй новую локацию и сохраняй её "
-        "в последующих клипах до следующего так же обоснованного перехода. Не меняй фон только ради визуального разнообразия и не делай "
-        "необъяснимых скачков между местами. Если источник действительно требует "
-        "исторического перехода, зафиксируй отдельно одну historical_environment для всего исторического слоя; не добавляй такой переход "
-        "без сюжетной необходимости. Для location всегда называй конкретное место, для lighting — характер света, для color_palette — "
-        "2–4 ведущих цвета. Не меняй время суток или цветовую основу внутри одного временного слоя. "
+        "lighting и color_palette. Сохраняй архитектуру, ключевой реквизит, основу света и палитру. "
+        f"{location_instruction}"
         + (
             "Кот должен быть естественным повторяющимся свидетелем минимум в 60% сцен, но не закрывать главный объект. "
             "В первую очередь помещай его в иначе статичные кадры с картами, вывесками, фасадами, полками "
@@ -1591,7 +1621,8 @@ def generate_story_scene_plan(
     data = extract_json_object(raw)
     generated_character_bible = _normalize_story_character_bible(data.get("characters"))
     character_bible = [*fixed_project_characters]
-    character_bible.extend(item for item in generated_character_bible if item["id"] not in fixed_character_ids)
+    if not short_format:
+        character_bible.extend(item for item in generated_character_bible if item["id"] not in fixed_character_ids)
     character_ids = {item["id"] for item in character_bible}
     character_descriptions = {item["id"]: item["description"] for item in character_bible}
     character_labels = {item["id"]: item["display_name"] for item in character_bible}
@@ -1641,8 +1672,10 @@ def generate_story_scene_plan(
             visual=visual,
             grandma_age=age,
         )
+        if continuous and normalized:
+            time_period = normalized[0]["time_period"]
         historical_scene = time_period == "past"
-        location_transition = _story_location_transition(candidate)
+        location_transition = not continuous and _story_location_transition(candidate)
         location, lighting, color_palette = _story_scene_environment(
             candidate,
             historical_scene=historical_scene,
@@ -1652,7 +1685,7 @@ def generate_story_scene_plan(
             allow_transition=location_transition,
         )
         environment_locks[time_period] = (location, lighting, color_palette)
-        camera_direction = _story_camera_direction(
+        camera_direction = "locked-off camera" if continuous else _story_camera_direction(
             index,
             candidate.get("camera_direction") or candidate.get("camera_movement"),
             previous=previous_camera_direction,
@@ -1687,6 +1720,7 @@ def generate_story_scene_plan(
         normalized.append(
             {
                 **window,
+                **({MODE_KEY: narrative_format} if short_format else {}),
                 "duration_sec": float(window.get("generation_duration_sec") or STORY_CLIP_DURATION_SEC),
                 "timeline_duration_sec": round(float(window["end_sec"]) - float(window["start_sec"]), 3),
                 "model": "kling_3_0",
@@ -1699,7 +1733,7 @@ def generate_story_scene_plan(
                 "recipe_step": f"{window['start_sec']:.0f}–{window['end_sec']:.0f} сек: {window['narration_excerpt']}",
                 "action": visual,
                 "display_action": visual,
-                "shot_type": str(candidate.get("shot_type") or "medium").strip(),
+                "shot_type": normalized[0]["shot_type"] if continuous and normalized else str(candidate.get("shot_type") or "medium").strip(),
                 "camera_direction": camera_direction,
                 "location": location,
                 "lighting": lighting,
@@ -2008,7 +2042,7 @@ def generate_story_production(
     previous_camera_direction = ""
     for index, source_scene in enumerate(scenes_plan):
         scene = dict(source_scene)
-        scene["camera_direction"] = _story_camera_direction(
+        scene["camera_direction"] = "locked-off camera" if scene.get(MODE_KEY) == FLOW else _story_camera_direction(
             index,
             scene.get("camera_direction"),
             previous=previous_camera_direction,
@@ -2039,6 +2073,18 @@ def generate_story_production(
         if not reference_style_only
         else ""
     )
+    continuous = any(scene.get(MODE_KEY) == FLOW for scene in safe_scenes_plan)
+    camera_instruction = (
+        "One continuous locked-off cel-animation shot. Begin each clip in the exact previous ending pose, "
+        "carry the prop's movement across the boundary and preserve its direction, pace and screen position. "
+        "No reframing, cuts or dissolves. Both project characters stay on model. "
+        if continuous else
+        f"Use each scene's camera_direction literally in its video prompt: the first clip is {STORY_SAFE_ZOOM_IN_DIRECTION}. "
+        "Never use tilt up, pan up or any bottom-to-top camera travel. Replace it with a slow optical zoom-in that remains strictly "
+        "inside the existing source-image boundaries and never reveals or generates space outside the frame, especially the ceiling. "
+        "Later clips may use the approved varied tracking shot, POV shot, optical zoom-in, over-the-shoulder shot, gentle orbit shot "
+        "or another planned camera technique that stays within the source frame. "
+    )
     prompt = (
         "Create production prompts for an approved narrated story timeline. Return only a JSON object with key prompts, "
         "one item per input scene in exactly the same order. Each item has start_frame_prompt_ru and video_prompt_en.\n"
@@ -2047,18 +2093,14 @@ def generate_story_production(
         "location, lighting and color_palette. Preserve the current physical setting across adjacent semantic beats: the same architecture, "
         "key props, lighting basis and palette remain recognizable. Change it only when the approved scene has location_transition=true; "
         "then visually establish the motivated arrival described in transition_note and keep that new setting continuous in following clips. "
-        "Never invent an unapproved move. Otherwise create variety only through shot size, camera angle, movement, action and zones of the same setting. "
+        "Never invent an unapproved change of setting. Follow the planned camera direction. "
         + style_instruction
         +
         "No readable text, subtitles, logos, brands or watermarks.\n"
         "VIDEO: use each scene's generation_duration_sec (3 or 4 seconds) for the Kling 3.0 image-to-video motion prompt in English. "
         "It must begin with the matching '<duration>-second Kling 3.0 image-to-video shot. No audio.' prefix "
         "and explicitly forbid dialogue, speech, lip sync, music, ambient sound, on-screen text, subtitles, logos and watermark. "
-        f"Use each scene's camera_direction literally in its video prompt: the first clip is {STORY_SAFE_ZOOM_IN_DIRECTION}. "
-        "Never use tilt up, pan up or any bottom-to-top camera travel. Replace it with a slow optical zoom-in that remains strictly "
-        "inside the existing source-image boundaries and never reveals or generates space outside the frame, especially the ceiling. "
-        "Later clips may use the approved varied tracking shot, POV shot, optical zoom-in, over-the-shoulder shot, gentle orbit shot "
-        "or another planned camera technique that stays within the source frame. "
+        f"{camera_instruction}"
         "Animate only the approved visual beat; preserve the start-frame character identity, age, era, objects and composition. "
         "The clip itself is silent because one external ElevenLabs narration track is added after all clips are approved.\n"
         "If feedback is present, revise previous_prompts literally without changing scene count, order, generation_duration_sec or narration excerpts.\n\n"
@@ -2084,6 +2126,11 @@ def generate_story_production(
         video_prompt = str(candidate.get("video_prompt_en") or "").strip() or _fallback_video_prompt(scene)
         if not video_prompt.lower().startswith(required_prefix.lower()):
             video_prompt = _fallback_video_prompt(scene)
+        short_format = SHORT_FORMATS.get(scene.get(MODE_KEY))
+        if short_format:
+            # The model may omit production constraints even when its JSON is valid.
+            start_prompt = f"{start_prompt} {short_format.frame}"
+            video_prompt = f"{video_prompt} {short_format.motion}"
         video_prompt = _ensure_story_camera_direction(
             video_prompt,
             scene.get("camera_direction"),
