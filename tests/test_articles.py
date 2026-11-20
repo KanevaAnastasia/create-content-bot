@@ -336,3 +336,106 @@ def test_publish_uses_persisted_random_id_and_verifies_provider_result(setup):
     assert client.requests[0].message == "Approved article"
     assert store.issue(row["id"])["channel_message_id"] == 30
     client.get_messages.assert_awaited_once()
+
+
+def private_test_target():
+    return {"channel_id": 987, "username": None, "title": "for_me", "publisher_id": 456, "access_hash": 654}
+
+
+def test_manual_test_preserves_primary_schedule_and_destination(setup):
+    topics = [{"title": str(i), "angle": "a"} for i in range(5)]
+    with store.transaction() as data:
+        data["prepared_topics"] = topics
+    before = store.snapshot()
+    target = private_test_target()
+    row = store.create_test(target, topics)
+    target["channel_id"] = 111
+    after = store.snapshot()
+    for key in ("channel_id", "username", "publisher_id", "next_run_at", "prepared_topics"):
+        assert after[key] == before[key]
+    assert store.target_for(row)["channel_id"] == 987
+    assert store.blocks_advertising(123)
+    with pytest.raises(ValueError):
+        store.create_test(private_test_target(), topics)
+    store.change(row["id"], row["revision"], allowed={"topics"}, state="cancelled")
+    scheduled = store.claim_due(START)
+    assert not scheduled.get("test_mode")
+    assert store.target_for(scheduled)["channel_id"] == 789
+    assert scheduled["topics"] == topics
+
+
+@pytest.mark.parametrize("invalid", [{"channel_id": 789}, {"publisher_id": 999}, {"access_hash": None}])
+def test_test_channel_must_be_explicit_and_separate(setup, invalid):
+    target = private_test_target() | invalid
+    with pytest.raises(ValueError):
+        store.create_test(target, [{"title": str(i), "angle": "a"} for i in range(5)])
+    assert not store.snapshot()["issues"]
+
+
+def test_missing_test_destination_never_falls_back_to_primary(setup):
+    with pytest.raises(ValueError):
+        store.target_for({"test_mode": True})
+
+
+def test_publisher_uses_issue_target_instead_of_primary_config(setup, monkeypatch):
+    target = private_test_target()
+    row = {"test_mode": True, "target": target}
+    @asynccontextmanager
+    async def connected(config):
+        assert config == target
+        yield NS(), NS(id=987), NS(id=456)
+    monkeypatch.setattr(pub, "channel_client", connected)
+    send = AsyncMock(return_value=41)
+    monkeypatch.setattr(pub, "_publish_connected", send)
+    assert asyncio.run(pub.publish(store.snapshot(), row)) == 41
+    assert send.call_args.args[1].id == 987
+    assert store.post_url(row, 41) == "https://t.me/c/987/41"
+
+
+def test_test_approval_screen_and_handoff_use_private_destination(setup, monkeypatch):
+    photo = setup / "photo.jpg"
+    photo.write_bytes(b"image")
+    row = store.create_test(private_test_target(), [{"title": str(i), "angle": "a"} for i in range(5)])
+    row = store.change(row["id"], row["revision"], allowed={"topics"}, state="ready", topic=row["topics"][0],
+                       text="Approved", teaser="Как сделать полотенца мягче", text_approved=True, images_approved=True,
+                       images={"horizontal": str(photo), "vertical": str(photo)})
+    b = bot()
+    asyncio.run(flow.show(b, 123, row))
+    screen = b.send_message.call_args.kwargs
+    assert 'Тест для канала «for_me»' in screen["text"]
+    assert screen["reply_markup"].inline_keyboard[0][0].text == "Опубликовать в for_me"
+    send = AsyncMock(return_value=41)
+    monkeypatch.setattr(flow, "publish", send)
+    asyncio.run(flow.callback(update(row, "publish"), NS(bot=b)))
+    saved = store.issue(row["id"])
+    assert saved["url"] == "https://t.me/c/987/41"
+    assert saved["target"]["channel_id"] == 987
+    assert set(saved["delivery"]) == {"photo", "url", "teaser"}
+    assert store.snapshot()["channel_id"] == 789
+
+
+def test_channel_client_resolves_private_peer_and_verifies_id(setup, monkeypatch):
+    import telethon
+    from telethon.types import InputPeerChannel
+    from app import syntax_telethon_fallback as fallback
+    client = NS(connect=AsyncMock(), disconnect=AsyncMock(), is_user_authorized=AsyncMock(return_value=True),
+                get_me=AsyncMock(return_value=NS(id=456)),
+                get_entity=AsyncMock(return_value=NS(id=987, creator=True, admin_rights=None)))
+    monkeypatch.setattr(telethon, "TelegramClient", lambda *a: client)
+    monkeypatch.setenv("TELEGRAM_API_ID", "1")
+    monkeypatch.setenv("TELEGRAM_API_HASH", "test")
+    candidate = NS(kind="file", value="test.session")
+    monkeypatch.setattr(fallback, "_acquire_syntax_session_candidate", lambda *a: candidate)
+    released = []
+    monkeypatch.setattr(fallback, "_release_syntax_session_candidate", lambda c: released.append(c))
+    async def connect():
+        async with pub.channel_client(private_test_target()) as (_, channel, __):
+            return channel.id
+    assert asyncio.run(connect()) == 987
+    peer = client.get_entity.call_args.args[0]
+    assert isinstance(peer, InputPeerChannel)
+    assert (peer.channel_id, peer.access_hash) == (987, 654)
+    client.get_entity.return_value = NS(id=789, creator=True, admin_rights=None)
+    with pytest.raises(ValueError):
+        asyncio.run(connect())
+    assert released == [candidate, candidate]

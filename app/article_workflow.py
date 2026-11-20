@@ -32,9 +32,12 @@ def keyboard(row, buttons):
 
 async def show(bot, chat_id, row):
     state = row["state"]
+    target = store.target_for(row)
+    destination = target.get("title") or target.get("username") or str(target["channel_id"])
+    test_notice = f'Тест для канала «{destination}». Стиль «У бабушки дома».\n\n' if row.get("test_mode") else ""
     buttons = []
     if state == "topics":
-        text = 'Статья для «У бабушки дома». Выберите тему:\n\n' + '\n\n'.join(
+        text = ('Выберите тему:\n\n' if row.get("test_mode") else 'Статья для «У бабушки дома». Выберите тему:\n\n') + '\n\n'.join(
             f'{n}. {t["title"]}\n{t["angle"]}' for n, t in enumerate(row["topics"], 1))
         buttons = [(str(n) + '. ' + t["title"], f"choose{n-1}") for n, t in enumerate(row["topics"], 1)]
         buttons += [("Другие пять тем", "more"), ("Своя тема / пожелания", "custom")]
@@ -53,10 +56,11 @@ async def show(bot, chat_id, row):
             text = "Проверьте обе картинки: кот, тема статьи и композиция. Можно внести правки."
             buttons = [("Обе картинки согласованы", "approve")]
         else:
-            text = (f'Готово к публикации в https://t.me/{store.snapshot()["username"]}\n'
+            text = (f'Готово к публикации в канале «{destination}»\n'
                     f'Тема: {row["topic"]["title"]}\n\nПубликация содержит согласованный текст и горизонтальную картинку. '
                     'После неё пришлю вертикальную картинку, ссылку и короткий анонс тремя отдельными сообщениями.')
-            buttons = [("Опубликовать статью в канале", "publish"), ("Исправить текст", "edit")]
+            publish_label = f"Опубликовать в {destination}" if row.get("test_mode") else "Опубликовать статью в канале"
+            buttons = [(publish_label, "publish"), ("Исправить текст", "edit")]
         buttons += [("Изменить горизонтальную", "edit_h"), ("Изменить вертикальную", "edit_v"), ("Изменить обе картинки", "imageedit")]
     elif state == "failed":
         text = row.get("error", "Не удалось завершить этап.") + "\nСохранённые материалы не потеряны."
@@ -73,7 +77,7 @@ async def show(bot, chat_id, row):
         text = "Этот этап сейчас выполняется. Результат пришлю сюда."
     if state in {"topics", "topic", "text", "images", "ready", "failed"}:
         buttons += [("Отменить эту статью", "cancel")]
-    await bot.send_message(chat_id=chat_id, text=text, reply_markup=keyboard(row, buttons) if buttons else None,
+    await bot.send_message(chat_id=chat_id, text=test_notice + text, reply_markup=keyboard(row, buttons) if buttons else None,
                            disable_web_page_preview=True)
     store.checkpoint(row["id"], shown_revision=row["revision"])
 
@@ -202,7 +206,7 @@ async def callback(update, context):
                     mid = None
                 if mid:
                     row = store.change(iid, row["revision"], allowed={"publishing", "publication_uncertain"}, state="published",
-                                       channel_message_id=mid, url=f'https://t.me/{store.snapshot()["username"]}/{mid}')
+                                       channel_message_id=mid, url=store.post_url(row, mid))
                     await deliver_handoff(context.bot, chat_id, row)
                 else:
                     row = store.change(iid, row["revision"], allowed={"publishing", "publication_uncertain"}, state="publication_uncertain")

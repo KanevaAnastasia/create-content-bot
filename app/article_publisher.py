@@ -37,7 +37,12 @@ async def channel_client(config):
         me = await client.get_me()
         if config.get("publisher_id") is not None and me.id != config["publisher_id"]:
             raise ValueError("Сессия принадлежит другому аккаунту. Публикация остановлена.")
-        channel = await client.get_entity(config["username"])
+        if config.get("username"):
+            peer = config["username"]
+        else:
+            from telethon.types import InputPeerChannel
+            peer = InputPeerChannel(config["channel_id"], config["access_hash"])
+        channel = await client.get_entity(peer)
         if channel.id != config["channel_id"]:
             raise ValueError("Адрес канала изменился. Публикация остановлена.")
         if not (channel.creator or getattr(channel.admin_rights, "post_messages", False)):
@@ -80,7 +85,7 @@ async def find_post(client, channel, row):
 async def publish(config, row, *, check_only=False):
     submission = {"started": False}
     try:
-        async with channel_client(config) as (client, channel, me):
+        async with channel_client(store.target_for(row, config)) as (client, channel, me):
             return await _publish_connected(client, channel, me, row, submission, check_only=check_only)
     except Exception as exc:
         if not submission["started"] and not check_only and not isinstance(exc, ReconciliationNeeded):

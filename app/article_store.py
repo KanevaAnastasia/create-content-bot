@@ -13,6 +13,7 @@ from .syntax_durable import write_json
 
 ROOT = Path(__file__).resolve().parents[1] / "runtime" / "articles"
 TERMINAL = {"published", "cancelled"}
+TARGET_FIELDS = ("channel_id", "username", "title", "publisher_id", "access_hash")
 
 
 def pending(row):
@@ -34,6 +35,39 @@ def transaction(*, write=True):
 def snapshot():
     with transaction(write=False) as data:
         return copy.deepcopy(data)
+
+
+def target_for(row, config=None):
+    target = row.get("target")
+    if row.get("test_mode") and not target:
+        raise ValueError("У тестовой статьи не указан канал публикации.")
+    source = target if target is not None else (config if config is not None else snapshot())
+    return {key: copy.deepcopy(source[key]) for key in TARGET_FIELDS if key in source}
+
+
+def post_url(row, message_id):
+    target = target_for(row)
+    address = target.get("username") or f'c/{target["channel_id"]}'
+    return f"https://t.me/{address}/{int(message_id)}"
+
+
+def create_test(target, topics):
+    """Start one explicitly requested test without consuming a scheduled slot."""
+    with transaction() as data:
+        if not data.get("enabled") or any(pending(i) for i in data["issues"].values()):
+            raise ValueError("Сначала завершите или отмените текущую статью.")
+        if (not target.get("channel_id") or target["channel_id"] == data["channel_id"]
+                or not target.get("publisher_id") or target["publisher_id"] != data.get("publisher_id")
+                or not target.get("title") or not (target.get("username") or target.get("access_hash"))):
+            raise ValueError("Нужен проверенный тестовый канал этого аккаунта.")
+        if len(topics) != 5:
+            raise ValueError("Для теста нужны пять тем.")
+        iid = uuid.uuid4().hex[:12]
+        row = {"id": iid, "revision": 0, "state": "topics", "operation": "topics", "test_mode": True,
+               "target": target_for({"target": target}), "topics": copy.deepcopy(topics),
+               "created_at": datetime.now(timezone.utc).isoformat(), "versions": [], "images": {}, "delivery": {}}
+        data["issues"][iid] = row
+        return copy.deepcopy(row)
 
 
 def configure(*, owner_id, publisher_id=None, channel_id, username, next_run_at, samples_path, reference_paths):
@@ -61,7 +95,8 @@ def claim_due(now=None):
         data["next_run_at"] = due.isoformat()
         iid = uuid.uuid4().hex[:12]
         data["issues"][iid] = {"id": iid, "revision": 0, "state": "working", "operation": "topics",
-                               "created_at": now.isoformat(), "versions": [], "images": {}, "delivery": {}}
+                               "created_at": now.isoformat(), "versions": [], "images": {}, "delivery": {},
+                               "target": target_for({}, data)}
         if data.get("prepared_topics"):
             data["issues"][iid].update(state="topics", topics=data.pop("prepared_topics"))
         return copy.deepcopy(data["issues"][iid])
