@@ -58,23 +58,17 @@
       "sha256": "419cbbdaf68a7e8e88852d24f7a4d4f68301358ebd6c4919120a60eeb8308cb2",
       "source": "https://support.apple.com/en-us/120414"
     },
-    "mur": {
-      "name": "Le Murmure",
-      "file": "editorial_selected/LeMurmure.otf",
-      "sha256": "cd4fe11f22a2b0756faf03f4a09ddf46d7e5f9d3f66f71324e69aae178d90f69",
-      "source": "https://online-fonts.com/fonts/le-murmure"
-    },
     "ci": {
       "name": "Cormorant Garamond SemiBold Italic",
       "file": "CF-CormorantItalic.ttf",
       "sha256": "f46585fdaf88f3af2ac0ebe7f821d80c6ac5c2ea3065abd2bd6acd83f3a7f8bb",
       "source": "https://online-fonts.com/fonts/cormorant-garamond"
     },
-    "at": {
-      "name": "Atziluth Script",
-      "file": "editorial_local/Atziluth Script.otf",
-      "sha256": "8601353dd2a1904af0ee3b1d635ad12b2feda3cd63c5acacdde9b12f4629a857",
-      "source": "https://online-fonts.com/fonts/atziluth-script"
+    "cyr": {
+      "name": "TD Ciryulnik",
+      "file": "editorial_local/Ciryulnik-TD CIRYULNIK.otf",
+      "sha256": "ca41627d8fa9c2b7d53751cd564bb35e05659fe66d643eeb8771a9bacfbd7e5d",
+      "source": "https://online-fonts.com/fonts/td-ciryulnik-0"
     }
   },
   "styles": {
@@ -90,9 +84,9 @@
           "text": "Почему",
           "box": [
             76,
-            606,
+            605,
             683,
-            855
+            801
           ],
           "color": "#EC5424"
         },
@@ -104,7 +98,7 @@
             213,
             883
           ],
-          "color": "#FFFAF1"
+          "color": "#F5F0EA"
         },
         {
           "text": "ТЫ?",
@@ -114,17 +108,17 @@
             593,
             1087
           ],
-          "color": "#FFFAF1"
+          "color": "#F5EFEA"
         }
       ],
       "en": [
         {
           "text": "Why",
           "box": [
-            144,
-            584,
+            138,
+            583,
             621,
-            854
+            812
           ],
           "color": "#EA5527"
         },
@@ -136,7 +130,7 @@
             217,
             881
           ],
-          "color": "#FFFAF1"
+          "color": "#F4EFE9"
         },
         {
           "text": "YOU?",
@@ -146,7 +140,7 @@
             653,
             1093
           ],
-          "color": "#FFFAF1"
+          "color": "#F5F0EA"
         }
       ]
     },
@@ -176,7 +170,7 @@
             445,
             730
           ],
-          "color": "#FAF4E2"
+          "color": "#FAF4E1"
         },
         {
           "text": "ТЫ?",
@@ -198,7 +192,7 @@
             666,
             518
           ],
-          "color": "#FCC339"
+          "color": "#FDC338"
         },
         {
           "text": "not",
@@ -208,7 +202,7 @@
             472,
             733
           ],
-          "color": "#FAF4E1"
+          "color": "#FAF4E0"
         },
         {
           "text": "YOU?",
@@ -248,17 +242,7 @@
             376,
             759
           ],
-          "color": "#F9F6F4",
-          "swash": {
-            "file": "swash-3-ru-1.png",
-            "box": [
-              204,
-              750,
-              449,
-              808
-            ],
-            "color": "#FC3259"
-          }
+          "color": "#F9F5F3"
         },
         {
           "text": "ты?",
@@ -268,17 +252,7 @@
             699,
             1043
           ],
-          "color": "#FC3259",
-          "swash": {
-            "file": "swash-3-ru-2.png",
-            "box": [
-              172,
-              972,
-              557,
-              1066
-            ],
-            "color": "#FC3259"
-          }
+          "color": "#FC3259"
         }
       ],
       "en": [
@@ -300,7 +274,7 @@
             441,
             770
           ],
-          "color": "#F9F6F4"
+          "color": "#F9F5F3"
         },
         {
           "text": "you?",
@@ -310,17 +284,7 @@
             702,
             1117
           ],
-          "color": "#FC3258",
-          "swash": {
-            "file": "swash-3-en-2.png",
-            "box": [
-              244,
-              958,
-              557,
-              1037
-            ],
-            "color": "#FC3258"
-          }
+          "color": "#FC3258"
         }
       ]
     },
@@ -340,7 +304,7 @@
             681,
             726
           ],
-          "color": "#F8E1C0"
+          "color": "#F8E1BF"
         },
         {
           "text": "не",
@@ -350,7 +314,7 @@
             542,
             842
           ],
-          "color": "#E76830"
+          "color": "#E6682F"
         },
         {
           "text": "ТЫ?",
@@ -382,7 +346,7 @@
             516,
             826
           ],
-          "color": "#E5672F"
+          "color": "#E5672E"
         },
         {
           "text": "YOU?",
@@ -398,11 +362,11 @@
     },
     "9": {
       "fonts": [
-        "mur",
+        "cyr",
         "ci",
-        "at"
+        "young"
       ],
-      "variant": "А",
+      "variant": "Б / А / В",
       "ru": [
         {
           "text": "ПОЧЕМУ",
@@ -422,7 +386,7 @@
             247,
             730
           ],
-          "color": "#FAF8F5"
+          "color": "#FAF7F5"
         },
         {
           "text": "ты?",
@@ -432,17 +396,7 @@
             701,
             965
           ],
-          "color": "#53C3FC",
-          "swash": {
-            "file": "swash-9-ru-2.png",
-            "box": [
-              113,
-              934,
-              634,
-              1098
-            ],
-            "color": "#53C3FC"
-          }
+          "color": "#52C3FD"
         }
       ],
       "en": [
@@ -464,7 +418,7 @@
             273,
             735
           ],
-          "color": "#FBF8F6"
+          "color": "#FAF8F6"
         },
         {
           "text": "you?",
@@ -474,7 +428,7 @@
             702,
             1125
           ],
-          "color": "#52C2FC"
+          "color": "#52C2FD"
         }
       ]
     }

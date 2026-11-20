@@ -29,9 +29,10 @@ Semantic parts keep fixed positions; individual words reveal at their own
 ElevenLabs alignment starts when the headline matches the spoken opening.
 Unspoken titles remain static rather than receiving invented speech timing.
 
-Approved drawings are emitted as ASS paths, avoiding font substitution between
-preview and final rendering. Original «Почему не ты / Why not you» contours and
-ornaments are retained. Other phrases use the approved complete alphabets.
+Previews and final videos use the same ASS paths. New style selections use
+the typefaces and colors in `fonts/editorial_selected/selection.json`.
+Styles 3 and 9 show the lettering without decorative underlines. See
+[`fonts/EDITORIAL.md`](../fonts/EDITORIAL.md) for the reference files and review process.
 Styles 3/9 automatically place the upper semantic part behind the foreground
 character. BiRefNet builds a mask from the actual new footage every half-second;
 backward optical flow tracks it on every intermediate frame. A scene cut resets

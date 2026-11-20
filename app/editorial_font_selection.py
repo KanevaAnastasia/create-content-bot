@@ -111,7 +111,7 @@ def _case(text, reference):
 
 def _box(sid, record, role, text, reference_title):
     if sid == '1' and not reference_title:
-        return ((40, 535, 680, 790), (50, 800, 230, 860), (40, 875, 680, 1110))[role]
+        return ((40, 600, 680, 790), (50, 800, 230, 860), (40, 875, 680, 1110))[role]
     if sid == '3' and not reference_title and role == 2:
         return (40, 815, 680, 1020)
     left, top, right, bottom = record['box']
@@ -124,7 +124,7 @@ def _box(sid, record, role, text, reference_title):
     return left, top, right, bottom
 
 
-def _size_and_position(mask, full, box, tilt):
+def _size_and_position(mask, full, box, tilt, fit):
     if tilt:
         rotated = full.rotate(tilt, Image.Resampling.BICUBIC, expand=True)
         crop = rotated.getbbox() or (0, 0, 1, 1)
@@ -134,25 +134,16 @@ def _size_and_position(mask, full, box, tilt):
     width, height = right - left, bottom - top
     ratio = min(width / full.width, height / full.height)
     size = (max(1, round(full.width * ratio)), max(1, round(full.height * ratio)))
+    if fit == 'reference':
+        # The selected script and display faces have different optical proportions.
+        # The reference word has an art-directed width and cap height in each language.
+        size = width, height
+    elif fit == 'tall':
+        # Keep shorter Russian headlines visible above the subject's hair. Limit
+        # stretching for long semantic parts whose width already fills the frame.
+        size = size[0], min(height, round(size[1] * 1.65))
     position = (left + (width - size[0]) // 2, top + (height - size[1]) // 2)
     return mask.resize(size, Image.Resampling.LANCZOS), position
-
-
-def _swash(record, ink, canonical):
-    spec = record['swash']
-    stroke = _asset(spec['file'])
-    left, top, right, _ = spec['box']
-    if canonical:
-        return stroke, (left, top)
-    # For new wording anchor the stroke below the actual ink, clear of descenders.
-    x, y, w, h = ink
-    ref_width = record['box'][2] - record['box'][0]
-    width = max(1, min(W - 32, round(w * stroke.width / ref_width)))
-    height = max(1, round(stroke.height * width / stroke.width))
-    center = (left + right) / 2
-    relative_center = (center - record['box'][0]) / ref_width
-    start = max(16, min(W - width - 16, round(x + w * relative_center - width / 2)))
-    return stroke.resize((width, height), Image.Resampling.LANCZOS), (start, min(H - height, y + h + 4))
 
 
 @lru_cache(maxsize=16)
@@ -176,18 +167,18 @@ def layers(sid, lang, parts, role, visible=None):
         mask = full if visible is None or visible >= len(frames) else _alpha(frames[visible - 1]).crop(crop)
     reference_title = all(t == records[r]['text'] for r, t in prepared) and len(prepared) == 3
     box = _box(sid, record, role, text, reference_title)
-    mask, (x, y) = _size_and_position(mask, full, box, 9 if sid == '1' and role == 0 else 0)
+    fit = 'contain'
+    if role == 0 and sid in ('1', '9') and reference_title:
+        fit = 'reference'
+    elif role == 0 and sid == '9' and lang == 'ru':
+        fit = 'tall'
+    mask, (x, y) = _size_and_position(mask, full, box, 9 if sid == '1' and role == 0 else 0, fit)
     face = Image.new('L', (W, H))
     face.paste(mask, (x, y))
     result = []
     if sid == '1' and role == 0:
         result.append(('#36251F', face.filter(ImageFilter.MaxFilter(3))))
     result.append((record['color'], face))
-    if 'swash' in record and (visible is None or visible >= len(text.split())):
-        stroke, position = _swash(record, (x, y, mask.width, mask.height), reference_title)
-        layer = Image.new('L', (W, H))
-        layer.paste(stroke, position)
-        result.append((record['swash']['color'], layer))
     return tuple(result)
 
 
