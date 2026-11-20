@@ -54,6 +54,21 @@ def test_selected_typefaces_and_original_colors():
     assert styles['9']['ru'][2]['text'] == 'ты?'
 
 
+@pytest.mark.parametrize('style_id', ['1', '2', '3', '5', '9'])
+@pytest.mark.parametrize('lang,title', [('ru', 'Почему не ты?'), ('en', 'Why not you?')])
+def test_saved_styles_render_like_a_new_selection(style_id, lang, title, reference_lettering):
+    from app.editorial_titles import ass_events
+
+    cue = {'language': lang, 'text': title, 'start_sec': 0, 'end_sec': 2}
+    style = {'editorial_style_id': style_id}
+    def render(settings):
+        return ass_events(cue, settings, 720, 1280, 'Default')
+
+    current = render({**style, 'editorial_font_revision': fonts.REVISION})
+    assert render(style) == current
+    assert render({**style, 'editorial_font_revision': 'review_v4'}) == current
+
+
 @pytest.mark.parametrize('title', ['Почему не ты?', 'У меня нет времени'])
 def test_reference_and_new_titles_require_the_selected_font_files(title, monkeypatch):
     parts = tuple(enumerate(fallback_parts(title)))

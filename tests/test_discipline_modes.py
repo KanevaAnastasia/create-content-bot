@@ -94,7 +94,7 @@ def test_approved_assets_are_frozen():
         assert hashlib.sha256((approved.ASSETS/name).read_bytes()).hexdigest()==digest
 
 
-def test_timed_headline_reveals_words_in_fixed_geometry():
+def test_timed_headline_reveals_words_in_fixed_geometry(title_event_ink):
     style={'editorial_style_id':'9','word_timing_by_lang':{'ru':[
         {'text':'Почему','start':.1,'end':.4},{'text':'не','start':.5,'end':.6},
         {'text':'ты?','start':.7,'end':1.0}]}}

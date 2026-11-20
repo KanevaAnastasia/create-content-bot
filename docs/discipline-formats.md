@@ -1,9 +1,11 @@
 # Discipline formats and approved title presets
 
-Approved on 2026-11-07: styles **1, 2, 3, 5, 9**, revision `review_v4`.
+Styles **1, 2, 3, 5, 9** use the font selections approved on 2026-11-20.
+The bilingual approval frames are in
+`artifacts/editorial_titles/typography_review_nov20/font-audit/final/`.
 Styles 6/7/10 remain available only as old draft data, not selectable for new titles.
-`fonts/editorial_approved/approval.json` pins the fonts, contextual alternates,
-geometry and original title outlines by SHA-256. Local review media is retained
+The original `review_v4` manifest in `fonts/editorial_approved/approval.json`
+pins the 2026-11-07 fonts, alternates, geometry and outlines by SHA-256. Its review media is retained
 in `artifacts/editorial_titles/approved_2026-11-07/`.
 
 After entering source text in Discipline, choose:
@@ -29,7 +31,7 @@ Semantic parts keep fixed positions; individual words reveal at their own
 ElevenLabs alignment starts when the headline matches the spoken opening.
 Unspoken titles remain static rather than receiving invented speech timing.
 
-Previews and final videos use the same ASS paths. New style selections use
+Previews and final videos use the same ASS paths. New and saved style selections use
 the typefaces and colors in `fonts/editorial_selected/selection.json`.
 Styles 3 and 9 show the lettering without decorative underlines. See
 [`fonts/EDITORIAL.md`](../fonts/EDITORIAL.md) for the reference files and review process.

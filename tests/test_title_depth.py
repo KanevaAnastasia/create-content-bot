@@ -14,7 +14,7 @@ def write_title(path, sid='9'):
         'start_sec':0,'end_sec':1}],title_style={'editorial_style_id':sid},video_width=720,video_height=1280)
 
 
-def test_split_keeps_only_upper_text_behind_and_dim_below_subject(tmp_path):
+def test_split_keeps_only_upper_text_behind_and_dim_below_subject(tmp_path, title_event_ink):
     source=tmp_path/'title.ass';write_title(source)
     assert title_depth.has_depth(source)
     base,back,front,intervals=title_depth.split_ass(source,tmp_path)
@@ -28,7 +28,7 @@ def test_split_keeps_only_upper_text_behind_and_dim_below_subject(tmp_path):
 
 
 @pytest.mark.parametrize('sid',['1','2','5'])
-def test_front_styles_do_not_require_segmentation(tmp_path,sid):
+def test_front_styles_do_not_require_segmentation(tmp_path,sid,title_event_ink):
     source=tmp_path/'title.ass';write_title(source,sid)
     assert not title_depth.has_depth(source)
 
@@ -105,7 +105,7 @@ def test_optical_flow_follows_subject_and_rejects_scene_cuts():
 
 @pytest.mark.parametrize('sid', ['3', '9'])
 @pytest.mark.parametrize('language,text', [('ru', 'А что если?'), ('en', 'What if?')])
-def test_reframe_phrase_never_goes_behind_subject(tmp_path, sid, language, text):
+def test_reframe_phrase_never_goes_behind_subject(tmp_path, sid, language, text, title_event_ink):
     source = tmp_path / 'pivot.ass'
     _write_burned_subtitle_ass(source, [], title_cues=[{
         'text': text, 'language': language, 'start_sec': 32, 'end_sec': 34,

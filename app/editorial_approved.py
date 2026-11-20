@@ -1,8 +1,4 @@
-"""Frozen approved typography, rasterized once and emitted as portable ASS drawings.
-
-Uses the same fonts, layout and contextual forms as review_v4. Upper title
-parts in styles 3/9 are marked for automatic per-shot foreground occlusion.
-"""
+"""Emit approved editorial titles as timed ASS paths. Keep the old review helpers for reference."""
 from functools import lru_cache
 from pathlib import Path
 import json
@@ -163,7 +159,6 @@ def ass_events(cue,style,width,height,base_style):
     alpha=round(255*(1-opacity))
     output=[event(0,start,end,f'{{\\an7\\pos(0,0)\\bord0\\shad0\\1c&H000000&\\1a&H{alpha:02X}&\\p1}}',f'm 0 0 l {width} 0 {width} {height} 0 {height}')]
     from . import editorial_font_selection as selected
-    revised = style.get('editorial_font_revision') == selected.REVISION
     semantic_parts = tuple(zip(roles, parts))
     offset=0
     for role,text in zip(roles,parts):
@@ -174,8 +169,7 @@ def ass_events(cue,style,width,height,base_style):
         for visible,t0,t1 in states:
             if t1<=t0:
                 continue
-            ink = (selected.drawings(sid,lang,semantic_parts,role,visible,foreground=always_front) if revised
-                   else drawings(sid,lang,role,text,visible))
+            ink = selected.drawings(sid, lang, semantic_parts, role, visible, foreground=always_front)
             for color,path in ink:
                 bgr=color[5:7]+color[3:5]+color[1:3]
                 tags=(f'{{\\an7\\pos(0,0)\\fscx{width/W*100:.5f}\\fscy{height/H*100:.5f}'

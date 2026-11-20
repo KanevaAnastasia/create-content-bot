@@ -45,7 +45,7 @@ def test_reframe_title_uses_real_middle_alignment(monkeypatch):
     assert _extra_title_cues(style,'ru',8)==[]
 
 
-def test_middle_title_renders_at_its_own_word_times_with_same_style():
+def test_middle_title_renders_at_its_own_word_times_with_same_style(title_event_ink):
     from app.editorial_approved import ass_events
     style={'editorial_style_id':'1','word_timing_by_lang':{'ru':[
         {'text':'У','start':0,'end':.2},{'text':'меня','start':.2,'end':.4},

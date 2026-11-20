@@ -1,9 +1,9 @@
 # Current approved titles
 
-New selections of styles 1, 2, 3, 5 and 9 use `editorial_selected/selection.json`.
+Styles 1, 2, 3, 5 and 9 use `editorial_selected/selection.json` for every render.
 It records the typeface, weight, SHA-256, bounding box and ink color for each role.
-The picker stores the revision in the draft. Drafts saved before this revision
-use their existing artwork in `editorial_approved/`.
+The picker records the revision for reference. Previously saved drafts use
+their selected style number with the current fonts when previewed or rebuilt.
 
 Both the preview and the final video use the same ASS paths. For every title,
 including «Почему не ты?», the renderer loads the actual font files into Chromium,
