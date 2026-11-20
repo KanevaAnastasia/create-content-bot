@@ -95,26 +95,25 @@ def _alpha(png):
         return image.getchannel('A')
 
 
-@lru_cache(maxsize=40)
-def _asset(file):
-    with Image.open(ASSETS / file) as image:
-        return image.convert('L')
-
-
 def _case(text, reference):
     if reference.isupper():
         return text.upper()
-    if reference[0].islower():
-        return text.lower()
+    if reference[0].islower() and text.casefold() == reference.casefold():
+        return reference
     return text
 
 
-def _box(sid, record, role, text, reference_title):
+def _box(sid, record, role, text, reference_title, foreground):
     if sid == '1' and not reference_title:
         return ((40, 600, 680, 790), (50, 800, 230, 860), (40, 875, 680, 1110))[role]
     if sid == '3' and not reference_title and role == 2:
         return (40, 815, 680, 1020)
     left, top, right, bottom = record['box']
+    if (sid in ('3', '9') and role == 0 and not reference_title and not foreground
+            and sum(ch.isalpha() for ch in text) <= 3):
+        # In the depth styles a short centered pronoun can disappear behind the face.
+        # Give it a readable column in the left margin of the composition.
+        return 40, top, 208, bottom
     if text != record['text'] and len(text) > len(record['text']):
         if role == 1:
             center = (left + right) // 2
@@ -147,7 +146,7 @@ def _size_and_position(mask, full, box, tilt, fit):
 
 
 @lru_cache(maxsize=16)
-def layers(sid, lang, parts, role, visible=None):
+def layers(sid, lang, parts, role, visible=None, foreground=False):
     style = selection()['styles'][sid]
     records = style[lang]
     prepared = [(r, _case(' '.join(t.split()), records[r]['text'])) for r, t in parts]
@@ -155,20 +154,16 @@ def layers(sid, lang, parts, role, visible=None):
     record = records[role]
     if not text or visible == 0:
         return ()
-    canonical = text == record['text']
-    if canonical:
-        full = mask = _asset(f'ink-{sid}-{lang}-{role}.png')
-    else:
-        needed = tuple((style['fonts'][r], t) for r, t in prepared if t and t != records[r]['text'])
-        frames = _shaped_parts(needed, visible is not None)[(style['fonts'][role], text)]
-        full = _alpha(frames[-1])
-        crop = full.getbbox() or (0, 0, 1, 1)
-        full = full.crop(crop)
-        mask = full if visible is None or visible >= len(frames) else _alpha(frames[visible - 1]).crop(crop)
+    needed = tuple((style['fonts'][r], t) for r, t in prepared if t)
+    frames = _shaped_parts(needed, visible is not None)[(style['fonts'][role], text)]
+    full = _alpha(frames[-1])
+    crop = full.getbbox() or (0, 0, 1, 1)
+    full = full.crop(crop)
+    mask = full if visible is None or visible >= len(frames) else _alpha(frames[visible - 1]).crop(crop)
     reference_title = all(t == records[r]['text'] for r, t in prepared) and len(prepared) == 3
-    box = _box(sid, record, role, text, reference_title)
+    box = _box(sid, record, role, text, reference_title, foreground)
     fit = 'contain'
-    if role == 0 and sid in ('1', '9') and reference_title:
+    if reference_title and (sid == '3' or (role == 0 and sid in ('1', '9'))):
         fit = 'reference'
     elif role == 0 and sid == '9' and lang == 'ru':
         fit = 'tall'
@@ -183,5 +178,5 @@ def layers(sid, lang, parts, role, visible=None):
 
 
 @lru_cache(maxsize=192)
-def drawings(sid, lang, parts, role, visible):
-    return tuple((color, rectangles(mask)) for color, mask in layers(sid, lang, parts, role, visible))
+def drawings(sid, lang, parts, role, visible, foreground=False):
+    return tuple((color, rectangles(mask)) for color, mask in layers(sid, lang, parts, role, visible, foreground))

@@ -4,71 +4,74 @@
       "name": "The Youngest Script",
       "file": "editorial_local/The Youngest Script-Rg.ttf",
       "sha256": "1d1460884ac28f94f6edc2b3aac0ee83de6a5a1e4e258d391ffc5e900b27c5c0",
-      "source": "https://mycreativeland.com/family/the-youngest/regular/"
+      "source": "https://mycreativeland.com/family/the-youngest/regular/",
+      "origin": "installed_collection"
     },
     "man": {
       "name": "Manrope",
-      "file": "CF-Manrope.ttf",
-      "sha256": "2b934e0c5120340d51eaa45f4cdd4c21abdf16efee8e39e3ee116c53f82fbe1f",
-      "source": "https://online-fonts.com/fonts/manrope"
+      "file": "editorial_selected/Manrope.ttf",
+      "sha256": "3ae11c49db0455a3cc33e37d380f20fdb8c7f8b41dc07625c177e3d87a9d6ae6",
+      "source": "https://raw.githubusercontent.com/google/fonts/main/ofl/manrope/Manrope%5Bwght%5D.ttf",
+      "weight": 700,
+      "origin": "download"
     },
     "steelB": {
       "name": "Steelfish Bold",
       "file": "editorial_local/Steelfish Bd.otf",
       "sha256": "6f498ce85ef9cbb37ec0af9308840f5eaa7a62a7a3da94825328c3aa8eb33845",
-      "source": "https://www.dafont.com/steelfish.font"
+      "source": "https://dl.dafont.com/dl/?f=steelfish",
+      "origin": "download"
     },
     "tex": {
       "name": "TeX Gyre Adventor Italic",
       "file": "editorial_local/TeXGyreAdventor-Italic.ttf",
       "sha256": "dab61a5d220986c5ea1a01e62a3433273a14e738e4a95218e0f169729f0f09a0",
-      "source": "https://www.gust.org.pl/projects/e-foundry/tex-gyre/adventor"
+      "source": "https://www.gust.org.pl/projects/e-foundry/tex-gyre/adventor",
+      "origin": "installed_collection"
     },
     "bebB": {
       "name": "Bebas Neue Bold",
       "file": "editorial_local/BebasNeue-BebasNeueBold.ttf",
       "sha256": "b0e717b380bdf85b2885e60e73ea50d9e03283a687aca224999f5c3fe0fe8b3e",
-      "source": "https://www.fontfabric.com/fonts/bebas-neue/"
-    },
-    "archive3a": {
-      "name": "CF Reviewed 3 1",
-      "file": "editorial_approved/CF Reviewed 3 1.ttf",
-      "sha256": "6e22cbbd89d381fa42dc3b4c6d69f7e950b80dd9fdc46e01cd3fd84751b7ccce"
-    },
-    "archive3b": {
-      "name": "CF Reviewed 3 2",
-      "file": "editorial_approved/CF Reviewed 3 2.ttf",
-      "sha256": "bce55158a06b45eff38b2707cde1bc716e02cfe26def42d5a7063de31c379816"
-    },
-    "archive3c": {
-      "name": "CF Reviewed 3 3",
-      "file": "editorial_approved/CF Reviewed 3 3.ttf",
-      "sha256": "1b92ff0e0807ad343029a14f5cba5260402fec9eea79030d065a1b46988687b5"
+      "source": "https://www.fontfabric.com/fonts/bebas-neue/",
+      "origin": "project_archive"
     },
     "playi": {
       "name": "Playfair Display Italic",
       "file": "editorial_selected/PlayfairItalic.ttf",
       "sha256": "a5e26dc5e2e77fb2803a0bf02fd4f81ee136ec8dea863ccdb0c59a263b21378b",
       "weight": 650,
-      "source": "https://online-fonts.com/fonts/playfair-display"
+      "source": "https://raw.githubusercontent.com/google/fonts/main/ofl/playfairdisplay/PlayfairDisplay-Italic%5Bwght%5D.ttf",
+      "origin": "download"
     },
     "did": {
       "name": "Didot Bold",
       "file": "editorial_local/Didot Bold.ttf",
       "sha256": "419cbbdaf68a7e8e88852d24f7a4d4f68301358ebd6c4919120a60eeb8308cb2",
-      "source": "https://support.apple.com/en-us/120414"
+      "source": "https://support.apple.com/en-us/120414",
+      "origin": "installed_collection"
     },
     "ci": {
       "name": "Cormorant Garamond SemiBold Italic",
-      "file": "CF-CormorantItalic.ttf",
-      "sha256": "f46585fdaf88f3af2ac0ebe7f821d80c6ac5c2ea3065abd2bd6acd83f3a7f8bb",
-      "source": "https://online-fonts.com/fonts/cormorant-garamond"
+      "file": "editorial_selected/CormorantGaramond-Italic.ttf",
+      "sha256": "0f48ea6abb2084537854f7174c470991a463b13036309e3b50a81511611c530d",
+      "source": "https://raw.githubusercontent.com/google/fonts/main/ofl/cormorantgaramond/CormorantGaramond-Italic%5Bwght%5D.ttf",
+      "weight": 600,
+      "origin": "download"
     },
     "cyr": {
       "name": "TD Ciryulnik",
       "file": "editorial_local/Ciryulnik-TD CIRYULNIK.otf",
       "sha256": "ca41627d8fa9c2b7d53751cd564bb35e05659fe66d643eeb8771a9bacfbd7e5d",
-      "source": "https://online-fonts.com/fonts/td-ciryulnik-0"
+      "source": "https://online-fonts.com/fonts/td-ciryulnik-0",
+      "origin": "project_archive"
+    },
+    "sign": {
+      "name": "SignPainter HouseScript",
+      "file": "editorial_local/SignPainter-HouseScript.otf",
+      "sha256": "9f280cd5568e4d888a8571e55a720fb5fddcb5afd5b660dcf75bf959c3f5720c",
+      "source": "https://support.apple.com/en-us/120414",
+      "origin": "installed_collection"
     }
   },
   "styles": {
@@ -218,11 +221,11 @@
     },
     "3": {
       "fonts": [
-        "archive3a",
-        "archive3b",
-        "archive3c"
+        "bebB",
+        "ci",
+        "sign"
       ],
-      "variant": null,
+      "variant": "А",
       "ru": [
         {
           "text": "ПОЧЕМУ",

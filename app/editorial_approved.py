@@ -174,7 +174,7 @@ def ass_events(cue,style,width,height,base_style):
         for visible,t0,t1 in states:
             if t1<=t0:
                 continue
-            ink = (selected.drawings(sid,lang,semantic_parts,role,visible) if revised
+            ink = (selected.drawings(sid,lang,semantic_parts,role,visible,foreground=always_front) if revised
                    else drawings(sid,lang,role,text,visible))
             for color,path in ink:
                 bgr=color[5:7]+color[3:5]+color[1:3]

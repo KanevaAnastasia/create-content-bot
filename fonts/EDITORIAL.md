@@ -5,15 +5,19 @@ It records the typeface, weight, SHA-256, bounding box and ink color for each ro
 The picker stores the revision in the draft. Drafts saved before this revision
 use their existing artwork in `editorial_approved/`.
 
-Both the preview and the final video use the same ASS paths. For the reference
-title, the paths come from the saved lettering masks. For other text, the renderer
-loads the exact font files in local Playwright Chromium and shapes each semantic
-part. Style 3 uses the bright pink lettering from its original sketch. Style 9
+Both the preview and the final video use the same ASS paths. For every title,
+including «Почему не ты?», the renderer loads the actual font files into Chromium,
+checks their hashes, and shapes each semantic part. The 30 comparison specimens
+in `tests/fixtures/editorial_letters/` are for verification. Style 3 pairs Bebas
+Neue Bold and Cormorant Garamond SemiBold Italic with bright pink SignPainter
+HouseScript. Style 9
 uses TD Ciryulnik, Cormorant Garamond SemiBold Italic and The Youngest Script.
 Both use the letterforms without decorative underlines.
 On a new render host, provision the manifest entries in
 `fonts/editorial_local/` from the licensed desktop collection and install
-Playwright Chromium. The renderer checks each file against its recorded hash.
+Playwright Chromium. The original Manrope and Cormorant Garamond variable fonts
+use weights 700 and 600. Their licenses are in `CF-Manrope-OFL.txt` and
+`CF-Cormorant-OFL.txt`.
 See `docs/discipline-formats.md` for timing and automatic foreground compositing.
 
 ## Visual review
@@ -24,7 +28,10 @@ from `artifacts/editorial_titles/eight_real_drafts/`, the selected lettered
 variant from `font_research_nov20/reference-match/` in the same archive, and
 the production render for both the short title and a longer phrase.
 The reviewer compares the lettering, color, baseline, spacing and subject overlap
-on the images and records a decision for each style. Submit a new render for a
+on the images, verifies the source file, face, checksum and glyph coverage, and
+types additional Russian and English phrases through the renderer. Record the
+source of each file (download, project archive or installed collection) and the
+review decision for each style. Submit a new render for a
 style the reviewer returns for corrections.
 
 # Legacy presets (kept for older drafts)
