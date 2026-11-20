@@ -212,7 +212,7 @@ async def callback(update, context):
                 if row["state"] not in {"images", "ready"}:
                     raise ValueError("Этот шаг уже изменился.")
                 for n, path in enumerate(store.snapshot()["reference_paths"], 1):
-                    caption = "Главный референс внешности бабушки, Тимоши и стиля" if n == 1 else "Дополнительный оригинал из вашего канала"
+                    caption = "Оригинальный референс бабушки из проекта" if n == 1 else "Оригинальный референс Тимоши из проекта"
                     with Path(path).open("rb") as photo:
                         await context.bot.send_photo(chat_id=chat_id, photo=photo, caption=caption)
                 return

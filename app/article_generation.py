@@ -159,34 +159,31 @@ def crop_square(row, position=None):
 
 
 def article_image_prompt(row):
-    # Legacy scene briefs include generic outfits and floor-level cats. The
-    # original references and crop composition take priority over those details.
-    return (
-        "Create one vertical 9:16 image featuring the EXACT SAME grandmother and orange cat Timosha "
-        "from the attached original channel reference images. This is a new scene with established characters. "
-        "Reference image 1 is the primary character identity and rendering-style reference; "
-        "the remaining originals show the same characters and their home. "
-        "Use this scene brief for ACTION AND ARTICLE PROPS ONLY. Disregard any generic description of "
-        "clothing, appearance, art style or character placement inside the brief:\n"
-        + row["image_prompt"] + "\nOwner's requested correction: " + row.get("image_feedback", "") +
-        "\nCHARACTER IDENTITY AND STYLE: faithfully retain the reference grandmother's broad round face, "
-        "full rosy cheeks, small round chin, rounded rosy nose, large brown eyes, fine round metal glasses, "
-        "silver hair and plump body proportions. Keep the cream headscarf with LARGE red roses and green "
-        "leaves tied beneath her chin, the pale yellow apron with bold red roses and green leaves, and "
-        "the dark blue dress with its small floral print. Preserve the exact character design and the "
-        "soft richly textured 3D illustrated rendering of the originals. Do not slim or elongate her face, "
-        "make her gaunt, add deep wrinkles, replace the floral patterns with tiny scattered flowers, "
-        "or turn her into a generic elderly woman. Timosha must retain his round face, large amber eyes, "
-        "cream muzzle and chest, fluffy orange fur and compact proportions from the same references. "
-        "Never use a previous generated article image as a character reference. "
-        "COMPOSITION: the centered square crop is the Telegram cover. Keep her entire head and hands, "
-        "the whole cat and the main article subject inside the central square, the middle 56% of image height. "
-        "Place their faces close together at the same height, with the cat on a separate stool beside the "
-        "work surface, away from food. This overrides any floor-level placement in the scene brief. "
-        "Only natural home background above and below. No empty labels, banners, panels, crop guides, "
-        "lettering, logos or watermarks. Change the action and props to fit the article; keep the established "
-        "characters and visual style from the original references."
+    """Use the same character/style locks as the working recipe image pipeline."""
+    from .handlers.handlers_media_scene import (
+        _append_reference_style_to_image_prompt,
+        _append_scene_identity_to_image_prompt,
+        _append_pixar_reference_style_phrase,
     )
+
+    prompt = (
+        "Создай одно вертикальное изображение 9:16 для статьи с бабушкой и рыжим котом Тимошей. "
+        "Используй те же утверждённые character references и внешний вид героев проекта. "
+        "Первый референс показывает бабушку, второй показывает Тимошу. "
+        "Приведённый ниже сюжет задаёт только действие и предметы. Внешность, одежду и художественный "
+        "стиль бери из оригиналов персонажей и обязательных правил проекта ниже; "
+        "игнорируй конфликтующие общие описания внешности или стиля внутри сюжета.\nСюжет статьи:\n"
+        + row["image_prompt"] + "\nПравка владельца: " + row.get("image_feedback", "") +
+        "\nКомпозиция статьи: центральный квадрат вертикали станет обложкой Telegram. "
+        "Помести голову бабушки целиком, её руки, целого кота и главный предмет статьи в центральный "
+        "квадрат, средние 56% высоты. Расположи лица героев рядом на одной высоте; кот может сидеть "
+        "на отдельном табурете возле рабочей поверхности, не касаясь еды. Это требование важнее "
+        "положения кота на полу в старом описании сюжета. Сверху и снизу только естественный фон. "
+        "Без надписей, пустых плашек, рамок и логотипов. Не копируй клетчатый фон character sheet."
+    )
+    prompt = _append_reference_style_to_image_prompt(prompt, attach_style_instruction=True)
+    prompt = _append_scene_identity_to_image_prompt(prompt, {"characters": ["grandma", "cat"]})
+    return _append_pixar_reference_style_phrase(prompt)
 
 
 def generate_missing_images(config, row):

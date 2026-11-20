@@ -144,7 +144,7 @@ def test_one_generation_uses_style_references_and_reuses_original_after_crop_fai
     def image(prompt, *, aspect_ratio, reference_images):
         calls.append(aspect_ratio)
         assert reference_images == [Path(p).read_bytes() for p in store.snapshot()["reference_paths"]]
-        assert "central square" in prompt and "same height" in prompt
+        assert "центральный квадрат" in prompt and "на одной высоте" in prompt
         data = io.BytesIO()
         Image.new("RGB", (90, 160)).save(data, format="JPEG")
         return data.getvalue()
@@ -602,8 +602,8 @@ def test_new_image_version_does_not_reuse_old_vertical_as_reference(setup, monke
     def generate(prompt, *, reference_images, aspect_ratio):
         calls.append(reference_images)
         assert original.read_bytes() not in reference_images
-        assert "primary character identity" in prompt
-        assert "broad round face" in prompt and "LARGE red roses" in prompt
+        assert "Замок идентичности бабушки" in prompt
+        assert "референсы — единственный" in prompt and "Персонажи в кадре: бабушка, рыжий кот" in prompt
         data = io.BytesIO()
         Image.new("RGB", (90, 160), "blue").save(data, format="JPEG")
         return data.getvalue()
@@ -612,6 +612,19 @@ def test_new_image_version_does_not_reuse_old_vertical_as_reference(setup, monke
     assert len(calls) == 1
     assert calls[0] == [Path(p).read_bytes() for p in store.snapshot()["reference_paths"]]
     assert images["vertical"] != str(original) and original.is_file()
+
+
+def test_article_image_uses_the_recipe_project_style_identity_and_atmosphere():
+    from app.handlers.handlers_media_scene import _IMAGE_REFERENCE_STYLE_BLOCK, _GRANDMA_FACE_IDENTITY_LOCK, PIXAR_REFERENCE_STYLE_PHRASE
+    from app.image_atmosphere import SOVIET_IMAGE_ATMOSPHERE
+    from app.character_catalog import character_identity_lines
+    prompt = gen.article_image_prompt({"image_prompt": "Бабушка пересыпает сухари в банку", "image_feedback": "Кот смотрит в камеру"})
+    for rule in (_IMAGE_REFERENCE_STYLE_BLOCK, _GRANDMA_FACE_IDENTITY_LOCK, SOVIET_IMAGE_ATMOSPHERE, PIXAR_REFERENCE_STYLE_PHRASE):
+        assert rule in prompt
+    for description in character_identity_lines(["grandma", "cat"]):
+        assert description in prompt
+    assert "Кот смотрит в камеру" in prompt
+    assert "Create one vertical 9:16 high quality 3D storybook" not in prompt
 
 
 def test_reference_button_shows_actual_configured_originals_without_generation(setup, monkeypatch):
