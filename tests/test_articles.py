@@ -157,6 +157,11 @@ def test_one_generation_uses_style_references_and_reuses_original_after_crop_fai
     assert Path(store.issue(row["id"])["images"]["vertical"]).exists()
     result = gen.generate_missing_images(store.snapshot(), store.issue(row["id"]))
     assert calls == ["9:16"]
+    import hashlib
+    reference = Path(store.snapshot()["reference_paths"][0])
+    assert store.issue(row["id"])["image_reference_manifest"] == [{
+        "file": reference.name, "sha256": hashlib.sha256(reference.read_bytes()).hexdigest(),
+        "bytes": reference.stat().st_size, "dimensions": [160, 90]}]
     with Image.open(result["square"]) as square:
         assert square.size == (90, 90)
     with Image.open(result["vertical"]) as vertical:
@@ -559,6 +564,69 @@ def test_image_approval_does_not_upload_images_again(setup, monkeypatch):
     b.send_photo.assert_not_called()
     publish.assert_not_called()
     assert "квадратную картинку 1:1" in b.send_message.call_args.kwargs["text"]
+
+
+@pytest.mark.parametrize("state", ["images", "ready"])
+def test_regenerate_starts_a_new_image_version_without_touching_approved_text(setup, monkeypatch, state):
+    row = make_row(state, text="Approved article", teaser="Короткий анонс", text_approved=True,
+                   images_approved=True, image_version=3, square_crop=40, image_feedback="Кот рядом с бабушкой",
+                   images={"square": "cover.jpg", "vertical": "story.jpg"},
+                   image_reference_manifest=[{"file": "original.jpg"}])
+    b = bot()
+    generation, publish = AsyncMock(), AsyncMock()
+    monkeypatch.setattr(flow, "generate", generation)
+    monkeypatch.setattr(flow, "publish", publish)
+    asyncio.run(flow.callback(update(row, "regenerate"), NS(bot=b)))
+    saved = store.issue(row["id"])
+    assert saved["state"] == "working" and saved["operation"] == "images"
+    assert saved["image_version"] == 4 and saved["square_crop"] == 50
+    assert saved["text"] == row["text"] and saved["teaser"] == row["teaser"] and saved["text_approved"]
+    assert saved["image_feedback"] == row["image_feedback"]
+    assert not saved["images"] and not saved["images_approved"] and not saved["image_reference_manifest"]
+    assert saved["versions"][-1]["images"] == row["images"]
+    assert saved["versions"][-1]["image_reference_manifest"] == row["image_reference_manifest"]
+    generation.assert_awaited_once()
+    publish.assert_not_called()
+    asyncio.run(flow.callback(update(row, "regenerate"), NS(bot=b)))
+    generation.assert_awaited_once()
+
+
+def test_new_image_version_does_not_reuse_old_vertical_as_reference(setup, monkeypatch):
+    from app import vertex_images
+    original = setup / "old-generated.jpg"
+    Image.new("RGB", (90, 160), "red").save(original)
+    row = make_row("images", image_version=1, image_prompt="Generic apron and floor-level cat",
+                   images={"vertical": str(original), "square": str(original)})
+    row = store.change(row["id"], row["revision"], allowed={"images"}, state="working", **flow.new_image_version(row))
+    calls = []
+    def generate(prompt, *, reference_images, aspect_ratio):
+        calls.append(reference_images)
+        assert original.read_bytes() not in reference_images
+        assert "primary character identity" in prompt
+        assert "broad round face" in prompt and "LARGE red roses" in prompt
+        data = io.BytesIO()
+        Image.new("RGB", (90, 160), "blue").save(data, format="JPEG")
+        return data.getvalue()
+    monkeypatch.setattr(vertex_images, "generate_image_vertex", generate)
+    images = gen.generate_missing_images(store.snapshot(), row)
+    assert len(calls) == 1
+    assert calls[0] == [Path(p).read_bytes() for p in store.snapshot()["reference_paths"]]
+    assert images["vertical"] != str(original) and original.is_file()
+
+
+def test_reference_button_shows_actual_configured_originals_without_generation(setup, monkeypatch):
+    row = make_row("images")
+    b = bot()
+    generate = AsyncMock()
+    monkeypatch.setattr(flow, "generate", generate)
+    seen = []
+    async def photo(**kwargs):
+        seen.append(kwargs["photo"].read())
+    b.send_photo.side_effect = photo
+    asyncio.run(flow.callback(update(row, "references"), NS(bot=b)))
+    assert seen == [Path(p).read_bytes() for p in store.snapshot()["reference_paths"]]
+    assert store.issue(row["id"]) == row
+    generate.assert_not_called()
 
 
 def test_square_reframing_never_generates_and_keeps_vertical_original(setup, monkeypatch):

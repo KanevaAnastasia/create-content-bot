@@ -3,12 +3,16 @@ from __future__ import annotations
 
 import io
 import json
+import hashlib
+import logging
 from pathlib import Path
 
 from PIL import Image
 
 from .llm_utils import extract_json_object, openai_generate_sync
 from . import article_store as store
+
+logger = logging.getLogger("bot.articles")
 
 STYLE = """Пиши для русскоязычного Telegram-канала «У бабушки дома», @ubabushkidoma.
 Образец подачи: поздние статьи о заморозке, сковородах, зажарке, взбивании белков.
@@ -116,7 +120,9 @@ def draft(config, row):
         '\nНазови предмет и знакомую проблему или пользу. Можно коротким вопросом. Без вступления, пересказа статьи,'
         ' перечня советов, призыва читать, хэштегов и URL. Не дописывай объяснение после вопроса.'
         '\nПримеры анонса: «Что сделать с засохшим хлебом?», «Как вернуть полотенцам мягкость?», «Почему подгорает пирог?».'
-        '\nimage_prompt: один конкретный сюжет по статье, уютная иллюстрация с бабушкой и рыжим котом Тимошей.'
+        '\nimage_prompt: только действие бабушки и кота Тимоши, предметы и их связь со статьёй.'
+        ' Не описывай внешность, возраст, телосложение, одежду, художественный стиль или расположение героев в кадре:'
+        ' они задаются оригинальными референсами и правилами композиции при создании картинки.'
         '\nВ примерах стиля не копируй факты в новую тему.\n' + json.dumps({
             "topic": row["topic"], "previous": row.get("text", ""), "previous_teaser": row.get("teaser", ""),
             "feedback": row.get("feedback", ""),
@@ -152,6 +158,37 @@ def crop_square(row, position=None):
     return {"vertical": str(vertical), "square": str(square)}
 
 
+def article_image_prompt(row):
+    # Legacy scene briefs include generic outfits and floor-level cats. The
+    # original references and crop composition take priority over those details.
+    return (
+        "Create one vertical 9:16 image featuring the EXACT SAME grandmother and orange cat Timosha "
+        "from the attached original channel reference images. This is a new scene with established characters. "
+        "Reference image 1 is the primary character identity and rendering-style reference; "
+        "the remaining originals show the same characters and their home. "
+        "Use this scene brief for ACTION AND ARTICLE PROPS ONLY. Disregard any generic description of "
+        "clothing, appearance, art style or character placement inside the brief:\n"
+        + row["image_prompt"] + "\nOwner's requested correction: " + row.get("image_feedback", "") +
+        "\nCHARACTER IDENTITY AND STYLE: faithfully retain the reference grandmother's broad round face, "
+        "full rosy cheeks, small round chin, rounded rosy nose, large brown eyes, fine round metal glasses, "
+        "silver hair and plump body proportions. Keep the cream headscarf with LARGE red roses and green "
+        "leaves tied beneath her chin, the pale yellow apron with bold red roses and green leaves, and "
+        "the dark blue dress with its small floral print. Preserve the exact character design and the "
+        "soft richly textured 3D illustrated rendering of the originals. Do not slim or elongate her face, "
+        "make her gaunt, add deep wrinkles, replace the floral patterns with tiny scattered flowers, "
+        "or turn her into a generic elderly woman. Timosha must retain his round face, large amber eyes, "
+        "cream muzzle and chest, fluffy orange fur and compact proportions from the same references. "
+        "Never use a previous generated article image as a character reference. "
+        "COMPOSITION: the centered square crop is the Telegram cover. Keep her entire head and hands, "
+        "the whole cat and the main article subject inside the central square, the middle 56% of image height. "
+        "Place their faces close together at the same height, with the cat on a separate stool beside the "
+        "work surface, away from food. This overrides any floor-level placement in the scene brief. "
+        "Only natural home background above and below. No empty labels, banners, panels, crop guides, "
+        "lettering, logos or watermarks. Change the action and props to fit the article; keep the established "
+        "characters and visual style from the original references."
+    )
+
+
 def generate_missing_images(config, row):
     from .vertex_images import generate_image_vertex
 
@@ -162,21 +199,22 @@ def generate_missing_images(config, row):
         vertical = folder / "vertical.jpg"
     # Reuse a saved original after a crop failure or interrupted checkpoint.
     if not vertical.is_file():
-        refs = [Path(p).read_bytes() for p in config["reference_paths"]]
+        refs, manifest = [], []
+        for value in config["reference_paths"]:
+            path = Path(value)
+            raw = path.read_bytes()
+            with Image.open(io.BytesIO(raw)) as ref:
+                dimensions = list(ref.size)
+                ref.verify()
+            refs.append(raw)
+            manifest.append({"file": path.name, "sha256": hashlib.sha256(raw).hexdigest(),
+                             "bytes": len(raw), "dimensions": dimensions})
         if not refs:
             raise ValueError("Нет утверждённых образцов внешности кота и бабушки.")
-        prompt = ("Create one vertical 9:16 high quality 3D storybook illustration for a home advice article. "
-                  "Match the exact visual style, materials, lighting and characters from the supplied references: "
-                  "the grandmother with round glasses, floral headscarf, blue dress and floral apron, "
-                  "and her orange fluffy cat Timosha, in a warm wooden home. "
-                  "The cat MUST be clearly visible, with consistent face and proportions. "
-                  "Show the specific article subject prominently. Use references for character identity and style, "
-                  "not their old props. COMPOSITION: the centered square crop of this vertical image will be used "
-                  "as a second cover. Keep the grandmother's entire head and hands, the whole cat and the main "
-                  "article subject within that central square, the middle 56% of the image height. "
-                  "Group them close together at the same height. Use only natural background above and below. "
-                  "Do not draw crop guides, frames, empty labels, banners, panels, lettering, logos or watermarks. "
-                  + row["image_prompt"] + "\nRequested image correction: " + row.get("image_feedback", ""))
+        store.checkpoint(row["id"], image_reference_manifest=manifest)
+        logger.info("article.image_references issue=%s version=%s references=%s", row["id"], row["image_version"],
+                    json.dumps(manifest, ensure_ascii=False))
+        prompt = article_image_prompt(row)
         raw = generate_image_vertex(prompt, reference_images=refs, aspect_ratio="9:16")
         with Image.open(io.BytesIO(raw)) as img:
             if abs(img.width / img.height - 9 / 16) > .06:

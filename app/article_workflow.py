@@ -41,6 +41,14 @@ def topic_fields(row, topic):
             "feedback": "", "image_feedback": "", "square_crop": 50, "text_approved": False, "images_approved": False}
 
 
+def new_image_version(row, *, feedback=None):
+    previous = {key: row[key] for key in ("images", "image_version", "square_crop", "image_feedback", "image_reference_manifest") if key in row}
+    return {"images": {}, "square_crop": 50, "images_approved": False, "image_reference_manifest": [],
+            "image_version": row.get("image_version", 0) + 1,
+            "image_feedback": row.get("image_feedback", "") if feedback is None else feedback,
+            "versions": row["versions"] + [previous]}
+
+
 async def show(bot, chat_id, row):
     started = monotonic()
     state = row["state"]
@@ -81,7 +89,8 @@ async def show(bot, chat_id, row):
                     'После неё пришлю вертикальную картинку, ссылку и короткий анонс тремя отдельными сообщениями.')
             publish_label = f"Опубликовать в {destination}" if row.get("test_mode") else "Опубликовать статью в канале"
             buttons = [(publish_label, "publish"), ("Исправить текст", "edit")]
-        buttons += [("Исправить изображение", "imageedit")]
+        buttons += [("Перегенерировать картинку", "regenerate"), ("Исправить изображение", "imageedit"),
+                    ("Показать референсы", "references")]
         if row.get("square_crop", 50) > 0:
             buttons += [("Квадрат: сдвинуть выше", "crop_up")]
         if row.get("square_crop", 50) < 100:
@@ -199,6 +208,14 @@ async def callback(update, context):
                     raise ValueError("Этот этап уже изменился. Откройте /articles.")
                 await request_edit(context.bot, chat_id, row, action)
                 return
+            if action == "references":
+                if row["state"] not in {"images", "ready"}:
+                    raise ValueError("Этот шаг уже изменился.")
+                for n, path in enumerate(store.snapshot()["reference_paths"], 1):
+                    caption = "Главный референс внешности бабушки, Тимоши и стиля" if n == 1 else "Дополнительный оригинал из вашего канала"
+                    with Path(path).open("rb") as photo:
+                        await context.bot.send_photo(chat_id=chat_id, photo=photo, caption=caption)
+                return
             if action.startswith("choose"):
                 index = int(action.removeprefix("choose"))
                 if not 0 <= index < 5:
@@ -232,6 +249,12 @@ async def callback(update, context):
                 return
             elif action == "approve":
                 row = store.change(iid, row["revision"], allowed={"images"}, state="ready", images_approved=True)
+            elif action == "regenerate":
+                row = store.change(iid, row["revision"], allowed={"images", "ready"}, state="working", operation="images",
+                                   **new_image_version(row))
+                await query.message.reply_text("Создаю новый вариант по оригинальным референсам. Предыдущая картинка и текст сохранены. Затем покажу вертикаль и квадрат для согласования.")
+                await generate(context.bot, chat_id, row)
+                return
             elif action in {"crop_up", "crop_down"}:
                 if row["state"] not in {"images", "ready"}:
                     raise ValueError("Кадрирование недоступно на этом шаге.")
@@ -314,9 +337,7 @@ async def apply_reply(update, context, ref):
                 await show(context.bot, update.effective_chat.id, row)
             else:
                 image_edit = ref["kind"] == "imageedit"
-                fields = ({"image_feedback": feedback, "images": {}, "square_crop": 50, "images_approved": False,
-                           "versions": row["versions"] + [{"images": row.get("images", {})}],
-                           "image_version": row.get("image_version", 0) + 1} if image_edit else
+                fields = (new_image_version(row, feedback=feedback) if image_edit else
                           {"feedback": feedback, "text_approved": False, "images_approved": False})
                 row = store.change(row["id"], row["revision"], allowed={"images", "ready"} if image_edit else {"text", "ready"},
                                    state="working", operation="images" if image_edit else "draft", **fields)
