@@ -197,6 +197,9 @@ async def deliver_ready_product(bot, chat_id):
     async with lock:
         session = SESSIONS.get(chat_id) or {}
         await finish_product_if_complete(bot, chat_id, session)
+        from .article_store import blocks_advertising
+        if blocks_advertising(chat_id):
+            return
         with SessionLocal() as db:
             schedule = db.get(AdvertisingQueueSchedule, 1)
             if not schedule or not schedule.enabled:
@@ -261,6 +264,9 @@ async def tick(bot):
     if chat_id is None:
         return
     await deliver_ready_product(bot, chat_id)
+    from .article_store import blocks_advertising
+    if blocks_advertising(chat_id):
+        return
     product_id = claim_due_product()
     if product_id:
         try:

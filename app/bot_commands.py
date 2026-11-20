@@ -16,6 +16,7 @@ OWNER_COMMANDS = (
     BotCommand("stat", "Статистика генераций и субтитров"),
     BotCommand("stats", "Статистика — аналог /stat"),
     BotCommand("text_model", "Выбрать модель ChatGPT для текстов"),
+    BotCommand("articles", "Статьи для канала У бабушки дома"),
     BotCommand("generate", "Запустить генерацию"),
     BotCommand("quick", "Быстрая генерация"),
     BotCommand("image", "Сгенерировать изображение"),

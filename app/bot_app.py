@@ -458,10 +458,12 @@ async def _post_init(application: Application) -> None:
     )
     from .advertising_queue import run_queue
     application.bot_data["advertising_queue_task"] = asyncio.create_task(run_queue(application.bot), name="advertising-products")
+    from .article_workflow import run_queue as run_articles
+    application.bot_data["article_queue_task"] = asyncio.create_task(run_articles(application.bot), name="channel-articles")
 
 
 async def _post_shutdown(application: Application) -> None:
-    for key in (_QUIET_MODE_MIDNIGHT_TASK_KEY, "advertising_queue_task"):
+    for key in (_QUIET_MODE_MIDNIGHT_TASK_KEY, "advertising_queue_task", "article_queue_task"):
         task = application.bot_data.pop(key, None)
         if task is not None:
             task.cancel()
@@ -494,6 +496,10 @@ def build_application(token: str) -> Application:
         .build()
     )
     app.add_handler(CommandHandler("start", start))
+    from .article_workflow import callback as article_callback, command as article_command, reply as article_reply
+    app.add_handler(CommandHandler("articles", article_command))
+    app.add_handler(CallbackQueryHandler(article_callback, pattern=r"^ar:", block=False))
+    app.add_handler(MessageHandler(filters.REPLY & filters.TEXT & ~filters.COMMAND, article_reply), group=-1)
     app.add_handler(CommandHandler("start_quiet", quiet_mode_command))
     app.add_handler(CommandHandler("stop_quiet", quiet_mode_command))
     app.add_handler(CommandHandler("status_quiet", quiet_mode_command))
