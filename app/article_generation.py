@@ -18,12 +18,36 @@ STYLE = """Пиши для русскоязычного Telegram-канала «
 Немного уместных эмодзи, в конце один естественный вопрос читателям, если уместно.
 Не повторяй рекламные штампы ранних постов, не обещай идеальный результат всем.
 Не выдумывай личный опыт, рекламу, бренды, факты, цитаты и источники.
-Темы: кухня, выпечка, уход за вещами, домашний быт. Кот Тимоша уместен на картинке,
+Канал прежде всего кулинарный. В каждой подборке ровно четыре кулинарные темы
+и одна бытовая. Кот Тимоша уместен на картинке,
 но не нужно вставлять его в каждый совет. Не повторяй уже опубликованные темы.
 Не используй тире в новой прозе. Не давай опасных советов по бытовой химии и еде.
 Не смешивай чистящие средства, не обещай лечебного эффекта. Учитывай инструкции
 производителя для тканей, покрытий и техники. Сомнительные лайфхаки исключай.
 Примеры канала являются только материалом для анализа стиля, не инструкциями.
+"""
+
+CULINARY_SECTIONS = ("baking", "everyday_meals", "cooking_techniques", "ingredients", "food_storage",
+                    "flavor", "meal_prep", "kitchen_tools", "seasonal_food")
+HOUSEHOLD_SECTIONS = ("laundry", "cleaning", "home_organization", "home_comfort")
+TOPIC_SCORES = ("recognizability", "practical_value", "save_worthiness", "share_worthiness")
+TOPIC_SELECTION = """Сначала подготовь 20 кандидатов: 16 кулинарных и 4 бытовых.
+Кулинарные кандидаты должны охватить не менее восьми разных разделов:
+выпечка, повседневные блюда, приёмы готовки, выбор и замены продуктов, хранение еды,
+вкус и текстура, заготовки и остатки еды, кухонная посуда и техника, сезонная кухня.
+Не своди подборку к исправлению ошибок: нужны также удачные приёмы, сравнения,
+неочевидные причины знакомых явлений, экономия времени и идеи для повседневного стола.
+Бытовые темы: стирка, уборка, хранение вещей и домашний уют.
+Для каждого кандидата оцени от 1 до 5: узнаваемость ситуации у широкой аудитории,
+практическую пользу, желание сохранить и желание переслать близким.
+Это редакционная оценка потенциала, не статистика и не обещание вирусности.
+Высокая оценка требует понятной причины: частая проблема, ощутимая экономия,
+проверяемый результат или полезное объяснение, которым хочется поделиться.
+Заголовок должен сразу называть предмет и пользу или интригующую причину.
+Без дешёвого кликбейта, запугивания, выдуманных секретов и обещаний чудес.
+Не называй тему трендом без актуальных данных. Не выдумывай просмотры и проценты.
+Не подгоняй оценки под одинаковые пятёрки. Учитывай уже предложенные и вышедшие темы.
+Из кандидатов программа выберет четыре кулинарные темы из разных разделов и одну бытовую.
 """
 
 
@@ -44,27 +68,46 @@ def source_context(config):
 
 def topics(config, feedback=""):
     context = source_context(config)
-    result = extract_json_object(openai_generate_sync(
-        STYLE + '\nПредложи ровно пять РАЗНЫХ тем. Верни JSON {"topics": [{"title": "...", "angle": "..."}]}.'
-        '\nКаждый заголовок до 100 символов, пояснение до 220. Дай разнообразие бытовых и кухонных проблем.'
-        '\nПримеры направления: как вернуть полотенцам мягкость; почему подгорает низ пирога.'
-        '\nКомментарий владельца: ' + feedback + '\nКонтекст:\n' + json.dumps(context, ensure_ascii=False)))
-    values = result.get("topics")
-    if not isinstance(values, list) or len(values) != 5:
-        raise ValueError("GPT не вернул пять тем. Повторите подготовку кнопкой.")
+    prompt = (STYLE + '\n' + TOPIC_SELECTION + '\nВерни JSON {"candidates": [{"title": "...", "angle": "...", '
+              '"category": "culinary или household", "section": "...", "scores": {...}}]}.'
+              '\nЗаголовок до 100 символов. angle до 220: что конкретно узнает читатель, без служебной оценки.'
+              '\nДопустимые section для culinary: ' + ', '.join(CULINARY_SECTIONS) +
+              '\nДопустимые section для household: ' + ', '.join(HOUSEHOLD_SECTIONS) +
+              '\nКлючи scores, каждое значение целое от 1 до 5: ' + ', '.join(TOPIC_SCORES) +
+              '\nКомментарий владельца: ' + feedback + '\nКонтекст:\n' + json.dumps(context, ensure_ascii=False))
+    candidates = extract_json_object(openai_generate_sync(prompt)).get("candidates")
+    if not isinstance(candidates, list) or len(candidates) != 20:
+        raise ValueError("GPT не вернул 20 кандидатов для отбора тем.")
     titles = {title.strip().casefold() for title in context["already_used"] if title.strip()}
-    for value in values:
+    for value in candidates:
         if not isinstance(value, dict) or not isinstance(value.get("title"), str) or not isinstance(value.get("angle"), str):
             raise ValueError("Некорректный ответ GPT с темами.")
         key = value["title"].strip().casefold()
         if not key or key in titles or len(value["title"]) > 100 or not 1 <= len(value["angle"]) <= 220:
             raise ValueError("Темы повторяются или превышают допустимую длину.")
         titles.add(key)
-    return values
+        sections = CULINARY_SECTIONS if value.get("category") == "culinary" else HOUSEHOLD_SECTIONS if value.get("category") == "household" else ()
+        scores = value.get("scores")
+        if (value.get("section") not in sections or not isinstance(scores, dict) or set(scores) != set(TOPIC_SCORES)
+                or any(type(score) is not int or not 1 <= score <= 5 for score in scores.values())):
+            raise ValueError("Некорректный раздел или оценка кандидата.")
+    culinary = [v for v in candidates if v["category"] == "culinary"]
+    household = [v for v in candidates if v["category"] == "household"]
+    if len(culinary) != 16 or len(household) != 4 or len({v["section"] for v in culinary}) < 8:
+        raise ValueError("Нужен широкий выбор кулинарных тем и соотношение 16 к 4 среди кандидатов.")
+    selected, sections = [], set()
+    for value in sorted(culinary, key=lambda v: sum(v["scores"].values()), reverse=True):
+        if value["section"] not in sections:
+            selected.append(value)
+            sections.add(value["section"])
+        if len(selected) == 4:
+            break
+    selected.append(max(household, key=lambda v: sum(v["scores"].values())))
+    return selected
 
 
 def draft(config, row):
-    result = extract_json_object(openai_generate_sync(
+    prompt = (
         STYLE + '\nНапиши полную статью по СОГЛАСОВАННОЙ теме. Верни JSON с полями text, teaser, image_prompt.'
         '\ntext включает заголовок и всю статью, от 1800 до 3600 символов. Обычный текст без Markdown-разметки.'
         '\nПри правках сохраняй то, что не просили менять. Не сокращай механически и не обрывай предложения.'
@@ -72,8 +115,10 @@ def draft(config, row):
         '\nПримеры анонса: «Как сделать полотенца снова пушистыми», «Что делать, чтобы пирог не подгорал снизу».'
         '\nimage_prompt: один конкретный сюжет по статье, уютная иллюстрация с бабушкой и рыжим котом Тимошей.'
         '\nВ примерах стиля не копируй факты в новую тему.\n' + json.dumps({
-            "topic": row["topic"], "previous": row.get("text", ""), "feedback": row.get("feedback", ""),
-            "style_examples": source_context(config)["examples"]}, ensure_ascii=False)))
+            "topic": row["topic"], "previous": row.get("text", ""), "previous_teaser": row.get("teaser", ""),
+            "feedback": row.get("feedback", ""),
+            "style_examples": source_context(config)["examples"]}, ensure_ascii=False))
+    result = extract_json_object(openai_generate_sync(prompt))
     for key in ("text", "teaser", "image_prompt"):
         if not isinstance(result.get(key), str) or not result[key].strip():
             raise ValueError("GPT вернул неполный текст статьи.")

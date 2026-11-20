@@ -130,7 +130,7 @@ def test_server_error_retries(monkeypatch):
 
 def test_persistent_admin_choice_wins_over_profile_but_guest_keeps_original(monkeypatch, tmp_path):
     from app import text_settings as settings
-    from app.writing_style import LEGACY_HUMAN_WRITING_RULES
+    from app.writing_style import HUMAN_WRITING_RULES
     monkeypatch.setattr(settings, 'SETTINGS_PATH', tmp_path / 'model.json')
     settings.save_text_model('gpt-6.1-sol')
     monkeypatch.setenv('OPENAI_CREATIVE_MODEL', 'original-profile-model')
@@ -144,4 +144,4 @@ def test_persistent_admin_choice_wins_over_profile_but_guest_keeps_original(monk
         settings.LEGACY_GUEST_TEXT.reset(token)
     payload = calls[-1][1]['json']
     assert payload['model'] == 'original-profile-model'
-    assert payload['input'][0]['content'][0]['text'] == LEGACY_HUMAN_WRITING_RULES + '\n\nscript'
+    assert payload['input'][0]['content'][0]['text'] == HUMAN_WRITING_RULES + '\n\nscript'

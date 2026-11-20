@@ -4,8 +4,6 @@ Reference: https://en.wikipedia.org/wiki/Wikipedia:Signs_of_AI_writing
 Reviewed 2026-11-17. These are editing principles, not an AI detector.
 """
 
-from .text_settings import LEGACY_GUEST_TEXT
-
 LEGACY_HUMAN_WRITING_RULES = """[CONTENT_FABRIC_WRITING_STYLE_V1]
 Общие правила для создаваемого и редактируемого текста на любом языке:
 Пиши естественно, конкретно и понятно выбранной аудитории. Сохраняй голос персонажа,
@@ -30,7 +28,7 @@ LEGACY_HUMAN_WRITING_RULES = """[CONTENT_FABRIC_WRITING_STYLE_V1]
 [/CONTENT_FABRIC_WRITING_STYLE_V1]"""
 
 
-# Keep the previous policy byte-for-byte for guest workflows.
+# Keep previous policies byte-for-byte so saved prompts can be upgraded once.
 
 PREVIOUS_HUMAN_WRITING_RULES = LEGACY_HUMAN_WRITING_RULES.replace("WRITING_STYLE_V1", "WRITING_STYLE_V2").replace(
     "[/CONTENT_FABRIC_WRITING_STYLE_V2]",
@@ -101,11 +99,10 @@ HUMAN_WRITING_RULES = PREVIOUS_HUMAN_WRITING_RULES.replace("WRITING_STYLE_V2", "
 
 
 def with_writing_style(prompt: str) -> str:
-    """Attach the applicable policy once; preserve the complete task payload."""
+    """Attach all current rules to every text request; preserve the task payload."""
     text = str(prompt)
-    rules = LEGACY_HUMAN_WRITING_RULES if LEGACY_GUEST_TEXT.get() else HUMAN_WRITING_RULES
     for existing in (HUMAN_WRITING_RULES, PREVIOUS_HUMAN_WRITING_RULES, LEGACY_HUMAN_WRITING_RULES):
         if text.startswith(existing + "\n\n"):
             text = text[len(existing) + 2:]
             break
-    return rules + "\n\n" + text
+    return HUMAN_WRITING_RULES + "\n\n" + text

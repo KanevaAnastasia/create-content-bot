@@ -43,7 +43,7 @@ def test_guest_isolation_in_concurrent_tasks_threads_and_after_error(monkeypatch
             guest(None, None, SimpleNamespace(role='guest')),
             guest(None, None, SimpleNamespace(role='admin')),
         )
-        assert results[0] == (None, 'gemini', LEGACY_HUMAN_WRITING_RULES + '\n\nsource')
+        assert results[0] == (None, 'gemini', HUMAN_WRITING_RULES + '\n\nsource')
         assert results[1] == ('gpt-6-astra', 'openai', HUMAN_WRITING_RULES + '\n\nsource')
         assert not settings.LEGACY_GUEST_TEXT.get()
 

@@ -70,13 +70,15 @@ def test_invalid_editor_contract_fails_bounded(answer):
     assert generate.call_count == 2
 
 
-def test_entrypoint_uses_same_backend_without_recursive_review(monkeypatch):
+@pytest.mark.parametrize('plain_text', [False, True])
+def test_entrypoint_does_not_rewrite_generated_result(monkeypatch, plain_text):
     from app import llm_utils as llm
     monkeypatch.setattr(llm, 'text_llm_provider', lambda: 'gemini')
-    generate = Mock(side_effect=['{"voiceover_text":"Вася — дома."}', '{"0":"Вася сидит дома."}'])
+    raw = 'Вася дома.' if plain_text else '{"voiceover_text":"Вася дома."}'
+    generate = Mock(return_value=raw)
     monkeypatch.setattr(llm, '_gemini_generate_sync', generate)
-    assert json.loads(llm.gemini_generate_sync('New story'))['voiceover_text'] == 'Вася сидит дома.'
-    assert generate.call_count == 2
+    assert llm.gemini_generate_sync('New story', editorial_plain_text=plain_text) == raw
+    assert generate.call_count == 1
 
 
 def test_quotes_cannot_hide_new_dashes():

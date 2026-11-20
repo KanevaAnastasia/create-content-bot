@@ -439,3 +439,83 @@ def test_channel_client_resolves_private_peer_and_verifies_id(setup, monkeypatch
     with pytest.raises(ValueError):
         asyncio.run(connect())
     assert released == [candidate, candidate]
+
+
+def candidate_pool():
+    return [{"title": f"Кулинарная тема {i}", "angle": "Полезный приём для кухни", "category": "culinary",
+             "section": gen.CULINARY_SECTIONS[i % 8], "scores": dict.fromkeys(gen.TOPIC_SCORES, 5 if i < 8 else 2)}
+            for i in range(16)] + [
+            {"title": f"Бытовая тема {i}", "angle": "Полезный приём для дома", "category": "household",
+             "section": gen.HOUSEHOLD_SECTIONS[i], "scores": dict.fromkeys(gen.TOPIC_SCORES, i + 1)} for i in range(4)]
+
+
+def test_topics_rank_a_broad_pool_and_enforce_four_culinary_one_household(setup, monkeypatch):
+    calls = []
+    def generate(prompt):
+        calls.append(prompt)
+        return json.dumps({"candidates": candidate_pool()}, ensure_ascii=False)
+    monkeypatch.setattr(gen, "openai_generate_sync", generate)
+    values = gen.topics(store.snapshot())
+    assert [v["category"] for v in values] == ["culinary"] * 4 + ["household"]
+    assert len({v["section"] for v in values[:4]}) == 4
+    assert values[-1]["title"] == "Бытовая тема 3"
+    assert len(calls) == 1
+
+
+@pytest.mark.parametrize("problem", ["narrow", "wrong_ratio", "fake_score"])
+def test_topic_pool_rejects_narrow_or_misclassified_candidates(setup, monkeypatch, problem):
+    candidates = candidate_pool()
+    if problem == "narrow":
+        for value in candidates[:16]:
+            value["section"] = "baking"
+    elif problem == "wrong_ratio":
+        candidates[0].update(category="household", section="laundry")
+    else:
+        candidates[0]["scores"]["practical_value"] = True
+    monkeypatch.setattr(gen, "openai_generate_sync", lambda *a: json.dumps({"candidates": candidates}))
+    with pytest.raises(ValueError):
+        gen.topics(store.snapshot())
+
+
+def test_article_and_teaser_are_generated_once_with_previous_approved_copy(setup, monkeypatch):
+    text = "Полезный совет. " * 50
+    raw = {"text": text + "Это просто.", "teaser": "Каша без комочков", "image_prompt": "Grandmother — warm light"}
+    prompts = []
+    def generate(prompt):
+        prompts.append(prompt)
+        return json.dumps(raw, ensure_ascii=False)
+    monkeypatch.setattr(gen, "openai_generate_sync", generate)
+    result = gen.draft(store.snapshot(), {"topic": {"title": "Каша"}, "teaser": "Предыдущий анонс"})
+    assert result == raw
+    assert "Предыдущий анонс" in prompts[0]
+    assert len(prompts) == 1
+
+
+def test_article_request_uses_responses_api_with_full_policy_and_no_second_pass(setup, monkeypatch):
+    from app import llm_utils as llm
+    from app.writing_style import HUMAN_WRITING_RULES
+    requests = []
+    monkeypatch.setenv("OPENAI_API_KEY", "test-key")
+    monkeypatch.setenv("OPENAI_MODEL", "gpt-6-astra")
+    monkeypatch.setattr(llm, "selected_text_model", lambda: None)
+    monkeypatch.setattr(llm, "safe_llm_call", lambda fn, **kwargs: fn())
+    class Response:
+        ok = True
+        def __init__(self, output):
+            self.output = output
+        def __enter__(self):
+            return self
+        def __exit__(self, *args):
+            pass
+        def json(self):
+            return {"status": "completed", "output": [{"type": "message", "content": [{"type": "output_text", "text": self.output}]}]}
+    def post(url, **kwargs):
+        requests.append((url, kwargs["json"]))
+        return Response(json.dumps({"candidates": candidate_pool()}))
+    monkeypatch.setattr(llm.requests, "post", post)
+    assert len(gen.topics(store.snapshot())) == 5
+    assert len(requests) == 1
+    for url, payload in requests:
+        assert url == "https://api.openai.com/v1/responses"
+        assert payload["model"] == "gpt-6-astra"
+        assert payload["input"][0]["content"][0]["text"].startswith(HUMAN_WRITING_RULES + "\n\n")

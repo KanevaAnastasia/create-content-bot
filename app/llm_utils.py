@@ -765,15 +765,12 @@ def gemini_generate_sync(
     """Compatibility entry point for all text generation, routed by TEXT_LLM_PROVIDER.
 
     Gemini remains selectable explicitly; errors never silently switch providers.
+    Both backends attach the full writing policy to the generation request.
+    editorial_plain_text is retained for callers; it no longer starts a second
+    model call that rewrites the generated result.
     """
     generate = openai_generate_sync if text_llm_provider() == "openai" else _gemini_generate_sync
-    raw = generate(prompt, images=images, rate_limit_max_attempts=rate_limit_max_attempts, model_profile=model_profile)
-    from .prose_review import review_prose_output
-    return review_prose_output(
-        prompt, raw,
-        lambda review_prompt: generate(review_prompt, rate_limit_max_attempts=rate_limit_max_attempts, model_profile=model_profile),
-        plain_text=editorial_plain_text,
-    )
+    return generate(prompt, images=images, rate_limit_max_attempts=rate_limit_max_attempts, model_profile=model_profile)
 
 
 def _gemini_generate_sync(
