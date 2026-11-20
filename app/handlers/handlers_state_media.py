@@ -6502,7 +6502,7 @@ async def _scene_media_start_ok(
         scene.pop(SCENE_IMAGE_REGEN_REFERENCE_KEY, None)
         _store_scene_image_model(scene, "start", image_result.model)
         _clear_scene_image_model_choice_pending(scene)
-        add_scene_shared_cost(scene, estimate_image_generation_cost_usd(image_result.model))
+        add_scene_shared_cost(scene, estimate_image_generation_cost_usd(image_result.model, getattr(image_result, "usage", None)))
     except Exception as e:
         logger.exception("vertex image generation failed")
         await _ask_scene_image_model_choice(update, session=session, scene=scene, target="start", failed_model=image_model, error=e)
@@ -6894,7 +6894,7 @@ async def _scene_media_end_ok(update: Update, *, session: dict, scene: dict, idx
         scene.pop(SCENE_IMAGE_REGEN_REFERENCE_KEY, None)
         _store_scene_image_model(scene, "end", end_result.model)
         _clear_scene_image_model_choice_pending(scene)
-        add_scene_shared_cost(scene, estimate_image_generation_cost_usd(end_result.model))
+        add_scene_shared_cost(scene, estimate_image_generation_cost_usd(end_result.model, getattr(end_result, "usage", None)))
     except Exception as e:
         logger.exception("vertex end-frame generation failed")
         await _ask_scene_image_model_choice(update, session=session, scene=scene, target="end", failed_model=image_model, error=e)

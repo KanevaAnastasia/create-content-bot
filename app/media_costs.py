@@ -48,9 +48,17 @@ def estimate_gemini_text_cost_usd(*, model: str, prompt_text: str, response_text
     }
 
 
-def estimate_image_generation_cost_usd(model: str) -> dict[str, Any]:
-    """Estimate one Vertex-generated image cost by model tier."""
+def estimate_image_generation_cost_usd(model: str, usage: dict | None = None) -> dict[str, Any]:
+    """Use reported token counts for OpenAI and the model tier for Vertex."""
     model_id = (model or "").strip()
+    if model_id == "gpt-image-2":
+        event = {"kind": "openai_image", "model": model_id, "cost_usd": None}
+        counts = (usage or {}).get("input_tokens_details") or {}
+        if "text_tokens" in counts and "image_tokens" in counts and "output_tokens" in usage:
+            # Standard synchronous Images API, prices in USD per million tokens.
+            cost = (counts["text_tokens"] * 5 + counts["image_tokens"] * 8 + usage["output_tokens"] * 30)
+            event.update(cost_usd=round(cost / 1_000_000, 6), usage=usage)
+        return event
     usd = _IMAGE_GENERATION_PRICE_USD.get(model_id, 0.04)
     return {
         "kind": "vertex_image",

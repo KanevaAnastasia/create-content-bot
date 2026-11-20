@@ -15,6 +15,7 @@ from .constants import VERTEX_IMAGE_GENERATE_TIMEOUT_SEC_ENV_NAME
 from .llm_queue import _run_llm_call_with_deadline
 from .llm_logging import get_llm_io_logger
 from .media_file_store import image_mime_type
+from .openai_images import OPENAI_IMAGE_MODEL, generate_openai_image
 
 logger = logging.getLogger("bot.image")
 _llm_io = get_llm_io_logger()
@@ -43,6 +44,7 @@ class ImageGenerationResult:
     data: bytes
     model: str
     request_id: str
+    usage: dict | None = None
 
 
 def resolve_image_generate_timeout_sec() -> float:
@@ -218,6 +220,13 @@ def primary_image_generation_model(profile: str | None = None) -> str:
     return models[0] if models else LATEST_IMAGE_GENERATION_MODEL
 
 
+def _image_provider() -> str:
+    provider = (os.getenv("IMAGE_GENERATION_PROVIDER") or "vertex").strip().lower()
+    if provider not in {"vertex", "openai"}:
+        raise ValueError("IMAGE_GENERATION_PROVIDER must be vertex or openai")
+    return provider
+
+
 def image_generation_profile_models(profile: str | None = None) -> list[str]:
     """
     Возвращает порядок моделей для генерации изображений.
@@ -226,6 +235,8 @@ def image_generation_profile_models(profile: str | None = None) -> list[str]:
     available only for explicit user-approved downgrade, not for silent
     automatic fallback.
     """
+    if _image_provider() == "openai":
+        return [OPENAI_IMAGE_MODEL]
     raw = (profile or os.getenv(IMAGE_GENERATION_PROFILE_ENV_NAME) or IMAGE_GENERATION_PROFILE_LEGACY).strip().lower()
     if raw in {"", IMAGE_GENERATION_PROFILE_LEGACY, "env", "custom"}:
         return _legacy_image_model_candidates()
@@ -438,6 +449,14 @@ def generate_image_vertex_result(
     refs_list = _coerce_reference_images(reference_image, reference_images)
     rid = request_id or uuid.uuid4().hex[:12]
     eff_aspect_ratio = str(aspect_ratio or "9:16").strip() or "9:16"
+    if _image_provider() == "openai":
+        # Older saved scenes can carry a Vertex model selection.
+        data, usage = generate_openai_image(
+            _enforce_aspect_ratio_prompt(prompt, eff_aspect_ratio), refs_list,
+            model=OPENAI_IMAGE_MODEL, aspect_ratio=eff_aspect_ratio, request_id=rid,
+            timeout=resolve_image_generate_timeout_sec(),
+        )
+        return ImageGenerationResult(data, OPENAI_IMAGE_MODEL, rid, usage)
     explicit_model = str(model or "").strip()
     if explicit_model:
         selected_model = explicit_model

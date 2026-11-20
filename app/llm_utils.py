@@ -37,7 +37,7 @@ from .constants import (
     GEMINI_MODEL_ENV_NAME,
 )
 from .llm_logging import get_llm_io_logger
-from .llm_queue import LLMCallTimeoutError, submit_llm
+from .llm_queue import LLMCallTimeoutError, resolve_llm_generate_timeout_sec, submit_llm
 from .writing_style import with_writing_style
 from .text_settings import selected_text_model
 
@@ -608,10 +608,48 @@ def _load_vertex_generative_sdk() -> tuple[Any, Any]:
     return vertexai, vertex_generative_models
 
 
+def uses_gemini_developer_api() -> bool:
+    return (os.getenv("GEMINI_BACKEND") or "vertex").strip().lower() == "developer"
+
+
+class _GeminiDeveloperModel:
+    """Send Gemini-native media checks to the API-key project."""
+
+    def __init__(self, model_id: str):
+        if not re.fullmatch(r"[A-Za-z0-9._-]+", model_id):
+            raise ValueError("Invalid Gemini model ID")
+        self.model_id = model_id
+
+    def generate_content(self, contents, *, generation_config=None, safety_settings=None):
+        key = (os.getenv("GEMINI_API_KEY") or "").strip()
+        if not key:
+            raise RuntimeError("Missing environment variable: GEMINI_API_KEY")
+        parts = contents if isinstance(contents, list) else [contents]
+        payload = {"contents": [{"role": "user", "parts": [
+            {"text": part} if isinstance(part, str) else part.to_dict() for part in parts
+        ]}]}
+        if safety_settings:
+            payload["safetySettings"] = [setting.to_dict() for setting in safety_settings]
+        if generation_config:
+            payload["generationConfig"] = generation_config
+        with requests.post(
+            f"https://generativelanguage.googleapis.com/v1beta/models/{self.model_id}:generateContent",
+            headers={"x-goog-api-key": key}, json=payload,
+            timeout=(15, resolve_llm_generate_timeout_sec()), allow_redirects=False,
+        ) as response:
+            if response.status_code != 200:
+                try:
+                    message = str(response.json()["error"]["message"]).replace(key, "[redacted]")
+                except (KeyError, ValueError, TypeError):
+                    message = ""
+                raise RuntimeError(f"Gemini API HTTP {response.status_code} {message[:1000]}")
+            return response.json()
+
+
 def get_vertex_generative_model(project: str, location: str, model_id: str) -> Any:
-    """
-    Returns a cached Vertex GenerativeModel for the current SDK module/config.
-    """
+    """Select the configured Gemini backend, caching Vertex models per project."""
+    if uses_gemini_developer_api():
+        return _GeminiDeveloperModel(model_id)
     vertexai, vertex_generative_models = _load_vertex_generative_sdk()
     GenerativeModel = getattr(vertex_generative_models, "GenerativeModel", None)
     if GenerativeModel is None:
@@ -805,11 +843,12 @@ def _gemini_generate_sync(
     """
     project = (os.getenv("GOOGLE_CLOUD_PROJECT") or "").strip()
     location = (os.getenv("GOOGLE_CLOUD_LOCATION") or "us-central1").strip() or "us-central1"
-    if not project:
+    if not project and not uses_gemini_developer_api():
         raise RuntimeError("Missing environment variable: GOOGLE_CLOUD_PROJECT")
     _load_vertex_generative_sdk()
     model_ids = _model_ids_for_profile(model_profile)
-    transports: list[tuple[str, Any]] = [("vertexai_sdk", None)]
+    transport = "gemini_api" if uses_gemini_developer_api() else "vertexai_sdk"
+    transports: list[tuple[str, Any]] = [(transport, None)]
     prompt_snapshot = with_writing_style(prompt)
     image_payloads = _dedupe_binary_payloads(images)
     context_fingerprint = hashlib.sha1(prompt_snapshot.encode("utf-8")).hexdigest()[:10]
@@ -926,7 +965,7 @@ def _gemini_generate_sync(
     if len(summary) > 2800:
         summary = summary[:2800] + "…"
     raise RuntimeError(
-        "Gemini (Vertex): не удалось получить ответ ни по одной модели.\n\n"
+        f"Gemini ({transport}): не удалось получить ответ ни по одной модели.\n\n"
         "Попытки:\n"
         f"{summary}"
     ) from last_non_quota_error

@@ -19,12 +19,12 @@ VIDEO_PROMPT = """Посмотри приложенный ролик. Опиши
 
 def _watch(url):
     from vertexai.generative_models import Part
-    from .llm_utils import get_vertex_generative_model
+    from .llm_utils import _extract_text_from_vertex_response, get_vertex_generative_model
     model = get_vertex_generative_model(shared_env("GOOGLE_CLOUD_PROJECT"), shared_env("GOOGLE_CLOUD_LOCATION", "us-central1"),
                                         shared_env("GEMINI_MODEL", DEFAULT_GEMINI_MODEL))
     response = model.generate_content([Part.from_uri(uri=url, mime_type="video/mp4"), VIDEO_PROMPT],
                                       generation_config={"response_mime_type": "application/json"})
-    data = json.loads(response.text)
+    data = json.loads(_extract_text_from_vertex_response(response) or "")
     if not isinstance(data, dict) or not all(isinstance(data.get(k), str) and data[k].strip()
                     for k in ("opening", "development", "ending")):
         raise ValueError("Видео не удалось изучить.")
@@ -32,7 +32,7 @@ def _watch(url):
 
 
 def review_sources(market, rows, previous, now=None):
-    from .llm_utils import text_llm_provider
+    from .llm_utils import text_llm_provider, uses_gemini_developer_api
     now = now or datetime.now(timezone.utc)
     own = [r for r in select_own(rows) if r.get("platform") == "youtube"]
     candidates = [*market["favorites"], *own[:1], *market["items"], *own[1:]]
@@ -42,7 +42,7 @@ def review_sources(market, rows, previous, now=None):
         if parsed and parsed[0] == "youtube" and parsed[2] not in urls:
             urls.append(parsed[2])
     studies = {url: previous[url] for url in urls if url in previous}
-    if not urls or text_llm_provider() != "gemini":
+    if not urls or (text_llm_provider() != "gemini" and not uses_gemini_developer_api()):
         return studies
     if any(s.get("provider_block") and (age_hours(s.get("at"), now) or 0) < 24 for s in previous.values()):
         return studies

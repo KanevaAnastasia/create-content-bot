@@ -25,6 +25,7 @@ from .llm_utils import (
     get_vertex_generative_model,
     get_vertex_safety_settings,
     safe_llm_call,
+    uses_gemini_developer_api,
     vertex_part_from_data,
     vertex_part_from_text,
 )
@@ -1010,7 +1011,7 @@ def call_ai_approval_model(
         raise RuntimeError("AI approval is disabled by AI_APPROVAL_ENABLED")
     project = (os.getenv("GOOGLE_CLOUD_PROJECT") or "").strip()
     location = (os.getenv("GOOGLE_CLOUD_LOCATION") or "us-central1").strip() or "us-central1"
-    if not project:
+    if not project and not uses_gemini_developer_api():
         raise RuntimeError("Missing environment variable: GOOGLE_CLOUD_PROJECT")
     safety_settings = get_vertex_safety_settings()
     media_payloads = _dedupe_binary_payloads(images)
