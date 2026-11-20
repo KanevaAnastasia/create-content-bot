@@ -12,6 +12,7 @@ from PIL import Image
 from telegram.ext import ApplicationHandlerStop
 
 from app import article_store as store, article_generation as gen, article_workflow as flow, article_publisher as pub
+from app.article_formatting import render_article
 
 START = datetime(2026, 11, 21, 6, tzinfo=timezone.utc)
 PRIORITY_CHECK = flow.advertising_has_priority
@@ -323,11 +324,13 @@ def test_image_correction_replaces_both_formats_and_preserves_text(setup, monkey
     assert saved["versions"][-1]["images"]["vertical"] == "old.jpg"
 
 
-def test_publish_uses_persisted_random_id_and_verifies_provider_result(setup):
+@pytest.mark.parametrize("copy", ["Approved article", "🥖 Хлеб\n\n**3. Подберите размер крошки**\n\nБез изменений <>&."])
+def test_publish_uses_persisted_random_id_and_verifies_provider_result(setup, copy):
     from telethon.types import InputFile
-    row = make_row("publishing", text="Approved article", images={"square": "cover.jpg"},
+    article_text, spans = render_article(copy)
+    row = make_row("publishing", text=copy, images={"square": "cover.jpg"},
                    publish_random_id=1234, publish_started_at=START.isoformat())
-    message = NS(id=30, peer_id=NS(channel_id=789), message=row["text"], raw_text=row["text"], photo=True)
+    message = NS(id=30, peer_id=NS(channel_id=789), message=article_text, raw_text=article_text, photo=True)
     class Client:
         def __init__(self):
             self.requests = []
@@ -343,10 +346,28 @@ def test_publish_uses_persisted_random_id_and_verifies_provider_result(setup):
     result = asyncio.run(pub._publish_connected(client, NS(id=789), NS(premium=True), row, {"started": False}, check_only=False))
     assert result == 30
     assert client.requests[0].random_id == 1234
-    assert client.requests[0].message == "Approved article"
+    assert client.requests[0].message == article_text
+    assert [(entity.offset, entity.length) for entity in client.requests[0].entities] == spans
     client.upload_file.assert_awaited_once_with("cover.jpg")
     assert store.issue(row["id"])["channel_message_id"] == 30
     client.get_messages.assert_awaited_once()
+    assert asyncio.run(pub.find_post(client, NS(id=789), store.issue(row["id"]))) == 30
+
+
+def test_bold_preview_preserves_text_and_uses_telegram_utf16_offsets(setup):
+    copy = "**🥖 Хлеб**\n\n**3. Подберите размер крошки**\n\nТекст <>& и *обычная звёздочка*."
+    row = make_row("text", text=copy, teaser="Что сделать с хлебом?")
+    b = bot()
+    asyncio.run(flow.show(b, 123, row))
+    preview = b.send_message.call_args_list[0].kwargs
+    expected = copy.replace("**", "")
+    assert preview["text"] == expected
+    assert preview["parse_mode"] is None
+    encoded = expected.encode("utf-16-le")
+    headings = [encoded[e.offset * 2:(e.offset + e.length) * 2].decode("utf-16-le") for e in preview["entities"]]
+    assert headings == ["🥖 Хлеб", "3. Подберите размер крошки"]
+    assert all(e.type == "bold" for e in preview["entities"])
+    assert render_article("Обычный текст <>&, без **парного маркера") == ("Обычный текст <>&, без **парного маркера", [])
 
 
 def private_test_target():
@@ -509,6 +530,8 @@ def test_article_and_teaser_are_generated_once_with_previous_approved_copy(setup
     result = gen.draft(store.snapshot(), {"topic": {"title": "Каша"}, "teaser": "Предыдущий анонс"})
     assert result == raw
     assert "Предыдущий анонс" in prompts[0]
+    assert "**3. Подберите размер крошки**" in prompts[0]
+    assert "каждый короткий подзаголовок шага выделяй жирным" in prompts[0]
     assert len(prompts) == 1
 
 

@@ -11,6 +11,7 @@ from PIL import Image
 
 from .llm_utils import extract_json_object, openai_generate_sync
 from . import article_store as store
+from .article_formatting import render_article, utf16_length
 
 logger = logging.getLogger("bot.articles")
 
@@ -62,10 +63,6 @@ angle: одно короткое предложение о конкретном 
 """
 
 
-def utf16_length(text):
-    return len(text.encode("utf-16-le")) // 2
-
-
 def source_context(config, *, include_examples=True):
     samples = json.loads(Path(config["samples_path"]).read_text())
     history = []
@@ -114,7 +111,11 @@ def topics(config, feedback=""):
 def draft(config, row):
     prompt = (
         STYLE + '\nНапиши полную статью по СОГЛАСОВАННОЙ теме. Верни JSON с полями text, teaser, image_prompt.'
-        '\ntext включает заголовок и всю статью, от 1800 до 3600 символов. Обычный текст без Markdown-разметки.'
+        '\ntext включает заголовок и всю статью, от 1800 до 3600 символов.'
+        '\nЗаголовок статьи и каждый короткий подзаголовок шага выделяй жирным через **...**.'
+        ' Каждый такой заголовок на отдельной строке, отделённой пустой строкой от основного текста.'
+        ' Номер шага тоже внутри выделения: **3. Подберите размер крошки**.'
+        ' Основные абзацы обычным текстом. Другую Markdown-разметку и HTML не используй.'
         '\nПри правках сохраняй то, что не просили менять. Не сокращай механически и не обрывай предложения.'
         '\nteaser: одна короткая разговорная фраза для сториз, обычно 25–45 символов, максимум 60.'
         '\nНазови предмет и знакомую проблему или пользу. Можно коротким вопросом. Без вступления, пересказа статьи,'
@@ -132,7 +133,7 @@ def draft(config, row):
         if not isinstance(result.get(key), str) or not result[key].strip():
             raise ValueError("GPT вернул неполный текст статьи.")
         result[key] = result[key].strip()
-    if not 500 <= utf16_length(result["text"]) <= 3800:
+    if not 500 <= utf16_length(render_article(result["text"])[0]) <= 3800:
         raise ValueError("Текст не помещается в публикацию. Нужна редактура, текст не обрезан.")
     if len(result["teaser"]) > TEASER_LIMIT or '\n' in result["teaser"] or len(result["image_prompt"]) > 2500:
         raise ValueError("Анонс или описание иллюстрации слишком длинные.")

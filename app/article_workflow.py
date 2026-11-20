@@ -8,11 +8,12 @@ from pathlib import Path
 import secrets
 from time import monotonic
 
-from telegram import ForceReply, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram import ForceReply, InlineKeyboardButton, InlineKeyboardMarkup, MessageEntity
 from telegram.ext import ApplicationHandlerStop
 
 from . import article_store as store
 from . import article_generation as generation
+from .article_formatting import render_article
 from .article_publisher import NotSubmitted, publish
 
 logger = logging.getLogger("bot.articles")
@@ -70,7 +71,9 @@ async def show(bot, chat_id, row):
         label = "Тему согласовываю, показать текст" if saved_text else "Тему согласовываю, написать статью"
         buttons = [(label, "draft"), ("Изменить тему", "custom")]
     elif state == "text":
-        await bot.send_message(chat_id=chat_id, text=row["text"])
+        article_text, spans = render_article(row["text"])
+        await bot.send_message(chat_id=chat_id, text=article_text, parse_mode=None,
+                               entities=[MessageEntity(MessageEntity.BOLD, offset, length) for offset, length in spans])
         text = f'Короткий анонс для сториз:\n{row["teaser"]}\n\nСогласуйте текст и анонс. Затем покажу квадрат для Telegram и вертикальный вариант для сториз.'
         saved_images = all(Path(row.get("images", {}).get(k, "")).is_file() for k in ("square", "vertical"))
         label = "Текст согласован, показать картинки" if saved_images else "Текст согласован, сделать картинки"

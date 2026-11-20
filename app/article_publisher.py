@@ -7,7 +7,7 @@ from datetime import datetime
 import os
 
 from . import article_store as store
-from .article_generation import utf16_length
+from .article_formatting import render_article, utf16_length
 
 
 class NotSubmitted(RuntimeError):
@@ -66,16 +66,17 @@ async def channel_client(config):
 
 
 async def find_post(client, channel, row):
+    article_text, _ = render_article(row["text"])
     if row.get("channel_message_id"):
         msg = await client.get_messages(channel, ids=row["channel_message_id"])
-        if msg and msg.raw_text == row["text"] and msg.photo:
+        if msg and msg.raw_text == article_text and msg.photo:
             return msg.id
     started = datetime.fromisoformat(row["publish_started_at"])
     matches = []
     async for msg in client.iter_messages(channel, limit=100):
         if msg.date < started:
             break
-        if msg.raw_text == row["text"] and msg.photo:
+        if msg.raw_text == article_text and msg.photo:
             matches.append(msg.id)
     if len(matches) > 1:
         raise ReconciliationNeeded("В канале несколько совпадающих постов. Нужна ручная проверка.")
@@ -100,23 +101,25 @@ async def _publish_connected(client, channel, me, row, submission, *, check_only
         return existing
     if check_only:
         return None
+    article_text, spans = render_article(row["text"])
     limit = 4096 if me.premium else 1024
-    if utf16_length(row["text"]) > limit:
+    if utf16_length(article_text) > limit:
         raise ValueError("Текст не помещается в подпись текущего Telegram-аккаунта. Нужна редактура.")
     from telethon import functions, types
     uploaded = await client.upload_file(row["images"]["square"])
     submission["started"] = True
     result = await client(functions.messages.SendMediaRequest(
-        peer=channel, media=types.InputMediaUploadedPhoto(file=uploaded), message=row["text"],
+        peer=channel, media=types.InputMediaUploadedPhoto(file=uploaded), message=article_text,
+        entities=[types.MessageEntityBold(offset, length) for offset, length in spans],
         random_id=row["publish_random_id"],
     ))
     # Persist the provider id before fetching confirmation; a timeout cannot erase it.
     for update in getattr(result, "updates", []):
         message = getattr(update, "message", None)
         if (message is not None and getattr(message.peer_id, "channel_id", None) == channel.id
-                and message.message == row["text"] and message.photo):
+                and message.message == article_text and message.photo):
             store.checkpoint(row["id"], channel_message_id=message.id)
             confirmed = await client.get_messages(channel, ids=message.id)
-            if confirmed and confirmed.raw_text == row["text"] and confirmed.photo:
+            if confirmed and confirmed.raw_text == article_text and confirmed.photo:
                 return confirmed.id
     return await find_post(client, channel, row)
