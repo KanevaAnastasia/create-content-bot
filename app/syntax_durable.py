@@ -15,6 +15,7 @@ import hashlib
 import json
 import logging
 import os
+import re
 from pathlib import Path
 import subprocess
 import sys
@@ -247,14 +248,25 @@ def execute_job(path: Path, *, runner=None) -> None:
 async def enqueue_recovery(application) -> None:
     from telegram import Update
     from .state import SESSIONS
+    sessions = {}
     for path in sorted(storage_root().glob('dialogue-*.json')):
         try:
-            envelope = read_json(path)
+            # Archived snapshots contain large media payloads. Consult the current
+            # persisted marker before reading any snapshot, not after parsing it.
+            match = re.fullmatch(r'dialogue-(-?\d+)-(\d+)\.json', path.name)
+            if match is None:
+                continue
+            chat_id, update_id = map(int, match.groups())
+            if chat_id not in sessions:
+                sessions[chat_id] = await asyncio.to_thread(SESSIONS.get, chat_id)
+            session = sessions[chat_id]
+            if not isinstance(session, dict) or session.get(MARKER) != update_id:
+                continue
+            envelope = await asyncio.to_thread(read_json, path)
             if not envelope.get('pending'):
                 continue
-            session = SESSIONS.get(envelope['chat_id'])
-            if not isinstance(session, dict) or session.get(MARKER) != envelope['update_id']:
-                logger.warning('syntax_durable.stale_dialogue_skipped chat_id=%s', envelope['chat_id'])
+            if envelope.get('chat_id') != chat_id or envelope.get('update_id') != update_id:
+                logger.warning('syntax_durable.invalid_dialogue_identity path=%s', path.name)
                 continue
             application.bot_data.setdefault('syntax_recovery_updates', set()).add(envelope['update_id'])
             await application.update_queue.put(Update.de_json(envelope['update'], application.bot))

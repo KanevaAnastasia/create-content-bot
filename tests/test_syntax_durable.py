@@ -250,3 +250,16 @@ def test_resume_delivers_video_without_rewriting_phrase_or_prompt(store, monkeyp
     asyncio.run(durable.resume_scene_job(scope.update, None, scope))
     assert calls == [('deliver', 'en'), ('advance', 0)]
     assert durable.read_json(scope.envelope)['delivered'] == ['en']
+
+
+def test_startup_does_not_read_archived_media_snapshots(store, monkeypatch):
+    from app import state
+    for name in ['dialogue-456-122.json', 'dialogue-789-999.json', 'dialogue-malformed.json']:
+        (store / name).write_text('must not be parsed')
+    monkeypatch.setattr(state, 'SESSIONS', {456: {durable.MARKER: 123}})
+    def fail_read(path):
+        pytest.fail('Startup must not read stale media snapshots')
+    monkeypatch.setattr(durable, 'read_json', fail_read)
+    app = SimpleNamespace(bot=None, bot_data={}, update_queue=asyncio.Queue())
+    asyncio.run(durable.enqueue_recovery(app))
+    assert app.update_queue.empty()
