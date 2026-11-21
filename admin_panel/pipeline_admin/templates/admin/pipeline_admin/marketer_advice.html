@@ -9,7 +9,7 @@
 {% if review_note %}<p class="source"><b>После проверки ревьюером</b><br>{{ review_note }}</p>{% endif %}
 <div class="mk-grid">{% for card in brief_plan.actions %}<article class="mk-card plan-card plan-{{ card.priority }}">
 <small>{% if forloop.first %}Сегодня{% elif forloop.last %}Развитие серии{% else %}Завтра{% endif %}{% if card.platform %} · {{ card.platform }} {{ card.language|upper }}{% endif %}</small>
-<h3>{{ card.title }}</h3><p>{{ card.action }}</p><h4>Почему стоит проверить</h4><p>{{ card.evidence }}</p>
+<h3>{{ card.title }}</h3>{% if card.pain %}<p><b>Проблема зрителя</b><br>{{ card.pain }}</p>{% endif %}<p>{{ card.action }}</p>{% if card.novelty %}<p><b>Что нового</b><br>{{ card.novelty }}</p>{% endif %}<h4>Почему стоит проверить</h4><p>{{ card.evidence }}</p>
 <h4>Как принять решение</h4>{% if card.measure %}<p><b>Первый замер через 48 часов</b> · {{ card.measure }}. {% if card.metric == "watch_percentage" %}Если Analytics ещё обрабатывает данные, отложите вывод до появления показателя.{% endif %}</p>{% endif %}<p>{{ card.check }}</p>
 {% if card.benchmark %}<p><b>Ориентир на вторые сутки</b> · {{ card.benchmark.median|floatformat:"-1g" }} просмотров, медиана {{ card.benchmark.n }} сопоставимых публикаций в возрасте 36–60 часов.</p>{% endif %}
 {% if card.sources %}<details><summary>Ролики и цифры · {{ card.sources|length }}</summary>{% for source in card.sources %}{% include "admin/pipeline_admin/marketer_source.html" %}{% endfor %}</details>{% endif %}</article>{% endfor %}</div>

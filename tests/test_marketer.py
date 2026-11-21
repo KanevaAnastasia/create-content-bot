@@ -155,7 +155,9 @@ def test_niche_empty_results_does_not_call_videos(monkeypatch):
 def test_ai_only_sends_allowlisted_report_fields(monkeypatch):
     import app.llm_utils
     seen = []
-    plan = {"summary": "План", "actions": [{"title": "Тест", "action": "Хук", "evidence": "Нет данных", "check": "Через 7 дней", "source_ids": ["O1"], "platform": "youtube", "language": "ru"}] * 3}
+    plan = {"summary": "План", "actions": [{"title": f"Тест {i}", "action": f"Сюжет {i}",
+            "pain": f"Проблема {i}", "novelty": f"Решение {i}", "evidence": "Нет данных", "check": "Через 48 часов",
+            "source_ids": ["O1"], "platform": "youtube", "language": "ru"} for i in range(3)]}
     monkeypatch.setattr(app.llm_utils, "gemini_generate_sync", lambda prompt, **kw: seen.append(prompt) or __import__('json').dumps(plan))
     data = row("a", 10, access_token="DO_NOT_SEND", payload_json={"secret": "DO_NOT_SEND"},
                comments_sample={"count": 12, "more": True,

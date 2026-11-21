@@ -193,6 +193,9 @@ def build_strategy(project, task_id, query="", language="ru", refresh_market=Tru
         row["control_48h"] = controls.get(row["id"])
     if report.get("brief") and isinstance(report["brief"], dict):
         profile["previous_decision"] = report["brief"].get("summary", "")
+    profile["previous_ideas"] = [{"title": card.get("title"), "action": card.get("action")}
+                                 for edition in report.get("plan_history", [])[-5:]
+                                 for card in edition.get("plan", {}).get("actions", [])]
     revision = report.get("reference_revision", 0)
     market = report.get("market") or {}
     if refresh_market or not market.get("at") or revision != report.get("market_reference_revision"):
@@ -217,7 +220,7 @@ def build_strategy(project, task_id, query="", language="ru", refresh_market=Tru
     try:
         brief = marketing_brief(profile, rows, recommendations, [r["query"] for r in market["searches"]])
     except Exception:
-        update_report(project.id, task_id, plan_history=edition(backup, "pilot", time.time()), brief_error="Редактор не вернул проверяемый план. Доступны свежие наблюдения и резервный план съёмки.")
+        update_report(project.id, task_id, plan_history=edition(backup, "pilot", time.time()), brief_error="Редактор не завершил новый план. Доступны собранные наблюдения и предварительные идеи для проверки.")
         return
     stamp = time.time()
     previous = report.get("previous_brief")

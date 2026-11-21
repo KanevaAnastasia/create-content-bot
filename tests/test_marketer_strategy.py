@@ -98,7 +98,8 @@ def test_unknown_source_or_uncited_favorite_cannot_become_verified_plan():
                                  [row(1, 0)], [], "")
     sources = {s["id"]: s for s in data["own_videos"] + data["favorites"]}
     card = {"title": "t", "action": "a", "evidence": "e", "check": "c", "platform":"youtube", "language":"ru", "source_ids":["O1"]}
-    plan = {"summary": "s", "actions": [card.copy() for _ in range(3)]}
+    plan = {"summary": "s", "actions": [{**card, "title": f"Тема {i}", "action": f"Сюжет {i}",
+                                         "pain": f"Проблема {i}", "novelty": f"Решение {i}"} for i in range(3)]}
     with pytest.raises(metrics.MetricsUnavailable):
         strategy.parse_plan(json.dumps(plan), sources)
     plan["actions"][0]["source_ids"] = ["O1", "F90"]
@@ -107,6 +108,28 @@ def test_unknown_source_or_uncited_favorite_cannot_become_verified_plan():
     plan["actions"][0]["source_ids"] = ["O1", "F1"]
     valid = strategy.parse_plan(json.dumps(plan), sources)
     assert valid["actions"][0]["sources"][1]["url"] == row(2, 0)["url"]
+    plan["actions"][1]["platform"] = "vk"
+    assert strategy.parse_plan(json.dumps(plan), sources)["actions"][1]["platform"] == "vk"
+    plan["actions"][1]["pain"] = plan["actions"][0]["pain"]
+    with pytest.raises(metrics.MetricsUnavailable):
+        strategy.parse_plan(json.dumps(plan), sources)
+
+
+def test_novelty_check_receives_full_archive_and_previous_ideas():
+    rows = [row(i, 100 + i, caption=f"Решение проблемы {i}") for i in range(65)]
+    previous = [{"title": "Прошлый план", "action": "Другой вариант начала"}]
+    data = strategy.evidence_set({"previous_ideas": previous}, rows, [], "")
+    assert len(data["own_videos"]) == 30
+    assert len(data["published_topics"]) == 65
+    assert data["published_topics"][0]["caption"] == "Решение проблемы 0"
+    assert data["project"]["previous_ideas"] == previous
+
+
+def test_fallback_does_not_turn_one_comment_into_two_filming_days():
+    notes = {"references": [], "outside": [], "questions": [{"text": "Сколько кубиков?"}], "leaders": []}
+    plan = strategy.pilot_plan({"slug": "grandma_kitchen"}, notes)
+    assert plan["pilot"] and "пока не готов" in plan["summary"]
+    assert "кубиков" not in json.dumps(plan, ensure_ascii=False)
 
 
 def test_youtube_comment_failure_is_distinct_from_measured_zero(monkeypatch):
