@@ -826,7 +826,7 @@ def test_vertex_receives_only_selected_character_references(guest_db, monkeypatc
     assert session["state"] == guest_handlers.STATE_IMAGE_APPROVAL
 
 
-def test_guest_image_generation_is_limited_to_seven_successes_per_moscow_day(guest_db, monkeypatch, tmp_path):
+def test_guest_image_generation_is_limited_to_four_successes_per_moscow_day(guest_db, monkeypatch, tmp_path):
     session, _project_id = _guest_session_with_project(guest_db)
     session["guest_data"] = {"image_description": "Портрет в саду"}
     guest_handlers._new_run(session, "image", title="Изображение")
@@ -845,12 +845,12 @@ def test_guest_image_generation_is_limited_to_seven_successes_per_moscow_day(gue
     for _ in range(guest_handlers.GUEST_IMAGE_DAILY_LIMIT):
         asyncio.run(guest_handlers._generate_image(update, session, target="image"))
 
-    assert calls == 7
-    assert guest_handlers._guest_generated_images_today(session) == 7
+    assert calls == 4
+    assert guest_handlers._guest_generated_images_today(session) == 4
 
     asyncio.run(guest_handlers._generate_image(update, session, target="image"))
 
-    assert calls == 7
+    assert calls == 4
     assert message.sent[-1][0] == "text"
     assert message.sent[-1][1] == guest_handlers.GUEST_IMAGE_QUOTA_EXHAUSTED_MESSAGE
     assert "только из собственных изображений" in message.sent[-1][1]
