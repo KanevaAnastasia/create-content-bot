@@ -87,6 +87,8 @@ MIDDLEWARE = [
 ROOT_URLCONF = "cf_admin.urls"
 WSGI_APPLICATION = "cf_admin.wsgi.application"
 DEFAULT_AUTO_FIELD = "django.db.models.BigAutoField"
+TIME_ZONE = "Europe/Moscow"
+USE_TZ = True
 STATIC_URL = "static/"
 STATIC_ROOT = os.getenv("DJANGO_STATIC_ROOT", str(PROJECT_ROOT / "runtime" / "django_static"))
 

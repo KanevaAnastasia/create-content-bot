@@ -2713,7 +2713,7 @@ class PublicationQueueAdminForm(django_forms.Form):
         required=False,
         input_formats=("%Y-%m-%dT%H:%M", "%Y-%m-%d %H:%M", "%Y-%m-%d %H:%M:%S"),
         widget=django_forms.DateTimeInput(attrs={"type": "datetime-local"}),
-        label="Publication time",
+        label="Время публикации (Москва, UTC+3)",
         help_text="Leave empty to publish as soon as the job is approved by the delivery flow.",
     )
 

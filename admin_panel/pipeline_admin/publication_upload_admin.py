@@ -103,7 +103,7 @@ class PublicationUploadForm(legacy.PublicationQueueAdminForm):
         )
         self.fields["project_slug"].label = "Проект и набор аккаунтов"
         self.fields["target_keys"].label = "Куда публиковать"
-        self.fields["scheduled_at"].label = "Когда публиковать"
+        self.fields["scheduled_at"].label = "Когда публиковать (Москва, UTC+3)"
         for language, label in (("ru", "Русское видео"), ("en", "English video")):
             source = self.fields[f"video_source_{language}"]
             source.label = "Версия видео"
