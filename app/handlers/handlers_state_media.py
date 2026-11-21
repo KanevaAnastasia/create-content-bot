@@ -28,6 +28,7 @@ from ..generation_modes import (
     is_advertising_generation,
     syntax_provider_for_scene_generation,
 )
+from ..llm_utils import TEXT_MODEL_PROFILE_SHORT
 from ..llm_utils import GEMINI_MODEL_PROFILE_CREATIVE, GEMINI_MODEL_PROFILE_EDIT
 from ..pipeline_llm_steps import FINAL_SCENE_SUBSCRIBE_CTA
 from ..pipeline_history import restore_scene_prompt_fields_from_history
@@ -3104,7 +3105,7 @@ async def _generate_social_copy_from_recipe(
         raw = await asyncio.to_thread(
             gemini_generate_sync,
             prompt,
-            model_profile=GEMINI_MODEL_PROFILE_CREATIVE,
+            model_profile=TEXT_MODEL_PROFILE_SHORT,
         )
         obj = extract_json_object(raw or "")
     except Exception:
@@ -3383,7 +3384,7 @@ async def _refine_social_copy_from_feedback(
         raw = await asyncio.to_thread(
             gemini_generate_sync,
             prompt,
-            model_profile=GEMINI_MODEL_PROFILE_EDIT,
+            model_profile=TEXT_MODEL_PROFILE_SHORT,
         )
         obj = extract_json_object(raw or "")
     except Exception:
@@ -5474,7 +5475,7 @@ async def _translate_scene_phrase_adaptive(
         gemini_generate_sync,
         prompt,
         rate_limit_max_attempts=1,
-        model_profile=GEMINI_MODEL_PROFILE_EDIT,
+        model_profile=TEXT_MODEL_PROFILE_SHORT,
     )
     out = normalize_speech_phrase_for_voice(raw or "")
     return out or normalize_speech_phrase_for_voice(source_text)

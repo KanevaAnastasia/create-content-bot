@@ -7,7 +7,7 @@ import logging
 import re
 from typing import Any
 
-from .llm_utils import GEMINI_MODEL_PROFILE_EDIT, extract_json_object, gemini_generate_sync
+from .llm_utils import TEXT_MODEL_PROFILE_SHORT, extract_json_object, gemini_generate_sync
 from .media_costs import estimate_gemini_text_cost_usd
 from .pipeline_llm_steps import FINAL_SCENE_SUBSCRIBE_CTA, FINAL_SCENE_SUBSCRIBE_CTA_VEO3, RUSSIAN_YO_RULE
 from .scene_speech_budget import (
@@ -144,7 +144,7 @@ def shorten_scene_speech_and_sync_video_prompt_sync(
         raw = gemini_generate_sync(
             full_prompt,
             rate_limit_max_attempts=rate_limit_max_attempts,
-            model_profile=GEMINI_MODEL_PROFILE_EDIT,
+            model_profile=TEXT_MODEL_PROFILE_SHORT,
         )
         try:
             obj = extract_json_object(raw)

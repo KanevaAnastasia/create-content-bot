@@ -176,6 +176,7 @@ from ..advertising_generation import (
     store_advertising_product_reference,
 )
 from ..generation_store import set_generation_run_title_color_for_session
+from ..llm_utils import TEXT_MODEL_PROFILE_SHORT
 from ..llm_utils import GEMINI_MODEL_PROFILE_CREATIVE, GEMINI_MODEL_PROFILE_EDIT, extract_json_object, gemini_generate_sync
 from ..post_production import _resolve_music_path, latinize_cyrillic_title, render_title_overlay_preview
 from ..scene_media_candidates import resolve_candidate_by_message
@@ -542,7 +543,7 @@ async def _translate_overlay_title_to_en(
         context,
         chat_id,
         "translate_overlay_title_en",
-        lambda: asyncio.to_thread(gemini_generate_sync, prompt, model_profile=GEMINI_MODEL_PROFILE_EDIT),
+        lambda: asyncio.to_thread(gemini_generate_sync, prompt, model_profile=TEXT_MODEL_PROFILE_SHORT),
     )
     translated = _clean_translated_title(str(raw or ""))
     if translated and _looks_like_title_transliteration(ru_title, translated):
@@ -557,7 +558,7 @@ async def _translate_overlay_title_to_en(
             context,
             chat_id,
             "translate_overlay_title_en_semantic_retry",
-            lambda: asyncio.to_thread(gemini_generate_sync, retry_prompt, model_profile=GEMINI_MODEL_PROFILE_EDIT),
+            lambda: asyncio.to_thread(gemini_generate_sync, retry_prompt, model_profile=TEXT_MODEL_PROFILE_SHORT),
         )
         retry_translated = _clean_translated_title(str(retry_raw or ""))
         if retry_translated and not _looks_like_title_transliteration(ru_title, retry_translated):
@@ -583,7 +584,7 @@ async def _translate_overlay_subtitle_to_en(
         context,
         chat_id,
         "translate_overlay_subtitle_en",
-        lambda: asyncio.to_thread(gemini_generate_sync, prompt, model_profile=GEMINI_MODEL_PROFILE_EDIT),
+        lambda: asyncio.to_thread(gemini_generate_sync, prompt, model_profile=TEXT_MODEL_PROFILE_SHORT),
     )
     translated = _clean_translated_title(str(raw or ""))
     return translated or ru_subtitle.strip()

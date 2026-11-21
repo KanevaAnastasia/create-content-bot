@@ -9,6 +9,7 @@ from pathlib import Path
 
 from PIL import Image
 
+from .llm_utils import TEXT_MODEL_PROFILE_SHORT
 from .llm_utils import extract_json_object, openai_generate_sync
 from . import article_store as store
 from .article_formatting import render_article, utf16_length
@@ -85,7 +86,7 @@ def topics(config, feedback=""):
               '\nДопустимые section для culinary: ' + ', '.join(CULINARY_SECTIONS) +
               '\nДопустимые section для household: ' + ', '.join(HOUSEHOLD_SECTIONS) +
               '\nКомментарий владельца: ' + feedback + '\nКонтекст:\n' + json.dumps(context, ensure_ascii=False))
-    candidates = extract_json_object(openai_generate_sync(prompt)).get("topics")
+    candidates = extract_json_object(openai_generate_sync(prompt, model_profile=TEXT_MODEL_PROFILE_SHORT)).get("topics")
     if not isinstance(candidates, list) or len(candidates) != 5:
         raise ValueError("GPT не вернул пять тем.")
     titles = {title.strip().casefold() for title in context["already_used"] if title.strip()}

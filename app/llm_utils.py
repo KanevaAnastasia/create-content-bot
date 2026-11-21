@@ -231,6 +231,7 @@ LLM_TRANSPORT_BACKOFF_MAX_SEC = 20.0
 _MAX_USER_VISIBLE_LLM_ERROR_LEN = 1200
 GEMINI_MODEL_PROFILE_CREATIVE = "creative"
 GEMINI_MODEL_PROFILE_EDIT = "edit"
+TEXT_MODEL_PROFILE_SHORT = "short"
 _DEFAULT_CREATIVE_MODEL_FALLBACKS = ("gemini-2.5-pro", "gemini-2.5-flash-lite")
 _DEFAULT_EDIT_MODEL_FALLBACKS = ("gemini-2.5-flash-lite", "gemini-2.5-pro")
 
@@ -550,7 +551,7 @@ def _model_ids_for_profile(profile: str | None) -> list[str]:
         fallbacks = _split_model_list(os.getenv(GEMINI_CREATIVE_MODEL_FALLBACKS_ENV_NAME))
         if not fallbacks:
             fallbacks = list(_DEFAULT_CREATIVE_MODEL_FALLBACKS)
-    elif normalized_profile == GEMINI_MODEL_PROFILE_EDIT:
+    elif normalized_profile in {GEMINI_MODEL_PROFILE_EDIT, TEXT_MODEL_PROFILE_SHORT}:
         fallbacks = _split_model_list(os.getenv(GEMINI_EDIT_MODEL_FALLBACKS_ENV_NAME))
         if not fallbacks:
             fallbacks = list(_DEFAULT_EDIT_MODEL_FALLBACKS)
@@ -732,6 +733,16 @@ def text_llm_provider() -> str:
     return provider
 
 
+def openai_text_model(model_profile: str | None = None) -> str:
+    """Short operations have their own model; admin selection controls complex work."""
+    if model_profile == TEXT_MODEL_PROFILE_SHORT:
+        return (os.getenv("OPENAI_SHORT_MODEL") or "").strip() or "gpt-6-luna"
+    model = (os.getenv("OPENAI_MODEL") or "").strip() or "gpt-6.2-sol"
+    if model_profile in {GEMINI_MODEL_PROFILE_CREATIVE, GEMINI_MODEL_PROFILE_EDIT}:
+        model = (os.getenv(f"OPENAI_{model_profile.upper()}_MODEL") or "").strip() or model
+    return selected_text_model() or model
+
+
 def openai_generate_sync(
     prompt: str,
     *,
@@ -743,10 +754,7 @@ def openai_generate_sync(
     api_key = (os.getenv("OPENAI_API_KEY") or "").strip()
     if not api_key:
         raise RuntimeError("Missing environment variable: OPENAI_API_KEY")
-    model = (os.getenv("OPENAI_MODEL") or "gpt-6-astra").strip()
-    if model_profile in {GEMINI_MODEL_PROFILE_CREATIVE, GEMINI_MODEL_PROFILE_EDIT}:
-        model = (os.getenv(f"OPENAI_{model_profile.upper()}_MODEL") or model).strip()
-    model = selected_text_model() or model
+    model = openai_text_model(model_profile)
     content: list[dict[str, Any]] = [{"type": "input_text", "text": with_writing_style(prompt)}]
     for payload in _dedupe_binary_payloads(images):
         mime = _guess_media_mime_type(payload)

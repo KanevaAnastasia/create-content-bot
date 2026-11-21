@@ -145,3 +145,47 @@ def test_persistent_admin_choice_wins_over_profile_but_guest_keeps_original(monk
     payload = calls[-1][1]['json']
     assert payload['model'] == 'original-profile-model'
     assert payload['input'][0]['content'][0]['text'] == HUMAN_WRITING_RULES + '\n\nscript'
+
+
+@pytest.mark.parametrize('profile, expected', [
+    (None, 'gpt-6.2-sol'), ('creative', 'gpt-6.2-sol'),
+    ('edit', 'gpt-6.2-sol'), ('short', 'gpt-6-luna'),
+])
+def test_default_task_models(monkeypatch, profile, expected):
+    for key in ('OPENAI_MODEL', 'OPENAI_SHORT_MODEL', 'OPENAI_CREATIVE_MODEL', 'OPENAI_EDIT_MODEL'):
+        monkeypatch.delenv(key, raising=False)
+    monkeypatch.setattr(llm, 'selected_text_model', lambda: None)
+    calls = response(monkeypatch, completed())
+    llm.gemini_generate_sync('task', model_profile=profile)
+    assert calls[0][1]['json']['model'] == expected
+
+
+def test_saved_main_model_does_not_override_short_tasks(monkeypatch):
+    monkeypatch.setattr(llm, 'selected_text_model', lambda: 'gpt-6.2-sol')
+    monkeypatch.setenv('OPENAI_SHORT_MODEL', 'gpt-6-luna')
+    assert llm.openai_text_model('short') == 'gpt-6-luna'
+    assert llm.openai_text_model('edit') == 'gpt-6.2-sol'
+
+
+def test_short_profile_uses_gemini_edit_fallbacks(monkeypatch):
+    monkeypatch.setenv('GEMINI_EDIT_MODEL_FALLBACKS', 'gemini-2.5-flash-lite')
+    assert llm._model_ids_for_profile('short') == llm._model_ids_for_profile('edit')
+
+
+def test_concept_and_json_repair_are_short_but_full_recipe_is_creative(monkeypatch):
+    import asyncio
+    from app import pipeline, pipeline_llm_steps
+    calls = []
+    replies = iter(['invalid', '{"concepts":[{"title":"Ужин"}]}', 'Готовый рецепт'])
+    def generate(prompt, **kwargs):
+        calls.append(kwargs['model_profile'])
+        return next(replies)
+    monkeypatch.setattr(pipeline_llm_steps, 'gemini_generate_sync', generate)
+    for getter in ('get_concepts', 'get_recipe_full'):
+        monkeypatch.setattr(pipeline, getter, lambda *args: None)
+    for setter in ('set_concepts', 'set_recipe_full'):
+        monkeypatch.setattr(pipeline, setter, lambda *args: None)
+    monkeypatch.setattr(pipeline, 'format_concepts', lambda value: 'preview')
+    asyncio.run(pipeline.generate_recipe_concepts('Ужин'))
+    assert asyncio.run(pipeline.generate_recipe_full_text('Ужин')) == 'Готовый рецепт'
+    assert calls == ['short', 'short', 'creative']

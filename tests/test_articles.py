@@ -127,7 +127,7 @@ def test_new_video_started_during_gpt_defers_delivery(setup, monkeypatch):
 
 
 def test_topics_exactly_five_distinct(setup, monkeypatch):
-    monkeypatch.setattr(gen, "openai_generate_sync", lambda *a: json.dumps({"topics": [{"title": "same", "angle": "x"}] * 5}))
+    monkeypatch.setattr(gen, "openai_generate_sync", lambda *a, **kw: json.dumps({"topics": [{"title": "same", "angle": "x"}] * 5}))
     with pytest.raises(ValueError):
         gen.topics(store.snapshot())
 
@@ -483,7 +483,8 @@ def selected_topics():
 
 def test_topics_request_only_five_cards_and_enforce_four_culinary_one_household(setup, monkeypatch):
     calls = []
-    def generate(prompt):
+    def generate(prompt, *, model_profile):
+        assert model_profile == "short"
         calls.append(prompt)
         return json.dumps({"topics": selected_topics()}, ensure_ascii=False)
     monkeypatch.setattr(gen, "openai_generate_sync", generate)
@@ -514,7 +515,7 @@ def test_topics_reject_narrow_misclassified_or_unreadable_cards(setup, monkeypat
         candidates[0]["title"] = candidates[1]["title"]
     else:
         candidates[0]["title"] = "Два\nзаголовка"
-    monkeypatch.setattr(gen, "openai_generate_sync", lambda *a: json.dumps({"topics": candidates}))
+    monkeypatch.setattr(gen, "openai_generate_sync", lambda *a, **kw: json.dumps({"topics": candidates}))
     with pytest.raises(ValueError):
         gen.topics(store.snapshot())
 
@@ -540,7 +541,8 @@ def test_article_request_uses_responses_api_with_full_policy_and_no_second_pass(
     from app.writing_style import HUMAN_WRITING_RULES
     requests = []
     monkeypatch.setenv("OPENAI_API_KEY", "test-key")
-    monkeypatch.setenv("OPENAI_MODEL", "gpt-6-astra")
+    monkeypatch.setenv("OPENAI_MODEL", "gpt-6.2-sol")
+    monkeypatch.setenv("OPENAI_SHORT_MODEL", "gpt-6-luna")
     monkeypatch.setattr(llm, "selected_text_model", lambda: None)
     monkeypatch.setattr(llm, "safe_llm_call", lambda fn, **kwargs: fn())
     class Response:
@@ -561,7 +563,7 @@ def test_article_request_uses_responses_api_with_full_policy_and_no_second_pass(
     assert len(requests) == 1
     for url, payload in requests:
         assert url == "https://api.openai.com/v1/responses"
-        assert payload["model"] == "gpt-6-astra"
+        assert payload["model"] == "gpt-6-luna"
         assert payload["input"][0]["content"][0]["text"].startswith(HUMAN_WRITING_RULES + "\n\n")
 
 

@@ -39,6 +39,7 @@ from .formatting import (
     format_frame_prompts_for_approval,
     format_romantic_drama_status,
 )
+from .llm_utils import TEXT_MODEL_PROFILE_SHORT
 from .llm_utils import (
     GEMINI_MODEL_PROFILE_CREATIVE,
     GEMINI_MODEL_PROFILE_EDIT,
@@ -1063,7 +1064,7 @@ async def _translate_scene_text(text: str, target_language: str) -> str:
         "Return only translated phrase without comments.\n"
         f"SOURCE:\n{source}\n"
     )
-    raw = await asyncio.to_thread(gemini_generate_sync, prompt, model_profile=GEMINI_MODEL_PROFILE_EDIT)
+    raw = await asyncio.to_thread(gemini_generate_sync, prompt, model_profile=TEXT_MODEL_PROFILE_SHORT)
     translated = normalize_speech_phrase_for_voice(raw or "")
     return translated or normalize_speech_phrase_for_voice(source)
 
@@ -1291,7 +1292,7 @@ async def _apply_llm_stress_for_veo3(scenes: list[dict[str, Any]]) -> list[dict[
         + json.dumps(payload, ensure_ascii=False)
     )
     try:
-        raw = await asyncio.to_thread(gemini_generate_sync, prompt, model_profile=GEMINI_MODEL_PROFILE_EDIT)
+        raw = await asyncio.to_thread(gemini_generate_sync, prompt, model_profile=TEXT_MODEL_PROFILE_SHORT)
         obj = extract_json_object(raw)
         items = obj.get("items")
         if not isinstance(items, list):
@@ -1339,12 +1340,12 @@ async def generate_recipe_concepts(
         return cached
 
     prompt = llm_steps.build_concepts_prompt(idea, feedback, previous)
-    raw = await llm_steps.gemini_text(prompt)
+    raw = await llm_steps.gemini_text(prompt, model_profile=TEXT_MODEL_PROFILE_SHORT)
     try:
         parsed_obj = extract_json_object(raw)
     except Exception:
         repair_prompt = llm_steps.build_concepts_json_repair_prompt(raw)
-        repaired = await llm_steps.gemini_text(repair_prompt)
+        repaired = await llm_steps.gemini_text(repair_prompt, model_profile=TEXT_MODEL_PROFILE_SHORT)
         parsed_obj = extract_json_object(repaired)
     concepts = parsed_obj.get("concepts")
     if not isinstance(concepts, list) or not concepts:

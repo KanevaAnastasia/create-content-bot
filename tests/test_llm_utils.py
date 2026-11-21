@@ -7,6 +7,7 @@ from app import llm_utils
 @pytest.fixture(autouse=True)
 def gemini_backend(monkeypatch):
     monkeypatch.setenv("TEXT_LLM_PROVIDER", "gemini")
+    monkeypatch.setenv("GEMINI_BACKEND", "vertex")
 
 
 def test_model_profile_creative_defaults_to_flash_pro_lite(monkeypatch):

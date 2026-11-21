@@ -1,7 +1,7 @@
 """Check that draft speech is developed enough, without an upper length limit."""
 import json
 
-from .llm_utils import GEMINI_MODEL_PROFILE_CREATIVE, extract_json_object, gemini_generate_sync
+from .llm_utils import TEXT_MODEL_PROFILE_SHORT, extract_json_object, gemini_generate_sync
 
 
 class SpeechLengthError(ValueError):
@@ -31,7 +31,7 @@ def validate_scene_speech(scenes: list[dict], brief: dict) -> None:
         )
         from .advertising_generation import advertising_editorial_rules
         prompt = advertising_editorial_rules(brief) + prompt
-        data = extract_json_object(gemini_generate_sync(prompt, model_profile=GEMINI_MODEL_PROFILE_CREATIVE))
+        data = extract_json_object(gemini_generate_sync(prompt, model_profile=TEXT_MODEL_PROFILE_SHORT))
         allowed = {item["index"] for item in invalid}
         for item in data.get("phrases", []):
             if not isinstance(item, dict):

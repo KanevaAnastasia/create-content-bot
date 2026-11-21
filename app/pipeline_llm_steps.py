@@ -33,13 +33,13 @@ FRUIT_ONLY_FIRST_MOMENT_RULE = (
 )
 
 
-async def gemini_text(prompt: str) -> str:
+async def gemini_text(prompt: str, *, model_profile: str = GEMINI_MODEL_PROFILE_CREATIVE) -> str:
     """Вызывает синхронный Gemini в thread pool, чтобы не блокировать event loop бота."""
     return (
         await asyncio.to_thread(
             gemini_generate_sync,
             prompt,
-            model_profile=GEMINI_MODEL_PROFILE_CREATIVE,
+            model_profile=model_profile,
         )
         or ""
     ).strip()

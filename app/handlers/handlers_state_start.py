@@ -63,6 +63,7 @@ from ..project_modes import PENDING_MODE_KEY, project_mode_rows, project_mode_la
 from ..discipline_modes import LABELS, MODE_KEY, SHORT_FORMATS, active_mode, mode_from_label
 from ..directorial_notes import direction_for_session
 from ..dish_visuals import build_dish_visual_brief
+from ..llm_utils import TEXT_MODEL_PROFILE_SHORT
 from ..llm_utils import GEMINI_MODEL_PROFILE_EDIT, extract_json_object
 from ..advertising_generation import (
     ADVERTISING_CAMPAIGNS_SESSION_KEY,
@@ -615,7 +616,7 @@ async def _translate_series_titles(
         context,
         chat_id,
         "translate_series_titles",
-        lambda: asyncio.to_thread(gemini_generate_sync, prompt, model_profile=GEMINI_MODEL_PROFILE_EDIT),
+        lambda: asyncio.to_thread(gemini_generate_sync, prompt, model_profile=TEXT_MODEL_PROFILE_SHORT),
     )
     try:
         data = extract_json_object(str(raw or ""))

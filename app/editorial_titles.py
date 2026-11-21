@@ -79,7 +79,7 @@ def fallback_parts(title: str) -> list[str]:
 
 async def propose_parts(titles: dict[str, str]) -> dict[str, list[str]]:
     from .pipeline_llm_steps import gemini_text
-    from .llm_utils import extract_json_object
+    from .llm_utils import TEXT_MODEL_PROFILE_SHORT, extract_json_object
     prompt = (
         'Раздели каждый заголовок на три СМЫСЛОВЫХ фрагмента для типографического плаката. '
         'Не дели по равному числу слов и не чередуй шрифты по словам. Сохрани порядок, '
@@ -89,7 +89,7 @@ async def propose_parts(titles: dict[str, str]) -> dict[str, list[str]]:
         'только для переданных языков. Заголовки: ' + json.dumps(titles, ensure_ascii=False)
     )
     try:
-        result = extract_json_object(await gemini_text(prompt))
+        result = extract_json_object(await gemini_text(prompt, model_profile=TEXT_MODEL_PROFILE_SHORT))
     except Exception:
         result = {}
     return {lang: result[lang] if valid_parts(title, result.get(lang)) else fallback_parts(title)

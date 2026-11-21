@@ -37,7 +37,7 @@ def selected_text_model() -> str | None:
 
 def save_text_model(model: str) -> None:
     if not _MODEL_ID.fullmatch(model):
-        raise ValueError("Укажите идентификатор текстовой модели OpenAI, например gpt-6-astra.")
+        raise ValueError("Укажите идентификатор текстовой модели OpenAI, например gpt-6.2-sol.")
     SETTINGS_PATH.parent.mkdir(parents=True, exist_ok=True)
     with tempfile.NamedTemporaryFile(mode="w", dir=SETTINGS_PATH.parent, delete=False) as file:
         temporary = Path(file.name)
@@ -52,22 +52,24 @@ async def text_model_command(update, context):
     args = context.args or []
     if args:
         if len(args) != 1:
-            await update.effective_message.reply_text("Формат: /text_model gpt-6-astra")
+            await update.effective_message.reply_text("Формат: /text_model gpt-6.2-sol")
             return
         try:
             save_text_model(args[0])
         except ValueError as exc:
             await update.effective_message.reply_text(str(exc))
             return
-    from .llm_utils import text_llm_provider
+    from .llm_utils import text_llm_provider, openai_text_model, TEXT_MODEL_PROFILE_SHORT
     provider = text_llm_provider()
-    model = selected_text_model() or (os.getenv("OPENAI_MODEL", "gpt-6-astra") if provider == "openai" else os.getenv("GEMINI_MODEL", "gemini-2.5-flash"))
+    model = openai_text_model() if provider == "openai" else os.getenv("GEMINI_MODEL", "gemini-2.5-flash")
     await update.effective_message.reply_text(
-        f"Тексты основных проектов: {provider} · {model}.\n"
-        "Сменить: /text_model <идентификатор модели GPT>\n"
-        "Например: /text_model gpt-6-astra\n"
+        f"Сценарии и сложные задачи: {provider} · {model}.\n"
+        + (f"Короткие задачи: {openai_text_model(TEXT_MODEL_PROFILE_SHORT)}.\n" if provider == "openai" else "")
+        + "Сменить: /text_model <идентификатор модели GPT>\n"
+        "Например: /text_model gpt-6.2-sol\n"
         "Другой вариант: /text_model gpt-6.1-sol\n"
-        "Выбор общий для основных проектов и сохраняется после перезапуска. "
+        "Выбор меняет модель сложных задач основных проектов и сохраняется после перезапуска. "
+        "Короткие задачи используют отдельную настройку OPENAI_SHORT_MODEL. "
         "Модель должна быть доступна API-аккаунту; доступ проверяется при генерации. "
         "Гостевые тексты и модели изображений этой командой не меняются."
     )
