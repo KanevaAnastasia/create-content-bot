@@ -1,6 +1,30 @@
 """Editorial direction for the grandmother's culinary and advertising scripts."""
 
 GRANDMA_STORY_RULES = """
+МОНТАЖНАЯ ЭКОНОМИЯ:
+Выбирай минимальное достаточное число сцен от 3 до 6, а не максимум диапазона.
+Сначала сгруппируй рецепт по смысловым изменениям: подготовка, приготовление
+или сборка, результат. Холодная нарезка с заправкой обычно требует 3 сцен:
+начало, подготовка, заправка вместе с подачей. Если дополнительно нужны варка
+и охлаждение, обычно достаточно 4 сцен. Это ориентиры по смыслу, не квоты.
+Пятая и шестая нужны только для самостоятельного важного превращения или
+приёма, который иначе станет непонятным; не выделяй сцену каждому ингредиенту.
+Первый кадр может коротко показать результат, но финал должен завершить действие
+или ситуацию, а не повторить то же выставление миски. Не добавляй отдельную
+сцену ради подписки, реакции кота или повторного перечисления ингредиентов.
+Если финал содержит только «подаю» и подписку, перенеси его в конец последней
+кулинарной сцены. Финальный результат не обязан занимать отдельные восемь секунд.
+У каждой сцены укажи scene_purpose: что нового узнаёт/видит зритель и почему
+этот смысл нельзя без потерь объединить с соседним. Это рабочая заметка,
+не реплика. Если два соседних purpose совпадают, объедини сцены.
+Одна восьмисекундная сцена содержит одно основное действие и до двух коротких
+вставок. Подготовку риса и яиц можно объединить монтажом с явным скачком времени.
+Не пытайся показать полную варку или всю нарезку в реальном времени. Полный
+рецепт и количества сохраняй в описании, а на экране показывай начало действия
+и готовое состояние после склейки. Распределяй сборку и заправку между сценами,
+если вместе получается больше трёх разных действий. Не ускоряй речь ради
+сокращения сцены и не теряй обязательный шаг. Явно заданное пользователем
+число сцен соблюдай; если оно не вмещает смысл, объясни конкретную перегрузку.
 ГОЛОС БАБУШКИ И ПРИЧИНА ДОСМОТРЕТЬ:
 Бабушка разговаривает с конкретным человеком, пока делает дело. Сначала определи,
 зачем ему эта история: знакомая неудача, семейный повод, желание получить вкусный
@@ -45,7 +69,14 @@ mention does not add a live character. Stage the first frame BEFORE the main
 action, then show a small, physically executable sequence within the duration.
 Cooking, boiling and cooling cannot complete in eight real-time seconds: use
 explicit time-passing cuts and consistent before/after states. Never turn the
-whole written recipe into simultaneous hand movements. Keep visual interest in
+whole written recipe into simultaneous hand movements. Plan
+one main action and at most two short inserts per eight-second scene. Explicit
+time-passing cuts may skip repetitive preparation, never necessary recipe facts.
+Treat approved micro_events as the maximum shot list. Ingredient quantities are
+recipe facts, not instructions to animate a separate pouring or knife movement
+for every ingredient. A jump cut may reveal those preparations already completed;
+show the before/after state clearly instead of adding new beats to the shot list.
+Do not expand the approved scene count or add a separate outro. Keep visual interest in
 the action, expression and result; do not add a new secret, food, promise or
 spoken instruction. Latest user corrections override old brief motifs.
 """

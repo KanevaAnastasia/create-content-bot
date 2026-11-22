@@ -312,7 +312,7 @@ def build_viral_concept_brief_prompt(
 def scenes_plan_requirements() -> dict[str, Any]:
     return {
         "scene_count": (
-            "3-6 scenes inclusive; scene 1 is hook-only with ready dish, then cover full recipe steps "
+            "3-6 scenes inclusive, choose the minimum sufficient count; simple assembly usually 3-4, use 5-6 only for distinct essential transformations. Scene 1 introduces the dish, then cover full recipe steps "
             "in order from scene 2 to final serving"
         ),
         "duration_sec": "veo3: 6/8; other models: >=2",
@@ -581,7 +581,7 @@ def build_scenes_plan_prompt(payload: dict[str, Any]) -> str:
         "ложка с супом/кремом, бабушка показывает готовое блюдо, кот реагирует на запах, неожиданная фраза, "
         "контраст было/стало, ностальгический домашний момент, честная интрига про финальный кадр; либо другой явный пользовательский hook-first кадр.\n"
         "Готовка по рецепту (действия типа режем/мешаем/жарим) начинается строго со СЦЕНЫ 2.\n"
-        "ПОСЛЕДНЯЯ СЦЕНА: презентация/подача готового блюда, аппетит, реплика от первого лица. "
+        "ПОСЛЕДНЯЯ СЦЕНА: завершение последнего кулинарного действия вместе с подачей и репликой от первого лица; не выделяй подачу в отдельную сцену, если её можно естественно завершить здесь. "
         "Финал обязан иметь сильный visual payoff: разрез, ложка, хруст, тянущийся сыр, бабушка пробует и улыбается, "
         "кот смотрит на блюдо, финальная сервировка, семейный стол или «сохрани, чтобы не потерять». "
         "После основной фразы про блюдо ОБЯЗАТЕЛЬНО закончи text подписочной фразой: "
@@ -589,7 +589,7 @@ def build_scenes_plan_prompt(payload: dict[str, Any]) -> str:
         f"{FINAL_SCENE_SUBSCRIBE_CTA_VEO3}.\n"
         "RETENTION LAYER: у каждой сцены добавь retention_function — одно из hook, visual_proof, recipe_progress, "
         "grandma_secret, cat_humor, texture_shot, transformation, suspense, payoff, cta_save_reason, brand_integration. "
-        "Добавь micro_events: 2-4 коротких события каждые 2-3 секунды (смена крупности, ингредиент, реакция бабушки, "
+        "Добавь micro_events: одно главное действие и до двух коротких вставок на всю восьмисекундную сцену (смена крупности, ингредиент, реакция бабушки, "
         "реакция кота, изменение текстуры, food close-up, мини-шутка, подсказка, переход, трансформация). "
         "Если одно действие может длиться слишком долго, укажи retention_suggestion: монтажное ускорение, нарезка или замена.\n"
         "Для sponsored_content=true встрои бренд только нативно в одну подходящую сцену; не делай отдельный рекламный блок.\n"
