@@ -656,6 +656,16 @@ def generate_advertising_production(
         if scene.get("dialogue_mode") == "multi":
             from .advertising_style import advice_dialogue, apply_advice_dialogue
             apply_advice_dialogue(scene_out, advice_dialogue(scene))
+        from .pipeline import _ensure_scene_video_prompt_invariants, _append_dialogue_video_prompt_metadata, append_veo3_video_framing_constraints
+        for language, video in scene_out["video_prompt_by_lang"].items():
+            video = _ensure_scene_video_prompt_invariants(video, scene_out, target_language=language)
+            video = append_veo3_video_framing_constraints(video, scene_out)
+            video = _append_dialogue_video_prompt_metadata(
+                video, (scene_out.get("dialogue_by_lang") or {}).get(language) or scene_out.get("dialogue"),
+                language, scene=scene_out,
+            )
+            scene_out["video_prompt_by_lang"][language] = video
+        scene_out["video_prompt"] = scene_out["video_prompt_by_lang"]["ru"]
         scene_out["start_frame_prompt"] = append_episode_prop_locks(scene_out["start_frame_prompt"], scene_out)
         enriched.append(scene_out)
     return {"json_plan": enriched}

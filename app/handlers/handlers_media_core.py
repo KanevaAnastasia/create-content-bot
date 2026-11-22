@@ -31,6 +31,9 @@ from ..pipeline import (
     GRANDMA_VOICE_LOCK_FULL,
     VIDEO_PROMPT_VISUAL_SOURCE_GENERATION_RULE,
     append_veo3_video_framing_constraints,
+    _NO_SUBTITLES_MUSIC_RULE,
+    _ensure_named_grandma_voice_lock,
+    VOICE_CONTINUITY_RULE,
 )
 from ..pipeline_llm_steps import RUSSIAN_YO_RULE
 from ..multilingual import language_name, normalize_language_code
@@ -121,9 +124,6 @@ _NON_REALISM_RULE = "visual style is strictly non-photorealistic, non-realistic,
 _CARTOON_CHARACTER_RUNTIME_RULE = (
     "grandmother is a cartoon grandmother; every human or animal character is cartoon; "
     "the cat is a cartoon cat"
-)
-_NO_SUBTITLES_MUSIC_RULE = (
-    "no on-screen text or subtitles; no background music or soundtrack"
 )
 _VIDEO_PROMPT_VISUAL_SOURCE_RULE = (
     "visual_source_lock: use the provided start/end frame or uploaded source image as the complete visual source of truth; "
@@ -1677,6 +1677,9 @@ def enforce_video_prompt_voice_requirements(
         if _NO_SUBTITLES_MUSIC_RULE.lower() not in vp.lower():
             vp = f"{vp}. {_NO_SUBTITLES_MUSIC_RULE}".strip()
     vp = enforce_video_prompt_visual_source_rule(vp)
+    vp = _ensure_named_grandma_voice_lock(vp, scene or {"voice_needed": True}, lang)
+    if VOICE_CONTINUITY_RULE.lower() not in vp.lower():
+        vp = f"{vp}\n{VOICE_CONTINUITY_RULE}"
     return _sanitize_video_prompt_language_references(append_veo3_video_framing_constraints(vp, scene), lang)
 
 

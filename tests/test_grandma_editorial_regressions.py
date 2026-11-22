@@ -34,6 +34,11 @@ def test_production_preserves_long_approved_speech_when_model_rewrites_it(monkey
     assert scene["speech_by_lang"]["ru"] == approved
     assert f"CHARACTERS SPEAKS: {approved}" in scene["video_prompt"]
     assert "Новая короткая фраза" not in scene["video_prompt"]
+    from app.pipeline import GRANDMA_VOICE_LOCK_FULL
+    assert f"voice_lock_full_grandma: {GRANDMA_VOICE_LOCK_FULL}" in scene["video_prompt"]
+    assert "no instrumental score, songs, jingles" in scene["video_prompt"]
+    assert "do not generate captions, titles, ingredient labels" in scene["video_prompt"]
+    assert "voice_identity_continuity:" in scene["video_prompt"]
 
 
 def test_editorial_rules_reach_both_brief_and_scene_plan():
@@ -95,3 +100,16 @@ def test_cutting_verbs_are_not_mistaken_for_neighbor_cat_name():
     cleaned = _strip_neighbor_cat_subplot_from_scenes([with_zaya])[0]
     assert "нарезает" in cleaned["action"]
     assert "Зая" not in cleaned["action"]
+
+
+def test_provider_prompt_keeps_canonical_grandma_voice_despite_generic_lock():
+    from app.handlers.handlers_media_core import enforce_video_prompt_voice_requirements
+    from app.pipeline import GRANDMA_VOICE_LOCK_FULL
+    scene = {"model": "veo3_fast", "single_take": True, "characters": ["grandma", "cat"], "text": "Салат готов!"}
+    prompt = "voice_lock_full: generic voice.\nCHARACTERS SPEAKS: Салат готов!"
+    out = enforce_video_prompt_voice_requirements(prompt, scene)
+    assert f"voice_lock_full_grandma: {GRANDMA_VOICE_LOCK_FULL}" in out
+    assert "CHARACTERS SPEAKS: Салат готов!" in out
+    assert "no instrumental score, songs, jingles" in out
+    assert "voice_identity_continuity:" in out
+    assert enforce_video_prompt_voice_requirements(out, scene) == out

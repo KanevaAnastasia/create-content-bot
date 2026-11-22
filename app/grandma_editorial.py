@@ -93,6 +93,10 @@ action описывает только простое движение внут�
 """
 
 GRANDMA_PRODUCTION_RULES = """
+Generate no on-screen text, captions, subtitles, ingredient labels or end cards.
+Generate no music, songs or jingles. Only approved dialogue and quiet natural
+action sounds. Reuse the exact canonical voice profile for each speaking
+character in every scene; never invent a new voice description for grandma.
 PRODUCTION FIDELITY: The approved scene text is final dialogue, not a draft to
 improve. Preserve every word and speaker. Keep editorial analysis out of spoken
 lines. Use only the approved cast. A product-label illustration or a negative

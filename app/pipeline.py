@@ -93,7 +93,17 @@ _CARTOON_CHARACTER_RUNTIME_RULE = (
     "grandmother is a cartoon grandmother; every human or animal character is cartoon; "
     "if a cat is present, the cat is a cartoon cat"
 )
-_NO_SUBTITLES_MUSIC_RULE = "no on-screen text or subtitles; no background music or soundtrack"
+_NO_SUBTITLES_MUSIC_RULE = (
+    "no on-screen text or subtitles; no background music or soundtrack; "
+    "do not generate captions, titles, ingredient labels, letters, numbers, watermarks or end cards; "
+    "no instrumental score, songs, jingles or musical transitions; "
+    "audio contains only the approved character dialogue and quiet natural action sounds"
+)
+VOICE_CONTINUITY_RULE = (
+    "voice_identity_continuity: the canonical named character voice profiles are authoritative; "
+    "preserve the same speaker identity, age, timbre, pitch, accent and speaking rate across every scene; "
+    "no new narrator, voice impersonation, singing or change of voice between shots"
+)
 _VIDEO_ASPECT_RULES = {
     "16:9": "render this video in horizontal landscape 16:9 aspect ratio; never vertical portrait framing",
     "9:16": "render this video in vertical portrait 9:16 aspect ratio; never horizontal landscape framing",
@@ -875,6 +885,8 @@ def _ensure_scene_video_prompt_invariants(video_prompt: str, scene: dict[str, An
     if _NO_SUBTITLES_MUSIC_RULE.lower() not in low:
         vp = _append_prompt_rule(vp, _NO_SUBTITLES_MUSIC_RULE)
         low = vp.lower()
+    if _should_apply_voice_lock(scene) and VOICE_CONTINUITY_RULE.lower() not in low:
+        vp = _append_prompt_rule(vp, VOICE_CONTINUITY_RULE)
     aspect_ratio = str(scene.get("aspect_ratio") or "9:16").strip()
     aspect_rule = _VIDEO_ASPECT_RULES.get(aspect_ratio, _VIDEO_ASPECT_RULES["9:16"])
     if aspect_rule.lower() not in low:
