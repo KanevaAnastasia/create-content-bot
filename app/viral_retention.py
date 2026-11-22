@@ -195,11 +195,7 @@ def _normalize_first_phrase(raw: str, *, fallback: str) -> str:
     phrase = re.sub(r"\s+", " ", (raw or "").strip())
     if not phrase:
         phrase = fallback.strip()
-    if _word_count(phrase) <= FIRST_PHRASE_MAX_WORDS and len(phrase) <= FIRST_PHRASE_MAX_CHARS:
-        return phrase
-    words = re.findall(r"\S+", phrase)
-    shortened = " ".join(words[:FIRST_PHRASE_MAX_WORDS]).strip(" ,.;:!?")
-    return shortened or fallback.strip()
+    return phrase
 
 
 def _normalize_dish_audience_type(value: Any) -> str:
@@ -237,12 +233,10 @@ def review_first_phrase(
         score -= 2
     if any(p in low for p in FIRST_PHRASE_GENERIC_BAD_PATTERNS):
         issues.append("начинается как обычное вступление вместо hook-first фразы")
-        score -= 3
-    if not any(p in low for p in FIRST_PHRASE_POWER_MARKERS):
-        issues.append("нет открытой петли, payoff-слова или эмоционального повода досмотреть")
-        score -= 2
-    else:
-        positives.append("есть интрига, эмоция или payoff-маркер")
+        score -= 4
+    if any(p in low for p in ("покажу яркий желток", "в конце поднесу ложку", "досмотрите до разреза")):
+        issues.append("реплика описывает приём съёмки вместо человеческого повода смотреть")
+        score -= 4
     if scene is not None:
         scene_blob = _blob(scene)
         if not any(p in scene_blob for p in FIRST_SCENE_VISUAL_HOOK_MARKERS):
@@ -258,9 +252,9 @@ def review_first_phrase(
     if issues:
         if isinstance(brief, dict):
             suggestion = _text(brief.get("strongest_first_phrase")) or _text(brief.get("main_hook"))
-        suggestion = suggestion or "Не теряйте это блюдо, сейчас покажу самый аппетитный момент."
     return {
         "score": max(1, min(10, score)),
+        "method": "mechanical_checks_not_retention_prediction",
         "issues": issues,
         "positive_notes": positives,
         "suggestion": suggestion,

@@ -3231,7 +3231,8 @@ async def generate_full_production(
     }
     viral_brief = viral_concept_brief if isinstance(viral_concept_brief, dict) else {}
     from .directorial_notes import RULE
-    comment = RULE + (generation_comment or "").strip()
+    from .grandma_editorial import GRANDMA_PRODUCTION_RULES
+    comment = RULE + GRANDMA_PRODUCTION_RULES + (generation_comment or "").strip()
     dish_brief = str(dish_visual_brief or "").strip()
     mode = normalize_generation_mode(generation_mode)
     if mode == GENERATION_MODE_ADVICE:

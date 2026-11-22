@@ -255,7 +255,7 @@ def test_explicit_publication_requires_selected_platforms(monkeypatch):
     assert "Не выбрана" in update.message.reply_text.call_args.args[0]
 
 
-def test_production_uses_normal_shortening_after_unbounded_draft(monkeypatch):
+def test_production_preserves_approved_speech_after_unbounded_draft(monkeypatch):
     from app import advertising_generation as advertising
     phrase = "Этот товар пригодится в повседневных делах: посмотрите, как удобно им пользоваться дома, и решите, подходит ли он именно вам."
     monkeypatch.setattr(advertising, "gemini_generate_sync", lambda *args, **kwargs: json.dumps({
@@ -267,8 +267,10 @@ def test_production_uses_normal_shortening_after_unbounded_draft(monkeypatch):
         target_languages=["ru"],
     )
     scene = result["json_plan"][0]
-    assert scene["speech_by_lang"]["ru"] == "Переписанная реплика."
-    assert "Переписанная реплика." in scene["video_prompt_by_lang"]["ru"]
+    assert scene["speech_by_lang"]["ru"] == phrase
+    assert phrase in scene["video_prompt_by_lang"]["ru"]
+    assert "Camera pan." in scene["video_prompt_by_lang"]["ru"]
+    assert "Переписанная реплика." not in scene["video_prompt_by_lang"]["ru"]
 
 
 def test_migration_seeds_exact_start_and_can_be_reverted():

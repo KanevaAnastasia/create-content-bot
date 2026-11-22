@@ -63,14 +63,14 @@ def test_review_first_phrase_penalizes_generic_intro() -> None:
     assert review["issues"]
 
 
-def test_review_first_phrase_rewards_payoff_and_visual_match() -> None:
+def test_review_first_phrase_rejects_empty_watch_to_end_bait() -> None:
     review = review_first_phrase(
         "Досмотрите до разреза медовика он слишком нежный",
         scene={"action": "Бабушка показывает готовый медовик и красивый разрез"},
     )
 
-    assert review["score"] >= 8
-    assert not review["issues"]
+    assert review["score"] < 8
+    assert review["issues"]
 
 
 def test_review_first_phrase_accepts_non_secret_payoff_hook() -> None:

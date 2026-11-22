@@ -898,6 +898,15 @@ def _append_reference_style_to_image_prompt(base_prompt: str, attach_style_instr
     return f"{text}\n\n{_IMAGE_REFERENCE_STYLE_BLOCK}"
 
 
+def _has_advertising_cast(scene: dict) -> bool:
+    meta = scene.get("prompt_meta_json") if isinstance(scene.get("prompt_meta_json"), dict) else {}
+    return bool(
+        scene.get("generation_mode") == "advertising"
+        or scene.get("advertising_product_required")
+        or meta.get("advertising_product_required")
+    ) and isinstance(scene.get("characters"), list)
+
+
 def _append_scene_identity_to_image_prompt(
     base_prompt: str,
     scene: dict,
@@ -936,7 +945,7 @@ def _append_scene_identity_to_image_prompt(
     if not fruit_only_closeup and not story_scene and "grandma" not in [c.lower() for c in char_list]:
         char_list.insert(0, "grandma")
     prompt_blob = text.lower()
-    if not story_scene:
+    if not story_scene and not _has_advertising_cast(scene):
         for key in (ASSETS.get("characters") or {}):
             ch_norm = _normalize_character_key(str(key))
             if ch_norm in {_normalize_character_key(c) for c in char_list}:
@@ -1139,7 +1148,7 @@ def _reference_keys_for_scene(
         ch_norm = _normalize_character_key(ch_key)
         if fruit_only_closeup and ch_norm not in {"banana", "strawberry"}:
             continue
-        mention = not story_scene and _prompt_mentions_character(ch_norm, character_prompt_blob)
+        mention = not story_scene and not _has_advertising_cast(scene) and _prompt_mentions_character(ch_norm, character_prompt_blob)
         if mention and ch_norm not in ch_list:
             ch_list.append(ch_norm)
     # Базовый минимум по продуктовым требованиям.
@@ -1198,7 +1207,7 @@ def _resolve_scene_references(scene: dict, *, prompt_keys: tuple[str, ...] | Non
         k = _normalize_character_key(str(key))
         if fruit_only_closeup and k not in {"banana", "strawberry"}:
             continue
-        if not story_scene and _prompt_mentions_character(k, character_prompt_blob) and k not in ch_list:
+        if not story_scene and not _has_advertising_cast(scene) and _prompt_mentions_character(k, character_prompt_blob) and k not in ch_list:
             ch_list.append(k)
         if k in ch_list and isinstance(cfg, dict):
             base = cfg.get("base")

@@ -8,6 +8,7 @@ import uuid
 from pathlib import Path
 from typing import Any
 
+from .grandma_editorial import GRANDMA_STORY_RULES
 from .llm_utils import GEMINI_MODEL_PROFILE_CREATIVE, extract_json_object, gemini_generate_sync
 
 
@@ -99,17 +100,17 @@ def _normalize_campaign(candidate: Any, *, index: int) -> dict[str, Any]:
 def advertising_editorial_rules(product_brief: dict, source_text: str = "") -> str:
     from .character_catalog import CHARACTER_CATALOG
     cast = {key: {"name": value["name"], "role": value.get("short_description", "")}
-            for key, value in CHARACTER_CATALOG.items()}
+            for key, value in CHARACTER_CATALOG.items() if key != "dog"}
     from .advertising_style import ADVICE_RULE
     style_rule = ADVICE_RULE if product_brief.get("video_style") == "advice" else ""
     comment = str(product_brief.get("owner_comment") or source_text or "").strip()
     return (
-        "ОБЯЗАТЕЛЬНОЕ РЕДАКЦИОННОЕ ЗАДАНИЕ. Это личный блог самой бабушки: она автор, хозяйка и рассказчик. "
+        GRANDMA_STORY_RULES + "ОБЯЗАТЕЛЬНОЕ РЕДАКЦИОННОЕ ЗАДАНИЕ. Это личный блог самой бабушки: она автор, хозяйка и рассказчик. "
         "Хуки, CTA, текст поста и реплики — от её первого лица: я, мой, моя кухня. "
         "Не рассказывай о ней от лица внука, покупателя или стороннего автора; нельзя 'моя бабушка', "
         "'наша бабушка', 'бабушка рекомендует' в её речи. В технических описаниях кадров можно писать 'бабушка'. "
         "Используй только имена и роли из утверждённого списка ниже; не переименовывай персонажей "
-        "и не смешивай разных котов. Если имя не нужно, скажи 'мой кот'. Не добавляй родственников без задачи пользователя. "
+        "и не смешивай разных котов. Рисунки на упаковке не являются героями сцены. Если имя не нужно, скажи 'мой кот'. Не добавляй родственников без задачи пользователя. "
         "Комментарий владельца — обязательная основа КАЖДОГО концепта, не просто источник характеристик. "
         "Сохраняй указанное блюдо, последовательность, показанное применение и ключевые преимущества. "
         "Пять вариантов отличаются подачей, хуком и юмором внутри этой задачи; нельзя заменить основное блюдо "
@@ -561,7 +562,7 @@ def generate_advertising_production(
         "Animate the approved action, include natural camera evolution, "
         "spoken phrase with accurate lip sync, no subtitles, no added on-screen text except the preserved original package label/logo, "
         "no watermark and no background music. "
-        "speech_by_lang values must be natural translations no longer than 105 characters. video_prompt_by_lang must include the exact corresponding "
+        "Preserve the approved scene text verbatim in speech_by_lang.ru, even when long. Do not shorten or rewrite it. Use only scene.characters as the cast; animals drawn on packaging are not live characters. video_prompt_by_lang must include the exact corresponding "
         "speech after CHARACTERS SPEAKS:. Do not invent product claims. If feedback is present, revise previous prompts without changing scene count.\n\n"
         + json.dumps(payload, ensure_ascii=False, indent=2)
     )
@@ -586,11 +587,13 @@ def generate_advertising_production(
         speech_by_lang: dict[str, str] = {}
         video_by_lang: dict[str, str] = {}
         for language in languages:
-            speech = _clean_text(raw_speech.get(language), 105)
-            if not speech:
-                speech = _clean_text(scene.get("text"), 105)
+            speech = str(scene.get("text") or (scene.get("speech_by_lang") or {}).get(language) or raw_speech.get(language) or "").strip()
             video = _clean_text(raw_video.get(language), 7000)
-            if not video:
+            speech_marker = re.search(r"CHARACTERS SPEAKS:\s*", video, re.IGNORECASE)
+            generated_speech = str(raw_speech.get(language) or "").strip()
+            if speech_marker and generated_speech and video[speech_marker.end():].startswith(generated_speech):
+                video = video[:speech_marker.end()] + speech + video[speech_marker.end() + len(generated_speech):]
+            if not video or not re.search(r"CHARACTERS SPEAKS:\s*" + re.escape(speech), video, re.IGNORECASE):
                 video = (
                     "8-second Veo 3 Fast vertical 9:16 advertising shot. "
                     f"Animate this action: {scene.get('display_action') or scene.get('action')}. {video_continuity} "

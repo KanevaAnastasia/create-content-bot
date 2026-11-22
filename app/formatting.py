@@ -179,8 +179,8 @@ def build_human_readable_plan(scenes: list[dict[str, Any]]) -> str:
         first_phrase_issue_text = ", ".join(_display_text(x) for x in first_phrase_issues if _display_text(x)) or "—"
         first_phrase_suggestion = _display_text(scene.get("first_phrase_suggestion")) or _display_text(first_phrase_review.get("suggestion")) or "—"
         first_phrase_block = (
-            "Проверка первой фразы:\n"
-            f"Оценка: {first_phrase_score}/10\n"
+            "Формальная проверка первой фразы (не прогноз досмотров):\n"
+            "Длина и формальные признаки, без оценки естественности речи.\n"
             f"Замечания: {first_phrase_issue_text}\n"
             f"Предложение: {first_phrase_suggestion}\n\n"
             if first_phrase_score is not None
@@ -368,7 +368,6 @@ def format_viral_application_summary(
         if isinstance(review.get("first_scene_review"), dict)
         else {}
     )
-    first_phrase_score = first_scene.get("first_phrase_score") or first_phrase_review.get("score") or "—"
     first_phrase_issues = (
         first_phrase_review.get("issues")
         if isinstance(first_phrase_review.get("issues"), list)
@@ -377,7 +376,7 @@ def format_viral_application_summary(
     first_phrase_status = (
         "нужно усилить: " + "; ".join(_safe_text(x) for x in first_phrase_issues if _safe_text(x))
         if first_phrase_issues
-        else "ок, первая фраза поддерживает удержание"
+        else "формальные замечания не найдены; качество речи нужно оценить по сценарию"
     )
     scene_functions = []
     for scene in scene_list:
@@ -388,7 +387,7 @@ def format_viral_application_summary(
         "VIRAL LAYER: КАК ПРИМЕНЕНО\n\n"
         "Это не отдельный отчёт: эти решения уже встроены в сценарий и дальше уйдут в промпты кадров/видео.\n\n"
         f"Первая фраза в сценарии: {_safe_text(first_scene.get('text')) or '—'}\n"
-        f"Проверка первой фразы: {first_phrase_score}/10, {first_phrase_status}\n"
+        f"Формальная проверка первой фразы (не прогноз досмотров): {first_phrase_status}\n"
         f"Первый кадр из brief: {_safe_text(brief_data.get('strongest_first_frame')) or '—'}\n"
         f"Что реально в сцене 1: {_safe_text(first_scene.get('action')) or '—'}\n\n"
         f"Причина досмотреть: {_safe_text(brief_data.get('reason_to_watch_end')) or '—'}\n"
