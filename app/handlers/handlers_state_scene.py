@@ -7349,7 +7349,7 @@ async def _handle_visualization_media_upload(
     from ..story_style_previews import PAGE_KEY
     from .handlers_state_start import _show_story_style_page
     session.pop(PAGE_KEY, None)
-    await _show_story_style_page(update, session, show_previews=False)
+    await _show_story_style_page(update, session, show_previews=True)
     return True
 
 

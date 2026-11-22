@@ -1387,7 +1387,7 @@ async def _handle_waiting_story_english_choice_state(
     session["state"] = STATE_WAITING_STORY_STYLE_CHOICE
     SESSIONS[chat_id] = session
     session.pop(PAGE_KEY, None)
-    await _show_story_style_page(update, session, show_previews=False)
+    await _show_story_style_page(update, session, show_previews=True)
     return True
 
 

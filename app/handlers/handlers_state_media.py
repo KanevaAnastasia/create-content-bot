@@ -187,6 +187,7 @@ from ..scene_media_store import (
     persist_message_link,
     persist_video_candidate,
     persist_video_candidate_state,
+    rebuild_production_session,
 )
 from ..video_frame_extraction import extract_last_video_frame
 from ..scene_speech_budget import (
@@ -6257,6 +6258,58 @@ def _invalidate_scene_video_prompts_after_start_prompt_change(scene: dict, langu
     scene["video_prompt_stale_reason"] = "start_frame_prompt_changed"
 
 
+def _refresh_image_candidates_from_storage(session: dict, scene: dict, *, idx: int) -> bool:
+    """Pull a newer durable image candidate into a stale in-memory approval session."""
+    run_id = str(session.get("generation_run_id") or "").strip()
+    scene_map = session.get("scene_db_ids_by_index")
+    production = session.get("production")
+    scenes = production.get("json_plan") if isinstance(production, dict) else None
+    if not run_id or not isinstance(scene_map, dict) or not isinstance(scenes, list) or idx >= len(scenes):
+        return False
+
+    snapshot = {
+        "generation_run_id": run_id,
+        "scene_db_ids_by_index": dict(scene_map),
+        "production": {"json_plan": [{} for _ in scenes]},
+    }
+    try:
+        rebuild_production_session(snapshot, run_id, include_media_blobs=False)
+    except Exception:
+        logger.exception("scene_media.refresh_image_candidates_failed scene_idx=%s", idx)
+        return False
+    durable_scenes = (snapshot.get("production") or {}).get("json_plan") or []
+    if idx >= len(durable_scenes) or not isinstance(durable_scenes[idx], dict):
+        return False
+    durable = durable_scenes[idx].get("image_candidates")
+    if not isinstance(durable, list) or not durable:
+        return False
+    local = scene.get("image_candidates")
+    local = local if isinstance(local, list) else []
+
+    def _candidate_order(item: object) -> tuple[str, str]:
+        if not isinstance(item, dict):
+            return "", ""
+        return str(item.get("created_at") or ""), str(item.get("candidate_id") or "")
+
+    durable_latest = max((item for item in durable if isinstance(item, dict)), key=_candidate_order, default=None)
+    local_latest = max((item for item in local if isinstance(item, dict)), key=_candidate_order, default=None)
+    if durable_latest is None:
+        return False
+    local_ids = {str(item.get("candidate_id") or "") for item in local if isinstance(item, dict)}
+    durable_latest_id = str(durable_latest.get("candidate_id") or "")
+    if durable_latest_id in local_ids or (
+        local_latest is not None and _candidate_order(durable_latest) <= _candidate_order(local_latest)
+    ):
+        return False
+    scene["image_candidates"] = durable
+    logger.info(
+        "scene_media.refreshed_newer_image_candidate scene_idx=%s candidate_id=%s",
+        idx,
+        durable_latest_id,
+    )
+    return True
+
+
 async def _scene_media_start_not_ok(
     update: Update,
     context: ContextTypes.DEFAULT_TYPE,
@@ -7035,6 +7088,7 @@ async def _scene_media_start_image_approval_step(
         await update.message.reply_text("Обновила стартовый промпт. Сразу перегенерирую стартовый кадр.")
         return await _scene_media_start_ok(update, context=context, chat_id=chat_id, session=session, scene=scene, idx=idx)
     if low in {"ок", "ok", "okay", "approve"}:
+        _refresh_image_candidates_from_storage(session, scene, idx=idx)
         selected = resolve_scene_image_for_video(scene, kind="start")
         if selected is not None:
             approved = mark_image_candidate_approved(scene, str(selected.get("candidate_id") or ""))
@@ -7149,6 +7203,7 @@ async def _scene_media_end_image_approval_step(
         await update.message.reply_text("Обновила промпт конечного кадра. Сразу перегенерирую конечный кадр.")
         return await _scene_media_end_ok(update, session=session, scene=scene, idx=idx)
     if low in {"ок", "ok", "okay", "approve"}:
+        _refresh_image_candidates_from_storage(session, scene, idx=idx)
         selected = resolve_scene_image_for_video(scene, kind="end")
         if selected is not None:
             approved = mark_image_candidate_approved(scene, str(selected.get("candidate_id") or ""))

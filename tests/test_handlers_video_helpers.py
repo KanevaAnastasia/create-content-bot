@@ -4331,6 +4331,41 @@ def test_start_image_approval_edit_uses_latest_image_as_reference(monkeypatch):
     assert photos == [b"edited-image"]
 
 
+def test_image_approval_refreshes_newer_durable_candidate(monkeypatch):
+    old = {
+        "candidate_id": "old-start",
+        "kind": "start",
+        "created_at": "2026-11-22T19:50:27+00:00",
+        "approved_for_video": False,
+    }
+    new = {
+        "candidate_id": "new-start",
+        "kind": "start",
+        "created_at": "2026-11-22T20:02:23+00:00",
+        "approved_for_video": False,
+        "media_uri": "file:///tmp/new-start.png",
+    }
+    scene = {"image_candidates": [old]}
+    session = {
+        "generation_run_id": "1d133314-6031-4d10-82fc-dd8440c79959",
+        "scene_db_ids_by_index": {0: "5ea20caa-102f-4c6e-8540-7459689c19ed"},
+        "production": {"json_plan": [scene]},
+    }
+
+    def _fake_rebuild(snapshot, _run_id, *, include_media_blobs):
+        assert include_media_blobs is False
+        snapshot["production"]["json_plan"][0]["image_candidates"] = [old, new]
+        return snapshot["production"]
+
+    monkeypatch.setattr(handlers_state_media, "rebuild_production_session", _fake_rebuild)
+
+    refreshed = handlers_state_media._refresh_image_candidates_from_storage(session, scene, idx=0)
+
+    assert refreshed is True
+    assert [item["candidate_id"] for item in scene["image_candidates"]] == ["old-start", "new-start"]
+    assert handlers_state_media.resolve_scene_image_for_video(scene, kind="start")["candidate_id"] == "new-start"
+
+
 def test_image_reference_debug_text_lists_hashes_and_sources():
     text = handlers_state_media._image_reference_debug_text(
         "start",

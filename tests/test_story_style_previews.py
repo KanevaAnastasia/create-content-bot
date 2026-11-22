@@ -50,7 +50,7 @@ def test_english_choice_shows_previews_before_style_menu(monkeypatch):
     session={}
     asyncio.run(start._handle_waiting_story_english_choice_state(
         SimpleNamespace(message=message),None,chat_id=1,session=session,text='Нет'))
-    assert message.reply_photo.await_count==0
+    assert message.reply_photo.await_count==14
     assert session['state']==start.STATE_WAITING_STORY_STYLE_CHOICE
 
 
