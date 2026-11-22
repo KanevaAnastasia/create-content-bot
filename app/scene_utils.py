@@ -248,11 +248,11 @@ def _sanitize_scene(scene: dict[str, Any], idx: int, allowed_locations: set[str]
     if cat_requested and "cat" not in chars:
         chars.append("cat")
     mentioned_character_aliases = {
-        "zaya": ("zaya", "зая", "заю", "заи", "зайка", "белая кошка", "белая кошечка"),
+        "zaya": ("zaya", "зая", "заю", "заи", "заей", "зайка", "белая кошка", "белая кошечка"),
         "markiz": ("markiz", "маркиз", "маркиза", "черно-белый кот", "чёрно-белый кот"),
     }
     for key, aliases in mentioned_character_aliases.items():
-        if any(alias in prompt_blob for alias in aliases) and key not in chars:
+        if any(re.search(rf"(?<!\w){re.escape(alias)}(?!\w)", prompt_blob) for alias in aliases) and key not in chars:
             chars.append(key)
     out["characters"] = chars
     action = _as_text(out.get("action")).strip()

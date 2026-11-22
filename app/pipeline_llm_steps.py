@@ -371,8 +371,8 @@ def scenes_plan_requirements() -> dict[str, Any]:
             "Even if shot_type suggests top/overhead, the frame must still show grandma+cat+action large "
             "(e.g. hands and food dominant, characters not tiny). "
             "Between scenes vary shot type, camera angle or continuity focus while keeping recurring props consistent. "
-            "For veo3_fast video_prompt (motion): require lip sync with the Russian line; camera angle or framing "
-            "should evolve during the clip—not one locked static tripod shot for the whole take."
+            "For veo3_fast use a single continuous shot with a locked camera: no cuts, zoom, "
+            "pan, tracking, reframing or time jumps; one simple main action."
         ),
         "veo3_speech_text": (
             "if model is veo3 or veo3_fast, field text must be plain readable spoken text without stress markers, "
@@ -589,9 +589,8 @@ def build_scenes_plan_prompt(payload: dict[str, Any]) -> str:
         f"{FINAL_SCENE_SUBSCRIBE_CTA_VEO3}.\n"
         "RETENTION LAYER: у каждой сцены добавь retention_function — одно из hook, visual_proof, recipe_progress, "
         "grandma_secret, cat_humor, texture_shot, transformation, suspense, payoff, cta_save_reason, brand_integration. "
-        "Добавь micro_events: одно главное действие и до двух коротких вставок на всю восьмисекундную сцену (смена крупности, ингредиент, реакция бабушки, "
-        "реакция кота, изменение текстуры, food close-up, мини-шутка, подсказка, переход, трансформация). "
-        "Если одно действие может длиться слишком долго, укажи retention_suggestion: монтажное ускорение, нарезка или замена.\n"
+        "Добавь micro_events: не более двух пунктов, одно главное простое действие и необязательная милая реакция кота в том же непрерывном кадре. Никаких вставок, смены крупности, склеек и движения камеры. "
+        "Если действие слишком долгое, перенеси подготовку за кадр между сценами и начни сцену с подготовленного состояния. Никакого ускорения или монтажа внутри сцены.\n"
         "Для sponsored_content=true встрои бренд только нативно в одну подходящую сцену; не делай отдельный рекламный блок.\n"
         "При нарезке — явно стиль нарезки (кубик соломка ломтики и т.д.).\n"
         "Не добавляй лишних персонажей, дубли котов, фоновых людей, лишние руки или параллельные действия, "

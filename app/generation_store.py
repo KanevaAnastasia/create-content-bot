@@ -27,6 +27,11 @@ SCENE_PROMPT_JSON_KEYS = (
     "prompt_meta_json",
 )
 SCENE_META_SNAPSHOT_KEYS = (
+    "single_take",
+    "preparation_offscreen",
+    "prop_descriptions",
+    "episode_prop_catalog",
+    "scene_purpose",
     "discipline_narrative_mode",
     "discipline_cast_override",
     "story_camera_reveal_requested",

@@ -17,14 +17,29 @@ GRANDMA_STORY_RULES = """
 У каждой сцены укажи scene_purpose: что нового узнаёт/видит зритель и почему
 этот смысл нельзя без потерь объединить с соседним. Это рабочая заметка,
 не реплика. Если два соседних purpose совпадают, объедини сцены.
-Одна восьмисекундная сцена содержит одно основное действие и до двух коротких
-вставок. Подготовку риса и яиц можно объединить монтажом с явным скачком времени.
-Не пытайся показать полную варку или всю нарезку в реальном времени. Полный
-рецепт и количества сохраняй в описании, а на экране показывай начало действия
-и готовое состояние после склейки. Распределяй сборку и заправку между сценами,
-если вместе получается больше трёх разных действий. Не ускоряй речь ради
-сокращения сцены и не теряй обязательный шаг. Явно заданное пользователем
-число сцен соблюдай; если оно не вмещает смысл, объясни конкретную перегрузку.
+Каждая сцена: одно простое действие, один неподвижный ракурс, один непрерывный
+дубль. Внутри сцены запрещены склейки, смена планов, зум, проезды камеры,
+ускорение и скачки времени. Время может пройти только МЕЖДУ сценами.
+Варку, охлаждение и повторяющуюся подготовку допустимо выполнить за кадром:
+в следующей сцене явно покажи продукты уже подготовленными и сохрани полный
+рецепт в описании. Не пытайся показать весь рецепт руками за восемь секунд.
+action описывает только простое движение внутри текущего дубля. Полную
+подготовку и количества вынеси в preparation_offscreen: что уже сделано
+между сценами. visual_description показывает это готовое состояние с начала
+кадра. Не возвращай preparation_offscreen в список движений текущей сцены.
+Бабушка и кот строго мультяшные: округлые стилизованные формы, выразительные
+лица, никакого фотореализма, реалистичной кожи или натуралистичной шерсти.
+Кот никогда не ест, не облизывает и не трогает человеческую еду лапами.
+Для кота можно выбрать одну милую фоновую линию на весь ролик: играть с мягкой
+игрушкой, сонно обнимать её, осторожно перевалиться на бок. Не требуй нового
+трюка в каждой сцене. Болезнь только если задана сюжетом; без страданий ради
+шутки. Падения только безопасные мультяшные, без травм. Кот не отвлекает
+от основного действия бабушки и остаётся на своём месте.
+Новые предметы опиши в prop_descriptions: JSON-объект стабильный_ключ -> строка
+с точными формой, размером, цветом, материалом, рисунком и количеством.
+В каждой сцене перечисляй только видимые предметы. Если предмет повторяется,
+копируй его описание дословно, не меняй цвет/материал и не создавай дубликаты.
+Одна игрушка-рыбка не превращается в живую рыбу или ингредиент.
 ГОЛОС БАБУШКИ И ПРИЧИНА ДОСМОТРЕТЬ:
 Бабушка разговаривает с конкретным человеком, пока делает дело. Сначала определи,
 зачем ему эта история: знакомая неудача, семейный повод, желание получить вкусный
@@ -67,15 +82,16 @@ improve. Preserve every word and speaker. Keep editorial analysis out of spoken
 lines. Use only the approved cast. A product-label illustration or a negative
 mention does not add a live character. Stage the first frame BEFORE the main
 action, then show a small, physically executable sequence within the duration.
-Cooking, boiling and cooling cannot complete in eight real-time seconds: use
-explicit time-passing cuts and consistent before/after states. Never turn the
-whole written recipe into simultaneous hand movements. Plan
-one main action and at most two short inserts per eight-second scene. Explicit
-time-passing cuts may skip repetitive preparation, never necessary recipe facts.
-Treat approved micro_events as the maximum shot list. Ingredient quantities are
-recipe facts, not instructions to animate a separate pouring or knife movement
-for every ingredient. A jump cut may reveal those preparations already completed;
-show the before/after state clearly instead of adding new beats to the shot list.
+Each scene is ONE continuous locked-camera shot with ONE simple main action.
+No cuts, inserts, montage, time jumps, time lapse, zoom, pan, tracking, reframing
+or angle changes inside a scene. Preparation and elapsed time happen BETWEEN
+scenes, off camera; start the next scene with the specified prepared state.
+For recipe coverage, preparation_offscreen and visible prepared ingredients
+establish prior steps. Do not animate those steps again inside the current shot.
+Both grandma and cat are strongly stylized rounded cartoon characters, never
+photorealistic humans or realistic animals, skin or fur. The cat never eats,
+licks or touches human food. Preserve the same gentle background cat activity
+and the exact recurring prop_descriptions; no new toys, duplicates or live fish.
 Do not expand the approved scene count or add a separate outro. Keep visual interest in
 the action, expression and result; do not add a new secret, food, promise or
 spoken instruction. Latest user corrections override old brief motifs.

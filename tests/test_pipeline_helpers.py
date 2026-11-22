@@ -1064,7 +1064,8 @@ def test_generate_scenes_plan_caps_steps_to_six(monkeypatch):
     assert "frame_framing_rule" in captured_prompt["text"]
     assert "обязательным названием блюда в `text`" in captured_prompt["text"]
     assert "MANDATORY RECIPE COVERAGE" in captured_prompt["text"]
-    assert "духовка/запекание" in captured_prompt["text"]
+    assert "preparation_offscreen" in captured_prompt["text"]
+    assert "single continuous shot with a locked camera" in captured_prompt["text"]
 
 
 def test_normalize_production_prompts_accepts_string_items():
@@ -1380,7 +1381,8 @@ def test_generate_full_production_with_approved_frames(monkeypatch):
     assert "ingredient inventory" in captured_prompt["text"]
     assert "never introduce new food" in captured_prompt["text"]
     assert "Mandatory recipe coverage" in captured_prompt["text"]
-    assert "духовка/запекание" in captured_prompt["text"]
+    assert "preparation_offscreen" in captured_prompt["text"]
+    assert "one continuous locked-camera shot" in captured_prompt["text"]
     assert "scene1_spoken_dish_name_rule" in captured_prompt["text"]
     assert "viewer must hear the dish name in the first scene" in captured_prompt["text"]
     assert "title_safe_top_30" in captured_prompt["text"]
@@ -1611,7 +1613,8 @@ def test_generate_full_production_includes_dish_visual_brief_in_prompt(monkeypat
     assert "dish_visual_brief" in captured["prompt"]
     assert "not cropped" in captured["prompt"]
     assert "Mandatory recipe coverage" in captured["prompt"]
-    assert "жарка/обжарка" in captured["prompt"]
+    assert "preparation_offscreen" in captured["prompt"]
+    assert "one continuous locked-camera shot" in captured["prompt"]
 
 
 def test_silence_video_prompt_requirements_do_not_duplicate_existing_rules():

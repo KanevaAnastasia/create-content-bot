@@ -29,6 +29,7 @@ from ..scene_media_candidates import selected_image_bytes_for_video
 from ..session_store import save_session_if_possible
 from ..vertex_images import generate_image_vertex, generate_image_vertex_result, next_image_generation_model
 from ..visual_props import append_visual_prop_descriptions
+from ..grandma_scene_contract import append_episode_prop_locks
 
 logger = logging.getLogger("bot")
 PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
@@ -1039,19 +1040,25 @@ def _append_scene_identity_to_image_prompt(
             "двух белых кошек или двух черно-белых котов; если в кадре несколько котов, они должны быть разными "
             "персонажами из списка выше и с разным окрасом."
         )
+    if scene.get("single_take"):
+        identity_lines.append(
+            "Бабушка и кот максимально мультяшные: округлые стилизованные формы и выразительные лица, "
+            "никакого фотореализма, реалистичной кожи и натуралистичной шерсти. "
+            "Кот не ест, не облизывает и не трогает человеческую еду."
+        )
     identity_block = "\n".join(identity_lines)
     if drama_beat:
         identity_block = f"{identity_block}\nФоновая драма этой сцены должна быть видна в кадре: {drama_beat}"
     if descriptions:
         identity_block = f"{identity_block}\n{descriptions}"
     if not text:
-        return identity_block if story_scene else append_visual_prop_descriptions(identity_block)
+        return append_episode_prop_locks(identity_block if story_scene else append_visual_prop_descriptions(identity_block), scene)
     combined = f"{text}\n\n{identity_block}"
     # The shared prop catalog belongs to the culinary/grandmother project.
     # Story scenes (including Discipline) carry their own setting and props;
     # injecting the kitchen table/window locks would pull every scene back
     # into the same room and can contradict outdoor or public locations.
-    return combined if story_scene else append_visual_prop_descriptions(combined)
+    return append_episode_prop_locks(combined if story_scene else append_visual_prop_descriptions(combined), scene)
 
 
 _IMAGE_PROMPT_REFERENCE_KEYS = ("start_frame_prompt", "start_frame_prompt_ru", "end_frame_prompt", "end_frame_prompt_ru", "video_prompt")

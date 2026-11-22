@@ -211,6 +211,8 @@ def build_human_readable_plan(scenes: list[dict[str, Any]]) -> str:
                 f"Нужна ли озвучка: {'да' if voice_needed else 'нет'}\n\n"
                 f"Провайдер озвучки: {voice_provider}\n\n"
             )
+        preparation = _display_text(scene.get("preparation_offscreen"))
+        preparation_block = f"До начала кадра уже подготовлено:\n{preparation}\n\n" if preparation else ""
         blocks.append(
             f"СЦЕНА {scene_no} [{audience_type}]\n"
             f"Вид/ракурс: {shot}\n"
@@ -222,6 +224,7 @@ def build_human_readable_plan(scenes: list[dict[str, Any]]) -> str:
             f"Lip sync: {'да' if has_lipsync else 'нет'}\n\n"
             "Что происходит:\n"
             f"{action}\n\n"
+            f"{preparation_block}"
             f"{tail_block}"
             "Почему эта модель:\n"
             f"{human_model_reason(scene)}\n\n"

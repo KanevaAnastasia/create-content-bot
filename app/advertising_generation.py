@@ -8,7 +8,8 @@ import uuid
 from pathlib import Path
 from typing import Any
 
-from .grandma_editorial import GRANDMA_STORY_RULES
+from .grandma_editorial import GRANDMA_STORY_RULES, GRANDMA_PRODUCTION_RULES
+from .grandma_scene_contract import lock_episode_props, append_episode_prop_locks
 from .llm_utils import GEMINI_MODEL_PROFILE_CREATIVE, extract_json_object, gemini_generate_sync
 
 
@@ -479,6 +480,8 @@ def generate_advertising_scene_plan(
                 "visual_description": f"{_clean_text(candidate.get('visual_description') or action, 1000)} {product_lock_ru}",
                 "shot_type": _clean_text(candidate.get("shot_type"), 120) or "close-up",
                 "characters": _normalize_characters(candidate.get("characters")),
+                "prop_descriptions": candidate.get("prop_descriptions"),
+                "preparation_offscreen": candidate.get("preparation_offscreen"),
                 "product_use": _clean_text(candidate.get("product_use"), 500) or "товар целиком виден рядом с главным действием",
                 "continuity_anchors": list(dict.fromkeys(anchors)),
                 "continuity_state": "тот же товар и та же упаковка без изменений",
@@ -497,6 +500,7 @@ def generate_advertising_scene_plan(
                 },
             }
         )
+    normalized = lock_episode_props(normalized)
     if dialogue:
         from .advertising_style import apply_advice_dialogue
         apply_advice_dialogue(normalized[0], dialogue)
@@ -543,6 +547,7 @@ def generate_advertising_production(
     # Advertising videos are intentionally generated only in Russian. Keep this
     # invariant here too, so resumed legacy sessions cannot request an EN render.
     languages = ["ru"]
+    scenes_plan = lock_episode_props([dict(scene) for scene in scenes_plan])
     payload = {
         "scenes": [_production_scene_payload(scene) for scene in scenes_plan],
         "product_brief": product_brief,
@@ -559,7 +564,7 @@ def generate_advertising_production(
         "VIDEO: an 8-second Veo 3 Fast prompt for every target language. Refer to the item only as the product from the approved start frame. "
         "Do not repeat product_brief and do not describe its name, package, shape, cap, colors, label, logo or other appearance in video_prompt_by_lang. "
         "Preserve the approved start-frame appearance without introducing, removing, duplicating, redesigning or transforming the product. "
-        "Animate the approved action, include natural camera evolution, "
+        "Animate one simple approved action in one continuous shot with a locked camera, no cuts or movement of the camera, "
         "spoken phrase with accurate lip sync, no subtitles, no added on-screen text except the preserved original package label/logo, "
         "no watermark and no background music. "
         "Preserve the approved scene text verbatim in speech_by_lang.ru, even when long. Do not shorten or rewrite it. Use only scene.characters as the cast; animals drawn on packaging are not live characters. video_prompt_by_lang must include the exact corresponding "
@@ -567,7 +572,7 @@ def generate_advertising_production(
         + json.dumps(payload, ensure_ascii=False, indent=2)
     )
     from .directorial_notes import RULE
-    prompt = RULE + advertising_editorial_rules(product_brief) + prompt
+    prompt = RULE + GRANDMA_PRODUCTION_RULES + advertising_editorial_rules(product_brief) + prompt
     raw = gemini_generate_sync(prompt, model_profile=GEMINI_MODEL_PROFILE_CREATIVE)
     data = extract_json_object(raw)
     prompts = data.get("prompts") if isinstance(data.get("prompts"), list) else []
@@ -651,5 +656,6 @@ def generate_advertising_production(
         if scene.get("dialogue_mode") == "multi":
             from .advertising_style import advice_dialogue, apply_advice_dialogue
             apply_advice_dialogue(scene_out, advice_dialogue(scene))
+        scene_out["start_frame_prompt"] = append_episode_prop_locks(scene_out["start_frame_prompt"], scene_out)
         enriched.append(scene_out)
     return {"json_plan": enriched}

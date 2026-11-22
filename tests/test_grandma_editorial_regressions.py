@@ -52,3 +52,46 @@ def test_review_does_not_reward_directorial_speech_or_truncate_user_line():
     assert not natural["issues"]
     long = "Ну какой же Новый год без крабового салата с кукурузой? Сейчас я поделюсь своим любимым рецептом."
     assert _normalize_first_phrase(long, fallback="") == long
+
+
+def test_episode_prop_design_is_locked_without_adding_invisible_objects():
+    from app.grandma_scene_contract import lock_episode_props, append_episode_prop_locks
+    scenes = [
+        {"prop_descriptions": {"toy_fish": "Одна голубая плюшевая рыбка с жёлтым хвостом."}},
+        {"prop_descriptions": {"toy_fish": "Красная пластиковая рыба."}},
+        {"prop_descriptions": {}},
+    ]
+    lock_episode_props(scenes)
+    assert scenes[1]["prop_descriptions"] == scenes[0]["prop_descriptions"]
+    assert scenes[2]["prop_descriptions"] == {}
+    assert scenes[2]["episode_prop_catalog"] == scenes[0]["prop_descriptions"]
+    assert append_episode_prop_locks("Кадр", scenes[2]) == "Кадр"
+    prompt = append_episode_prop_locks("Кадр", scenes[1])
+    assert "Красная" not in prompt
+    assert append_episode_prop_locks(prompt, scenes[1]) == prompt
+
+
+def test_single_take_replaces_legacy_camera_movement_and_preserves_speech():
+    from app.pipeline import append_veo3_video_framing_constraints, VEO3_FAST_VIDEO_FRAMING_RULE
+    scene = {"single_take": True, "model": "veo3_fast", "characters": ["grandma", "cat"]}
+    raw = 'CHARACTERS SPEAKS: Ну что, к столу! ' + VEO3_FAST_VIDEO_FRAMING_RULE
+    result = append_veo3_video_framing_constraints(raw, scene)
+    assert "angle shifts" not in result
+    assert "locked-camera" in result
+    assert "never eats" in result
+    assert "CHARACTERS SPEAKS: Ну что, к столу!" in result
+    assert append_veo3_video_framing_constraints(result, scene) == result
+
+
+def test_cutting_verbs_are_not_mistaken_for_neighbor_cat_name():
+    from app.pipeline import _strip_neighbor_cat_subplot_from_scenes
+    from app.scene_utils import normalize_scenes_for_pipeline
+    action = "Бабушка нарезает палочки, нарезая их мелкими кубиками."
+    scene = {"text": "Я режу палочки.", "action": action, "characters": ["grandma", "cat"]}
+    normalized = normalize_scenes_for_pipeline([dict(scene) for _ in range(3)])
+    assert "zaya" not in normalized[0]["characters"]
+    assert _strip_neighbor_cat_subplot_from_scenes(normalized)[0]["action"] == action
+    with_zaya = {**scene, "action": action + " Белая кошка Зая сидит рядом.", "characters": ["grandma", "cat", "zaya"]}
+    cleaned = _strip_neighbor_cat_subplot_from_scenes([with_zaya])[0]
+    assert "нарезает" in cleaned["action"]
+    assert "Зая" not in cleaned["action"]

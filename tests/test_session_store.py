@@ -2175,3 +2175,27 @@ def test_new_session_snapshot_does_not_resurrect_cleared_approval(monkeypatch):
     session_store.save_session(995, session)
     restored = session_store.load_session(995)
     assert restored['production']['json_plan'][0]['speech_budget_override_by_lang'] == {}
+
+
+def test_episode_prop_catalog_and_single_take_survive_session_reload(monkeypatch):
+    _install_sqlite(monkeypatch)
+    with db.SessionLocal() as check_db:
+        run = GenerationRun(status="draft", language="ru", script="Салат")
+        check_db.add(run)
+        check_db.flush()
+        run_id = str(run.id)
+        check_db.commit()
+    props = {"toy_fish": "Одна голубая плюшевая рыбка с жёлтым хвостом."}
+    session = {"state": "waiting_scene_approval", "generation_run_id": run_id,
+               "scenes_plan": [{"scene": 1, "text": "Ну что, к столу!", "duration_sec": 8,
+                                "characters": ["grandma", "cat"], "single_take": True,
+                                "prop_descriptions": props, "episode_prop_catalog": props}]}
+    session_store.save_session(1009, session)
+    restored = session_store.load_session(1009)
+    scene = restored["scenes_plan"][0]
+    assert scene["single_take"] is True
+    assert scene["prop_descriptions"] == props
+    assert scene["episode_prop_catalog"] == props
+    with db.SessionLocal() as check_db:
+        row = check_db.scalar(select(Scene).where(Scene.run_id == uuid.UUID(run_id)))
+        assert row.prompt_meta_json["prop_descriptions"] == props

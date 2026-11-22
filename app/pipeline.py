@@ -66,6 +66,7 @@ from .scene_utils import (
 )
 from .viral_retention import enrich_scenes_with_retention, normalize_viral_concept_brief
 from .visual_props import append_visual_prop_descriptions
+from .grandma_scene_contract import SINGLE_TAKE_RULE, lock_episode_props, append_episode_prop_locks
 
 logger = logging.getLogger("bot")
 
@@ -337,8 +338,8 @@ def _replace_character_names_with_short_descriptions(text: str) -> str:
 
 _NEIGHBOR_CAT_KEYS = {"zaya", "markiz"}
 _NEIGHBOR_CAT_TEXT_RE = re.compile(
-    r"zaya|markiz|зая|за[еию]|маркиз|маркиза|бел[а-яё]*\s+ко[шщ][а-яё]*|white\s+cat|"
-    r"черно-бел[а-яё-]*\s+кот|ч[её]рно-бел[а-яё-]*\s+кот|black[-\s]and[-\s]white\s+cat",
+    r"(?<!\w)(?:zaya|markiz|за(?:я|ю|и|ей|е)|маркиз(?:а|у|ом|е)?|бел[а-яё]*\s+ко[шщ][а-яё]*|white\s+cat|"
+    r"черно-бел[а-яё-]*\s+кот|ч[её]рно-бел[а-яё-]*\s+кот|black[-\s]and[-\s]white\s+cat)(?!\w)",
     re.IGNORECASE,
 )
 _NEIGHBOR_CAT_REMOVE_INTENT_RE = re.compile(
@@ -571,8 +572,12 @@ def append_veo3_video_framing_constraints(
     if not model.startswith("veo3"):
         return vp
     out = vp
+    single_take = bool(scene and scene.get("single_take"))
+    if single_take and SINGLE_TAKE_RULE not in out:
+        out = re.sub(r"\s*veo3_framing:.*?(?=\. |\.$|$)", "", out, flags=re.IGNORECASE | re.DOTALL).strip()
+        out = f"{out} {SINGLE_TAKE_RULE}".strip()
     low = out.lower()
-    if "veo3_framing:" in low and "close-up shot only" not in low:
+    if not single_take and "veo3_framing:" in low and "close-up shot only" not in low:
         out = re.sub(r"\s*veo3_framing:\s*[^.]*\.?", "", out, count=1, flags=re.IGNORECASE).strip()
         low = out.lower()
     if "veo3_framing:" not in low:
@@ -2623,6 +2628,8 @@ async def generate_scenes_plan(
         raw_scenes = _strip_neighbor_cat_subplot_from_scenes(raw_scenes)
     romantic_subplot = _romantic_subplot_from_scenes(payload.get("romantic_drama_subplot"), raw_scenes)
     _enforce_romantic_subplot_characters(raw_scenes, romantic_subplot)
+    if mode in {GENERATION_MODE_NORMAL, GENERATION_MODE_ADVICE}:
+        raw_scenes = lock_episode_props(raw_scenes)
     out_raw = {
         "text_plan": format_romantic_drama_status(romantic_subplot, raw_scenes)
         + "\n\n"
@@ -2830,7 +2837,7 @@ def _fallback_video_prompt_from_scene(scene: dict[str, Any]) -> str:
     continuity_state = sanitize_character_names_and_keys(str(scene.get("continuity_state") or "").strip())
     prompt = (
         f"{duration}-second cozy cartoon cooking clip, close-up framing only, not medium or medium-close, "
-        f"grandmother and cartoon cat fully visible, gentle camera evolution, accurate lip sync, "
+        f"grandmother and cartoon cat fully visible, {SINGLE_TAKE_RULE if scene.get('single_take') else 'gentle camera evolution'}, accurate lip sync, "
         f"no on-screen text, no subtitles, no background music. Main action: {action}."
     )
     if anchors_text:
@@ -3070,6 +3077,7 @@ async def _generate_silence_full_production(
             final_scene_feedback,
             is_final_scene=scene_index == len(scenes),
         )
+        scene_out["start_frame_prompt"] = append_episode_prop_locks(str(scene_out.get("start_frame_prompt") or ""), scene_out)
         enriched.append(scene_out)
     return {"json_plan": enriched}
 
@@ -3232,9 +3240,19 @@ async def generate_full_production(
     viral_brief = viral_concept_brief if isinstance(viral_concept_brief, dict) else {}
     from .directorial_notes import RULE
     from .grandma_editorial import GRANDMA_PRODUCTION_RULES
-    comment = RULE + GRANDMA_PRODUCTION_RULES + (generation_comment or "").strip()
+    comment = RULE + (generation_comment or "").strip()
     dish_brief = str(dish_visual_brief or "").strip()
     mode = normalize_generation_mode(generation_mode)
+    if mode in {GENERATION_MODE_NORMAL, GENERATION_MODE_ADVICE}:
+        comment = GRANDMA_PRODUCTION_RULES + comment
+        scenes = lock_episode_props(scenes)
+    production_framing_rule = SINGLE_TAKE_RULE if any(s.get("single_take") for s in scenes) else VEO3_FAST_VIDEO_FRAMING_RULE
+    recipe_coverage_rule = (
+        "Show each recipe ingredient in the correct prepared state. preparation_offscreen describes "
+        "steps completed BETWEEN scenes, not actions to animate. In this shot animate only the one "
+        "approved main action; no montage or time jumps to repeat preparation."
+        if any(s.get("single_take") for s in scenes) else MANDATORY_RECIPE_COVERAGE_RULE
+    )
     if mode == GENERATION_MODE_ADVICE:
         comment = (comment + "\n\n" + ADVICE_SCENE_RULE).strip()
     target_languages = ["ru"] if mode in {GENERATION_MODE_SILENCE, GENERATION_MODE_LONG} else list(target_languages or target_languages_from_env())
@@ -3309,8 +3327,8 @@ async def generate_full_production(
                     "include the exact phrase cartoon cat; "
                     "obey kitchen physics: cookware and appliances must be functional and physically plausible; "
                     "do not invent extra characters, extra animals, extra hands, or unrelated parallel actions; "
-                    "close-up with full grandma + all characters visible, lip sync, camera angle evolves "
-                    "(not a single fixed static angle for the whole clip)"
+                    "close-up with full grandma + all characters visible, lip sync, camera follows the supplied veo3_framing_rule "
+                    "(follow the supplied camera rule throughout the clip)"
                 ),
                 "visual_source_action_only_rule": VIDEO_PROMPT_VISUAL_SOURCE_GENERATION_RULE,
                 "do_not_copy_internal_rules_to_video_prompt": (
@@ -3326,7 +3344,7 @@ async def generate_full_production(
                 ),
                 "scene1_title_safe_rule": "Title-safe top area applies only to start_frame_prompt_ru, never to video_prompt_en.",
                 "fruit_only_first_moment_rule": FRUIT_ONLY_FIRST_MOMENT_RULE,
-                "veo3_framing_rule": VEO3_FAST_VIDEO_FRAMING_RULE,
+                "veo3_framing_rule": production_framing_rule,
                 "continuity_rule": (
                     "video_prompt_en must use start/end frames as the visual source of truth. It may mention only "
                     "objects already visible in the frames when describing an action with them; do not restate "
@@ -3337,8 +3355,8 @@ async def generate_full_production(
                     "or dish decorations; all visuals come from start/end frames"
                 ),
                 "mandatory_recipe_coverage_rule": (
-                    MANDATORY_RECIPE_COVERAGE_RULE
-                    + " In video_prompt_en, make the required recipe operation visibly happen with the already-visible "
+                    recipe_coverage_rule
+                    + " In video_prompt_en, make only the approved main action visibly happen with the already-visible "
                     "ingredients, cookware, frying pan, burner, oven, tray, or appliance from the approved frames."
                 ),
                 "cat_identity_count_rule": (
@@ -3399,7 +3417,7 @@ async def generate_full_production(
             "Do not describe relative placement, room/background inventory, or title-safe composition zones. "
             "Use the start/end frames as the visual source of truth; mention a visual object only when a character acts on it, "
             "and never introduce new food, garnish, tableware, or scenery in video_prompt_en. "
-            f"Mandatory recipe coverage: {MANDATORY_RECIPE_COVERAGE_RULE} "
+            f"Mandatory recipe coverage: {recipe_coverage_rule} "
             "In video_prompt_en, visibly animate the required operation with the already-visible ingredients, cookware, "
             "frying pan, burner, oven, tray, or appliance from the approved frames. "
             "Visual style must be non-photorealistic/non-realistic cartoon (no realism). "
@@ -3418,8 +3436,7 @@ async def generate_full_production(
             "Do not include title_safe_top_30 or top-30-percent overlay instructions in video_prompt_en; that rule is only for start_frame_prompt_ru. "
             f"Scene 1 fruit-only first-moment exception: {FRUIT_ONLY_FIRST_MOMENT_RULE} "
             "Framing: close-up only, not medium or medium-close; grandmother's full figure and every other character in the scene "
-            "must stay fully visible; camera angle or framing should evolve during the clip (no fixed static "
-            "tripod for the entire take).\n"
+            "must stay fully visible; obey the supplied veo3_framing_rule.\n"
             + _LLM_VIDEO_CHARACTERS_SPEAKS_RULE
             + "\n"
             + _RUSSIAN_YO_RULE
@@ -3428,7 +3445,7 @@ async def generate_full_production(
             + GRANDMA_VOICE_LOCK_FULL
             + ".\n"
             "Also include this exact framing block verbatim: "
-            + VEO3_FAST_VIDEO_FRAMING_RULE
+            + production_framing_rule
             + "\n"
             "Use the cartoon-character and kitchen-physics rules when composing the prompt, but do not append bulky "
             "meta-rule labels like veo3_cartoon_character_rule or kitchen_physics_rule unless they naturally belong in the prompt.\n"
@@ -3517,6 +3534,7 @@ async def generate_full_production(
                     "provider": "none",
                     "note": "speechless prompt: Kling prompt audio/cooking sounds only",
                 }
+                scene_out["start_frame_prompt"] = append_episode_prop_locks(str(scene_out.get("start_frame_prompt") or ""), scene_out)
                 enriched.append(scene_out)
                 continue
             scene_out["speech_by_lang"] = speech_by_lang
@@ -3551,6 +3569,7 @@ async def generate_full_production(
                 "provider": "none",
                 "note": "image-only iteration (no separate voice)",
             }
+            scene_out["start_frame_prompt"] = append_episode_prop_locks(str(scene_out.get("start_frame_prompt") or ""), scene_out)
             enriched.append(scene_out)
         return {"json_plan": enriched}
 
@@ -3577,9 +3596,9 @@ async def generate_full_production(
                 "include the exact phrase cartoon cat; "
                 "obey kitchen physics: cookware and appliances must be functional and physically plausible; "
                 "do not invent extra characters, extra animals, extra hands, or unrelated parallel actions; "
-                "close-up with full grandma + all characters visible, lip sync, camera angle evolves; "
+                "close-up with full grandma + all characters visible, lip sync, camera follows the supplied veo3_framing_rule; "
                 "spoken delivery should feel natural but efficient, and the final phrase should finish slightly before the clip ends "
-                "(not a single fixed static angle for the whole clip)"
+                "(follow the supplied camera rule throughout the clip)"
             ),
             "visual_source_action_only_rule": VIDEO_PROMPT_VISUAL_SOURCE_GENERATION_RULE,
             "do_not_copy_internal_rules_to_video_prompt": (
@@ -3598,7 +3617,7 @@ async def generate_full_production(
                 "video_prompt_en": "Do not copy title-safe/top-30-percent overlay rules to video_prompt_en.",
             },
             "fruit_only_first_moment_rule": FRUIT_ONLY_FIRST_MOMENT_RULE,
-            "veo3_framing_rule": VEO3_FAST_VIDEO_FRAMING_RULE,
+            "veo3_framing_rule": production_framing_rule,
                 "continuity_rule": (
                     "start_frame_ru preserves continuity_anchors and continuity_state in visual detail; video_prompt_en "
                     "uses the frames as visual source of truth and only describes motion/action/speech with already-visible objects"
@@ -3608,9 +3627,9 @@ async def generate_full_production(
                     "new visible ingredients, garnishes, toppings, sides, sauces, or dish decorations"
                 ),
             "mandatory_recipe_coverage_rule": (
-                MANDATORY_RECIPE_COVERAGE_RULE
+                recipe_coverage_rule
                 + " start_frame_ru/end_frame_prompt_ru must make the required ingredients and equipment visible; "
-                "video_prompt_en must animate the required operation instead of using a generic cooking action."
+                "video_prompt_en must animate the main action only, without repeating preparation_offscreen."
             ),
             "cat_identity_count_rule": (
                 "Each cat identity may appear at most once: one orange cat, one white cat, one black-and-white cat. "
@@ -3648,9 +3667,9 @@ async def generate_full_production(
         "Use DISH VISUAL BRIEF as the real-world target: before writing each food frame, infer the canonical look "
         "of the named dish/current recipe state and write it directly into the prompt; the main food must be framed "
         "readably, not cropped off, with shape, texture, color, and ingredient state visible. "
-        f"Mandatory recipe coverage: {MANDATORY_RECIPE_COVERAGE_RULE} "
+        f"Mandatory recipe coverage: {recipe_coverage_rule} "
         "For every required step, start/end frame prompts must make the needed ingredients and equipment visible, "
-        "and video_prompt_en must animate the concrete operation rather than generic cooking. "
+        "and video_prompt_en must animate only the approved main action, respecting prepared offscreen states. "
         f"START FRAME Russian mandatory rule: {START_FRAME_RECIPE_VISUAL_DETAIL_RULE} "
         f"SCENE 1 title-safe mandatory rule: {TITLE_SAFE_FIRST_SCENE_START_FRAME_RULE} "
         f"SCENE 1 fruit-only first-moment exception: {FRUIT_ONLY_FIRST_MOMENT_RULE} "
@@ -3678,8 +3697,7 @@ async def generate_full_production(
         "Do not include title_safe_top_30 or top-30-percent overlay instructions in video_prompt_en; that rule is only for START FRAME. "
         f"Scene 1 fruit-only first-moment exception: {FRUIT_ONLY_FIRST_MOMENT_RULE} "
         "Framing: close-up only, not medium or medium-close; grandmother's full figure and every other character in the scene "
-        "must stay fully visible; camera angle or framing should evolve during the clip (no fixed static "
-        "tripod for the entire take).\n"
+        "must stay fully visible; obey the supplied veo3_framing_rule.\n"
         + _LLM_VIDEO_CHARACTERS_SPEAKS_RULE
         + "\n"
         + _RUSSIAN_YO_RULE
@@ -3688,7 +3706,7 @@ async def generate_full_production(
         + GRANDMA_VOICE_LOCK_FULL
         + ".\n"
         "Also include this exact framing block verbatim: "
-        + VEO3_FAST_VIDEO_FRAMING_RULE
+        + production_framing_rule
         + "\n"
         "Use the cartoon-character and kitchen-physics rules when composing the prompt, but do not append bulky "
         "meta-rule labels like veo3_cartoon_character_rule or kitchen_physics_rule unless they naturally belong in the prompt.\n"
@@ -3782,6 +3800,7 @@ async def generate_full_production(
                 "provider": "none",
                 "note": "speechless prompt: Kling prompt audio/cooking sounds only",
             }
+            scene_out["start_frame_prompt"] = append_episode_prop_locks(str(scene_out.get("start_frame_prompt") or ""), scene_out)
             enriched.append(scene_out)
             continue
         scene_out["speech_by_lang"] = speech_by_lang
@@ -3816,6 +3835,7 @@ async def generate_full_production(
             "provider": "none",
             "note": "image-only iteration (no separate voice)",
         }
+        scene_out["start_frame_prompt"] = append_episode_prop_locks(str(scene_out.get("start_frame_prompt") or ""), scene_out)
         enriched.append(scene_out)
     return {"json_plan": enriched}
 
