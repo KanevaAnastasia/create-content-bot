@@ -14,6 +14,7 @@ from app.handlers.handlers_state_scene import (
     _apply_overlay_title_style_feedback,
     _apply_overlay_title_to_production,
     _clean_translated_title,
+    _cumulative_scene_plan_feedback,
     _default_overlay_title_style,
     _ensure_end_frame_scene_requests_from_session_text,
     _handle_scene_approval_refine,
@@ -656,6 +657,80 @@ def test_scene_approval_feedback_mentions_pause_but_regenerates_scenes(monkeypat
     assert session["state"] == "waiting_scene_approval"
     assert len(session["scenes_plan"]) == 2
     assert any("Обновила план по правкам" in item for item in captured)
+
+
+def test_cumulative_advice_scene_feedback_preserves_earlier_corrections():
+    session = {}
+
+    first = _cumulative_scene_plan_feedback(
+        session,
+        "Исправь: Тут непонятно, сколько соли надо для картошки",
+    )
+    second = _cumulative_scene_plan_feedback(
+        session,
+        "Добавь: Соль чувствуется не сразу, а суп перенеси во вторую сцену",
+    )
+
+    assert "сколько соли надо для картошки" in first
+    assert "1. Тут непонятно, сколько соли надо для картошки" in second
+    assert "2. Соль чувствуется не сразу" in second
+    assert session["scene_plan_feedback_history"] == [
+        "Тут непонятно, сколько соли надо для картошки",
+        "Соль чувствуется не сразу, а суп перенеси во вторую сцену",
+    ]
+
+
+def test_advice_scene_refinement_sends_cumulative_feedback_to_model(monkeypatch):
+    captured_feedback: list[str] = []
+    session = {
+        "state": "waiting_scene_approval",
+        "generation_mode": "advice",
+        "selected_concept": "Как солить разные блюда",
+        "recipe_full_text": "Суп, картошка, макароны и мясо.",
+        "scenes_plan": [{"scene": 1, "text": "Старый план", "model": "veo3_fast"}],
+        "viral_concept_brief": {},
+    }
+
+    class _Message:
+        async def reply_text(self, text, reply_markup=None):
+            _ = (text, reply_markup)
+
+    async def _fake_generate(*_args, **kwargs):
+        captured_feedback.append(kwargs["user_feedback"])
+        return {
+            "json_plan": [{"scene": 1, "text": "Новый план", "model": "veo3_fast"}],
+            "text_plan": "СЦЕНА 1",
+            "viral_concept_brief": {},
+            "romantic_drama_subplot": {},
+            "retention_review": {},
+            "regeneration_events": [],
+        }
+
+    async def _fake_call(_update, _context, _chat_id, _name, fn):
+        return await fn()
+
+    monkeypatch.setattr("app.handlers.handlers_state_scene.generate_scenes_plan", _fake_generate)
+    monkeypatch.setattr("app.handlers.handlers_state_scene._call_with_503_retries", _fake_call)
+    update = SimpleNamespace(message=_Message())
+
+    asyncio.run(_handle_scene_approval_refine(
+        update,
+        context=None,
+        chat_id=1031,
+        session=session,
+        text="Исправь: укажи количество соли для картошки",
+    ))
+    asyncio.run(_handle_scene_approval_refine(
+        update,
+        context=None,
+        chat_id=1031,
+        session=session,
+        text="Добавь: скажи, что соль чувствуется не сразу",
+    ))
+
+    assert "количество соли для картошки" in captured_feedback[0]
+    assert "1. укажи количество соли для картошки" in captured_feedback[1]
+    assert "2. скажи, что соль чувствуется не сразу" in captured_feedback[1]
 
 
 def test_on_text_first_step_generate_button_without_session():

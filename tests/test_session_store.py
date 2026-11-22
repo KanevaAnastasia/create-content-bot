@@ -2121,6 +2121,7 @@ def test_series_and_title_review_survive_session_cache():
         "overlay_title_return_state": "waiting_scene_media",
         "overlay_title_review_frame": "new-frame",
         "overlay_title_approved_frame": "old-frame",
+        "scene_plan_feedback_history": ["Указать количество соли для картошки"],
     }
     assert _chat_session_cache_payload(session) == session
 

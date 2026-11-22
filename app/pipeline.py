@@ -214,13 +214,17 @@ TITLE_SAFE_FIRST_SCENE_START_FRAME_RULE = (
     "Композиция под заголовок: в первой сцене верхние примерно 30% кадра должны оставаться свободными "
     "от персонажей, лиц, рук, посуды, еды и крупных деталей; важное действие размещай ниже этой зоны. "
     "Не обрезай кадр и не делай пустую искусственную полосу сверху: верхняя зона должна выглядеть как естественное "
-    "продолжение сцены с тем же фоном, светом, столешницей или интерьером, только без крупных объектов."
+    "продолжение живого интерьера. В ней допустимы неконтрастные мелкие цветочные обои, кружевная занавеска "
+    "или другая узнаваемая фактура комнаты. Не превращай эту зону в пустую однотонную стену, студийный фон "
+    "или безжизненную полосу; крупные предметы интерьера располагай ниже либо сбоку."
 )
 TITLE_SAFE_FIRST_SCENE_VIDEO_RULE = (
     "title_safe_top_30: for scene 1, keep roughly the top 30% of the frame clear of characters, faces, "
     "hands, cookware, food, and large visual details for an added title overlay; keep the main action below that zone. "
     "Do not crop the frame or create an artificial blank band at the top; the top area must remain a natural continuation "
-    "of the same scene with background, lighting, tabletop or interior texture, just without large objects."
+    "of a lived-in interior. It may contain low-contrast small floral wallpaper, a lace-curtained window or another "
+    "recognizable room texture. Never turn it into a plain empty wall, studio backdrop or featureless band; place "
+    "large interior objects lower or to the side."
 )
 FRUIT_ONLY_FIRST_MOMENT_RULE = (
     "If the user explicitly asks scene 1 to start with a close-up of anthropomorphic banana and strawberry talking "

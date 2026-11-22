@@ -2276,9 +2276,25 @@ def test_reference_style_prompt_rejects_storybook_style_drift():
 
     assert "Soviet family home" in prompt
     assert "CRT television" in prompt
+    assert "at least three recognizable home anchors" in prompt
+    assert "never turn that area into a plain empty wall" in prompt
     assert "единственный источник стиля" in prompt
     assert "Do not switch to a children's storybook" in prompt
     assert "Disney-like" in prompt
+
+
+def test_image_atmosphere_replaces_empty_title_wall_with_lived_in_room():
+    prompt = handlers_media_scene._append_reference_style_to_image_prompt(
+        "Верхние примерно 30% кадра занимает ровно освещённая стена, естественное продолжение того же фона, "
+        "без лиц, рук, еды, посуды и крупных деталей. Бабушка стоит у стола.",
+        False,
+    )
+
+    assert "ровно освещённая стена" not in prompt
+    assert "мелкие цветочные обои" in prompt
+    assert "белой кружевной занавески" in prompt
+    assert "старый телевизор с кинескопом" in prompt
+    assert "never a blank studio" in prompt
 
 
 def test_story_video_runtime_policy_forces_silent_kling_even_from_stale_veo_scene():

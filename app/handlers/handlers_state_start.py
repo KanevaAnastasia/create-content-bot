@@ -103,7 +103,13 @@ from ..discipline_intro import (
     intro_character_names,
     parse_intro_dialogue_text,
 )
-from ..advice_generation import ADVICE_SCENE_RULE, advice_concept_input, format_advice_choices
+from ..advice_generation import (
+    ADVICE_SCENE_RULE,
+    advice_concept_input,
+    format_advice_choices,
+    format_advice_for_approval,
+    generate_advice_full_text,
+)
 from ..generation_modes import (
     GENERATION_MODE_ADVICE,
     GENERATION_MODE_ADVERTISING,
@@ -725,7 +731,11 @@ async def _ask_overlay_title_before_recipe_plan(update: Update, chat_id: int, se
     SESSIONS[chat_id] = session
     await reply_text_without_keyboard(
         update.message,
-        "Рецепт утверждён. До viral plan введите русский заголовок для верхней надписи.",
+        (
+            "Текст совета утверждён. До viral plan введите русский заголовок для верхней надписи."
+            if normalize_generation_mode(session.get(GENERATION_MODE_SESSION_KEY)) == GENERATION_MODE_ADVICE
+            else "Рецепт утверждён. До viral plan введите русский заголовок для верхней надписи."
+        ),
     )
     return True
 
@@ -926,7 +936,12 @@ async def _continue_generation_with_recipe(
         return
 
     try:
-        await reply_text_without_keyboard(update.message, "Генерирую варианты рецепта, ждите.")
+        await reply_text_without_keyboard(
+            update.message,
+            "Готовлю варианты вопроса для совета, ждите."
+            if advice_mode
+            else "Генерирую варианты рецепта, ждите.",
+        )
         result = await _call_with_503_retries(
             update,
             context,
@@ -1842,28 +1857,43 @@ async def _handle_waiting_concept_state(
             return True
         selected = concepts[idx]
         concept_text = f"{selected.get('name', '')}. {selected.get('hook', '')}"
-        if normalize_generation_mode(session.get(GENERATION_MODE_SESSION_KEY)) == GENERATION_MODE_ADVICE:
-            concept_text += "\nРешение: " + str(selected.get("why") or "") + "\n\n" + ADVICE_SCENE_RULE + "\nИсходный запрос/рецепт:\n" + str(session.get("user_input") or "")
+        advice_mode = normalize_generation_mode(session.get(GENERATION_MODE_SESSION_KEY)) == GENERATION_MODE_ADVICE
+        if advice_mode:
+            concept_text += "\nРешение: " + str(selected.get("why") or "") + "\n\n" + ADVICE_SCENE_RULE + "\nИсходный материал:\n" + str(session.get("user_input") or "")
         session["selected_concept"] = concept_text
         session["selected_concept_name"] = str(selected.get("name", "")).strip() or concept_text
         try:
-            await reply_text_without_keyboard(update.message, "Генерирую полный рецепт, ждите.")
-            recipe_full = await _call_with_503_retries(
-                update,
-                context,
-                chat_id,
-                "generate_recipe_full_text",
-                lambda: generate_recipe_full_text(
-                    concept_text,
-                    dish_name=session.get("selected_concept_name"),
-                ),
-            )
+            if advice_mode:
+                await reply_text_without_keyboard(update.message, "Готовлю полный текст совета, ждите.")
+                recipe_full = await _call_with_503_retries(
+                    update,
+                    context,
+                    chat_id,
+                    "generate_advice_full_text",
+                    lambda: generate_advice_full_text(
+                        concept_text,
+                        str(session.get("user_input") or ""),
+                    ),
+                )
+            else:
+                await reply_text_without_keyboard(update.message, "Генерирую полный рецепт, ждите.")
+                recipe_full = await _call_with_503_retries(
+                    update,
+                    context,
+                    chat_id,
+                    "generate_recipe_full_text",
+                    lambda: generate_recipe_full_text(
+                        concept_text,
+                        dish_name=session.get("selected_concept_name"),
+                    ),
+                )
         except ServiceUnavailableRetriesExhaustedError as e:
             await update.message.reply_text(str(e))
             return True
         except Exception as e:
-            logger.exception("recipe full text generation failed")
-            await update.message.reply_text(f"Ошибка генерации рецепта: {_user_error_message(e)}")
+            logger.exception("approval text generation failed")
+            label = "текста совета" if advice_mode else "рецепта"
+            await update.message.reply_text(f"Ошибка генерации {label}: {_user_error_message(e)}")
             return True
         session["state"] = STATE_WAITING_RECIPE_APPROVAL
         session["recipe_full_text"] = recipe_full
@@ -1875,11 +1905,14 @@ async def _handle_waiting_concept_state(
         session["frame_prompts_text"] = None
         session["end_frame_scene_requests"] = []
         session["user_feedback"] = None
-        await _reply_text_chunked(update, format_full_recipe_for_approval(recipe_full))
+        await _reply_text_chunked(
+            update,
+            format_advice_for_approval(recipe_full) if advice_mode else format_full_recipe_for_approval(recipe_full),
+        )
         await _reply_text_with_optional_markup(
             update,
-            "Если рецепт подходит — нажми «ОК». "
-            "Если нужно доработать — нажми «Добавь» или «Исправь», затем пришли текст правки.",
+            ("Если текст совета подходит — нажми «ОК». " if advice_mode else "Если рецепт подходит — нажми «ОК». ")
+            + "Если нужно доработать — нажми «Добавь» или «Исправь», затем пришли текст правки.",
             reply_markup=ok_only_markup(),
         )
         return True
@@ -1997,7 +2030,10 @@ async def _continue_after_recipe_approval_plan(
 ) -> bool:
     full_recipe = str(full_recipe or session.get("recipe_full_text") or "").strip()
     if not full_recipe:
-        await update.message.reply_text("Нет текста рецепта. Сначала согласуйте рецепт.")
+        if normalize_generation_mode(session.get(GENERATION_MODE_SESSION_KEY)) == GENERATION_MODE_ADVICE:
+            await update.message.reply_text("Нет текста совета. Сначала согласуйте текст совета.")
+        else:
+            await update.message.reply_text("Нет текста рецепта. Сначала согласуйте рецепт.")
         return True
 
     if on_scene_plan_fail is None:
@@ -2097,6 +2133,7 @@ async def _handle_waiting_recipe_approval_state(
     text: str,
 ) -> bool:
     """Обрабатывает состояние `STATE_WAITING_RECIPE_APPROVAL`."""
+    advice_mode = normalize_generation_mode(session.get(GENERATION_MODE_SESSION_KEY)) == GENERATION_MODE_ADVICE
     if text.lower() in {"ок", "ok", "okay", "approve"}:
         async def _on_scene_plan_fail(p: dict[str, Any]) -> None:
             if update.message is not None:
@@ -2104,7 +2141,11 @@ async def _handle_waiting_recipe_approval_state(
 
         full_recipe = str(session.get("recipe_full_text") or "").strip()
         if not full_recipe:
-            await update.message.reply_text("Нет текста рецепта. Сначала согласуйте рецепт.")
+            await update.message.reply_text(
+                "Нет текста совета. Сначала согласуйте текст совета."
+                if advice_mode
+                else "Нет текста рецепта. Сначала согласуйте рецепт."
+            )
             return True
         if normalize_generation_mode(session.get(GENERATION_MODE_SESSION_KEY)) == GENERATION_MODE_SILENCE:
             return await _continue_silence_after_recipe_approval(
@@ -2131,38 +2172,57 @@ async def _handle_waiting_recipe_approval_state(
     session["state"] = STATE_REFINING_RECIPE
     session["user_feedback"] = text
     try:
-        await reply_text_without_keyboard(update.message, "Дорабатываю рецепт, ждите.")
-        recipe_full = await _call_with_503_retries(
-            update,
-            context,
-            chat_id,
-            "refine_recipe_full_text",
-            lambda: generate_recipe_full_text(
-                str(session.get("selected_concept") or "").strip(),
-                dish_name=session.get("selected_concept_name"),
-                user_feedback=text,
-                previous_text=session.get("recipe_full_text"),
-            ),
-        )
+        if advice_mode:
+            await reply_text_without_keyboard(update.message, "Дорабатываю текст совета, ждите.")
+            recipe_full = await _call_with_503_retries(
+                update,
+                context,
+                chat_id,
+                "refine_advice_full_text",
+                lambda: generate_advice_full_text(
+                    str(session.get("selected_concept") or "").strip(),
+                    str(session.get("user_input") or "").strip(),
+                    user_feedback=text,
+                    previous_text=session.get("recipe_full_text"),
+                ),
+            )
+        else:
+            await reply_text_without_keyboard(update.message, "Дорабатываю рецепт, ждите.")
+            recipe_full = await _call_with_503_retries(
+                update,
+                context,
+                chat_id,
+                "refine_recipe_full_text",
+                lambda: generate_recipe_full_text(
+                    str(session.get("selected_concept") or "").strip(),
+                    dish_name=session.get("selected_concept_name"),
+                    user_feedback=text,
+                    previous_text=session.get("recipe_full_text"),
+                ),
+            )
     except ServiceUnavailableRetriesExhaustedError as e:
         await update.message.reply_text(str(e))
         session["state"] = STATE_WAITING_RECIPE_APPROVAL
         return True
     except Exception as e:
-        logger.exception("recipe regeneration failed")
-        await update.message.reply_text(f"Ошибка перегенерации рецепта: {_user_error_message(e)}")
+        logger.exception("approval text regeneration failed")
+        label = "текста совета" if advice_mode else "рецепта"
+        await update.message.reply_text(f"Ошибка перегенерации {label}: {_user_error_message(e)}")
         session["state"] = STATE_WAITING_RECIPE_APPROVAL
         return True
     session["state"] = STATE_WAITING_RECIPE_APPROVAL
     session["recipe_full_text"] = recipe_full
     session["precheck_recipe_steps"] = None
     session["recipe_steps"] = None
-    await update.message.reply_text("Обновила рецепт по правкам:")
-    await _reply_text_chunked(update, format_full_recipe_for_approval(recipe_full))
+    await update.message.reply_text("Обновила текст совета по правкам:" if advice_mode else "Обновила рецепт по правкам:")
+    await _reply_text_chunked(
+        update,
+        format_advice_for_approval(recipe_full) if advice_mode else format_full_recipe_for_approval(recipe_full),
+    )
     await _reply_text_with_optional_markup(
         update,
-        "Если рецепт подходит — нажми «ОК». "
-        "Если нужно доработать — нажми «Добавь» или «Исправь», затем пришли правку текстом.",
+        ("Если текст совета подходит — нажми «ОК». " if advice_mode else "Если рецепт подходит — нажми «ОК». ")
+        + "Если нужно доработать — нажми «Добавь» или «Исправь», затем пришли правку текстом.",
         reply_markup=ok_only_markup(),
     )
     return True

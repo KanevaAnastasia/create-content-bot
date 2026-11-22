@@ -226,6 +226,33 @@ def build_recipe_full_prompt(concept: str, dish_name: str, feedback: str, prev: 
     )
 
 
+def build_advice_full_prompt(
+    selected_concept: str,
+    source_text: str,
+    feedback: str,
+    prev: str,
+) -> str:
+    return (
+        "Ты редактируешь текст короткого полезного ролика в формате «Совет» для русской страницы бабушки.\n\n"
+        f"ВЫБРАННЫЙ ВОПРОС ДЛЯ НАЧАЛА РОЛИКА:\n{selected_concept}\n\n"
+        f"ИСХОДНЫЙ МАТЕРИАЛ. ЭТО ГЛАВНЫЙ ИСТОЧНИК ФАКТОВ:\n{source_text}\n\n"
+        f"ПРЕДЫДУЩАЯ ВЕРСИЯ ТЕКСТА СОВЕТА:\n{prev or '-'}\n\n"
+        f"ПРАВКИ ОТ ПОЛЬЗОВАТЕЛЯ:\n{feedback or '-'}\n\n"
+        "ЗАДАЧА:\n"
+        "- верни текст совета, а не рецепт блюда и не список ингредиентов\n"
+        "- начни с выбранного вопроса дочери; не заменяй его другим хуком\n"
+        "- сохрани все конкретные советы, продукты, количества, сроки и оговорки из исходного материала\n"
+        "- если источник содержит советы для нескольких блюд или продуктов, сохрани их все в исходном порядке; "
+        "не сужай текст до одного блюда из выбранного вопроса\n"
+        "- если пользователь прислал в правке полный готовый вариант, возьми его за основу целиком, "
+        "сохрани порядок, конкретику и естественный ритм\n"
+        "- не придумывай новые факты, ингредиенты, измерения или правила\n"
+        "- допускаются короткие смысловые блоки с названиями продуктов, если так понятнее зрителю\n"
+        "- без служебных комментариев и без заголовка «Рецепт»\n\n"
+        "Верни только готовый русский текст совета."
+    )
+
+
 def build_recipe_from_source_text_prompt(source_text: str, source_url: str | None = None) -> str:
     """Промпт для извлечения цельного рецепта из сырого текста страницы/источника."""
     src = (source_text or "").strip()
@@ -411,7 +438,9 @@ def scenes_plan_requirements() -> dict[str, Any]:
         "feedback_application_rule": (
             "If feedback is not empty, treat it as a patch list. Apply every requested change to the named scene(s) "
             "and keep unaffected scenes as close as possible to previous_scenes. Do not replace the user's concrete "
-            "wording with generic equivalents."
+            "wording with generic equivalents. If the user says that an amount, moment, reason or method is unclear, "
+            "the revised spoken scene text must explicitly answer that missing point; merely restating the old text "
+            "does not satisfy the feedback."
         ),
         "no_extra_characters_or_actions_rule": (
             "Do not invent extra characters, duplicate animals, background people, extra hands, or helper figures "
@@ -612,6 +641,8 @@ def build_scenes_plan_prompt(payload: dict[str, Any]) -> str:
         "Для каждой сцены верни speech_plan: 1-3 коротких spoken chunks в порядке произнесения, чтобы потом по ним можно было собрать тайминги субтитров.\n"
         "Если в payload есть непустой feedback или previous_scenes — это режим РЕДАКТИРОВАНИЯ, а не генерации с нуля. "
         "Сначала прочитай previous_scenes, затем примени feedback как точные правки по указанным сценам: "
+        "если feedback содержит нумерованный список накопленных правок, выполни каждый пункт по порядку; "
+        "новая правка отменяет старую только при явном противоречии, иначе нельзя терять ни один предыдущий пункт. "
         "если пользователь пишет «в сцене 2 добавляем слово...», «в сцене 3 сразу говорим...», «пауза не нужна...» — "
         "измени именно эти scene.text/action/visual_description/dialogue и не игнорируй ни один пункт. "
         "Сцены без упомянутых правок сохраняй максимально близко к previous_scenes, сохранив блюдо и логику рецепта.\n"

@@ -404,6 +404,8 @@ def test_pipeline_llm_steps_scenes_payload_carries_feedback_and_previous():
     assert "Готовка по рецепту" in prompt
     assert "начинается строго со СЦЕНЫ 2" in prompt
     assert "режим РЕДАКТИРОВАНИЯ" in prompt
+    assert "must explicitly answer that missing point" in prompt
+    assert "нельзя терять ни один предыдущий пункт" in prompt
     assert "romantic_drama_subplot" in prompt
     assert "CHARACTER KEYS AND SHORT DESCRIPTIONS" in prompt
     assert "payload.character_short_descriptions" in prompt
@@ -1161,7 +1163,8 @@ def test_ensure_image_prompt_framing_requirements_adds_title_safe_top_for_first_
     )
     assert "верхние примерно 30% кадра должны оставаться свободными" in out
     assert "Не обрезай кадр" in out
-    assert "без крупных объектов" in out
+    assert "мелкие цветочные обои" in out
+    assert "пустую однотонную стену" in out
 
 
 def test_ensure_image_prompt_framing_requires_stove_for_cooking_pan_or_pot():

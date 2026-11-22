@@ -71,6 +71,7 @@ _CHAT_SESSION_CACHE_KEYS = {
     "overlay_subtitle_decided",
     "scene_media_approve_mode",
     "scene_media_ai_human_review",
+    "scene_plan_feedback_history",
     "scheduled_generation_mode",
     "scheduled_item_id",
     "is_draft",

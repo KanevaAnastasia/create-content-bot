@@ -7,6 +7,7 @@ from app.generation_modes import (
     aspect_ratio_for_generation_mode, syntax_provider_for_scene_generation, SYNTAX_PROVIDER_VEO,
 )
 from app.handlers import handlers_state_start as start
+from app.pipeline_llm_steps import build_advice_full_prompt
 
 
 def test_advice_uses_normal_video_provider_and_configured_languages():
@@ -35,13 +36,97 @@ def test_advice_direct_recipe_still_offers_questions_and_keeps_choice(monkeypatc
     assert session['state'] == start.STATE_WAITING_CONCEPT
     assert session['target_languages'] == ['ru', 'en']
     assert 'вопросов-проблем' in concepts.call_args.args[0]
-    recipe = AsyncMock(return_value='Свёкла, капуста. Обжарить свёклу, сварить борщ.')
+    assert 'Не разбивай такой исходник на отдельный концепт' in concepts.call_args.args[0]
+    advice = AsyncMock(return_value='Мам, как сохранить цвет борща? Обжарь свёклу отдельно.')
+    recipe = AsyncMock(return_value='Не должен вызываться')
+    monkeypatch.setattr(start, 'generate_advice_full_text', advice)
     monkeypatch.setattr(start, 'generate_recipe_full_text', recipe)
     asyncio.run(start._handle_waiting_concept_state(update, None, chat_id=987654, session=session, text='1'))
     assert question in session['selected_concept']
     assert 'speaker=daughter' in session['selected_concept']
-    assert 'Обжарить свёклу' in recipe.call_args.args[0]
+    assert advice.await_args.args[1] == 'Свёкла, капуста. Обжарить свёклу, сварить борщ.'
+    assert recipe.await_count == 0
+    assert session['recipe_full_text'].startswith('Мам, как сохранить цвет борща?')
     assert session['state'] == start.STATE_WAITING_RECIPE_APPROVAL
+
+
+def test_advice_refinement_keeps_full_source_and_does_not_use_recipe_generator(monkeypatch):
+    session = {
+        'generation_mode': 'advice',
+        'state': start.STATE_WAITING_RECIPE_APPROVAL,
+        'user_input': 'Суп: ложка соли. Рис: половина ложки. Картошку солить в конце.',
+        'selected_concept': 'Мам, сколько соли нужно?',
+        'selected_concept_name': 'Как солить разные блюда',
+        'recipe_full_text': 'Старый текст только про рис.',
+    }
+    advice = AsyncMock(return_value='Суп: ложка соли. Рис: половина ложки. Картошку соли в конце.')
+    recipe = AsyncMock(return_value='Не должен вызываться')
+    monkeypatch.setattr(start, 'generate_advice_full_text', advice)
+    monkeypatch.setattr(start, 'generate_recipe_full_text', recipe)
+
+    async def call(update, context, chat_id, name, fn):
+        return await fn()
+
+    monkeypatch.setattr(start, '_call_with_503_retries', call)
+    message = SimpleNamespace(reply_text=AsyncMock())
+    update = SimpleNamespace(message=message)
+    feedback = 'Оставь советы для всех блюд, не делай рецепт риса.'
+    asyncio.run(start._handle_waiting_recipe_approval_state(
+        update, None, chat_id=123, session=session, text=feedback,
+    ))
+
+    assert advice.await_args.args[:2] == (
+        'Мам, сколько соли нужно?',
+        'Суп: ложка соли. Рис: половина ложки. Картошку солить в конце.',
+    )
+    assert advice.await_args.kwargs['user_feedback'] == feedback
+    assert advice.await_args.kwargs['previous_text'] == 'Старый текст только про рис.'
+    assert recipe.await_count == 0
+    assert session['recipe_full_text'].startswith('Суп:')
+    assert session['state'] == start.STATE_WAITING_RECIPE_APPROVAL
+    sent = '\n'.join(str(call.args[0]) for call in message.reply_text.await_args_list)
+    assert 'ТЕКСТ СОВЕТА' in sent
+    assert 'Если текст совета подходит' in sent
+
+
+def test_normal_concept_still_uses_recipe_generator(monkeypatch):
+    session = {
+        'generation_mode': 'normal',
+        'state': start.STATE_WAITING_CONCEPT,
+        'user_input': 'Свёкла, капуста. Сварить борщ.',
+        'concepts': [{'name': 'Борщ', 'hook': 'Яркий борщ', 'why': 'Сохраняем цвет'}],
+    }
+    recipe = AsyncMock(return_value='Свёкла, капуста. Сварить борщ.')
+    advice = AsyncMock(return_value='Не должен вызываться')
+    monkeypatch.setattr(start, 'generate_recipe_full_text', recipe)
+    monkeypatch.setattr(start, 'generate_advice_full_text', advice)
+
+    async def call(update, context, chat_id, name, fn):
+        return await fn()
+
+    monkeypatch.setattr(start, '_call_with_503_retries', call)
+    update = SimpleNamespace(message=SimpleNamespace(reply_text=AsyncMock()))
+    asyncio.run(start._handle_waiting_concept_state(
+        update, None, chat_id=321, session=session, text='1',
+    ))
+
+    assert recipe.await_count == 1
+    assert advice.await_count == 0
+    assert session['recipe_full_text'].startswith('Свёкла')
+
+
+def test_advice_prompt_preserves_every_tip_in_multi_product_source():
+    prompt = build_advice_full_prompt(
+        'Мама, сколько это соли?',
+        'Суп: ложка на литр. Рис: половина ложки. Мясо: ложка на килограмм.',
+        'Это советы, а не рецепт.',
+        'Старый текст только про рис.',
+    )
+    assert 'текст совета, а не рецепт блюда' in prompt
+    assert 'сохрани их все в исходном порядке' in prompt
+    assert 'не сужай текст до одного блюда' in prompt
+    assert 'Суп: ложка на литр' in prompt
+    assert 'Мясо: ложка на килограмм' in prompt
 
 
 def test_advice_scene_request_overrides_viral_hook_and_keeps_question(monkeypatch):
@@ -65,6 +150,9 @@ def test_advice_scene_request_overrides_viral_hook_and_keeps_question(monkeypatc
     assert 'speaker=daughter' in captured['generation_comment']
     assert 'в этой же сцене' in captured['generation_comment']
     assert 'приоритет' in captured['generation_comment']
+    assert 'сохрани каждый совет' in captured['generation_comment']
+    assert 'не превращай весь ролик' in captured['generation_comment']
+    assert 'непонятно сколько' in captured['generation_comment']
 
 
 def test_advice_not_enabled_for_other_projects():

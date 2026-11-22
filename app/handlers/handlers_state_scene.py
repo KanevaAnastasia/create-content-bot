@@ -248,10 +248,12 @@ from .handlers_state_media import (
     scene_media_reference_images_pending,
 )
 from ..character_catalog import format_character_short_descriptions
+from ..advice_generation import format_advice_for_approval
 from ..copy_mode_prompts import build_copy_mode_seedance_prompt, copy_mode_family_roles
 from ..db import SessionLocal
 from ..final_build_queue import queue_final_builds_for_session
 from ..generation_modes import (
+    GENERATION_MODE_ADVICE,
     GENERATION_MODE_ADVERTISING,
     GENERATION_MODE_COPY,
     GENERATION_MODE_NORMAL,
@@ -5695,10 +5697,15 @@ async def _debounced_session(update: Update) -> tuple[int | None, dict | None, s
     return chat_id, SESSIONS.get(chat_id), text
 
 
-async def _handle_refining_state(update: Update, state: str) -> bool:
+async def _handle_refining_state(update: Update, state: str, session: dict | None = None) -> bool:
+    advice_mode = normalize_generation_mode((session or {}).get(GENERATION_MODE_SESSION_KEY)) == GENERATION_MODE_ADVICE
     mapping = {
         STATE_REFINING_CONCEPT: "Дорабатываю концепты. Отправь сообщение еще раз через пару секунд.",
-        STATE_REFINING_RECIPE: "Дорабатываю рецепт. Отправь сообщение еще раз через пару секунд.",
+        STATE_REFINING_RECIPE: (
+            "Дорабатываю текст совета. Отправь сообщение еще раз через пару секунд."
+            if advice_mode
+            else "Дорабатываю рецепт. Отправь сообщение еще раз через пару секунд."
+        ),
         STATE_REFINING_SCENES: "Дорабатываю сцены. Отправь сообщение еще раз через пару секунд.",
         STATE_REFINING_FRAME_PROMPTS: "Дорабатываю frame prompts. Отправь сообщение еще раз через пару секунд.",
         STATE_REFINING_PRODUCTION_BUNDLE: "Перегенерирую промпты. Отправь сообщение ещё раз через пару секунд.",
@@ -5712,9 +5719,42 @@ async def _handle_refining_state(update: Update, state: str) -> bool:
     return True
 
 
+SCENE_PLAN_FEEDBACK_HISTORY_SESSION_KEY = "scene_plan_feedback_history"
+_SCENE_PLAN_FEEDBACK_HISTORY_LIMIT = 12
+
+
+def _cumulative_scene_plan_feedback(session: dict, text: str) -> str:
+    """Persist advice-scene corrections so a later edit cannot silently drop an earlier one."""
+    cleaned = re.sub(r"^(?:исправь|добавь)\s*:\s*", "", str(text or "").strip(), flags=re.IGNORECASE)
+    raw_history = session.get(SCENE_PLAN_FEEDBACK_HISTORY_SESSION_KEY)
+    history = [
+        " ".join(str(item or "").split())
+        for item in (raw_history if isinstance(raw_history, list) else [])
+        if str(item or "").strip()
+    ]
+    normalized = " ".join(cleaned.split())
+    if normalized and normalized not in history:
+        history.append(normalized)
+    history = history[-_SCENE_PLAN_FEEDBACK_HISTORY_LIMIT:]
+    session[SCENE_PLAN_FEEDBACK_HISTORY_SESSION_KEY] = history
+    if not history:
+        return cleaned
+    lines = "\n".join(f"{index}. {item}" for index, item in enumerate(history, 1))
+    return (
+        "НАКОПЛЕННЫЕ ПРАВКИ ПОЛЬЗОВАТЕЛЯ. Примени каждый пункт. "
+        "Если более новая правка прямо заменяет старую, более новая важнее:\n"
+        + lines
+    )
+
+
 async def _handle_scene_approval_refine(update: Update, context: ContextTypes.DEFAULT_TYPE, *, chat_id: int, session: dict, text: str) -> bool:
     session["state"] = STATE_REFINING_SCENES
     session["user_feedback"] = text
+    cumulative_feedback = (
+        _cumulative_scene_plan_feedback(session, text)
+        if normalize_generation_mode(session.get(GENERATION_MODE_SESSION_KEY)) == GENERATION_MODE_ADVICE
+        else text
+    )
     _update_end_frame_scene_requests(session, text)
     if is_story_generation(session):
         from ..project_profiles import project_story_characters
@@ -5861,7 +5901,7 @@ async def _handle_scene_approval_refine(update: Update, context: ContextTypes.DE
             lambda: generate_scenes_plan(
                 session["selected_concept"],
                 full_recipe_text=str(session.get("recipe_full_text") or "").strip(),
-                user_feedback=text,
+                user_feedback=cumulative_feedback,
                 previous_scenes=session.get("scenes_plan"),
                 on_attempt_failure=_on_scene_plan_fail_refine,
                 viral_concept_brief=session.get("viral_concept_brief"),
@@ -5892,7 +5932,13 @@ async def _handle_scene_approval_refine(update: Update, context: ContextTypes.DE
     if report: await _reply_text_chunked(update, report)
     await update.message.reply_text("Обновила план по правкам:")
     rft = session.get("recipe_full_text")
-    if isinstance(rft, str) and rft.strip(): await _reply_text_chunked(update, format_full_recipe_for_approval(rft))
+    if isinstance(rft, str) and rft.strip():
+        approval_text = (
+            format_advice_for_approval(rft)
+            if normalize_generation_mode(session.get(GENERATION_MODE_SESSION_KEY)) == GENERATION_MODE_ADVICE
+            else format_full_recipe_for_approval(rft)
+        )
+        await _reply_text_chunked(update, approval_text)
     if session.get("viral_concept_brief"):
         await _reply_text_chunked(
             update,
@@ -8907,7 +8953,7 @@ async def _on_text_impl(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         return
     if state == STATE_WAITING_RECIPE_APPROVAL and await _handle_waiting_recipe_approval_state(update, context, chat_id=chat_id, session=session, text=text):
         return
-    if await _handle_refining_state(update, state):
+    if await _handle_refining_state(update, state, session):
         return
     if state == STATE_WAITING_SCENE_APPROVAL:
         if await _handle_waiting_scene_approval_state(update, context, chat_id=chat_id, session=session, text=text):
