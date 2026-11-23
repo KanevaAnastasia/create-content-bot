@@ -1,4 +1,5 @@
 from __future__ import annotations
+from . import discipline_admin  # noqa: F401
 
 from . import advertising_admin  # noqa: F401 — register the advertising queue
 

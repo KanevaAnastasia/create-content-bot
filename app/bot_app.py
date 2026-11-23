@@ -110,6 +110,10 @@ async def _run_admin(callback, update, context, identity, *, quiet_enabled: bool
         return
     async with chat_lock(chat_id):
         with quiet_mode_menu_scope(identity, quiet_enabled):
+            if is_quiet_mode_owner(identity):
+                from .discipline_queue import handle as handle_discipline_queue
+                if await handle_discipline_queue(update, context):
+                    return
             if isinstance(update, TelegramUpdate):
                 from .syntax_durable import dialogue_scope, read_json, finish_dialogue, MARKER
                 recovery_ids = context.application.bot_data.setdefault("syntax_recovery_updates", set())
@@ -458,12 +462,14 @@ async def _post_init(application: Application) -> None:
     )
     from .advertising_queue import run_queue
     application.bot_data["advertising_queue_task"] = asyncio.create_task(run_queue(application.bot), name="advertising-products")
+    from .discipline_queue import run_queue as run_discipline
+    application.bot_data["discipline_queue_task"] = asyncio.create_task(run_discipline(application.bot), name="discipline-ideas")
     from .article_workflow import run_queue as run_articles
     application.bot_data["article_queue_task"] = asyncio.create_task(run_articles(application.bot), name="channel-articles")
 
 
 async def _post_shutdown(application: Application) -> None:
-    for key in (_QUIET_MODE_MIDNIGHT_TASK_KEY, "advertising_queue_task", "article_queue_task"):
+    for key in (_QUIET_MODE_MIDNIGHT_TASK_KEY, "advertising_queue_task", "article_queue_task", "discipline_queue_task"):
         task = application.bot_data.pop(key, None)
         if task is not None:
             task.cancel()
@@ -496,6 +502,9 @@ def build_application(token: str) -> Application:
         .build()
     )
     app.add_handler(CommandHandler("start", start))
+    from .discipline_queue import callback as discipline_callback, command as discipline_command
+    app.add_handler(CommandHandler("discipline_queue", discipline_command))
+    app.add_handler(CallbackQueryHandler(discipline_callback, pattern=r"^dq:", block=False))
     from .article_workflow import callback as article_callback, command as article_command, reply as article_reply
     app.add_handler(CommandHandler("articles", article_command))
     app.add_handler(CallbackQueryHandler(article_callback, pattern=r"^ar:", block=False))

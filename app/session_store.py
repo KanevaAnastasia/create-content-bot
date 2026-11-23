@@ -43,6 +43,7 @@ _RUN_PENDING_SESSION_KEYS = (
 _CHAT_SESSION_CACHE_KEYS = {
     "_syntax_durable_update_id",
     "advertising_queue_product_id",
+    "discipline_queue_idea_id",
     "advertising_product_paths",
     "social_descriptions_sent",
     "social_descriptions_approved",

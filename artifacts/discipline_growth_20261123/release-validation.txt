@@ -1,0 +1,11 @@
+23 ноября2026. Итоговые проверки.
+128/128 профильных тестов прошли после последней правки, exit0:
+tests/test_discipline_queue.py tests/test_discipline_modes.py tests/test_project_profiles.py tests/test_bot_app.py tests/test_session_store.py
+DATABASE_URL изолированнойSQLite, --no-cov -q. Лог /private/tmp/cf-discipline-finalchecks.log.
+Независимый ревьюер повторил67/67 проверок очереди и режимов, см.review-forty.md.
+Общий прогон:2176passed,15failed. На исходномHEAD воспроизведены14/15; ещё1 связан с существовавшими до задачи изменениями handlers_state_media.py. Проверка устаревшего меню исправлена этой задачей. Остальные падения общего набора не устранены: публикационная форма, provider/OpenAI-Vertex ожидания, SyntaxVeo и существующая обработка медиа. См. /private/tmp/cf-discipline-full-tests.log и /private/tmp/cf-discipline-head-failures.log.
+40/40реальныхHTTP-страниц админки, список и расписание вернули200после перезапуска. Повторный импорт:0добавлений,0изменений.
+Расписание enabled=True, next_run_at2026-11-24T06:00:00UTC; интервал2дня. Все40pending.
+БотPID92106, штатныйbotctl; лог discipline_queue.started cadence=2-days manual-approval=true, Application started.
+JSONSHA256:ce78a8ed6518fc59de485d52a4ab24ecb408cac1494aba20ca7d5cd9bc571a10.
+В этой задаче не запускались платная генерация или публикация. Редакционный допуск40/40 не подтверждает фактический рендер, непрерывность анимации или виральность.

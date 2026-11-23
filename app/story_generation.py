@@ -16,7 +16,7 @@ from pathlib import Path
 from typing import Any
 
 from .discipline_modes import (
-    FLOW, LABELS, MODE_KEY, REFRAME, SHORT_FORMATS, opening_sentence, script_direction, visual_direction,
+    TWO_LIVES, FLOW, LABELS, MODE_KEY, REFRAME, SHORT_FORMATS, opening_sentence, script_direction, visual_direction,
 )
 from .llm_utils import GEMINI_MODEL_PROFILE_CREATIVE, extract_json_object, gemini_generate_sync
 
@@ -1476,10 +1476,10 @@ def generate_story_scene_plan(
     legacy_grandma_cast = not fixed_project_characters and not discipline_project
     grandma_story = legacy_grandma_cast or grandma_project
     semantic_beats = build_semantic_narration_beats(voiceover_text, duration_sec, alignment)
-    windows = _expand_semantic_beats_to_clips(semantic_beats, continuous=continuous)
+    windows = _expand_semantic_beats_to_clips(semantic_beats, continuous=bool(short_format))
     if normalized_generation_mode == "visualization":
         windows = _apply_visualization_final_clip_policy(windows, visualization_output_policy)
-    clips_key = "continuous_clips" if continuous else "three_second_clips"
+    clips_key = "continuous_clips" if continuous else ("four_second_clips" if short_format else "three_second_clips")
     payload = {
         "source_story": source_story,
         "approved_voiceover": voiceover_text,
@@ -1564,6 +1564,17 @@ def generate_story_scene_plan(
         "over-the-shoulder shot, gentle orbit shot и другие подходящие кинематографичные варианты. "
         "Не повторяй одно и то же движение камеры в соседних клипах и не выбирай приём, который противоречит действию сцены."
     )
+    if short_format and not continuous:
+        camera_instruction = (
+            "Выбери крупность по действию и ремаркам, внутри клипа camera_direction=locked-off camera. "
+            "Не чередуй случайные движения камеры. Смена плана между клипами только по смыслу. "
+        )
+    if narrative_format == TWO_LIVES:
+        camera_instruction = (
+            "Две фиксированные горизонтальные панели. Во всех клипах camera_direction=locked-off camera. "
+            "Ракурс и граница панелей неизменны. Время сверху и снизу может расходиться по сценарию. "
+            "Переходы по совпадающей позе, без случайных приближений и перемещения камеры. "
+        )
     location_instruction = (
         "В каждом клипе сохраняй исходную локацию и выставляй location_transition=false. "
         if continuous else
@@ -1576,6 +1587,12 @@ def generate_story_scene_plan(
         "без сюжетной необходимости. Для location всегда называй конкретное место, для lighting — характер света, для color_palette — "
         "2–4 ведущих цвета. Не меняй время суток или цветовую основу внутри одного временного слоя. "
     )
+    if narrative_format == TWO_LIVES:
+        location_instruction = (
+            "Одна комната и фиксированные панели; location_transition=false. "
+            "Время в панелях может расходиться. Смену дней, сезонов и лет показывай только согласно "
+            "ремаркам, сохраняя архитектуру, героев и основные предметы. "
+        )
     prompt = (
         "Ты режиссёр короткой немой визуальной истории под уже утверждённую закадровую дорожку. "
         "Верни только JSON-объект с ключами characters, scenario_environment, historical_environment и beats. "
@@ -1675,7 +1692,7 @@ def generate_story_scene_plan(
         if continuous and normalized:
             time_period = normalized[0]["time_period"]
         historical_scene = time_period == "past"
-        location_transition = not continuous and _story_location_transition(candidate)
+        location_transition = not continuous and narrative_format != TWO_LIVES and _story_location_transition(candidate)
         location, lighting, color_palette = _story_scene_environment(
             candidate,
             historical_scene=historical_scene,
@@ -1685,7 +1702,7 @@ def generate_story_scene_plan(
             allow_transition=location_transition,
         )
         environment_locks[time_period] = (location, lighting, color_palette)
-        camera_direction = "locked-off camera" if continuous else _story_camera_direction(
+        camera_direction = "locked-off camera" if short_format else _story_camera_direction(
             index,
             candidate.get("camera_direction") or candidate.get("camera_movement"),
             previous=previous_camera_direction,
@@ -2042,7 +2059,7 @@ def generate_story_production(
     previous_camera_direction = ""
     for index, source_scene in enumerate(scenes_plan):
         scene = dict(source_scene)
-        scene["camera_direction"] = "locked-off camera" if scene.get(MODE_KEY) == FLOW else _story_camera_direction(
+        scene["camera_direction"] = "locked-off camera" if scene.get(MODE_KEY) in SHORT_FORMATS else _story_camera_direction(
             index,
             scene.get("camera_direction"),
             previous=previous_camera_direction,
@@ -2130,7 +2147,8 @@ def generate_story_production(
         if short_format:
             # The model may omit production constraints even when its JSON is valid.
             start_prompt = f"{start_prompt} {short_format.frame}"
-            video_prompt = f"{video_prompt} {short_format.motion}"
+            from .discipline_craft import MOTION_RULES
+            video_prompt = f"{video_prompt} {short_format.motion} {MOTION_RULES}"
         video_prompt = _ensure_story_camera_direction(
             video_prompt,
             scene.get("camera_direction"),

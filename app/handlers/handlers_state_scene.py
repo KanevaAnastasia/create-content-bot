@@ -1240,7 +1240,10 @@ def _advertising_post_approval_markup():
 
 
 def keyboard_for_session_state(session: dict):
-    """Return the reply keyboard expected for the current visible state."""
+    """Return the keyboard expected for the current visible state."""
+    from ..discipline_queue import STATE as DISCIPLINE_OFFER, markup as discipline_offer_markup
+    if (session or {}).get("state") == DISCIPLINE_OFFER:
+        return discipline_offer_markup(session.get("discipline_queue_idea_id"))
     state = str((session or {}).get("state") or "")
     if state in {
         STATE_REFINING_CONCEPT,

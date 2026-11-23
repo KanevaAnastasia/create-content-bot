@@ -924,3 +924,34 @@ class PublicationJob(Base):
     )
 
     project: Mapped["Project"] = relationship(back_populates="publication_jobs")
+
+
+class DisciplineQueueSchedule(Base):
+    __tablename__ = "discipline_queue_schedule"
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, default=1)
+    enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
+    next_run_at: Mapped[DateTime] = mapped_column(DateTime(timezone=True), nullable=False)
+
+
+class DisciplineIdea(Base):
+    __tablename__ = "discipline_ideas"
+    id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
+    slug: Mapped[str] = mapped_column(String(100), unique=True, nullable=False)
+    title: Mapped[str] = mapped_column(Text, nullable=False)
+    position: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    mode: Mapped[str] = mapped_column(String(64), nullable=False)
+    series: Mapped[str] = mapped_column(Text, nullable=False, default="")
+    episode: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    script: Mapped[str] = mapped_column(Text, nullable=False)
+    direction: Mapped[str] = mapped_column(Text, nullable=False)
+    review_plan: Mapped[str] = mapped_column(Text, nullable=False, default="")
+    problem: Mapped[str] = mapped_column(Text, nullable=False)
+    hook: Mapped[str] = mapped_column(Text, nullable=False)
+    payoff: Mapped[str] = mapped_column(Text, nullable=False)
+    sources: Mapped[list] = mapped_column(JSON, nullable=False, default=list)
+    status: Mapped[str] = mapped_column(String(32), nullable=False, default="pending", index=True)
+    offered_at: Mapped[DateTime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    completed_at: Mapped[DateTime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    run_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    delivery_index: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    created_at: Mapped[DateTime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())

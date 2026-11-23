@@ -1,0 +1,242 @@
+[
+  {
+    "position": 1,
+    "slug": "new-01",
+    "title": "Повторяется день. Или год.",
+    "url": "http://127.0.0.1:8000/admin/pipeline_admin/disciplineidea/ac47100e-6f9f-41fb-bbc8-d9f4952fb3bd/change/"
+  },
+  {
+    "position": 2,
+    "slug": "famous-01",
+    "title": "Кинг выбросил начало «Кэрри»",
+    "url": "http://127.0.0.1:8000/admin/pipeline_admin/disciplineidea/53fd48ed-f9de-4543-b141-fb6a760701fe/change/"
+  },
+  {
+    "position": 3,
+    "slug": "learn-01",
+    "title": "Учебник закрыт. Что осталось?",
+    "url": "http://127.0.0.1:8000/admin/pipeline_admin/disciplineidea/e7a15dda-2a30-4baa-9823-8e0f3eb15a5c/change/"
+  },
+  {
+    "position": 4,
+    "slug": "old-01",
+    "title": "Я ОТДЫХАЮ ОТ ЖИЗНИ, КОТОРУЮ ХОТЕЛ ИЗМЕНИТЬ",
+    "url": "http://127.0.0.1:8000/admin/pipeline_admin/disciplineidea/0ad3ce11-78f4-4051-84aa-786ddd86b1dc/change/"
+  },
+  {
+    "position": 5,
+    "slug": "new-02",
+    "title": "Отпуск закончился. Я так и не начал.",
+    "url": "http://127.0.0.1:8000/admin/pipeline_admin/disciplineidea/725989ab-56f6-4017-b255-26e1f06d237c/change/"
+  },
+  {
+    "position": 6,
+    "slug": "famous-02",
+    "title": "Номер, в котором не спали",
+    "url": "http://127.0.0.1:8000/admin/pipeline_admin/disciplineidea/a1270ae9-bbac-417e-9b6c-9741d687318e/change/"
+  },
+  {
+    "position": 7,
+    "slug": "learn-02",
+    "title": "Я уже учил это. Почему снова забыл?",
+    "url": "http://127.0.0.1:8000/admin/pipeline_admin/disciplineidea/e37d7300-e4b1-429c-816f-c4a89ac35f61/change/"
+  },
+  {
+    "position": 8,
+    "slug": "old-02",
+    "title": "Я СНОВА ОТМЕНИЛ ВСТРЕЧУ С СОБОЙ",
+    "url": "http://127.0.0.1:8000/admin/pipeline_admin/disciplineidea/cc2ae18a-5f37-49ff-b2d4-7e1bef231a53/change/"
+  },
+  {
+    "position": 9,
+    "slug": "new-03",
+    "title": "Один пропуск съел весь месяц",
+    "url": "http://127.0.0.1:8000/admin/pipeline_admin/disciplineidea/b5d1ca91-4219-4f17-bc23-26a5b98bb5bf/change/"
+  },
+  {
+    "position": 10,
+    "slug": "famous-03",
+    "title": "Пять тысяч попыток не влезли в красивую историю",
+    "url": "http://127.0.0.1:8000/admin/pipeline_admin/disciplineidea/e608e294-604e-40ca-b60a-041ad6084abc/change/"
+  },
+  {
+    "position": 11,
+    "slug": "learn-03",
+    "title": "Пока задачи по порядку, я гений",
+    "url": "http://127.0.0.1:8000/admin/pipeline_admin/disciplineidea/c4293c0a-b27c-475e-9e83-e42bc073be67/change/"
+  },
+  {
+    "position": 12,
+    "slug": "old-03",
+    "title": "Я СТОЛЬКО ЗНАЮ, ЧТО МНЕ УЖЕ СТЫДНО НЕ НАЧАТЬ",
+    "url": "http://127.0.0.1:8000/admin/pipeline_admin/disciplineidea/2a7a6d7b-5b43-49c4-8651-ad15b8dd585b/change/"
+  },
+  {
+    "position": 13,
+    "slug": "new-04",
+    "title": "Я учусь или обустраиваю учёбу?",
+    "url": "http://127.0.0.1:8000/admin/pipeline_admin/disciplineidea/d973cdab-9a58-4811-ae54-4e729a38de09/change/"
+  },
+  {
+    "position": 14,
+    "slug": "famous-04",
+    "title": "Пять лет отказов после первого успеха",
+    "url": "http://127.0.0.1:8000/admin/pipeline_admin/disciplineidea/ff0417ac-943f-4789-8aa8-ca7a38aa6c93/change/"
+  },
+  {
+    "position": 15,
+    "slug": "learn-04",
+    "title": "Красиво объяснил. А почему так?",
+    "url": "http://127.0.0.1:8000/admin/pipeline_admin/disciplineidea/da0dbcfb-bece-4f5a-b8d4-d39be6d56a44/change/"
+  },
+  {
+    "position": 16,
+    "slug": "old-04",
+    "title": "Я ЖДУ, КОГДА СТАНЕТ НЕ СТРАШНО",
+    "url": "http://127.0.0.1:8000/admin/pipeline_admin/disciplineidea/5f9c0995-3554-4d5a-bcf9-1c3bb34e6d92/change/"
+  },
+  {
+    "position": 17,
+    "slug": "new-05",
+    "title": "Чужой десятый год. Мои двадцать минут.",
+    "url": "http://127.0.0.1:8000/admin/pipeline_admin/disciplineidea/5f36f33c-010a-4f97-afa9-8b23b838b8ac/change/"
+  },
+  {
+    "position": 18,
+    "slug": "famous-05",
+    "title": "Письмо, которое изменило план Дарвина",
+    "url": "http://127.0.0.1:8000/admin/pipeline_admin/disciplineidea/c0ae8c28-10ab-46c3-b66c-f831e353749a/change/"
+  },
+  {
+    "position": 19,
+    "slug": "learn-05",
+    "title": "Правило помню. Где его применять?",
+    "url": "http://127.0.0.1:8000/admin/pipeline_admin/disciplineidea/05e414ec-69b1-4211-b19f-4494c8651cf0/change/"
+  },
+  {
+    "position": 20,
+    "slug": "old-05",
+    "title": "Я БОЛЬШЕ НЕ ВЕРЮ СВОЕМУ «С ПОНЕДЕЛЬНИКА»",
+    "url": "http://127.0.0.1:8000/admin/pipeline_admin/disciplineidea/30017cfc-7541-48ac-8af6-abb5a0379cd3/change/"
+  },
+  {
+    "position": 21,
+    "slug": "new-06",
+    "title": "Я устал от списка, к которому не приступал",
+    "url": "http://127.0.0.1:8000/admin/pipeline_admin/disciplineidea/ad7a0a44-de03-4836-8f4b-eed7a16a648c/change/"
+  },
+  {
+    "position": 22,
+    "slug": "famous-06",
+    "title": "Даже Леонардо оставил незавершённое",
+    "url": "http://127.0.0.1:8000/admin/pipeline_admin/disciplineidea/07cf18b2-342a-46bf-a2bb-532058f99790/change/"
+  },
+  {
+    "position": 23,
+    "slug": "learn-06",
+    "title": "Конспект красивый. Связи потерялись",
+    "url": "http://127.0.0.1:8000/admin/pipeline_admin/disciplineidea/52e5b209-0554-48bf-8b05-a20e4ef15f3c/change/"
+  },
+  {
+    "position": 24,
+    "slug": "old-06",
+    "title": "МОИ ЛУЧШИЕ ЧАСЫ ДОСТАЮТСЯ ВСЕМ ПОДРЯД",
+    "url": "http://127.0.0.1:8000/admin/pipeline_admin/disciplineidea/94dc5783-7adb-496d-898d-1d42ebd7e33e/change/"
+  },
+  {
+    "position": 25,
+    "slug": "new-07",
+    "title": "Спросить стыднее, чем бросить",
+    "url": "http://127.0.0.1:8000/admin/pipeline_admin/disciplineidea/6b281a34-a80f-4d21-9f1c-0f2c638f07f0/change/"
+  },
+  {
+    "position": 26,
+    "slug": "famous-07",
+    "title": "Начать в двадцать семь",
+    "url": "http://127.0.0.1:8000/admin/pipeline_admin/disciplineidea/5866ed41-de2f-459c-8a4b-2250015f336b/change/"
+  },
+  {
+    "position": 27,
+    "slug": "learn-07",
+    "title": "Без подсказки не могу. Значит, тупой?",
+    "url": "http://127.0.0.1:8000/admin/pipeline_admin/disciplineidea/f2918e11-6951-4e6f-aca6-14d4f2df3a9f/change/"
+  },
+  {
+    "position": 28,
+    "slug": "old-07",
+    "title": "ВДРУГ Я ПРОСТО ЗРЯ ТРАЧУ ВРЕМЯ?",
+    "url": "http://127.0.0.1:8000/admin/pipeline_admin/disciplineidea/95c4ec35-a0b4-4eb6-a494-a8bb5325afb9/change/"
+  },
+  {
+    "position": 29,
+    "slug": "new-08",
+    "title": "Покупаю новый курс на месте трудного урока",
+    "url": "http://127.0.0.1:8000/admin/pipeline_admin/disciplineidea/1744cbc4-d00d-43e6-95f1-77eadf211387/change/"
+  },
+  {
+    "position": 30,
+    "slug": "famous-08",
+    "title": "Писать до первого «мама»",
+    "url": "http://127.0.0.1:8000/admin/pipeline_admin/disciplineidea/3084be0d-9cb1-4834-a522-0098f1fc864f/change/"
+  },
+  {
+    "position": 31,
+    "slug": "learn-08",
+    "title": "Опять та же ошибка. Я же её исправил",
+    "url": "http://127.0.0.1:8000/admin/pipeline_admin/disciplineidea/64bbbaa7-9777-4ddf-8748-e1ce54505c0d/change/"
+  },
+  {
+    "position": 32,
+    "slug": "old-08",
+    "title": "Я КАЖДЫЙ ГОД НАЧИНАЮ ОДИН И ТОТ ЖЕ ГОД",
+    "url": "http://127.0.0.1:8000/admin/pipeline_admin/disciplineidea/73fd6004-3cfe-4fbb-822b-a9d31b42bd66/change/"
+  },
+  {
+    "position": 33,
+    "slug": "new-09",
+    "title": "Если никто не похвалил, я зря старался?",
+    "url": "http://127.0.0.1:8000/admin/pipeline_admin/disciplineidea/58375743-e11c-4669-888a-5cbc295733bc/change/"
+  },
+  {
+    "position": 34,
+    "slug": "famous-09",
+    "title": "Скучный день Мураками",
+    "url": "http://127.0.0.1:8000/admin/pipeline_admin/disciplineidea/624b957f-2dc6-4dab-8731-80ca2c225ec7/change/"
+  },
+  {
+    "position": 35,
+    "slug": "learn-09",
+    "title": "Сижу третий час. Учусь ли я?",
+    "url": "http://127.0.0.1:8000/admin/pipeline_admin/disciplineidea/3ff17815-8f67-4eb6-9574-10cdc429ba28/change/"
+  },
+  {
+    "position": 36,
+    "slug": "old-09",
+    "title": "МОЯ МЕЧТА ПОКА НИКОГО НЕ РАЗОЧАРОВАЛА",
+    "url": "http://127.0.0.1:8000/admin/pipeline_admin/disciplineidea/0a20c120-f3e2-451b-9ebf-f9615fb012ed/change/"
+  },
+  {
+    "position": 37,
+    "slug": "new-10",
+    "title": "Я могу учиться только когда меня никто не видит",
+    "url": "http://127.0.0.1:8000/admin/pipeline_admin/disciplineidea/c542d3ea-8c50-4364-b45e-e293228238e4/change/"
+  },
+  {
+    "position": 38,
+    "slug": "famous-10",
+    "title": "Байлз остановилась в Токио. Что было дальше?",
+    "url": "http://127.0.0.1:8000/admin/pipeline_admin/disciplineidea/cc30f384-ac4f-41a8-92ea-f827ba04e326/change/"
+  },
+  {
+    "position": 39,
+    "slug": "learn-10",
+    "title": "Готовлюсь к разговору. Всё время молча",
+    "url": "http://127.0.0.1:8000/admin/pipeline_admin/disciplineidea/7f36dddb-601d-43be-a6f6-faf90941e499/change/"
+  },
+  {
+    "position": 40,
+    "slug": "old-10",
+    "title": "Я ДИСЦИПЛИНИРОВАННО ИДУ НЕ ТУДА",
+    "url": "http://127.0.0.1:8000/admin/pipeline_admin/disciplineidea/8d062c23-e427-4325-8cc7-c3a339a5886b/change/"
+  }
+]

@@ -222,6 +222,7 @@ _NEW_GENERATION_STALE_KEYS = (
     "social_descriptions_pending",
     "final_social_descriptions_triggered_at",
     "advertising_queue_product_id",
+    "discipline_queue_idea_id",
     "advertising_product_paths",
     "story_character_references",
     "story_character_bible",

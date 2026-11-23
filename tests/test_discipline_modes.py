@@ -276,3 +276,29 @@ def test_narrative_cast_requires_approved_reference(tmp_path):
              'scenes_plan':[{'characters':[]}],handler.STORY_CHARACTER_REFERENCES_SESSION_KEY:{}}
     with pytest.raises(ValueError,match='референс'):
         handler._attach_story_character_references(session)
+
+
+@pytest.mark.parametrize('mode', list(modes.SHORT_FORMATS))
+def test_short_plans_preserve_four_second_clips_and_no_forced_camera(monkeypatch,mode):
+    from app.discipline_craft import MOTION_RULES
+    captured=[]
+    def generator(prompt,**kwargs):
+        captured.append(prompt)
+        return json.dumps({'scenes':[{'visual':'Вася закрывает книгу.','camera_direction':'orbit shot','location_transition':True}]})
+    monkeypatch.setattr(story_generation,'gemini_generate_sync',generator)
+    plan=story_generation.generate_story_scene_plan(source_story='Закрыть книгу, вспомнить и сверить.',
+        voiceover_text='Вася закрывает книгу. Потом вспоминает и сверяет.',duration_sec=12.4,
+        alignment={},project_slug='discipline',discipline_mode=mode,
+        project_characters=[{'id':'vasily','description':'Вася'},{'id':'knopka','description':'Кнопка'}])['json_plan']
+    assert all(row['duration_sec']>=4 for row in plan)
+    assert all(row['camera_direction']=='locked-off camera' for row in plan)
+    assert sum(row['timeline_duration_sec'] for row in plan)==pytest.approx(12.4)
+    assert 'Не повторяй одно и то же движение камеры' not in captured[0]
+    result=story_generation.generate_story_production(scenes_plan=plan)['json_plan']
+    assert all(MOTION_RULES in row['video_prompt'] for row in result)
+    if mode==modes.LEARNING:
+        assert 'подсказ' in modes.script_direction(mode)
+        assert 'источник' in modes.script_direction(mode)
+    if mode==modes.TWO_LIVES:
+        assert 'Время сверху и снизу может расходиться' in captured[0]
+        assert all(not row['location_transition'] for row in plan)

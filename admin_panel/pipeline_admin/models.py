@@ -551,3 +551,50 @@ class SceneVideoCandidate(models.Model):
 
     def __str__(self) -> str:
         return f"{self.language}: {self.candidate_id}"
+
+
+class DisciplineQueueSchedule(models.Model):
+    id = models.IntegerField(primary_key=True, default=1)
+    enabled = models.BooleanField("Включена", default=True)
+    next_run_at = models.DateTimeField("Следующая распаковка", help_text="Раз в два дня. Время отображается в часовом поясе админки.")
+    class Meta:
+        managed = False
+        db_table = "discipline_queue_schedule"
+        verbose_name = "Расписание Дисциплины"
+        verbose_name_plural = "Расписание Дисциплины"
+    def __str__(self):
+        return "Утренняя распаковка каждые два дня"
+
+
+class DisciplineIdea(models.Model):
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4)
+    slug = models.SlugField("Ключ", max_length=100, unique=True)
+    title = models.TextField("Название")
+    position = models.PositiveIntegerField("Порядок", default=0)
+    mode = models.CharField("Режим", max_length=64)
+    series = models.TextField("Серия", default="", blank=True)
+    episode = models.PositiveIntegerField("Выпуск", default=0)
+    script = models.TextField("Текст озвучки")
+    direction = models.TextField("Сценарий видеоряда")
+    review_plan = models.TextField("Приёмы, источники и план проверки", default="", blank=True)
+    problem = models.TextField("Проблема зрителя")
+    hook = models.TextField("Первые две секунды")
+    payoff = models.TextField("Развязка и польза")
+    sources = LenientJSONField("Источники и референсы", default=list, blank=True)
+    status = models.CharField("Статус", max_length=32, default="pending", choices=[
+        ("pending", "В очереди"), ("ready", "Ожидает доставки"), ("offered", "Идея на согласовании"),
+        ("in_progress", "Совместная генерация"), ("paused", "Генерация прервана"), ("deferred", "На следующую распаковку"),
+        ("completed", "Готово"), ("skipped", "Отклонено")])
+    offered_at = models.DateTimeField("Предложена", null=True, blank=True)
+    completed_at = models.DateTimeField("Завершена", null=True, blank=True)
+    run_id = models.CharField(max_length=64, null=True, blank=True)
+    delivery_index = models.IntegerField(default=0)
+    created_at = models.DateTimeField(auto_now_add=True)
+    class Meta:
+        managed = False
+        db_table = "discipline_ideas"
+        ordering = ("position", "created_at", "id")
+        verbose_name = "Сценарий Дисциплины"
+        verbose_name_plural = "Дисциплина · очередь сценариев"
+    def __str__(self):
+        return self.title

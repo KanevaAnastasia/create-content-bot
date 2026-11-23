@@ -51,14 +51,9 @@ def test_discipline_workspace_uses_owner_project_voice_and_story_mode(monkeypatc
     assert session["project_voice_id"] == "EvnFqTSGPvDU3JBwJbCC"
     assert session["force_story_mode"] is True
     rows = [[button.text for button in row] for row in guest_main_menu_markup(session).keyboard]
-    assert rows == [
-        ["Добавить персонажа"],
-        ["Основной персонаж"],
-        ["Создать ролик-историю"],
-        ["Создать визуализацию"],
-        ["Сохранить черновик"],
-        ["В начало"],
-    ]
+    from app.project_modes import project_mode_rows
+    assert rows == [["Добавить персонажа"], ["Основной персонаж"]] + project_mode_rows('discipline') + [
+        ["Сохранить черновик"], ["В начало"]]
     engine.dispose()
 
 
