@@ -2101,7 +2101,7 @@ def _story_character_reference_prompt(
         style = story_visual_style_config(story_visual_style)
         return (
             f"Создай референс одного сюжетного предмета: {character.get('display_name')}. "
-            f"Стиль {style['label']}: {style['prompt']}. "
+            f"Стиль {style['label']}: {style.get('prop_prompt', style['prompt'])}. "
             "На нейтральном фоне покажи предмет целиком и один дополнительный ракурс. "
             "Без людей, лиц, рук, окружения, надписей и логотипов. Форма и масштаб предмета едины. "
             f"Описание: {character.get('description')}. {character.get('reference_prompt')}. "
@@ -2128,6 +2128,7 @@ def _story_character_reference_prompt(
         "Покажи одного и того же персонажа дважды: крупный портрет лица и фигуру в полный рост в нейтральной позе. "
         + style_clause
         +
+        f"Изображаемый человек: {character.get('display_name')}. Сохрани его индивидуальные черты лица и возраст из описания, не заменяй типовым красивым лицом. "
         "Исторически точная одежда и причёска; лицо чёткое и пригодно как референс для следующих кадров. "
         "Не добавляй других людей, животных, предметы в руках или сюжетное действие. "
         "Если приложен референс другой возрастной версии, это строго тот же человек: сохрани геометрию лица, глаза, "
@@ -2155,6 +2156,15 @@ async def _generate_story_character_reference(
     index: int,
     feedback: str = "",
 ) -> bool:
+    if session.get("discipline_narrative_mode") == "lives_archive":
+        from ..story_generation import validate_historical_cast
+        validate_historical_cast(session.get(STORY_CHARACTER_BIBLE_SESSION_KEY) or [])
+        from ..historical_people import validate_story_people
+        validate_story_people(
+            str(session.get(STORY_VOICEOVER_SESSION_KEY) or ""),
+            session.get(STORY_CHARACTER_BIBLE_SESSION_KEY) or [],
+            session.get("scenes_plan") or [],
+        )
     characters = _required_story_characters(session)
     if index < 0 or index >= len(characters):
         return False
@@ -2199,7 +2209,7 @@ async def _generate_story_character_reference(
                 story_visual_style=str(session.get(STORY_VISUAL_STYLE_SESSION_KEY) or ""),
                 feedback=feedback,
                 has_project_style_reference=bool(primary_style_refs),
-            ) + (" Первый приложенный референс задаёт личность исполнителя: сохрани лицо и узнаваемые черты, адаптируй материал и костюм к выбранной стилистике. " if identity_refs else ""),
+            ) + (" Первый приложенный референс задаёт личность исполнителя: сохрани узнаваемые индивидуальные черты, но пропорции головы, глаз и тела, степень карикатурности и материал полностью возьми из выбранной стилистики. Фотография не задаёт реализм или анатомические пропорции результата. " if identity_refs else ""),
             reference_images=references or None,
             aspect_ratio="9:16",
         )

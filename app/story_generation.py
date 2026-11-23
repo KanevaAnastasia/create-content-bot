@@ -1085,15 +1085,26 @@ def _apply_discipline_cast_policy(
         }
 
 
+def validate_historical_cast(characters):
+    """Fail closed on old project-cast sessions before spending on references."""
+    for character in characters:
+        if character.get("entity_type") == "prop":
+            continue
+        identity = str(character.get("display_name") or character.get("id") or "")
+        if re.search(r"Василий|Вася|Анастасия|Кнопка|vasil[iy]|anastasia|knopka", identity, re.I):
+            raise ValueError("В исторической серии нужны сами реальные люди, а не исполнители из проекта. Обновите состав истории.")
+
+
 def enforce_discipline_narrative_cast(scenes, project_characters):
-    """Bind narrative heroes to approved project IDs, never invented model aliases."""
+    """Bind scenes to their own historical bible or to the regular project cast."""
     historical = [scene for scene in scenes if scene.get(MODE_KEY) == ARCHIVE]
     if historical:
+        validate_historical_cast(project_characters)
         known = {str(c["id"]): c for c in project_characters}
         for scene in historical:
             ids = [str(v) for v in scene.get("characters") or []]
             if any(i not in known for i in ids):
-                raise ValueError("Историческая сцена содержит неизвестного исполнителя. Используйте утверждённые character_id проекта.")
+                raise ValueError("Историческая сцена содержит неизвестного исполнителя. Укажите character_id реального человека из библии этой истории.")
             scene["characters"] = ids
             scene["story_character_descriptions"] = {i: known[i].get("description", "") for i in ids}
             scene["story_character_labels"] = {i: known[i].get("display_name", "") for i in ids}
@@ -1522,7 +1533,9 @@ def generate_story_scene_plan(
         else {}
     )
     grandma_project = normalized_project_slug in {"grandma_kitchen", "grandma_cat_cooking"}
-    fixed_project_characters = _normalize_story_character_bible(project_characters or [])
+    fixed_project_characters = _normalize_story_character_bible(
+        [] if narrative_format == ARCHIVE else (project_characters or [])
+    )
     fixed_character_ids = {item["id"] for item in fixed_project_characters}
     requested_primary_id = _story_character_id(primary_character_id)
     primary_ids = [item["id"] for item in fixed_project_characters if item.get("is_primary")]
@@ -1532,7 +1545,7 @@ def generate_story_scene_plan(
     discipline_anastasia_id = (
         _discipline_anastasia_character_id(fixed_project_characters) if discipline_project else ""
     )
-    legacy_grandma_cast = not fixed_project_characters and not discipline_project
+    legacy_grandma_cast = not fixed_project_characters and not discipline_project and narrative_format != ARCHIVE
     grandma_story = legacy_grandma_cast or grandma_project
     semantic_beats = build_semantic_narration_beats(voiceover_text, duration_sec, alignment)
     windows = (_history_beat_clips(semantic_beats) if narrative_format == ARCHIVE else
@@ -1600,8 +1613,8 @@ def generate_story_scene_plan(
         )
     if narrative_format:
         project_character_direction = visual_direction(narrative_format)
-        project_character_direction += (" Используй точные id исполнителей исторических ролей из project_characters. Василий играет главного героя, Анастасия женскую роль. Кнопку не добавляй автоматически. Лица остаются утверждёнными, меняются только согласованные костюмы эпохи." if narrative_format == ARCHIVE else " Используй только точные id Василия и Кнопки из project_characters, не придумывай им новые id.")
-    if short_format:
+        project_character_direction += (" Показывай самих реальных людей из исходной истории, а не персонажей проекта в их ролях. Создай для каждого собственный id и полное настоящее имя в display_name. В description и reference_prompt укажи полное имя, возраст на момент событий, узнаваемые черты реального лица, волосы и одежду эпохи. Стилизуй внешность, сохраняя сходство; не делай фотореализм. Не используй Василия, Анастасию или Кнопку. Каждый используемый образ сначала утверждает пользователь." if narrative_format == ARCHIVE else " Используй только точные id Василия и Кнопки из project_characters, не придумывай им новые id.")
+    if short_format and narrative_format != ARCHIVE:
         project_character_direction += " В этих выпусках весь актёрский состав ограничен project_characters."
     if continuous:
         project_character_direction += " Начни с Василия и Кнопки вместе и держи их в одной декорации до конца."
@@ -1712,12 +1725,15 @@ def generate_story_scene_plan(
     generated_character_bible = _normalize_story_character_bible(data.get("characters"))
     character_bible = [*fixed_project_characters]
     if narrative_format == ARCHIVE:
-        generated_by_id = {c["id"]: c for c in generated_character_bible}
-        for character in character_bible:
-            planned = generated_by_id.get(character["id"])
-            if planned:
-                character["reference_prompt"] = planned["reference_prompt"]
-    if not short_format:
+        # Historical people have their own identities. Never inherit project portraits.
+        project_ids = {str(c.get("id")) for c in project_characters or []}
+        for character in generated_character_bible:
+            if character["id"] in project_ids:
+                raise ValueError("Исторический герой не может использовать id персонажа проекта.")
+            character["asset_uri"] = ""
+        validate_historical_cast(generated_character_bible)
+        character_bible = generated_character_bible
+    elif not short_format:
         character_bible.extend(item for item in generated_character_bible if item["id"] not in fixed_character_ids)
     props = _normalize_story_character_bible(data.get("props"))
     if len(props) > 3 or any(not p["id"].startswith("prop_") for p in props):
@@ -1754,7 +1770,7 @@ def generate_story_scene_plan(
         if narrative_format == ARCHIVE and not chars and not str(candidate.get("characters_absent_reason") or "").strip():
             raise ValueError("В историческом кадре отсутствуют исполнители. Укажите character_id героя или объясните предметный план в characters_absent_reason.")
         if narrative_format == ARCHIVE and any(item not in character_ids for item in chars):
-            raise ValueError("Историческая сцена содержит неизвестного исполнителя. Используйте утверждённые character_id проекта.")
+            raise ValueError("Историческая сцена содержит неизвестного исполнителя. Укажите character_id реального человека из библии этой истории.")
         chars = [
             item
             for item in chars
@@ -1898,7 +1914,7 @@ def generate_story_scene_plan(
         )
         final_scene["visualization_output_policy"] = dict(visualization_output_policy)
     if narrative_format:
-        enforce_discipline_narrative_cast(normalized, fixed_project_characters)
+        enforce_discipline_narrative_cast(normalized, character_bible if narrative_format == ARCHIVE else fixed_project_characters)
     if discipline_project and not narrative_format:
         present_scenes = [item for item in normalized if str(item.get("time_period") or "present") == "present"]
         first_person_scenes = [
@@ -2033,12 +2049,9 @@ def generate_story_scene_plan(
             or (not str(character.get("asset_uri") or "").strip()
                 and (character_usage.get(character_id, 0) >= 2 or len(group_members.get(group, set())) >= 2))
         )
-    if narrative_format == ARCHIVE and re.search(r"Кинг|Кэрри", source_story, re.I) and re.search(r"Табит", source_story, re.I):
-        used = {key for scene in normalized for key in scene["characters"]}
-        female = _discipline_anastasia_character_id(fixed_project_characters)
-        male = next((c["id"] for c in fixed_project_characters if str(c.get("display_name") or "").casefold() in {"василий", "вася", "vasily", "vasiliy"} or c["id"].casefold() in {"vasily", "vasiliy", "discipline_vasily"}), "")
-        if not male or not female or not {male, female}.issubset(used):
-            raise ValueError("В истории Кинга должны действовать оба утверждённых исполнителя: Кинг и Табита. Дополните состав сцен до генерации референсов.")
+    if narrative_format == ARCHIVE:
+        from .historical_people import validate_story_people
+        validate_story_people(source_story, character_bible, normalized)
     raw_props = {str(item.get("id") or ""): item for item in data.get("props") or [] if isinstance(item, dict)}
     minor_prop = re.compile(r"\b(?:кружк\w*|чашк\w*|стол(?:а|у|ом|е|ы|ов)?|комнат\w*|карандаш\w*|стул\w*|cups?|mugs?|tables?|desks?|rooms?|pencils?|chairs?)\b", re.I)
     for prop in props:

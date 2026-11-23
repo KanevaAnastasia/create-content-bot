@@ -38,10 +38,10 @@ def test_history_style_choice_preserves_accepted_text_without_model(monkeypatch,
     assert g.story_visual_style_config(key)['reference_path']==''
 
 
-def test_history_cast_keeps_female_actor_without_forcing_cat():
-    scenes=[{m.MODE_KEY:m.ARCHIVE,'characters':['anastasia']}, {m.MODE_KEY:m.ARCHIVE,'characters':[]}]
-    g.enforce_discipline_narrative_cast(scenes,[{'id':'anastasia','description':'героиня'}])
-    assert scenes[0]['characters']==['anastasia']
+def test_history_cast_keeps_real_person_without_forcing_cat():
+    scenes=[{m.MODE_KEY:m.ARCHIVE,'characters':['tabitha_king']}, {m.MODE_KEY:m.ARCHIVE,'characters':[]}]
+    g.enforce_discipline_narrative_cast(scenes,[{'id':'tabitha_king','description':'героиня'}])
+    assert scenes[0]['characters']==['tabitha_king']
     assert scenes[1]['characters']==[]
 
 
@@ -49,7 +49,7 @@ def test_history_style_duration_camera_survive_scene_and_production(monkeypatch)
     prompts=[]
     def generator(prompt,**kwargs):
         prompts.append(prompt)
-        return json.dumps({'scenes':[{'characters':['anastasia'],'visual':'Табита читает лист.',
+        return json.dumps({'characters':[{'id':'tabitha_king','display_name':'Табита Кинг','description':'Молодая Табита Кинг'}], 'scenes':[{'characters':['tabitha_king'],'visual':'Табита читает лист.',
                          'camera_direction':'locked-off camera'}]})
     monkeypatch.setattr(g,'gemini_generate_sync',generator)
     plan=g.generate_story_scene_plan(source_story='Табита читает лист.',voiceover_text='Табита читает лист.',
@@ -58,7 +58,7 @@ def test_history_style_duration_camera_survive_scene_and_production(monkeypatch)
     assert len(plan)==1
     assert plan[0]['duration_sec']==7
     assert plan[0]['story_visual_style_key']=='history_comic'
-    assert plan[0]['characters']==['anastasia']
+    assert plan[0]['characters']==['tabitha_king']
     out=g.generate_story_production(scenes_plan=plan)['json_plan'][0]
     assert plan[0]['camera_direction']=='locked-off camera'
     assert out['camera_direction']=='locked-off camera'
@@ -81,7 +81,7 @@ def test_semantic_clips_have_no_lost_time_and_at_most_one_second_trim(ends):
 
 
 def test_history_rejects_unknown_actor_instead_of_losing_reference():
-    with pytest.raises(ValueError, match="исполнителя"):
+    with pytest.raises(ValueError, match="реальные люди"):
         g.enforce_discipline_narrative_cast([{m.MODE_KEY:m.ARCHIVE,'characters':['stephen_king']}],[{'id':'vasily'}])
 
 def test_history_direction_does_not_force_cat_or_flat_animation():

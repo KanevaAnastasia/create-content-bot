@@ -691,6 +691,16 @@ async def _send_next_scene_media_step(update: Update, session: dict) -> None:
     )
 
 
+def _has_selected_visual_style(prompt: str) -> bool:
+    if "Only the user-selected visual style applies" in prompt:
+        return True
+    from ..story_generation import STORY_VISUAL_STYLES
+    low = prompt.casefold()
+    return any(str(style.get("prompt") or "").strip()
+               and str(style["prompt"]).casefold() in low
+               for style in STORY_VISUAL_STYLES.values())
+
+
 def _soften_generation_prompt(prompt: str) -> str:
     """
     Смягчает промпт для фолбэка при отказе генератора (safety/policy/validation).
@@ -700,9 +710,14 @@ def _soften_generation_prompt(prompt: str) -> str:
     p = re.sub(r"\b(blood|gore|weapon|violence|nude|nsfw)\b", "", p, flags=re.IGNORECASE)
     p = re.sub(r"\s+", " ", p).strip(" ,.;")
     suffix = (
-        " Family-friendly cooking scene, non-violent, fully clothed, no brands, no logos, no text overlay, "
-        "neutral expression, safe domestic environment, photorealistic details."
+        " Non-violent, fully clothed, no brands, no logos, no text overlay, "
+        "Preserve the original artistic style, scene setting, character identity and framing."
     )
+    if not _has_selected_visual_style(prompt):
+        suffix = (
+            " Family-friendly cooking scene, non-violent, fully clothed, no brands, no logos, no text overlay, "
+            "neutral expression, safe domestic environment, photorealistic details."
+        )
     return f"{p}.{suffix}"
 
 
@@ -726,6 +741,8 @@ def _should_soften_image_prompt_after_error(e: Exception) -> bool:
 
 def _append_pixar_reference_style_phrase(prompt: str) -> str:
     text = (prompt or "").strip()
+    if _has_selected_visual_style(text):
+        return re.sub(re.escape(PIXAR_REFERENCE_STYLE_PHRASE), "", text, flags=re.IGNORECASE).strip()
     historical_watercolor_markers = (
         "dry-watercolor",
         "dry watercolor",
@@ -779,6 +796,7 @@ async def _generate_image_with_lenient_fallback_result(
     else:
         imgs = []
     ref_kw = imgs if imgs else None
+    # Keep the legacy project default only when no separate style was selected.
     prompt = _append_pixar_reference_style_phrase(prompt)
     def _result_call(text: str):
         kwargs = {"reference_images": ref_kw, "model": model}
@@ -923,6 +941,14 @@ def _append_scene_identity_to_image_prompt(
     scene_model = str(scene.get("model") or "").strip().lower()
     silence_scene = scene_generation_mode == "silence" or scene_model.startswith("kling")
     story_scene = scene_generation_mode == "story"
+    if story_scene and scene.get("story_visual_style_key"):
+        from ..story_generation import story_visual_style_config, story_style_uses_character_references_only
+        if not story_style_uses_character_references_only(scene["story_visual_style_key"]):
+            selected_style = story_visual_style_config(scene["story_visual_style_key"])
+            text = re.sub(re.escape(PIXAR_REFERENCE_STYLE_PHRASE), "", text, flags=re.IGNORECASE).strip()
+            text += ("\nOnly the user-selected visual style applies to every character, prop and background: "
+                     + selected_style["prompt"]
+                     + " Do not blend in the project's default style. Identity photos supply likeness only, not rendering style.")
     if silence_scene:
         allow_grandma_face_crop_rule = False
         text = re.sub(
