@@ -6,7 +6,7 @@
 
 from __future__ import annotations
 
-from .grandma_editorial import GRANDMA_STORY_RULES, GRANDMA_OBSERVED_EXAMPLES
+from .grandma_editorial import GRANDMA_STORY_RULES, GRANDMA_OBSERVED_EXAMPLES, GRANDMA_RETENTION_REVIEW_RULES
 
 import asyncio
 import json
@@ -291,7 +291,7 @@ def build_viral_concept_brief_prompt(
         "analytics_feedback": analytics_feedback or {},
     }
     return (
-        GRANDMA_STORY_RULES + GRANDMA_OBSERVED_EXAMPLES + "Ты сценарный редактор уютного food/cartoon-блога с бабушкой, котом и домашними рецептами.\n"
+        GRANDMA_STORY_RULES + GRANDMA_OBSERVED_EXAMPLES + GRANDMA_RETENTION_REVIEW_RULES + "Ты сценарный редактор уютного food/cartoon-блога с бабушкой, котом и домашними рецептами.\n"
         "Нужно подготовить Viral Concept Brief ДО генерации сцен: ролик должен удерживать внимание, "
         "но не превращаться в агрессивный кликбейт.\n\n"
         "Стиль: уют, бабушка, кот, домашняя еда, семейность, тепло, мультяшность, аппетитность. "
@@ -325,7 +325,8 @@ def build_viral_concept_brief_prompt(
         "grandma_shows_dish, cat_smells, unexpected_phrase, before_after, secret_tease.\n"
         "payoff_type выбери одно значение из: cut, spoon, crunch, cheese_pull, grandma_taste_smile, cat_reaction, "
         "final_plating, family_table, save_cta.\n"
-        "hooks должен быть объектом: emotional 3 шт, intrigue 3 шт, useful 2 шт, cliffhanger 2 шт.\n"
+        "hooks: emotional, intrigue, useful, cliffhanger; только содержательные варианты по рецепту, пустая группа допустима.\n"
+        "Также верни attention_technique_audit, camera_technique_audit и editorial_review по правилам выше.\n"
         "final_phrases: ровно 3 финальные фразы.\n"
         "analysis должен содержать оценки 1-10: hook_strength, first_frame_strength, retention_score, "
         "visual_payoff_score, emotional_warmth_score, recipe_clarity_score, saveability_score, "
@@ -509,8 +510,9 @@ def build_scenes_plan_prompt(payload: dict[str, Any]) -> str:
     else:
         scene_range_text = "3–6 сцен"
     return (
-        GRANDMA_STORY_RULES + GRANDMA_OBSERVED_EXAMPLES + f"Ты режиссер вирусного кулинарного Shorts. По ПОЛНОМУ тексту рецепта ниже построй сценарий: {scene_range_text}.\n"
+        GRANDMA_STORY_RULES + GRANDMA_OBSERVED_EXAMPLES + GRANDMA_RETENTION_REVIEW_RULES + f"Ты режиссер вирусного кулинарного Shorts. По ПОЛНОМУ тексту рецепта ниже построй сценарий: {scene_range_text}.\n"
         "Return ONLY valid JSON array of scenes. No markdown.\n"
+        "Для этого ответа аудит каталогов выполняй внутренне с учётом brief; не добавляй объект аудита вне массива. В каждом объекте сцены обязательно сохрани camera_design.\n"
         f"КРИТИЧЕСКОЕ ПРАВИЛО: {scene_range_text}; по порядку покрой весь рецепт от подготовки/старта до подачи; "
         "не выдумывай другое блюдо и не опускай ключевые этапы из текста рецепта.\n"
         "GENERATION COMMENT: если payload.generation_comment непустой, это обязательная правка ко всему ролику; "
@@ -548,6 +550,7 @@ def build_scenes_plan_prompt(payload: dict[str, Any]) -> str:
         "В КАЖДОЙ обычной сцене явно укажи characters с `grandma` и `cat`: бабушка и ровно один рыжий кот всегда видны в кадре. "
         "Исключение только если пользователь явно просит первый кадр без бабушки/кота, например только говорящие фрукты. Поле location НЕ добавляй.\n"
         "FAMILY CAST RULE: смотри payload.viral_concept_brief.dish_audience_type и family_cast_plan.\n"
+        "Явный состав в family_cast_plan и правки пользователя важнее автоматической категории блюда. Если только бабушка и кот, никого не добавляй даже при child/male.\n"
         "- Если dish_audience_type=child, в сцене 1 и в последней сцене добавь ровно одного из персонажей grandchild: `grandson` ИЛИ `granddaughter`; "
         "выбери одного и держи его консистентно в обеих сценах. В промежуточных сценах этого персонажа не добавляй, если пользователь прямо не просил.\n"
         "- Если dish_audience_type=male, в сцене 1 и в последней сцене добавь `grandfather`. В промежуточных сценах дедушки быть не должно, если пользователь прямо не просил.\n"

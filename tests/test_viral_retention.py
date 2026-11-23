@@ -7,7 +7,7 @@ from app.viral_retention import (
 )
 
 
-def test_normalize_viral_concept_brief_fills_required_hooks_and_scores() -> None:
+def test_normalize_viral_concept_brief_preserves_real_hooks_and_clamps_scores() -> None:
     brief = normalize_viral_concept_brief(
         {
             "main_hook": "В конце покажу разрез",
@@ -20,11 +20,9 @@ def test_normalize_viral_concept_brief_fills_required_hooks_and_scores() -> None
     )
 
     hooks = brief["hooks"]
-    assert len(hooks["emotional"]) >= 3
-    assert len(hooks["intrigue"]) >= 3
-    assert len(hooks["useful"]) >= 2
-    assert len(hooks["cliffhanger"]) >= 2
-    assert len(flatten_hooks(hooks)) >= 10
+    assert hooks["emotional"] == ["домашнее тепло"]
+    assert hooks["intrigue"] == []
+    assert flatten_hooks(hooks) == ["домашнее тепло"]
     assert brief["analysis"]["hook_strength"] == 10
     assert brief["analysis"]["risk_of_boring_scene"] == 1
     assert brief["dish_audience_type"] == "neutral"
@@ -32,9 +30,10 @@ def test_normalize_viral_concept_brief_fills_required_hooks_and_scores() -> None
     assert brief["first_scene_dialogue_hint"] is False
 
 
-def test_normalize_hooks_fallback_has_minimum_ten() -> None:
+def test_normalize_hooks_does_not_invent_filler() -> None:
     hooks = normalize_hooks({}, "сырники")
-    assert len(flatten_hooks(hooks)) >= 10
+    assert flatten_hooks(hooks) == []
+    assert normalize_viral_concept_brief({}, concept="сырники")["needs_editorial_review"] is True
 
 
 def test_enrich_scenes_with_retention_marks_hook_and_payoff() -> None:
@@ -111,3 +110,13 @@ def test_normalize_viral_concept_brief_preserves_family_cast_fields() -> None:
     assert brief["dish_audience_type"] == "child"
     assert "внука" in brief["family_cast_plan"].lower()
     assert brief["first_scene_dialogue_hint"] is True
+
+
+def test_normalize_preserves_twenty_technique_audit_without_polluting_hooks():
+    from app.discipline_craft import TECHNIQUES
+    audit = [{"technique": name, "applied": False, "evidence": "Не требуется сюжетом"} for name in TECHNIQUES["attention"]]
+    brief = normalize_viral_concept_brief({"main_hook": "Десерт в мандарине", "hooks": {"intrigue": ["Мандарины едят ложкой."]}, "attention_technique_audit": audit, "editorial_review": {"opening_question": "Что внутри?"}}, concept="Рецепт пользователя")
+    assert brief["attention_technique_audit"] == audit
+    assert len(audit) == 20
+    assert flatten_hooks(brief["hooks"]) == ["Мандарины едят ложкой."]
+    assert brief["editorial_review"]["opening_question"] == "Что внутри?"

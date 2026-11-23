@@ -2066,6 +2066,10 @@ async def _continue_after_recipe_approval_plan(
                 sponsored_content=bool(session.get("sponsored_content")),
                 brand_context=session.get("brand_context"),
                 analytics_feedback=session.get("analytics_feedback"),
+                editorial_context={
+                    "series": session.get("series") or {},
+                    "user_direction": direction_for_session(session),
+                },
             ),
         )
         scenes = await _call_with_503_retries(

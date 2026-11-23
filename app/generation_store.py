@@ -27,6 +27,7 @@ SCENE_PROMPT_JSON_KEYS = (
     "prompt_meta_json",
 )
 SCENE_META_SNAPSHOT_KEYS = (
+    "camera_design",
     "single_take",
     "preparation_offscreen",
     "prop_descriptions",

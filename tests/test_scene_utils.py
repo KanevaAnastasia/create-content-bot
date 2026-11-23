@@ -15,6 +15,16 @@ from app.scene_utils import (
 )
 
 
+def test_authored_tasting_does_not_gain_an_extra_plating_action():
+    action = "Бабушка пробует ложечку и улыбается."
+    scenes = normalize_scenes_for_pipeline([
+        {"text": "Мандариновый десерт", "action": "Показывает десерт"},
+        {"text": "Наполняю кожуру", "action": "Наливает смесь"},
+        {"text": "Мм, как вкусно!", "action": action},
+    ])
+    assert scenes[-1]["action"] == action
+
+
 def test_pick_model_variants():
     assert pick_model({"text": "реплика", "has_lipsync": True, "shot_type": "closeup"}) == "veo3_fast"
     assert pick_model({"text": "реплика"}) == "veo3_fast"

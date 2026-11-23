@@ -713,7 +713,8 @@ def test_viral_concept_brief_prompt_contract():
     )
     assert "Viral Concept Brief" in prompt
     assert "first_frame_type" in prompt
-    assert "hooks должен быть объектом" in prompt
+    assert "только содержательные варианты по рецепту" in prompt
+    assert "attention_technique_audit" in prompt
     assert "brand_context" in prompt
     assert "dish_audience_type" in prompt
     assert "family_cast_plan" in prompt
@@ -732,7 +733,8 @@ def test_generate_viral_concept_brief_fallback_on_bad_json(monkeypatch):
         )
     )
     assert out["main_hook"]
-    assert len(out["hooks"]["emotional"]) >= 3
+    assert out["hooks"]["emotional"] == []
+    assert out["needs_editorial_review"] is True
     assert out["dish_audience_type"] == "neutral"
     assert out["first_scene_dialogue_hint"] is False
 
@@ -1823,3 +1825,16 @@ def test_generate_script_composes_full_text_and_scenes(monkeypatch):
     monkeypatch.setattr("app.pipeline.generate_scenes_plan", _fake_scenes)
     out = asyncio.run(generate_script("сырники"))
     assert out["json_plan"][0]["scene"] == 1
+
+
+def test_viral_brief_series_context_reaches_model_and_changes_cache(monkeypatch):
+    prompts = []
+    async def fake_text(prompt):
+        prompts.append(prompt)
+        return json.dumps({'main_hook': 'Мандарины', 'strongest_first_phrase': 'Новогодний десерт', 'strongest_first_frame': 'Десерт крупно'})
+    monkeypatch.setattr(pipeline_llm_steps, 'gemini_text', fake_text)
+    for title in ('Новогодние рецепты', 'Летние рецепты'):
+        asyncio.run(generate_viral_concept_brief('context-cache-test-mandarin', full_recipe_text='Сливки и мандарины', editorial_context={'series': {'title': title}}))
+    assert len(prompts) == 2
+    assert 'Новогодние рецепты' in prompts[0]
+    assert 'Летние рецепты' in prompts[1]

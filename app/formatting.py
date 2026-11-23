@@ -213,6 +213,10 @@ def build_human_readable_plan(scenes: list[dict[str, Any]]) -> str:
             )
         preparation = _display_text(scene.get("preparation_offscreen"))
         preparation_block = f"До начала кадра уже подготовлено:\n{preparation}\n\n" if preparation else ""
+        camera = scene.get("camera_design")
+        camera_block = ""
+        if isinstance(camera, dict) and camera.get("technique"):
+            camera_block = f"Операторский приём: {_display_text(camera['technique'])}\nЗачем: {_display_text(camera.get('purpose'))}\n\n"
         blocks.append(
             f"СЦЕНА {scene_no} [{audience_type}]\n"
             f"Вид/ракурс: {shot}\n"
@@ -225,6 +229,7 @@ def build_human_readable_plan(scenes: list[dict[str, Any]]) -> str:
             "Что происходит:\n"
             f"{action}\n\n"
             f"{preparation_block}"
+            f"{camera_block}"
             f"{tail_block}"
             "Почему эта модель:\n"
             f"{human_model_reason(scene)}\n\n"

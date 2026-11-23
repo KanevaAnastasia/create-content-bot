@@ -64,7 +64,7 @@ from .scene_utils import (
     normalize_recipe_steps,
     normalize_scenes_for_pipeline,
 )
-from .viral_retention import enrich_scenes_with_retention, normalize_viral_concept_brief
+from .viral_retention import enrich_scenes_with_retention, normalize_viral_concept_brief, review_first_phrase
 from .visual_props import append_visual_prop_descriptions
 from .grandma_scene_contract import SINGLE_TAKE_RULE, lock_episode_props, append_episode_prop_locks
 
@@ -1545,6 +1545,7 @@ async def generate_viral_concept_brief(
     sponsored_content: bool = False,
     brand_context: str | None = None,
     analytics_feedback: dict[str, Any] | None = None,
+    editorial_context: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """
     Генерирует Viral Concept Brief перед сценарным планом.
@@ -1558,6 +1559,10 @@ async def generate_viral_concept_brief(
         raise ValueError("Empty concept for viral brief.")
     if not body:
         raise ValueError("Empty full_recipe_text for viral brief.")
+    analytics_feedback = dict(analytics_feedback or {})
+    analytics_feedback["editorial_policy_revision"] = "grandma_retention_2026_11_23"
+    if editorial_context:
+        analytics_feedback["editorial_context"] = editorial_context
     cached = get_viral_concept_brief(
         concept,
         body,
@@ -1798,6 +1803,10 @@ def _apply_family_cast_rules(
         return
     brief = viral_concept_brief if isinstance(viral_concept_brief, dict) else {}
     audience_type = str(brief.get("dish_audience_type") or "neutral").strip().lower()
+    family_plan = str(brief.get("family_cast_plan") or "").lower()
+    explicit_core_cast = bool(re.search(r"только\s+бабушк|без\s+внук|без\s+дополнительных|only\s+grandma", family_plan))
+    if explicit_core_cast:
+        audience_type = "neutral"
     optional_family = set(_scene_optional_family_characters())
     selected_child = _pick_family_child_character(scenes, brief) if audience_type == "child" else ""
     total = len(scenes)
@@ -2664,6 +2673,16 @@ async def generate_scenes_plan(
     _enforce_romantic_subplot_characters(raw_scenes, romantic_subplot)
     if mode in {GENERATION_MODE_NORMAL, GENERATION_MODE_ADVICE}:
         raw_scenes = lock_episode_props(raw_scenes)
+        if raw_scenes and isinstance(viral_concept_brief, dict):
+            viral_concept_brief = dict(viral_concept_brief)
+            viral_concept_brief["strongest_first_phrase"] = str(raw_scenes[0].get("text") or "")
+            viral_concept_brief["first_phrase_review"] = review_first_phrase(viral_concept_brief["strongest_first_phrase"])
+            viral_concept_brief["strongest_first_frame"] = str(raw_scenes[0].get("visual_description") or "")
+            viral_concept_brief["main_visual_payoff"] = str(raw_scenes[-1].get("action") or "")
+            viral_concept_brief["final_phrases"] = [str(raw_scenes[-1].get("text") or "")]
+            viral_concept_brief["series_format"] = f"{len(raw_scenes)} сцен: " + "; ".join(
+                str(scene.get("scene_purpose") or scene.get("action") or "") for scene in raw_scenes
+            )
     out_raw = {
         "text_plan": format_romantic_drama_status(romantic_subplot, raw_scenes)
         + "\n\n"

@@ -131,3 +131,27 @@ def test_close_framing_reaches_plan_image_and_video_without_full_body_conflict()
             assert "fully visible" not in prompt
     assert "Never widen" in HOLIDAY_DIRECTION
     assert "whole tree" in HOLIDAY_DIRECTION
+
+
+def test_retention_and_camera_catalogs_reach_both_planning_prompts():
+    from app.discipline_craft import TECHNIQUES
+    for prompt in (build_viral_concept_brief_prompt(concept='Мандариновый десерт', full_recipe_text='Мандарины, сливки'), build_scenes_plan_prompt({})):
+        for technique in TECHNIQUES['attention'] + TECHNIQUES['camera']:
+            assert technique in prompt
+        assert 'camera_design' in prompt
+        assert 'новогодний стол' in prompt
+        assert 'Неподвижная камера внутри сцены обязательна' in prompt
+
+
+def test_explicit_family_plan_overrides_sweet_dish_classification():
+    from app.pipeline import _apply_family_cast_rules
+    scenes = [{'characters': ['grandma', 'cat', 'grandson']} for _ in range(3)]
+    _apply_family_cast_rules(scenes, viral_concept_brief={'dish_audience_type': 'child', 'family_cast_plan': 'Только бабушка и Тимоша.'})
+    assert all(s['characters'] == ['grandma', 'cat'] for s in scenes)
+
+
+def test_single_take_veo_keeps_face_visible_even_during_silent_action():
+    from app.pipeline import append_veo3_video_framing_constraints
+    out = append_veo3_video_framing_constraints('Grandma lifts a lid.', {'model':'veo3_fast', 'single_take':True, 'characters':['grandma','cat']})
+    assert 'EVERY frame, including silent moments' in out
+    assert 'no face-free inserts or rear views' in out

@@ -328,9 +328,9 @@ def normalize_scenes_for_pipeline(
     normalized = [_sanitize_scene(scene, idx) for idx, scene in enumerate(scenes, start=1)]
     normalized[0]["goal"] = "хук"
     normalized[-1]["goal"] = "результат"
-    # Финальная сцена всегда про подачу готового блюда.
+    # Do not add a second action after an authored tasting/reveal/payoff.
     final_action = _as_text(normalized[-1].get("action")).strip()
-    if "подач" not in final_action.lower() and "готов" not in final_action.lower():
+    if not final_action:
         normalized[-1]["action"] = (
             f"{final_action} Бабушка выполняет подачу готового блюда на тарелке с видимыми ингредиентами."
         ).strip()

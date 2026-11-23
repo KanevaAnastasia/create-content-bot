@@ -4,6 +4,8 @@ SINGLE_TAKE_RULE = (
     "veo3_framing: one continuous locked-camera shot, fixed angle and framing; "
     "no cuts, montage, time jumps, zoom, pan, tracking or reframing; one simple main action; "
     "frame grandma waist-up with her face intact, hands and food large in the foreground; "
+    "grandma's entire face and head remain visible in EVERY frame, including silent moments; "
+    "hands, utensils and food never obscure her face; no face-free inserts or rear views; "
     "keep other listed characters recognizable; lower bodies may be outside the frame; "
     "no need to show floor, legs, furniture legs or the whole room; accurate lip sync; "
     "strongly stylized rounded cartoon grandma and cartoon cat, never photorealistic; "

@@ -141,41 +141,11 @@ def _string_list(value: Any) -> list[str]:
     return []
 
 
-def _fallback_hooks(concept: str) -> dict[str, list[str]]:
-    dish = concept.strip() or "это блюдо"
-    return {
-        "emotional": [
-            f"Этот {dish} пахнет так, будто дома снова детство.",
-            f"Бабушка сказала, что такой {dish} нельзя терять.",
-            f"Когда на столе {dish}, дома сразу становится теплее.",
-        ],
-        "intrigue": [
-            f"Все думали, что {dish} покупной, но бабушка сделала его дома.",
-            f"Покажу разрез {dish}, ради него хочется досмотреть до конца.",
-            f"Сначала кажется просто, но финал у этого блюда слишком красивый.",
-        ],
-        "useful": [
-            f"Сохрани этот способ, чтобы {dish} получался ровнее и вкуснее.",
-            f"Не теряй этот приём, с ним {dish} получается заметно лучше.",
-        ],
-        "cliffhanger": [
-            "Досмотрите до разреза, он получился слишком красивым.",
-            "В конце кот проверит запах, и сразу станет понятно, удалось ли.",
-        ],
-    }
-
-
 def normalize_hooks(raw_hooks: Any, concept: str) -> dict[str, list[str]]:
-    """Return hook groups with at least 3/3/2/2 items."""
-    fallback = _fallback_hooks(concept)
+    """Preserve actual editorial proposals; never invent filler to satisfy a quota."""
     source = raw_hooks if isinstance(raw_hooks, dict) else {}
-    limits = {"emotional": 3, "intrigue": 3, "useful": 2, "cliffhanger": 2}
-    out: dict[str, list[str]] = {}
-    for key, min_count in limits.items():
-        values = _string_list(source.get(key))
-        values.extend(x for x in fallback[key] if x not in values)
-        out[key] = values[:max(min_count, len(values))]
-    return out
+    return {key: list(dict.fromkeys(_string_list(source.get(key))))
+            for key in ("emotional", "intrigue", "useful", "cliffhanger")}
 
 
 def flatten_hooks(hooks: dict[str, list[str]]) -> list[str]:
@@ -271,7 +241,7 @@ def normalize_viral_concept_brief(
     """Normalize LLM JSON for the Viral Concept Brief contract."""
     raw = data if isinstance(data, dict) else {}
     hooks = normalize_hooks(raw.get("hooks"), concept)
-    main_hook = _text(raw.get("main_hook")) or flatten_hooks(hooks)[0]
+    main_hook = _text(raw.get("main_hook")) or _text(raw.get("strongest_first_phrase")) or next(iter(flatten_hooks(hooks)), concept)
     final_phrases = _string_list(raw.get("final_phrases"))
     if len(final_phrases) < 3:
         final_phrases.extend(
@@ -304,7 +274,7 @@ def normalize_viral_concept_brief(
     )
     phrase_review = review_first_phrase(strongest_first_phrase)
     if phrase_review["score"] < 7:
-        strongest_first_phrase = _normalize_first_phrase(main_hook, fallback=flatten_hooks(hooks)[0])
+        strongest_first_phrase = _normalize_first_phrase(main_hook, fallback=main_hook)
         phrase_review = review_first_phrase(strongest_first_phrase)
     dish_audience_type = _normalize_dish_audience_type(raw.get("dish_audience_type"))
     family_cast_plan = _text(raw.get("family_cast_plan"))
@@ -317,6 +287,10 @@ def normalize_viral_concept_brief(
             family_cast_plan = "Дополнительных семейных персонажей не добавлять."
     return {
         "main_hook": main_hook,
+        "editorial_review": raw.get("editorial_review") if isinstance(raw.get("editorial_review"), dict) else {},
+        "attention_technique_audit": raw.get("attention_technique_audit") if isinstance(raw.get("attention_technique_audit"), list) else [],
+        "camera_technique_audit": raw.get("camera_technique_audit") if isinstance(raw.get("camera_technique_audit"), list) else [],
+        "needs_editorial_review": not bool(raw.get("strongest_first_phrase") and raw.get("strongest_first_frame")),
         "viewer_promise": _text(raw.get("viewer_promise")) or "уютный домашний рецепт с понятным результатом",
         "reason_to_watch_end": _text(raw.get("reason_to_watch_end")) or "в финале будет красивый визуальный payoff",
         "main_visual_payoff": _text(raw.get("main_visual_payoff")) or "крупный финальный кадр готового блюда",
