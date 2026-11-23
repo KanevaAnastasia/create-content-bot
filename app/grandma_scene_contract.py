@@ -3,7 +3,9 @@
 SINGLE_TAKE_RULE = (
     "veo3_framing: one continuous locked-camera shot, fixed angle and framing; "
     "no cuts, montage, time jumps, zoom, pan, tracking or reframing; one simple main action; "
-    "keep grandma's face and all listed characters visible; accurate lip sync; "
+    "frame grandma waist-up with her face intact, hands and food large in the foreground; "
+    "keep other listed characters recognizable; lower bodies may be outside the frame; "
+    "no need to show floor, legs, furniture legs or the whole room; accurate lip sync; "
     "strongly stylized rounded cartoon grandma and cartoon cat, never photorealistic; "
     "the cat never eats, licks or touches human food."
 )
@@ -36,6 +38,7 @@ def append_episode_prop_locks(prompt: str, scene: dict) -> str:
         return prompt
     lines = [f"{key}: {value}" for key, value in props.items() if isinstance(value, str)]
     return prompt + "\n\nПРЕДМЕТЫ ЭТОГО РОЛИКА:\n" + "\n".join(lines) + (
-        "\nЭто утверждённые описания: они важнее общих описаний предметов. "
+        "\nЭти описания фиксируют внешность перечисленных предметов, но не отменяют "
+        "постоянный советский интерьер, скатерть и оформление комнаты. "
         "Сохранять внешность и количество между сценами; не добавлять отсутствующие предметы."
     )

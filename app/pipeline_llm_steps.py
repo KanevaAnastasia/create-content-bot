@@ -388,12 +388,12 @@ def scenes_plan_requirements() -> dict[str, Any]:
             "but every scene must still obey frame_framing_rule (no distant wide shots)"
         ),
         "frame_framing_rule": (
-            "EVERY scene, for start/end frame generation: composition is always close-up only, not medium or medium-close, on grandma, "
+            "EVERY scene, for start/end frame generation: composition is always tight food-first waist-up composition, on grandma, "
             "cat, and the hands-on food action (faces, paws, ingredients, utensils readable). "
             f"Exception: {FRUIT_ONLY_FIRST_MOMENT_RULE} "
-            "Grandmother's full figure must remain visible with face and head fully inside the frame "
-            "(at least head through torso, never a face-only crop); "
-            "every other character listed for the scene must also stay fully visible in frame. "
+            "Frame grandmother waist-up, with face and head fully inside the frame "
+            "and hands and food large in the foreground; "
+            "Other characters must be recognizable; their lower bodies may be outside the frame. No need to show floor, legs or furniture legs. "
             "No wide/establishing shots where characters are small. "
             "Even if shot_type suggests top/overhead, the frame must still show grandma+cat+action large "
             "(e.g. hands and food dominant, characters not tiny). "

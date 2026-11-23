@@ -20,7 +20,10 @@ SOVIET_IMAGE_ATMOSPHERE = (
     "floral porcelain cups and saucers, enamel pots with dark rims, faceted glasses and simple ceramic "
     "dishes, keeping their cooking function unchanged. Use a warm, cared-for domestic atmosphere and the "
     "project's existing cartoon style. Do not add interior furniture outdoors, obscure the food, or add "
-    "text or logos."
+    "text or logos. Frame grandma waist-up with her face intact, hands and food large in the foreground. "
+    "The cat remains recognizable; lower bodies may be outside the frame. Recognizable room anchors "
+    "may be partial details at the frame edges. Never widen the composition to show floor, legs, "
+    "furniture legs or entire background objects. Holiday decorations supplement this home."
 )
 
 _EMPTY_TITLE_WALL_PATTERNS = (

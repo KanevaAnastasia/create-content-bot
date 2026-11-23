@@ -8,10 +8,10 @@ THEME_KEY = "series_theme"
 _active_theme = ContextVar("series_render_theme", default="")
 HOLIDAY_DIRECTION = (
     "SERIES ART DIRECTION (visual only, never spoken): In EVERY scene and every start/end frame, "
-    "keep a visible Soviet-era multicoloured electric garland, a Christmas tree decorated with "
+    "Keep the same room decorated with a Soviet-era multicoloured electric garland, a Christmas tree decorated with "
     "vintage Soviet glass ornaments, and a window with falling snow outside. "
     "Use consistent placement of the same decorations throughout Grandma's kitchen. "
-    "Choose camera framing wide enough to retain all three elements, including cooking close-ups. "
+    "Show only the portions of these decorations that naturally fit behind the close foreground action. Never widen the camera to fit the whole tree, window or room into every shot. "
     "Preserve the recipe actions and characters. Russian series: Новогодние рецепты; "
     "English series: Christmas Recipes. Do not generate lettering inside images."
 )

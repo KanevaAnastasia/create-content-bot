@@ -391,7 +391,7 @@ def test_pipeline_llm_steps_scenes_payload_carries_feedback_and_previous():
     assert p["dialogue_feedback_hint"] == {}
     assert p["previous_scenes"] == [{"scene": 1}]
     assert "ingredient_source_of_truth_rule" in p["requirements"]
-    assert "close-up only, not medium or medium-close" in p["requirements"]["frame_framing_rule"]
+    assert "tight food-first waist-up composition" in p["requirements"]["frame_framing_rule"]
     prompt = pipeline_llm_steps.build_scenes_plan_prompt(p)
     assert "INGREDIENT SOURCE OF TRUTH" in prompt
     assert "Не добавляй продукты" in prompt

@@ -110,16 +110,16 @@ _VIDEO_ASPECT_RULES = {
 }
 
 VEO3_FAST_VIDEO_FRAMING_RULE = (
-    "veo3_framing: close-up shot only, not medium or medium-close; grandmother's full figure always fully visible in frame "
-    "with face and head fully inside the frame (at least head through torso, never a tight face-only crop); every other character in the scene stays "
-    "fully visible in frame; accurate lip sync with the spoken Russian speech; camera angle and framing "
+    "veo3_framing: close-up shot only, meaning tight food-first waist-up composition; waist-up grandmother with hands and dish large in the foreground "
+    "with face and head fully inside the frame; other characters remain recognizable, their bodies may be cropped; "
+    "no need to show legs, floor or furniture legs; accurate lip sync with the spoken Russian speech; camera angle and framing "
     "evolve during the clip (subtle reframing, angle shifts, or gentle camera movement) — avoid one locked "
     "static tripod angle for the entire take."
 )
 VEO3_COOKING_CAST_RULE = (
-    "veo3_cast_rule: for Grandma Kitchen project, grandmother and exactly one orange cartoon cat are mandatory in frame and fully visible in every ordinary shot. "
-    "Grandmother's face and head must stay fully inside the frame. The orange cat must be listed in scene.characters and must stay fully visible. "
-    "If the white cat or black-and-white cat are listed in scene.characters or mentioned in the prompt, they must also stay fully visible."
+    "veo3_cast_rule: for Grandma Kitchen project, grandmother and exactly one orange cartoon cat are mandatory and recognizable in every ordinary shot; lower bodies may be outside the frame. "
+    "Grandmother's face and head must stay fully inside the frame. The orange cat must be listed in scene.characters and must remain recognizable; full-body framing is not required. "
+    "If the white cat or black-and-white cat are listed in scene.characters or mentioned in the prompt, their faces must remain recognizable, not necessarily their full bodies."
 )
 VEO3_CARTOON_CHARACTER_RULE = (
     "veo3_cartoon_character_rule: visual style is explicitly cartoon; grandmother is a cartoon grandmother, "
@@ -166,7 +166,7 @@ _IMAGE_NON_CLOSEUP_TOKENS = (
 _FRAME_PLAN_EXCEPTION_LOCATIONS = {"fridge", "холодильник", "kamin", "камин", "fireplace"}
 SILENCE_BASE_SCENE_RULES = (
     "Pixar-like non-realistic cartoon style; nostalgic rustic grandma kitchen; "
-    "extreme close-up food-first framing; grandmother and exactly one orange cartoon cat always present and fully visible; "
+    "extreme close-up food-first framing; grandmother and exactly one orange cartoon cat recognizable, with lower bodies allowed outside the frame; "
     "no dialogue, no voiceover, no subtitles, no on-screen text, no background music."
 )
 LONG_MIN_VEO_SCENES = 24
@@ -2852,8 +2852,8 @@ def _fallback_video_prompt_from_scene(scene: dict[str, Any]) -> str:
     )
     continuity_state = sanitize_character_names_and_keys(str(scene.get("continuity_state") or "").strip())
     prompt = (
-        f"{duration}-second cozy cartoon cooking clip, close-up framing only, not medium or medium-close, "
-        f"grandmother and cartoon cat fully visible, {SINGLE_TAKE_RULE if scene.get('single_take') else 'gentle camera evolution'}, accurate lip sync, "
+        f"{duration}-second cozy cartoon cooking clip, tight food-first waist-up framing, "
+        f"grandmother framed waist-up and cartoon cat recognizable, {SINGLE_TAKE_RULE if scene.get('single_take') else 'gentle camera evolution'}, accurate lip sync, "
         f"no on-screen text, no subtitles, no background music. Main action: {action}."
     )
     if anchors_text:
@@ -3343,7 +3343,7 @@ async def generate_full_production(
                     "include the exact phrase cartoon cat; "
                     "obey kitchen physics: cookware and appliances must be functional and physically plausible; "
                     "do not invent extra characters, extra animals, extra hands, or unrelated parallel actions; "
-                    "close-up with full grandma + all characters visible, lip sync, camera follows the supplied veo3_framing_rule "
+                    "food-first close-up with grandma waist-up and listed characters recognizable, lip sync, camera follows the supplied veo3_framing_rule "
                     "(follow the supplied camera rule throughout the clip)"
                 ),
                 "visual_source_action_only_rule": VIDEO_PROMPT_VISUAL_SOURCE_GENERATION_RULE,
@@ -3451,8 +3451,8 @@ async def generate_full_production(
             "name the dish from the scenario; the viewer must hear the dish name in the first scene. "
             "Do not include title_safe_top_30 or top-30-percent overlay instructions in video_prompt_en; that rule is only for start_frame_prompt_ru. "
             f"Scene 1 fruit-only first-moment exception: {FRUIT_ONLY_FIRST_MOMENT_RULE} "
-            "Framing: close-up only, not medium or medium-close; grandmother's full figure and every other character in the scene "
-            "must stay fully visible; obey the supplied veo3_framing_rule.\n"
+            "Framing: tight food-first waist-up composition; grandmother's face, hands and dish dominate; listed characters remain recognizable. "
+            "Lower bodies, legs and furniture may be outside the frame; obey the supplied veo3_framing_rule.\n"
             + _LLM_VIDEO_CHARACTERS_SPEAKS_RULE
             + "\n"
             + _RUSSIAN_YO_RULE
@@ -3612,7 +3612,7 @@ async def generate_full_production(
                 "include the exact phrase cartoon cat; "
                 "obey kitchen physics: cookware and appliances must be functional and physically plausible; "
                 "do not invent extra characters, extra animals, extra hands, or unrelated parallel actions; "
-                "close-up with full grandma + all characters visible, lip sync, camera follows the supplied veo3_framing_rule; "
+                "food-first close-up with grandma waist-up and listed characters recognizable, lip sync, camera follows the supplied veo3_framing_rule; "
                 "spoken delivery should feel natural but efficient, and the final phrase should finish slightly before the clip ends "
                 "(follow the supplied camera rule throughout the clip)"
             ),
@@ -3712,8 +3712,8 @@ async def generate_full_production(
         "name the dish from the scenario; the viewer must hear the dish name in the first scene. "
         "Do not include title_safe_top_30 or top-30-percent overlay instructions in video_prompt_en; that rule is only for START FRAME. "
         f"Scene 1 fruit-only first-moment exception: {FRUIT_ONLY_FIRST_MOMENT_RULE} "
-        "Framing: close-up only, not medium or medium-close; grandmother's full figure and every other character in the scene "
-        "must stay fully visible; obey the supplied veo3_framing_rule.\n"
+        "Framing: tight food-first waist-up composition; grandmother's face, hands and dish dominate; listed characters remain recognizable. "
+        "Lower bodies, legs and furniture may be outside the frame; obey the supplied veo3_framing_rule.\n"
         + _LLM_VIDEO_CHARACTERS_SPEAKS_RULE
         + "\n"
         + _RUSSIAN_YO_RULE

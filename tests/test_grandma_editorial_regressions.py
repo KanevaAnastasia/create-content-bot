@@ -113,3 +113,21 @@ def test_provider_prompt_keeps_canonical_grandma_voice_despite_generic_lock():
     assert "no instrumental score, songs, jingles" in out
     assert "voice_identity_continuity:" in out
     assert enforce_video_prompt_voice_requirements(out, scene) == out
+
+
+def test_close_framing_reaches_plan_image_and_video_without_full_body_conflict():
+    from app.pipeline_llm_steps import scenes_plan_requirements
+    from app.pipeline import append_veo3_video_framing_constraints
+    from app.image_atmosphere import add_image_atmosphere
+    from app.series_theme import HOLIDAY_DIRECTION
+    plan = scenes_plan_requirements()["frame_framing_rule"]
+    image = add_image_atmosphere("Бабушка перемешивает салат.")
+    for single_take in (True, False):
+        video = append_veo3_video_framing_constraints("Cooking", {
+            "model": "veo3_fast", "single_take": single_take, "characters": ["grandma", "cat"]})
+        for prompt in (plan, image, video):
+            assert "waist-up" in prompt
+            assert "full figure" not in prompt
+            assert "fully visible" not in prompt
+    assert "Never widen" in HOLIDAY_DIRECTION
+    assert "whole tree" in HOLIDAY_DIRECTION

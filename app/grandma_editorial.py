@@ -41,6 +41,12 @@ action описывает только простое движение внут�
 копируй его описание дословно, не меняй цвет/материал и не создавай дубликаты.
 Одна игрушка-рыбка не превращается в живую рыбу или ингредиент.
 ГОЛОС БАБУШКИ И ПРИЧИНА ДОСМОТРЕТЬ:
+КОМПОЗИЦИЯ: бабушка по пояс, лицо целиком, руки и блюдо крупно на переднем
+плане. Не показывай полный рост, пол и ножки мебели ради размещения персонажей.
+Кот узнаваем, его нижняя часть тела может быть за краем кадра. Между сценами
+чередуй акцент на готовом блюде, руках за работой, перемешивании и лице при
+пробе. Внутри сцены камера неподвижна. Постоянный советский интерьер виден
+частично; не отдаляй камеру ради целой ёлки, окна или всей комнаты.
 Бабушка разговаривает с конкретным человеком, пока делает дело. Сначала определи,
 зачем ему эта история: знакомая неудача, семейный повод, желание получить вкусный
 результат. Первая реплика выражает эту ситуацию, а не объявляет план съёмки.
@@ -94,6 +100,11 @@ action описывает только простое движение внут�
 
 GRANDMA_PRODUCTION_RULES = """
 Generate no on-screen text, captions, subtitles, ingredient labels or end cards.
+Frame grandma waist-up with her face intact, hands and food large in the foreground.
+Keep the cat recognizable; lower bodies may be outside the frame. Never pull
+back to show legs, floor, furniture legs or all holiday decorations. Background
+furnishings remain consistent even when outside the crop. Vary the visual focus
+between scenes, never the camera during a scene.
 Generate no music, songs or jingles. Only approved dialogue and quiet natural
 action sounds. Reuse the exact canonical voice profile for each speaking
 character in every scene; never invent a new voice description for grandma.
