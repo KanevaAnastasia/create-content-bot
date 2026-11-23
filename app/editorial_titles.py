@@ -13,6 +13,7 @@ FONT_DIR = Path(__file__).resolve().parents[1] / 'fonts'
 STYLE_IDS = ('1', '2', '3', '5', '9')
 STYLE_KEY = 'editorial_style_id'
 PARTS_KEY = 'semantic_parts_by_lang'
+HIERARCHY_KEY = 'editorial_hierarchy_by_lang'
 DEFAULT_DIM = 82 / 255
 # libass measures font size using Windows ascender/descender, Pillow uses em units.
 ASS_FONT_SCALE = {'Manrope': 1.366, 'Oranienbaum': 1.155, 'Oswald': 1.702,
@@ -55,6 +56,14 @@ STYLES = {
 
 def normalized(text: str) -> str:
     return ' '.join(str(text).split())
+
+
+def valid_hierarchy_parts(parts: object) -> bool:
+    return (
+        isinstance(parts, list)
+        and len(parts) == 3
+        and all(isinstance(part, str) and part.strip() for part in parts)
+    )
 
 
 def valid_parts(title: str, parts: object) -> bool:

@@ -8,9 +8,20 @@ import re
 from PIL import Image, ImageDraw, ImageFont
 from telegram import ReplyKeyboardMarkup
 
-from ..editorial_titles import FONT_DIR, STYLE_IDS, STYLES, STYLE_KEY, PARTS_KEY, DEFAULT_DIM, propose_parts, valid_parts
+from ..editorial_titles import (
+    DEFAULT_DIM,
+    FONT_DIR,
+    HIERARCHY_KEY,
+    PARTS_KEY,
+    STYLE_IDS,
+    STYLES,
+    STYLE_KEY,
+    propose_parts,
+    valid_parts,
+)
 from ..editorial_font_selection import REVISION
 from ..post_production import render_title_overlay_preview
+from ..series_store import SERIES_COUNTER_BY_LANG_SESSION_KEY, SERIES_TITLE_BY_LANG_SESSION_KEY
 from .handlers_generation_utils import OVERLAY_TITLE_BY_LANG_SESSION_KEY, OVERLAY_TITLE_STYLE_SESSION_KEY
 
 
@@ -54,21 +65,45 @@ async def ask_picker(update, session, *, all_styles=True):
     if not titles:
         return False
     style = dict(session.get(OVERLAY_TITLE_STYLE_SESSION_KEY) or {})
-    from ..discipline_modes import active_mode, TWO_LIVES, FORK
+    from ..discipline_modes import ARCHIVE, active_mode, TWO_LIVES, FORK
     if active_mode(session) in (TWO_LIVES, FORK):
         style.setdefault('speaker_panel', 'top')
-    parts = style.get(PARTS_KEY) or {}
-    if not all(valid_parts(title, parts.get(lang)) for lang, title in titles.items()):
-        parts = await propose_parts(titles)
+    hierarchy = {}
+    if active_mode(session) == ARCHIVE:
+        series_titles = session.get(SERIES_TITLE_BY_LANG_SESSION_KEY) or {}
+        series_counters = session.get(SERIES_COUNTER_BY_LANG_SESSION_KEY) or {}
+        for lang, title in titles.items():
+            series_title = str(series_titles.get(lang) or series_titles.get('ru') or '').strip()
+            series_counter = str(series_counters.get(lang) or series_counters.get('ru') or '').strip()
+            if series_title and series_counter:
+                hierarchy[lang] = [title, series_title, series_counter]
+    if hierarchy:
+        style[HIERARCHY_KEY] = hierarchy
+        parts = style.get(PARTS_KEY) or {}
+    else:
+        style.pop(HIERARCHY_KEY, None)
+        parts = style.get(PARTS_KEY) or {}
+        if not all(valid_parts(title, parts.get(lang)) for lang, title in titles.items()):
+            parts = await propose_parts(titles)
     style.update({'editorial_font_revision': REVISION, PARTS_KEY: parts, 'dim_opacity': style.get('dim_opacity', DEFAULT_DIM)})
     session[OVERLAY_TITLE_STYLE_SESSION_KEY] = style
     await update.message.reply_text('Выберите оформление заголовка. На карточках ваш текст; фон — первый сгенерированный кадр.')
     for style_id in STYLE_IDS if all_styles else (str(style.get(STYLE_KEY) or '1'),):
         await _send_card(update, titles, {**style, STYLE_KEY: style_id}, session)
+    if hierarchy:
+        explanation = 'Три уровня заголовка:\n' + '\n'.join(
+            f'{lang.upper()}: ' + ' / '.join(value) for lang, value in hierarchy.items()
+        )
+    else:
+        explanation = (
+            'Смысловые части:\n' + '\n'.join(f'{lang.upper()}: ' + ' | '.join(value) for lang, value in parts.items())
+            + '\nМожно исправить: RU: У меня | нет | энергии (или EN: I have | no | energy).'
+        )
     await update.message.reply_text(
-        'Нажмите номер стиля. Смысловые части:\n' + '\n'.join(f'{lang.upper()}: ' + ' | '.join(value) for lang, value in parts.items())
-        + '\nМожно исправить: RU: У меня | нет | энергии (или EN: I have | no | energy). '
-        'Затемнение: «затемнение 32%». После выбора нажмите «ОК».', reply_markup=picker_markup(style.get('speaker_panel') in ('top', 'bottom')))
+        'Нажмите номер стиля. ' + explanation
+        + '\nЗатемнение: «затемнение 32%». После выбора нажмите «ОК».',
+        reply_markup=picker_markup(style.get('speaker_panel') in ('top', 'bottom')),
+    )
     return True
 
 

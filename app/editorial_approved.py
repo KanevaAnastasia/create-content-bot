@@ -127,21 +127,33 @@ def drawings(sid,lang,role,text,visible_words=None):
 
 
 def ass_events(cue,style,width,height,base_style):
-    from .editorial_titles import fallback_parts,valid_parts,_timestamp
+    from .editorial_titles import (
+        HIERARCHY_KEY,
+        _timestamp,
+        fallback_parts,
+        valid_hierarchy_parts,
+        valid_parts,
+    )
     sid=str(style['editorial_style_id']);lang='en' if cue.get('language')=='en' else 'ru'
     title=str(cue.get('text') or '')
+    hierarchy = (style.get(HIERARCHY_KEY) or {}).get(lang)
+    hierarchy_mode = valid_hierarchy_parts(hierarchy)
     # The narrative pivot must remain readable even in depth-enabled presets.
     normalized_title = ' '.join(re.findall(r'[^\W_]+', title.casefold()))
     always_front = bool(cue.get('always_foreground')) or normalized_title in ('а что если', 'what if')
-    parts=(style.get('semantic_parts_by_lang') or {}).get(lang)
-    if not valid_parts(title,parts):
-        parts=fallback_parts(title)
-    roles=[0,1,2] if len(parts)==3 else ([0,2] if len(parts)==2 else [2])
+    if hierarchy_mode:
+        parts=[part.strip() for part in hierarchy]
+        roles=[0,1,2]
+    else:
+        parts=(style.get('semantic_parts_by_lang') or {}).get(lang)
+        if not valid_parts(title,parts):
+            parts=fallback_parts(title)
+        roles=[0,1,2] if len(parts)==3 else ([0,2] if len(parts)==2 else [2])
     start=float(cue.get('start_sec') or 0);end=float(cue.get('end_sec') or 0)
     timing=cue.get('word_timing') if 'word_timing' in cue else (style.get('word_timing_by_lang') or {}).get(lang)
     timing=timing or []
     clean=lambda s: re.sub(r'[^\w]+','',s).casefold()
-    if [clean(row.get('text','')) for row in timing] != [clean(word) for word in title.split()]:
+    if hierarchy_mode or [clean(row.get('text','')) for row in timing] != [clean(word) for word in title.split()]:
         timing=[]
     if timing:
         start=max(start,float(timing[0]['start']))
@@ -177,7 +189,15 @@ def ass_events(cue,style,width,height,base_style):
         for visible,t0,t1 in states:
             if t1<=t0:
                 continue
-            ink = selected.drawings(sid, lang, semantic_parts, role, visible, foreground=always_front)
+            ink = selected.drawings(
+                sid,
+                lang,
+                semantic_parts,
+                role,
+                visible,
+                foreground=always_front or hierarchy_mode,
+                hierarchy=hierarchy_mode,
+            )
             for color,path in ink:
                 overrides = (style.get('part_colors_by_lang') or {}).get(lang, {})
                 override = overrides.get(str(role), '')
@@ -186,7 +206,7 @@ def ass_events(cue,style,width,height,base_style):
                 bgr=color[5:7]+color[3:5]+color[1:3]
                 tags=(f'{{\\an7\\pos({origin_x:g},{origin_y:g})\\fscx{width/W*100*scale:.5f}\\fscy{height/H*100*scale:.5f}'
                       f'\\bord0\\shad0\\1c&H{bgr}&\\1a&H00&\\p1}}')
-                behind = role == 0 and sid in ('3','9') and not always_front
+                behind = role == 0 and sid in ('3','9') and not always_front and not hierarchy_mode
                 output.append(event(1 if behind else 2,max(start,t0),t1,tags,path,
                                     'CF_DEPTH_BACK' if behind else ''))
         offset+=count

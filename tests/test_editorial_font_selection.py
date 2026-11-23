@@ -131,6 +131,16 @@ def test_short_depth_words_clear_the_subject_but_the_foreground_pivot_keeps_its_
     assert fonts._box(sid, record, 0, short, False, True) == tuple(record['box'])
 
 
+def test_archive_hierarchy_uses_large_then_two_medium_rows():
+    record = fonts.selection()['styles']['1']['ru'][0]
+    boxes = [fonts._box('1', record, role, 'Текст', False, True, True) for role in range(3)]
+    heights = [bottom - top for _left, top, _right, bottom in boxes]
+    assert boxes[0][1] < boxes[1][1] < boxes[2][1]
+    assert heights[0] > heights[1]
+    assert heights[0] > heights[2]
+    assert heights[2] <= heights[1]
+
+
 def test_lowercase_t_in_ninth_preset_even_after_uppercased_input(reference_lettering):
     uppercase = ((0, 'ПОЧЕМУ'), (1, 'НЕ'), (2, 'ТЫ?'))
     normal = tuple(enumerate('Почему не ты?'.split()))

@@ -2125,9 +2125,19 @@ def _write_burned_subtitle_ass(
         ]
     )
     lines = [header]
-    from .editorial_titles import STYLE_KEY, STYLES, ass_events
+    from .editorial_titles import (
+        HIERARCHY_KEY,
+        STYLE_KEY,
+        STYLES,
+        ass_events,
+        valid_hierarchy_parts,
+    )
     editorial = str(title_style.get(STYLE_KEY) or "") in STYLES
     for cue in title_cues or []:
+        language = str(cue.get("language") or "ru")
+        hierarchy = (title_style.get(HIERARCHY_KEY) or {}).get(language)
+        if editorial and str(cue.get("kind") or "title") == "series" and valid_hierarchy_parts(hierarchy):
+            continue
         if editorial and str(cue.get("kind") or "title") == "title":
             lines.extend(ass_events(cue, title_style, layout.width, layout.height, SUBTITLE_STYLE_NAME))
             continue

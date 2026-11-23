@@ -79,6 +79,89 @@ def test_picker_rejects_missing_words_and_preserves_style(monkeypatch):
     assert session['overlay_title_style'][titles.PARTS_KEY]['ru'] == ['У меня', 'нет', 'энергии']
 
 
+def test_archive_picker_builds_three_level_hierarchy_without_rewriting(monkeypatch):
+    replies = []
+
+    async def reply_text(text, **_kwargs):
+        replies.append(text)
+
+    update = SimpleNamespace(message=SimpleNamespace(reply_text=reply_text))
+    session = {
+        'selected_project_key': 'discipline',
+        'discipline_narrative_mode': 'lives_archive',
+        'overlay_title_by_lang': {'ru': 'Стивен Кинг', 'en': 'Stephen King'},
+        'series_title_by_lang': {
+            'ru': 'Истории несовершенных ошибок',
+            'en': 'Stories of Imperfect Mistakes',
+        },
+        'series_counter_by_lang': {'ru': 'История 1', 'en': 'Story 1'},
+    }
+    send = AsyncMock()
+    propose = AsyncMock(side_effect=AssertionError('archive hierarchy must not call the semantic splitter'))
+    monkeypatch.setattr(picker, '_send_card', send)
+    monkeypatch.setattr(picker, 'propose_parts', propose)
+
+    assert asyncio.run(picker.ask_picker(update, session)) is True
+
+    hierarchy = session['overlay_title_style'][titles.HIERARCHY_KEY]
+    assert hierarchy == {
+        'ru': ['Стивен Кинг', 'Истории несовершенных ошибок', 'История 1'],
+        'en': ['Stephen King', 'Stories of Imperfect Mistakes', 'Story 1'],
+    }
+    assert send.await_count == len(titles.STYLE_IDS)
+    assert all(call.args[2][titles.HIERARCHY_KEY] == hierarchy for call in send.await_args_list)
+    assert any('Стивен Кинг / Истории несовершенных ошибок / История 1' in text for text in replies)
+
+
+def test_final_ass_replaces_archive_series_row_with_editorial_hierarchy(tmp_path, monkeypatch):
+    from app import editorial_font_selection as selected
+
+    observed = []
+
+    def fake_drawings(sid, lang, parts, role, visible, foreground=False, hierarchy=False):
+        observed.append((sid, lang, parts, role, visible, foreground, hierarchy))
+        return (('#ffffff', f'm {role} 0 l {role + 1} 0 {role + 1} 1 {role} 1'),)
+
+    monkeypatch.setattr(selected, 'drawings', fake_drawings)
+    path = tmp_path / 'archive-title.ass'
+    style = {
+        titles.STYLE_KEY: '1',
+        titles.HIERARCHY_KEY: {
+            'ru': ['Стивен Кинг', 'Истории несовершенных ошибок', 'История 1'],
+        },
+    }
+    cues = [
+        {'kind': 'title', 'language': 'ru', 'text': 'Стивен Кинг', 'start_sec': 0, 'end_sec': 2},
+        {
+            'kind': 'series',
+            'language': 'ru',
+            'text': 'Истории несовершенных ошибок',
+            'counter_text': 'История 1',
+            'start_sec': 0,
+            'end_sec': 2,
+        },
+    ]
+
+    _write_burned_subtitle_ass(
+        path,
+        [],
+        title_cues=cues,
+        title_style=style,
+        video_width=720,
+        video_height=1280,
+    )
+
+    events = [line for line in path.read_text().splitlines() if line.startswith('Dialogue:')]
+    assert len(events) == 4  # one dim layer and exactly three hierarchy rows
+    assert [row[3] for row in observed] == [0, 1, 2]
+    assert all(row[5:] == (True, True) for row in observed)
+    assert observed[0][2] == (
+        (0, 'Стивен Кинг'),
+        (1, 'Истории несовершенных ошибок'),
+        (2, 'История 1'),
+    )
+
+
 def test_three_parts_required_for_long_title():
     assert not titles.valid_parts('У меня нет энергии', ['У меня нет энергии'])
     assert titles.valid_parts('Почему?', ['Почему?'])

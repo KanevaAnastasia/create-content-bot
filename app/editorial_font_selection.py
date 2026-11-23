@@ -103,7 +103,16 @@ def _case(text, reference):
     return text
 
 
-def _box(sid, record, role, text, reference_title, foreground):
+_HIERARCHY_BOXES = (
+    (40, 500, 680, 730),
+    (55, 765, 665, 875),
+    (150, 920, 570, 1000),
+)
+
+
+def _box(sid, record, role, text, reference_title, foreground, hierarchy=False):
+    if hierarchy:
+        return _HIERARCHY_BOXES[role]
     if sid == '1' and not reference_title:
         return ((40, 600, 680, 790), (50, 800, 230, 860), (40, 875, 680, 1110))[role]
     if sid == '3' and not reference_title and role == 2:
@@ -145,8 +154,8 @@ def _size_and_position(mask, full, box, tilt, fit):
     return mask.resize(size, Image.Resampling.LANCZOS), position
 
 
-@lru_cache(maxsize=16)
-def layers(sid, lang, parts, role, visible=None, foreground=False):
+@lru_cache(maxsize=32)
+def layers(sid, lang, parts, role, visible=None, foreground=False, hierarchy=False):
     style = selection()['styles'][sid]
     records = style[lang]
     prepared = [(r, _case(' '.join(t.split()), records[r]['text'])) for r, t in parts]
@@ -161,9 +170,9 @@ def layers(sid, lang, parts, role, visible=None, foreground=False):
     full = full.crop(crop)
     mask = full if visible is None or visible >= len(frames) else _alpha(frames[visible - 1]).crop(crop)
     reference_title = all(t == records[r]['text'] for r, t in prepared) and len(prepared) == 3
-    box = _box(sid, record, role, text, reference_title, foreground)
+    box = _box(sid, record, role, text, reference_title, foreground, hierarchy)
     fit = 'contain'
-    if reference_title and (sid == '3' or (role == 0 and sid in ('1', '9'))):
+    if not hierarchy and reference_title and (sid == '3' or (role == 0 and sid in ('1', '9'))):
         fit = 'reference'
     elif role == 0 and sid == '9' and lang == 'ru':
         fit = 'tall'
@@ -177,6 +186,9 @@ def layers(sid, lang, parts, role, visible=None, foreground=False):
     return tuple(result)
 
 
-@lru_cache(maxsize=192)
-def drawings(sid, lang, parts, role, visible, foreground=False):
-    return tuple((color, rectangles(mask)) for color, mask in layers(sid, lang, parts, role, visible, foreground))
+@lru_cache(maxsize=256)
+def drawings(sid, lang, parts, role, visible, foreground=False, hierarchy=False):
+    return tuple(
+        (color, rectangles(mask))
+        for color, mask in layers(sid, lang, parts, role, visible, foreground, hierarchy)
+    )
