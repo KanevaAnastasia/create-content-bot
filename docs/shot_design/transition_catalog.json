@@ -1,0 +1,238 @@
+{
+  "status": "design_draft_not_enabled",
+  "date": "2026-11-23",
+  "scope": "План будущей реализации. Не изменяет активные ролики.",
+  "sources": {
+    "editing": "https://open.library.okstate.edu/introfilmtv/part/editing/",
+    "match": "https://www.studiobinder.com/blog/match-cuts-creative-transitions-examples/",
+    "eyeline": "https://www.studiobinder.com/blog/what-is-an-eyeline-match/",
+    "cuts": "https://www.studiobinder.com/blog/types-of-editing-transitions-in-film/",
+    "whip": "https://www.studiobinder.com/blog/swish-pan-whip-pan-definition-film/",
+    "audio": "https://helpx.adobe.com/premiere/desktop/edit-projects/trim-clips/perform-j-cuts-and-l-cuts.html",
+    "effects": "https://helpx.adobe.com/ph_fil/premiere-pro/how-to/apply-transitions-premiere-cc.html",
+    "reaction": "https://www.studiobinder.com/blog/shot-reverse-shot-cutaways-coverage/"
+  },
+  "selection_rule": "Один понятный переход на границе; сложный эффект только когда он помогает действию. Некоторые пункты являются практическими вариантами общих принципов.",
+  "transitions": [
+    {
+      "id": "action_match",
+      "number": 1,
+      "name": "Склейка внутри действия",
+      "kind": "Базовый приём",
+      "mechanism": "Начало движения в общем плане, продолжение в крупном без повторного старта.",
+      "grandma_example": "Начала раскатывать тесто, крупно скалка завершает тот же проход.",
+      "discipline_example": "Начал завязывать шнурок, крупно затягивает тот же узел.",
+      "acceptance": "Сохранить фазу, руку, опору и скорость.",
+      "source": "https://www.studiobinder.com/blog/match-cuts-creative-transitions-examples/"
+    },
+    {
+      "id": "toss_catch",
+      "number": 2,
+      "name": "Подброс и ловля",
+      "kind": "Вариант склейки по действию",
+      "mechanism": "Незаконченная траектория получает видимый конец после смены кадра.",
+      "grandma_example": "Подбросила один шарик теста; в следующем плане ловит его ладонью. Только для подходящего рецепта.",
+      "discipline_example": "Подбрасывает карандаш и ловит его над открытой тетрадью.",
+      "acceptance": "Один предмет; не менять размер, направление полёта и руку. Не скрывать захват за краем.",
+      "source": "https://www.studiobinder.com/blog/match-cuts-creative-transitions-examples/"
+    },
+    {
+      "id": "head_turn",
+      "number": 3,
+      "name": "Поворот головы",
+      "kind": "Вариант склейки по действию",
+      "mechanism": "Смена крупности внутри одного поворота, затем объект интереса.",
+      "grandma_example": "Поворачивается на Тимошу; крупно заканчивает поворот.",
+      "discipline_example": "Оборачивается на Кнопку; крупно меняется выражение лица.",
+      "acceptance": "Не повторять начало поворота и не менять сторону.",
+      "source": "https://www.studiobinder.com/blog/match-cuts-creative-transitions-examples/"
+    },
+    {
+      "id": "eyeline",
+      "number": 4,
+      "name": "Взгляд и то, что увидел герой",
+      "kind": "Базовый приём",
+      "mechanism": "Взгляд создаёт конкретный вопрос, следующий кадр показывает ответ.",
+      "grandma_example": "Смотрит вниз на край стола; там лапа Тимоши возле теста.",
+      "discipline_example": "Смотрит на часы; следующий кадр показывает время.",
+      "acceptance": "Соблюсти направление взгляда, высоту предмета и ось.",
+      "source": "https://www.studiobinder.com/blog/what-is-an-eyeline-match/"
+    },
+    {
+      "id": "eye_trace",
+      "number": 5,
+      "name": "Точка внимания на том же месте экрана",
+      "kind": "Принцип размещения склейки",
+      "mechanism": "Главный объект следующего плана попадает туда, куда зритель уже смотрел. Это не то же самое, что взгляд героя.",
+      "grandma_example": "Кончик ложки в правой трети; в следующем плане там же капля соуса.",
+      "discipline_example": "Палец на строке; в следующем плане нужный знак в той же области.",
+      "acceptance": "Сверить нормированные координаты и размер на телефоне.",
+      "source": "https://open.library.okstate.edu/introfilmtv/part/editing/"
+    },
+    {
+      "id": "shape_match",
+      "number": 6,
+      "name": "Совпадение формы",
+      "kind": "Базовый графический match cut",
+      "mechanism": "Контур связывает разные предметы или моменты, связь помогает рассказу.",
+      "grandma_example": "Круг теста сменяется кругом готового изделия после явно обозначенного приготовления.",
+      "discipline_example": "Циферблат будильника сменяется диском спортивного снаряда.",
+      "acceptance": "Не подменять этап рецепта магическим приготовлением.",
+      "source": "https://www.studiobinder.com/blog/match-cuts-creative-transitions-examples/"
+    },
+    {
+      "id": "composition_time",
+      "number": 7,
+      "name": "Та же композиция через время",
+      "kind": "Вариант графической склейки",
+      "mechanism": "Стабильный кадр подчёркивает изменившийся результат.",
+      "grandma_example": "Один противень до и после выпечки, с показанным пропуском времени.",
+      "discipline_example": "Одинаковая поза Васи в2020и2026; изменилась форма.",
+      "acceptance": "Сохранить масштаб, ось и опорные точки. Год или этап должен быть понятен.",
+      "source": "https://www.studiobinder.com/blog/match-cuts-creative-transitions-examples/"
+    },
+    {
+      "id": "motion_match",
+      "number": 8,
+      "name": "Совпадение ритма и направления жеста",
+      "kind": "Базовый кинетический match cut",
+      "mechanism": "Один направленный жест связывается с другим осмысленным действием.",
+      "grandma_example": "Размешивание по часовой стрелке сменяется тем же направлением распределения соуса.",
+      "discipline_example": "Проводит строку слева направо; следующий план продолжает движение руки на тренировке.",
+      "acceptance": "Не соединять случайные действия только из-за красивой траектории.",
+      "source": "https://www.studiobinder.com/blog/match-cuts-creative-transitions-examples/"
+    },
+    {
+      "id": "exit_entry",
+      "number": 9,
+      "name": "Выход из кадра и вход в следующий",
+      "kind": "Приём непрерывности направления",
+      "mechanism": "Зритель ожидает продолжения пути за границей кадра.",
+      "grandma_example": "Уносит противень вправо; входит с ним в следующую часть кухни слева.",
+      "discipline_example": "Выходит из комнаты вправо; входит на дорожку слева, сохранив направление движения.",
+      "acceptance": "Заранее установить географию, не зеркалить персонажа.",
+      "source": "https://open.library.okstate.edu/introfilmtv/part/editing/"
+    },
+    {
+      "id": "object_wipe",
+      "number": 10,
+      "name": "Перекрытие камеры предметом",
+      "kind": "Вариант скрытой склейки",
+      "mechanism": "Предмет закрывает кадр и открывает следующий.",
+      "grandma_example": "Поднос проходит близко к камере и раскрывает сервированный стол.",
+      "discipline_example": "Закрывающаяся книга перекрывает кадр и открывает следующий день.",
+      "acceptance": "Совпадение направления и достаточное перекрытие; не терять руки и предмет.",
+      "source": "https://www.studiobinder.com/blog/types-of-editing-transitions-in-film/"
+    },
+    {
+      "id": "whip_pan",
+      "number": 11,
+      "name": "Склейка в смазанной панораме",
+      "kind": "Базовый приём",
+      "mechanism": "Два движения камеры соединены в момент смаза.",
+      "grandma_example": "Быстрый перевод от рабочей поверхности к духовке по ходу действия.",
+      "discipline_example": "Перевод от рабочего стола к залу.",
+      "acceptance": "Только если режим допускает движение камеры. Для двух панелей и непрерывной неподвижной2Dне использовать.",
+      "source": "https://www.studiobinder.com/blog/swish-pan-whip-pan-definition-film/"
+    },
+    {
+      "id": "zoom_bridge",
+      "number": 12,
+      "name": "Переход через приближение",
+      "kind": "Монтажный вариант",
+      "mechanism": "Приближение к предмету переходит в совпадающую крупность другого кадра.",
+      "grandma_example": "Приближение к слоистой структуре выпечки, затем раскрытие разреза на тарелке.",
+      "discipline_example": "Приближение к строчке тетради, переход к следующему дню за тем же столом.",
+      "acceptance": "Нужны запас разрешения и согласованная точка центра; не заставлять модель выдумывать края.",
+      "source": "https://helpx.adobe.com/ph_fil/premiere-pro/how-to/apply-transitions-premiere-cc.html"
+    },
+    {
+      "id": "focus_bridge",
+      "number": 13,
+      "name": "Переход через расфокус",
+      "kind": "Монтажный вариант",
+      "mechanism": "Конец кадра уходит в размытие, следующий проявляет связанный предмет.",
+      "grandma_example": "Пар размывает кастрюлю; проявляется готовая порция, время готовки обозначено.",
+      "discipline_example": "Вечерняя книга теряет резкость; утром та же книга снова в фокусе.",
+      "acceptance": "Использовать дозированно; точные формулы и пищевую структуру не прятать.",
+      "source": "https://www.studiobinder.com/blog/types-of-editing-transitions-in-film/"
+    },
+    {
+      "id": "cut_in",
+      "number": 14,
+      "name": "Врезка важной детали",
+      "kind": "Базовый приём",
+      "mechanism": "Переход от целого к нужной детали даёт новую информацию.",
+      "grandma_example": "Крупно край теста, по которому видно нужную толщину.",
+      "discipline_example": "Крупно конкретная ошибка, на которую он смотрит.",
+      "acceptance": "Врезка отвечает на вопрос, а не украшает монтаж.",
+      "source": "https://www.studiobinder.com/blog/types-of-editing-transitions-in-film/"
+    },
+    {
+      "id": "reaction",
+      "number": 15,
+      "name": "Склейка на реакцию",
+      "kind": "Базовый приём",
+      "mechanism": "После причины показываем следствие на лице или в жесте.",
+      "grandma_example": "Результат пробы, затем понятная реакция бабушки.",
+      "discipline_example": "Увидел вчерашний рисунок, затем реакция и новая попытка.",
+      "acceptance": "Причина должна быть показана раньше; оставить время прочесть реакцию.",
+      "source": "https://www.studiobinder.com/blog/shot-reverse-shot-cutaways-coverage/"
+    },
+    {
+      "id": "j_cut",
+      "number": 16,
+      "name": "Звук следующего кадра раньше изображения",
+      "kind": "Базовый звуковой переход",
+      "mechanism": "Новый звук подготавливает следующий кадр.",
+      "grandma_example": "Слышен таймер, затем видим духовку.",
+      "discipline_example": "Начинается звук будильника, затем меняется день.",
+      "acceptance": "Требует монтажной звуковой дорожки; в режиме без звука выключен. Не добавлять поверх утверждённого голоса автоматически.",
+      "source": "https://helpx.adobe.com/premiere/desktop/edit-projects/trim-clips/perform-j-cuts-and-l-cuts.html"
+    },
+    {
+      "id": "l_cut",
+      "number": 17,
+      "name": "Голос продолжается после смены изображения",
+      "kind": "Базовый звуковой переход",
+      "mechanism": "Речь предыдущего плана продолжается на действии или реакции.",
+      "grandma_example": "Фраза бабушки продолжается на крупном плане её рук.",
+      "discipline_example": "Фраза о рутине продолжается на изменившемся результате2026.",
+      "acceptance": "Не обрезать слова, не дублировать речь. Уже записанную дорожку сохранять.",
+      "source": "https://helpx.adobe.com/premiere/desktop/edit-projects/trim-clips/perform-j-cuts-and-l-cuts.html"
+    },
+    {
+      "id": "sound_match",
+      "number": 18,
+      "name": "Звуковая рифма",
+      "kind": "Вариант звуковой склейки",
+      "mechanism": "Похожие звуки связывают разные события.",
+      "grandma_example": "Стук скалки сменяется аккуратным стуком тарелки о стол.",
+      "discipline_example": "Щелчок лампы сменяется щелчком кнопки тренажёра.",
+      "acceptance": "Отдельный разрешённый звуковой слой; похожий звук не заменяет причинность.",
+      "source": "https://www.studiobinder.com/blog/match-cuts-creative-transitions-examples/"
+    },
+    {
+      "id": "ellipsis",
+      "number": 19,
+      "name": "Пропуск времени внутри знакомого действия",
+      "kind": "Базовый монтажный приём",
+      "mechanism": "Опускаем ожидание, сохраняем начало и видимый результат.",
+      "grandma_example": "Накрыла тесто; после обозначенной выдержки снимает то же полотенце.",
+      "discipline_example": "Закрыл тетрадь вечером; открыл утром на оставленной закладке.",
+      "acceptance": "Не скрывать обязательный шаг рецепта и не путать пропуск времени с непрерывным движением.",
+      "source": "https://open.library.okstate.edu/introfilmtv/part/editing/"
+    },
+    {
+      "id": "loop",
+      "number": 20,
+      "name": "Возврат финала к первому кадру",
+      "kind": "Применение совпадающей композиции",
+      "mechanism": "Последний жест подготавливает повтор начала, после законченной развязки.",
+      "grandma_example": "Последняя тарелка движется в том же направлении, что первая подача.",
+      "discipline_example": "После показанного2026палец тянется к будильнику, близко к композиции начала.",
+      "acceptance": "Не отнимать финал ради повтора и не обещать повторный просмотр.",
+      "source": "https://www.studiobinder.com/blog/match-cuts-creative-transitions-examples/"
+    }
+  ]
+}

@@ -1,0 +1,246 @@
+{
+  "schema_version": 1,
+  "status": "design_template_requires_real_references",
+  "project_id": null,
+  "run_id": null,
+  "revision": 1,
+  "characters": {
+    "approved_character_id": {
+      "reference_path": null,
+      "reference_sha256": null,
+      "description": "Точное описание из утверждённой карточки персонажа",
+      "locked": [
+        "face",
+        "body_proportions",
+        "hair_or_fur",
+        "clothing",
+        "handedness",
+        "art_style"
+      ],
+      "allowed_changes": []
+    }
+  },
+  "locations": {
+    "approved_location_id": {
+      "reference_path": null,
+      "reference_sha256": null,
+      "layout": "Расположение окна, двери, мебели и рабочей поверхности относительно друг друга",
+      "lighting": "Направление света и время суток",
+      "palette": [],
+      "axis": "Какая сторона оси используется",
+      "prop_ids": []
+    }
+  },
+  "props": {
+    "prop_id": {
+      "reference_path": null,
+      "shape": null,
+      "size_relative_to_hand": null,
+      "material": null,
+      "color": null,
+      "state_before": null,
+      "state_after": null
+    }
+  },
+  "shots": [
+    {
+      "shot_id": "s01",
+      "location_id": "approved_location_id",
+      "character_ids": [
+        "approved_character_id"
+      ],
+      "action": null,
+      "action_reason": null,
+      "screen_direction": null,
+      "camera": {
+        "shot_size": null,
+        "angle": null,
+        "movement": null
+      },
+      "timing": {
+        "action_seconds": null,
+        "read_result_seconds": null,
+        "timeline_seconds": null,
+        "generation_seconds": null,
+        "provider_allowed_seconds": [],
+        "edit_in_seconds": null,
+        "edit_out_seconds": null,
+        "speed": 1.0,
+        "range_convention": "edit_in_inclusive_edit_out_exclusive"
+      },
+      "start_state": {
+        "pose": null,
+        "gaze_target": null,
+        "focal_point_normalized": [
+          null,
+          null
+        ],
+        "prop_states": {}
+      },
+      "end_state": {
+        "pose": null,
+        "gaze_target": null,
+        "focal_point_normalized": [
+          null,
+          null
+        ],
+        "prop_states": {}
+      },
+      "panels": [],
+      "panel_schema": {
+        "id": "top_or_bottom",
+        "bounds_normalized": null,
+        "location_id": null,
+        "pose": null,
+        "gaze_target": null,
+        "prop_states": {},
+        "focal_point_panel_normalized": [
+          null,
+          null
+        ]
+      }
+    },
+    {
+      "shot_id": "s02",
+      "location_id": "approved_location_id",
+      "character_ids": [
+        "approved_character_id"
+      ],
+      "action": null,
+      "action_reason": null,
+      "screen_direction": null,
+      "camera": {
+        "shot_size": null,
+        "angle": null,
+        "movement": null
+      },
+      "timing": {
+        "action_seconds": null,
+        "read_result_seconds": null,
+        "timeline_seconds": null,
+        "generation_seconds": null,
+        "provider_allowed_seconds": [],
+        "edit_in_seconds": null,
+        "edit_out_seconds": null,
+        "speed": 1.0,
+        "range_convention": "edit_in_inclusive_edit_out_exclusive"
+      },
+      "start_state": {
+        "pose": null,
+        "gaze_target": null,
+        "focal_point_normalized": [
+          null,
+          null
+        ],
+        "prop_states": {}
+      },
+      "end_state": {
+        "pose": null,
+        "gaze_target": null,
+        "focal_point_normalized": [
+          null,
+          null
+        ],
+        "prop_states": {}
+      },
+      "panels": [],
+      "panel_schema": {
+        "id": "top_or_bottom",
+        "bounds_normalized": null,
+        "location_id": null,
+        "pose": null,
+        "gaze_target": null,
+        "prop_states": {},
+        "focal_point_panel_normalized": [
+          null,
+          null
+        ]
+      }
+    }
+  ],
+  "boundaries": [
+    {
+      "from": "s01",
+      "to": "s02",
+      "technique_id": "action_match",
+      "intent": "Зачем зрителю следующий кадр",
+      "exit_pose": null,
+      "entry_pose": null,
+      "motion_vector": null,
+      "focal_point_normalized": [
+        null,
+        null
+      ],
+      "axis_preserved": true,
+      "approved_source_candidate_id": null,
+      "source_video_sha256": null,
+      "source_frame_timestamp_seconds": null,
+      "source_frame_path": null,
+      "source_frame_sha256": null,
+      "mode": "same_camera_continue_or_reframed_match",
+      "check_status": "not_rendered",
+      "source_frame_index": null,
+      "source_frame_selection": "last displayed frame strictly before edit_out_seconds, not a frame after the cut",
+      "panel_links": []
+    }
+  ],
+  "rules": [
+    "Описание дополняет реальные изображения, но не заменяет их.",
+    "Файл заполняется только подтверждёнными референсами, пустые ссылки не означают готовность.",
+    "Для стыка извлечь кадр непосредственно перед исключающей границей edit_out_seconds утверждённого клипа, а не автоматически последний исходный кадр.",
+    "При смене ракурса прежний кадр используется как референс положения и реквизита, не как обязательный стартовый кадр другого ракурса.",
+    "При замене исходного кандидата downstream-стыки становятся stale и пересогласуются.",
+    "Непрерывное движение проверять парой реальных клипов; соответствиеJSONне доказывает качество.",
+    "Не переносить новую локацию на остальные сцены без явного location_id.",
+    "Нельзя покупать8секунд ради5вмонтаже: выбранная оплачиваемая длительность используется целиком. Проверить это до отправки платного запроса."
+  ],
+  "budget_policy": {
+    "no_paid_unused_video_seconds": true,
+    "generate_longer_then_trim": false,
+    "catalog_in_every_request": false,
+    "planning_calls_per_initial_film": 1,
+    "reuse_approved_media_by_hash": true,
+    "per_scene_request_scope": [
+      "participating_characters",
+      "current_location",
+      "relevant_props",
+      "incoming_boundary",
+      "current_action",
+      "outgoing_boundary"
+    ],
+    "validate_locally": [
+      "durations",
+      "supported_provider_values",
+      "candidate_ids",
+      "asset_hashes",
+      "paid_seconds_equal_unique_used_source_seconds"
+    ],
+    "cost_preview": {
+      "new_images": null,
+      "new_video_requests": null,
+      "paid_video_seconds": null,
+      "known_price": null,
+      "unique_used_source_seconds": null,
+      "final_timeline_seconds_including_reuse": null
+    },
+    "source_purchases": [],
+    "purchase_schema": {
+      "purchase_id": null,
+      "source_clip_id": null,
+      "generation_seconds": null,
+      "source_frame_count": null,
+      "price_if_known": null
+    },
+    "edit_uses": [],
+    "use_schema": {
+      "source_clip_id": null,
+      "first_frame_inclusive": null,
+      "last_frame_exclusive": null,
+      "timeline_start_seconds": null,
+      "speed": 1.0,
+      "reuse_approved": false
+    },
+    "coverage_rule": "For every new paid source clip, union of used frame intervals covers its complete intended duration at original speed. Reusing the same prefix does not compensate for an unused tail."
+  },
+  "frame_coordinate_system": "normalized_full_frame; panel coordinates are local to panel bounds"
+}
