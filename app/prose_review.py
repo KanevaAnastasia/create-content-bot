@@ -8,6 +8,7 @@ import re
 from typing import Callable
 
 from .text_settings import LEGACY_GUEST_TEXT
+from .writing_style import NARRATIVE_CLARITY_RULES
 
 # Explicit schema fields. Visual descriptions, QA results and extracted data stay intact.
 logger = logging.getLogger("bot.editorial")
@@ -90,6 +91,7 @@ def review_prose_output(prompt: str, raw: str, generate: Callable[[str], str], *
         return raw
     draft = {str(i): value for i, (_, value) in enumerate(selected)}
     request = (
+        NARRATIVE_CLARITY_RULES + '\n' +
         'Отредактируй только новые зрительские тексты из DRAFT по всем редакционным правилам. '
         'Проверь логику, естественность, пустые обобщения, искусственные конструкции, повторы, '
         'служебные фразы и форматирование, а не только пунктуацию. Тире запрещены. '

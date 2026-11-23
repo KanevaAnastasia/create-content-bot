@@ -1,6 +1,7 @@
 import json
 import base64
 import math
+import pytest
 from pathlib import Path
 
 from app import story_generation
@@ -1113,3 +1114,32 @@ def test_story_young_grandma_prompt_overrides_elderly_reference_age():
     assert "возрасте примерно 22–30 лет" in prompt
     assert "приоритет над возрастом и одеждой в базовом" in prompt
     assert "не рисовать пожилую женщину" in prompt.lower()
+
+
+@pytest.mark.parametrize('redirected', [False, True])
+def test_timed_audio_reports_geo_restriction_without_retry(monkeypatch, redirected):
+    from types import SimpleNamespace
+    from unittest.mock import Mock
+    monkeypatch.setenv('ELEVENLABS_API_KEY','test-key')
+    response=SimpleNamespace(ok=True,status_code=200 if redirected else 302,
+        url='https://geo-restriction.elevenlabs.io/' if redirected else 'https://api.elevenlabs.io/v1/text-to-dialogue/with-timestamps',
+        headers={} if redirected else {'Location':'https://geo-restriction.elevenlabs.io/'},
+        json=Mock(side_effect=ValueError('Expecting value')))
+    post=Mock(return_value=response)
+    monkeypatch.setattr('requests.post',post)
+    with pytest.raises(RuntimeError,match='ограничил доступ'):
+        story_generation.generate_story_audio('Утверждённый текст.',voice_id='voice')
+    assert post.call_count==1
+    assert post.call_args.kwargs['allow_redirects'] is False
+    response.json.assert_not_called()
+
+
+def test_timed_audio_non_json_does_not_resubmit_paid_request(monkeypatch):
+    from types import SimpleNamespace
+    from unittest.mock import Mock
+    monkeypatch.setenv('ELEVENLABS_API_KEY','test-key')
+    response=SimpleNamespace(ok=True,status_code=200,url='https://api.elevenlabs.io/',headers={},json=Mock(side_effect=ValueError('Expecting value')))
+    post=Mock(return_value=response);monkeypatch.setattr('requests.post',post)
+    with pytest.raises(RuntimeError,match='проверить историю'):
+        story_generation.generate_story_audio('Утверждённый текст.',voice_id='voice')
+    assert post.call_count==1

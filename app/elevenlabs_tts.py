@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 import os
+from urllib.parse import urlsplit
 
 import requests
 
@@ -30,6 +31,18 @@ def _env_required(name: str) -> str:
     if not value:
         raise RuntimeError(f"Не задан {name}.")
     return value
+
+
+
+def check_elevenlabs_access(response) -> None:
+    """Recognize the provider's geo redirect before parsing JSON or audio."""
+    targets = [getattr(response, 'url', ''), response.headers.get('Location', ''), response.headers.get('location', '')]
+    if any(isinstance(url, str) and urlsplit(url).hostname == 'geo-restriction.elevenlabs.io' for url in targets):
+        raise RuntimeError(
+            'ElevenLabs ограничил доступ с текущего сетевого адреса по региону. '
+            'Вместо озвучки сервис вернул страницу ограничения. Текст сохранён; '
+            'повторная генерация автоматически не запускалась.'
+        )
 
 
 def generate_elevenlabs_speech(
@@ -65,7 +78,9 @@ def generate_elevenlabs_speech(
             "apply_text_normalization": "auto",
         },
         timeout=180,
+        allow_redirects=False,
     )
+    check_elevenlabs_access(response)
     content_type = response.headers.get("content-type") or ""
     if not response.ok or not content_type.lower().startswith("audio/"):
         try:

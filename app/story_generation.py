@@ -628,7 +628,7 @@ def _timed_dialogue_endpoint_result(
     import requests
 
     from .constants import ELEVENLABS_API_KEY_ENV_NAME
-    from .elevenlabs_tts import DEFAULT_ELEVENLABS_OUTPUT_FORMAT, DEFAULT_ELEVENLABS_TTS_MODEL
+    from .elevenlabs_tts import DEFAULT_ELEVENLABS_OUTPUT_FORMAT, DEFAULT_ELEVENLABS_TTS_MODEL, check_elevenlabs_access
 
     api_key = str(os.getenv(ELEVENLABS_API_KEY_ENV_NAME) or "").strip()
     if not api_key:
@@ -658,10 +658,21 @@ def _timed_dialogue_endpoint_result(
             },
         },
         timeout=180,
+        allow_redirects=False,
     )
+    check_elevenlabs_access(response)
     if not response.ok:
         raise RuntimeError(f"ElevenLabs timed TTS failed: HTTP {response.status_code}: {response.text[:1000]}")
-    data = response.json()
+    try:
+        data = response.json()
+    except ValueError as exc:
+        raise RuntimeError(
+            'ElevenLabs вернул ответ без ожидаемых данных озвучки '
+            f'(HTTP {getattr(response, "status_code", "unknown")}). '
+            'Нужно проверить историю генераций перед повторной попыткой.'
+        ) from exc
+    if not isinstance(data, dict):
+        raise RuntimeError('ElevenLabs вернул некорректные данные озвучки. Проверьте историю перед повтором.')
     audio_b64 = str(data.get("audio_base64") or "").strip()
     from .story_alignment import response_alignment
     alignment = response_alignment(data)

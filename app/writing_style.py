@@ -1,7 +1,7 @@
 """Shared editorial guidance for every text backend, including saved prompts.
 
 Reference: https://en.wikipedia.org/wiki/Wikipedia:Signs_of_AI_writing
-Reviewed 2026-11-17. These are editing principles, not an AI detector.
+Reviewed 2026-11-23. These are editing principles, not an AI detector.
 """
 
 LEGACY_HUMAN_WRITING_RULES = """[CONTENT_FABRIC_WRITING_STYLE_V1]
@@ -54,7 +54,7 @@ PREVIOUS_HUMAN_WRITING_RULES = LEGACY_HUMAN_WRITING_RULES.replace("WRITING_STYLE
 )
 
 
-HUMAN_WRITING_RULES = PREVIOUS_HUMAN_WRITING_RULES.replace("WRITING_STYLE_V2", "WRITING_STYLE_V3").replace(
+V3_HUMAN_WRITING_RULES = PREVIOUS_HUMAN_WRITING_RULES.replace("WRITING_STYLE_V2", "WRITING_STYLE_V3").replace(
     "Это редакционные ориентиры, а не запрет отдельных слов или знаков препинания.",
     "Это обязательные редакционные требования к новой прозе. Запрет тире указан ниже.",
 ).replace(
@@ -98,10 +98,40 @@ HUMAN_WRITING_RULES = PREVIOUS_HUMAN_WRITING_RULES.replace("WRITING_STYLE_V2", "
 )
 
 
+# The frozen V3 prefix also occurs in saved prompts. Upgrade it without changing payload.
+NARRATIVE_CLARITY_RULES = """Редакторская проверка смысла и живой речи во всех проектах:
+До написания установи, кто говорит, кому, о какой конкретной ситуации и чего хочет.
+Дай понятный предмет разговора до местоимений и оценок. «Сначала путался», «этот кусок»,
+«стал другим», «получилось» не заменяют описание: в чём путался, что делал и что изменилось?
+Если ответ уже очевиден из соседней реплики, не повторяй его. Не выдумывай детали ради конкретности.
+Журналистская проверка: что произошло, с кем, при каких обстоятельствах, что этому предшествовало
+и чем это закончилось. Включай только нужные для понимания ответы, не превращай их в анкету.
+Каждая фраза должна продолжать предыдущую, отвечать на возникший вопрос или менять ситуацию.
+Не склеивай независимые афоризмы вместо истории. Избегай рубленой цепочки «сначала... потом...
+зато... теперь...», если за ней нет понятного действия. Не навязывай одинаковый ритм всем роликам.
+Для озвучки мысленно произнеси весь текст от лица одного персонажа: говорит ли так человек,
+не сменился ли рассказчик, понятно ли, зачем он это рассказывает? Сохраняй естественные связки.
+Не проговаривай режиссёрские указания «в другой версии», «герой внизу», если персонаж сам
+не обсуждает устройство кадра. Изображение может показывать результат и шутку, но не обязано
+исправлять бессмысленную реплику. Конкретные поступки и речь важнее перечня модных приёмов.
+Не превращай концовку в отвлечённый лозунг, самооценку или обязательную шутку. Пользовательский
+дословный финал и намеренный ритмический повтор сохраняй. Не добавляй морали к уже ясной сцене.
+В исторической истории сохраняй проверенные факты; не придумывай цитаты и внутренние мотивы.
+В учебном объяснении называй задачу, ошибку или пример; не подменяй понятное объяснение
+словами «понять связь», «выбрать способ», «изменить подход» без раскрытия их смысла.
+Перед выдачей удали фразу, которая ничего не добавляет, затем проверь, не пропала ли логическая связь.
+Список признаков ИИ служит поводом проверить качество, не доказательством авторства: не запрещай
+обычное слово само по себе и не обещай детектору или зрителю определённый результат.
+"""
+HUMAN_WRITING_RULES = V3_HUMAN_WRITING_RULES.replace('WRITING_STYLE_V3', 'WRITING_STYLE_V4').replace(
+    '[/CONTENT_FABRIC_WRITING_STYLE_V4]', NARRATIVE_CLARITY_RULES + '[/CONTENT_FABRIC_WRITING_STYLE_V4]'
+)
+
+
 def with_writing_style(prompt: str) -> str:
     """Attach all current rules to every text request; preserve the task payload."""
     text = str(prompt)
-    for existing in (HUMAN_WRITING_RULES, PREVIOUS_HUMAN_WRITING_RULES, LEGACY_HUMAN_WRITING_RULES):
+    for existing in (HUMAN_WRITING_RULES, V3_HUMAN_WRITING_RULES, PREVIOUS_HUMAN_WRITING_RULES, LEGACY_HUMAN_WRITING_RULES):
         if text.startswith(existing + "\n\n"):
             text = text[len(existing) + 2:]
             break

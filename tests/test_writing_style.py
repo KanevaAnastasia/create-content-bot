@@ -18,5 +18,14 @@ def test_previous_rules_upgrade_once_without_touching_payload():
     payload = 'Preserve approved: Это — цитата. image_prompt: 3D style.'
     updated = with_writing_style(PREVIOUS_HUMAN_WRITING_RULES + '\n\n' + payload)
     assert updated == HUMAN_WRITING_RULES + '\n\n' + payload
-    assert 'WRITING_STYLE_V3' in updated
+    assert 'WRITING_STYLE_V4' in updated
+    assert with_writing_style(updated) == updated
+
+
+def test_v3_saved_prompt_upgrades_without_rewriting_user_script():
+    from app.writing_style import V3_HUMAN_WRITING_RULES
+    payload = 'Approved voice: Сначала путался. Это — точная цитата. {"duration": 8}'
+    updated = with_writing_style(V3_HUMAN_WRITING_RULES + '\n\n' + payload)
+    assert updated == HUMAN_WRITING_RULES + '\n\n' + payload
+    assert updated.count('[CONTENT_FABRIC_WRITING_STYLE_V4]') == 1
     assert with_writing_style(updated) == updated
