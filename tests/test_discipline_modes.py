@@ -284,7 +284,7 @@ def test_short_plans_preserve_four_second_clips_and_no_forced_camera(monkeypatch
     captured=[]
     def generator(prompt,**kwargs):
         captured.append(prompt)
-        return json.dumps({'scenes':[{'visual':'Вася закрывает книгу.','camera_direction':'orbit shot','location_transition':True}]})
+        return json.dumps({'scenes':[{'visual':'Вася закрывает книгу.','camera_direction':'orbit shot','location_transition':True,'transition_note':'После чтения Вася идёт в зал по сценарию.'}]})
     monkeypatch.setattr(story_generation,'gemini_generate_sync',generator)
     plan=story_generation.generate_story_scene_plan(source_story='Закрыть книгу, вспомнить и сверить.',
         voiceover_text='Вася закрывает книгу. Потом вспоминает и сверяет.',duration_sec=12.4,
@@ -301,4 +301,5 @@ def test_short_plans_preserve_four_second_clips_and_no_forced_camera(monkeypatch
         assert 'источник' in modes.script_direction(mode)
     if mode==modes.TWO_LIVES:
         assert 'Время сверху и снизу может расходиться' in captured[0]
-        assert all(not row['location_transition'] for row in plan)
+        assert plan[0]['location_transition'] is True
+        assert 'по явно заданным действиям сценария' in captured[0]

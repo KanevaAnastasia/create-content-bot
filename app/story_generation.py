@@ -1589,9 +1589,9 @@ def generate_story_scene_plan(
     )
     if narrative_format == TWO_LIVES:
         location_instruction = (
-            "Одна комната и фиксированные панели; location_transition=false. "
+            "Фиксированные панели. Локации менять только по явно заданным действиям сценария; при таком переходе location_transition=true и transition_note объясняет причину смены места. "
             "Время в панелях может расходиться. Смену дней, сезонов и лет показывай только согласно "
-            "ремаркам, сохраняя архитектуру, героев и основные предметы. "
+            "ремаркам, сохраняя стороны панелей и модели героев. "
         )
     prompt = (
         "Ты режиссёр короткой немой визуальной истории под уже утверждённую закадровую дорожку. "
@@ -1692,7 +1692,7 @@ def generate_story_scene_plan(
         if continuous and normalized:
             time_period = normalized[0]["time_period"]
         historical_scene = time_period == "past"
-        location_transition = not continuous and narrative_format != TWO_LIVES and _story_location_transition(candidate)
+        location_transition = not continuous and _story_location_transition(candidate)
         location, lighting, color_palette = _story_scene_environment(
             candidate,
             historical_scene=historical_scene,
