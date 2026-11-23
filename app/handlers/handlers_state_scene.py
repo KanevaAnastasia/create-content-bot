@@ -1145,6 +1145,10 @@ async def _generate_production_after_overlay_title(
     chat_id: int,
     session: dict,
 ) -> bool:
+    if is_story_generation(session):
+        if _next_story_character_index(session) is not None:
+            return await _begin_story_character_approval(update, context, chat_id=chat_id, session=session)
+        _attach_story_character_references(session)
     try:
         await reply_text_without_keyboard(update.message, "Генерирую production-промпты, ждите.")
         requested_end_frame_scenes = _ensure_end_frame_scene_requests_from_session_text(session)
@@ -2023,6 +2027,7 @@ def _story_character_reference_is_approved(session: dict, character: dict[str, A
         and record.get("approved")
         and Path(str(record.get("selected_path") or "")).is_file()
         and str(record.get("description") or "") == str(character.get("description") or "")
+        and (not character.get("requires_reference") or str(record.get("reference_prompt") or "") == str(character.get("reference_prompt") or ""))
         and normalize_story_visual_style(record.get("story_visual_style_key")) == selected_style
     )
 
@@ -2080,6 +2085,16 @@ def _story_character_reference_prompt(
     feedback: str = "",
     has_project_style_reference: bool = False,
 ) -> str:
+    if character.get("entity_type") == "prop":
+        style = story_visual_style_config(story_visual_style)
+        return (
+            f"Создай референс одного сюжетного предмета: {character.get('display_name')}. "
+            f"Стиль {style['label']}: {style['prompt']}. "
+            "На нейтральном фоне покажи предмет целиком и один дополнительный ракурс. "
+            "Без людей, лиц, рук, окружения, надписей и логотипов. Форма и масштаб предмета едины. "
+            f"Описание: {character.get('description')}. {character.get('reference_prompt')}. "
+            f"Правка пользователя: {feedback}"
+        )
     age_stage = str(character.get("age_stage") or "adult")
     same_group = str(character.get("same_person_group") or character.get("id") or "")
     style_config = story_visual_style_config(story_visual_style)
@@ -2135,7 +2150,7 @@ async def _generate_story_character_reference(
     label = str(character.get("display_name") or character.get("id") or "герой")
     await reply_text_without_keyboard(
         update.message,
-        f"Генерирую и обязательно сохраняю референс персонажа {index + 1}/{len(characters)}: {label}. Ждите.",
+        f"Создаю референс {index + 1}/{len(characters)}: {label}. Он будет сохранён для согласования.",
     )
     same_person_refs = _story_same_person_reference_bytes(session, character)
     primary_style_refs = (
@@ -2146,7 +2161,24 @@ async def _generate_story_character_reference(
     # A same-person age reference preserves identity. In the «Основной» mode,
     # one project-primary reference is also attached strictly for material and
     # rendering language; the prompt explicitly forbids copying its identity.
-    references = [*same_person_refs, *primary_style_refs]
+    asset_uri = str(character.get("asset_uri") or "")
+    asset_path = Path(asset_uri[7:] if asset_uri.startswith("file://") else asset_uri)
+    if character.get("entity_type") != "prop" and asset_uri and not asset_path.is_file():
+        await update.message.reply_text("Исходный референс персонажа не найден. Восстановите файл персонажа проекта; генерация без его лица остановлена.")
+        return True
+    identity_refs = []
+    if character.get("entity_type") != "prop" and asset_uri:
+        try:
+            identity = asset_path.read_bytes()
+            if not identity:
+                raise ValueError("empty identity reference")
+        except (OSError, ValueError):
+            await update.message.reply_text(f"Исходный референс {label} пуст или недоступен. Восстановите файл; генерация остановлена.")
+            return True
+        identity_refs = [identity]
+    if identity_refs:
+        primary_style_refs = []
+    references = [*identity_refs, *same_person_refs, *primary_style_refs]
     try:
         image_bytes = await asyncio.to_thread(
             generate_image_vertex,
@@ -2155,7 +2187,7 @@ async def _generate_story_character_reference(
                 story_visual_style=str(session.get(STORY_VISUAL_STYLE_SESSION_KEY) or ""),
                 feedback=feedback,
                 has_project_style_reference=bool(primary_style_refs),
-            ),
+            ) + (" Первый приложенный референс задаёт личность исполнителя: сохрани лицо и узнаваемые черты, адаптируй материал и костюм к выбранной стилистике. " if identity_refs else ""),
             reference_images=references or None,
             aspect_ratio="9:16",
         )
@@ -2175,6 +2207,7 @@ async def _generate_story_character_reference(
             "selected_path": path,
             "versions": versions,
             "approved": False,
+            "reference_prompt": str(character.get("reference_prompt") or ""),
             "description": str(character.get("description") or ""),
             "story_visual_style_key": normalize_story_visual_style(
                 session.get(STORY_VISUAL_STYLE_SESSION_KEY)
@@ -2192,13 +2225,13 @@ async def _generate_story_character_reference(
         update.message,
         photo=bio,
         caption=(
-            f"Референс {index + 1}/{len(characters)} · {label} · {character.get('age_stage')}.\n"
-            "Файл сохранён до апрува. Проверьте лицо, возраст, одежду и ретро-стиль."
+            f"Референс {index + 1}/{len(characters)} · {label}.\n"
+            + ("Проверьте форму, материал, цвет и выбранную стилистику." if character.get("entity_type") == "prop" else "Проверьте лицо, возраст, одежду и выбранную стилистику.")
         ),
     )
     await _reply_text_with_optional_markup(
         update,
-        "«ОК» — закрепить внешность во всех соответствующих кадрах. "
+        "«ОК» — закрепить этот референс во всех соответствующих кадрах. "
         "«ПЕРЕГЕНЕРИРОВАТЬ» — создать и тоже сохранить ещё один вариант. Можно прислать конкретный фидбэк.",
         reply_markup=_story_character_approval_markup(),
     )
@@ -2229,9 +2262,11 @@ def _attach_story_character_references(session: dict) -> None:
             if isinstance(scene.get("story_character_descriptions"), dict)
             else {}
         )
-        for character_id in [str(x) for x in scene.get("characters") or []]:
+        for character_id in [str(x) for x in [*(scene.get("characters") or []), *(scene.get("story_prop_ids") or [])]]:
             record = refs.get(character_id)
             character = bible.get(character_id)
+            if isinstance(character, dict) and character.get("requires_reference") and not _story_character_reference_is_approved(session, character):
+                raise ValueError(f"Сначала утвердите референс: {character.get('display_name') or character_id}.")
             if isinstance(record, dict) and record.get("approved") and Path(str(record.get("selected_path") or "")).is_file():
                 scene_refs[character_id] = str(record["selected_path"])
             elif active_mode(session) and isinstance(character, dict) and character.get("display_name") in {"Василий", "Кнопка"}:
@@ -2239,7 +2274,12 @@ def _attach_story_character_references(session: dict) -> None:
             if isinstance(character, dict):
                 descriptions[character_id] = str(character.get("description") or "")
         scene["references"] = scene_refs
+        scene["story_required_reference_ids"] = [key for key in [*(scene.get("characters") or []), *(scene.get("story_prop_ids") or [])] if key in bible and bible[key].get("requires_reference")]
+        scene["story_prop_descriptions"] = {key: bible[key].get("description", "") for key in scene.get("story_prop_ids") or [] if key in bible}
+        scene["story_character_reference_prompts"] = {key: bible[key].get("reference_prompt", "") for key in scene.get("characters") or [] if key in bible}
         scene["story_character_descriptions"] = descriptions
+    from ..story_continuity import save_continuity_manifest
+    save_continuity_manifest(session)
 
 
 async def _refine_story_voiceover(
@@ -3084,6 +3124,8 @@ async def _approve_story_audio_and_build_scenes(
                     and Path(str(scoped.get("selected_path") or "")).is_file()):
                 character["description"] = str(scoped.get("description") or character.get("description") or "")
                 character["asset_uri"] = Path(scoped["selected_path"]).as_uri()
+                continue
+            if session.get("discipline_narrative_mode") == "lives_archive":
                 continue
             asset_uri = str(character.get("asset_uri") or "").strip()
             asset_path = asset_uri[7:] if asset_uri.startswith("file://") else asset_uri
@@ -5007,6 +5049,8 @@ async def _continue_after_scene_approval(
     chat_id: int,
     session: dict,
 ) -> bool:
+    if is_story_generation(session) and _next_story_character_index(session) is not None:
+        return await _begin_story_character_approval(update, context, chat_id=chat_id, session=session)
     if not session.get(SERIES_CHOICE_CONFIRMED_SESSION_KEY) and not session.get(SERIES_SESSION_KEY):
         session[SERIES_PENDING_NEXT_SESSION_KEY] = SERIES_NEXT_OVERLAY_TITLE
         SESSIONS[chat_id] = session
@@ -5103,7 +5147,7 @@ async def _handle_waiting_story_character_approval_state(
                 index=next_index,
             )
         _attach_story_character_references(session)
-        await update.message.reply_text("Все повторяющиеся герои утверждены и закреплены за историческими кадрами.")
+        await update.message.reply_text("Персонажи и основной повторяющийся реквизит утверждены и закреплены за нужными кадрами.")
         return await _continue_after_scene_approval(
             update,
             context,
@@ -5114,7 +5158,7 @@ async def _handle_waiting_story_character_approval_state(
     if low == "фидбек:":
         await _reply_text_with_optional_markup(
             update,
-            "Пришлите конкретную правку к внешности этого героя одним сообщением.",
+            "Пришлите конкретную правку к этому референсу одним сообщением.",
             reply_markup=_story_character_approval_markup(),
         )
         return True

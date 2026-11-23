@@ -988,6 +988,13 @@ def _append_scene_identity_to_image_prompt(
                 character_lines.append(
                     f"{character_context} {key}: {description}. Во всех сценах сохранять одно и то же лицо и телосложение."
                 )
+    for key in scene.get("story_prop_ids") or []:
+        description = (scene.get("story_prop_descriptions") or {}).get(key, "")
+        character_lines.append(f"Основной предмет {key}: {description}. Сохранять форму, материал и цвет по утверждённому референсу.")
+    for key in normalized_keys:
+        approved_look = (scene.get("story_character_reference_prompts") or {}).get(key, "")
+        if approved_look:
+            character_lines.append(f"Образ {key} для этого ролика: {approved_look}. Лицо исполнителя и костюм брать с утверждённого референса этого ролика; описание базовой одежды проекта не заменяет костюм роли.")
     descriptions = "\n".join(character_lines)
     drama_beat = "" if fruit_only_closeup else sanitize_character_names_and_keys(scene.get("romantic_drama_beat") or "").strip()
     identity_lines = [
@@ -1169,6 +1176,9 @@ def _reference_keys_for_scene(
     for ch in ch_list:
         if ch not in keys_order and isinstance(refs.get(ch), str) and refs.get(ch, "").strip():
             keys_order.append(ch)
+    for key in scene.get("story_prop_ids") or []:
+        if key not in keys_order and isinstance(refs.get(key), str) and refs[key].strip():
+            keys_order.append(key)
     for key in refs:
         if str(key).startswith("__story_style_") and key not in keys_order:
             keys_order.append(str(key))
@@ -1235,6 +1245,11 @@ def _load_scene_reference_images(
     Раньше брался только первый ключ (локация), из-за чего character sheets не попадали в запрос.
     """
     refs = _resolve_scene_references(scene, prompt_keys=prompt_keys)
+    for key in scene.get("story_required_reference_ids") or []:
+        path = refs.get(key, "")
+        absolute = path if os.path.isabs(path) else os.path.join(PROJECT_ROOT, path)
+        if not path or not os.path.isfile(absolute) or os.path.getsize(absolute) == 0:
+            raise ValueError(f"Утверждённый референс {key} недоступен. Восстановите файл до генерации кадра.")
     if not refs:
         return []
     story_scene = str(scene.get("generation_mode") or "").strip().lower() == "story"
@@ -1255,8 +1270,12 @@ def _load_scene_reference_images(
             with open(abs_path, "rb") as f:
                 data = f.read()
         except Exception:
+            if key in (scene.get("story_required_reference_ids") or []):
+                raise ValueError(f"Не удалось прочитать утверждённый референс {key}.")
             continue
         if not data:
+            if key in (scene.get("story_required_reference_ids") or []):
+                raise ValueError(f"Утверждённый референс {key} пуст.")
             continue
         if story_scene:
             data = crop_story_reference_border(data)

@@ -1662,7 +1662,7 @@ def generate_story_scene_plan(
         )
     prompt = (
         "Ты режиссёр короткой немой визуальной истории под уже утверждённую закадровую дорожку. "
-        "Верни только JSON-объект с ключами characters, scenario_environment, historical_environment и beats. "
+        "Верни только JSON-объект с ключами characters, props, scenario_environment, historical_environment и beats. "
         "Один beat строго на каждый semantic_beats. "
         "Не дроби и не переписывай фразу озвучки внутри смыслового эпизода.\n"
         "characters — библия всех повторяющихся или сюжетно важных людей. Персонажи из project_characters уже утверждены: "
@@ -1670,10 +1670,16 @@ def generate_story_scene_plan(
         "Для одного героя в разных возрастах создай отдельные id (например antonin_young и antonin_adult), но одинаковый "
         "same_person_group. Поля: id, display_name, role, age_stage, same_person_group, description, reference_prompt, "
         "requires_reference. Description фиксирует лицо, волосы, телосложение и отличительные признаки; одежда исторически точна.\n"
+        "props — только основной сюжетный реквизит, узнаваемый в двух или более сценах, обычно 0–2 предмета, максимум 3. "
+        "Не включай чашки, столы, комнаты, карандаши и бытовые мелочи: сохраняй их описанием в location и continuity_anchors. "
+        "Для истории Кинга важны машинка и рукопись; не создавай отдельный референс каждому листу. "
+        "Каждый prop: id с префиксом prop_, display_name, description (форма, размер, материал, цвет), reference_prompt, is_key_story_prop. Последнее true только для главного сюжетного предмета, не для фонового реквизита. "
+        "В каждом clip_visual добавь props: точные id только видимых в этом кадре предметов из props. "
         f"Каждый beat: beat, visual_concept, clip_visuals. Число clip_visuals равно числу {clips_key} "
         "этого semantic_beat. Каждый clip_visual: visual, shot_type, camera_direction, location, lighting, color_palette, "
         "grandma_age (young/current/none), cat_present, time_period (present/past), "
         "characters (grandma, cat и/или id из characters), continuity_anchors, location_segment, "
+        "characters_absent_reason: если людей нет, явно объясни предметный или пейзажный план; при действующем герое characters не может быть пустым. "
         "location_transition (true/false), transition_note.\n"
         "Все clip_visuals одного beat подтверждают ПОЛНЫЙ смысл narration_excerpt, а не отдельные обрывки слов. "
         "Первый clip_visual сразу устанавливает весь смысловой тезис; следующие развивают его визуально. "
@@ -1705,8 +1711,20 @@ def generate_story_scene_plan(
     data = extract_json_object(raw)
     generated_character_bible = _normalize_story_character_bible(data.get("characters"))
     character_bible = [*fixed_project_characters]
+    if narrative_format == ARCHIVE:
+        generated_by_id = {c["id"]: c for c in generated_character_bible}
+        for character in character_bible:
+            planned = generated_by_id.get(character["id"])
+            if planned:
+                character["reference_prompt"] = planned["reference_prompt"]
     if not short_format:
         character_bible.extend(item for item in generated_character_bible if item["id"] not in fixed_character_ids)
+    props = _normalize_story_character_bible(data.get("props"))
+    if len(props) > 3 or any(not p["id"].startswith("prop_") for p in props):
+        raise ValueError("Выберите не более трёх основных предметов с id prop_. Мелочи опишите в сценах.")
+    prop_ids = {p["id"] for p in props}
+    if prop_ids.intersection(item["id"] for item in character_bible):
+        raise ValueError("Идентификаторы предметов и персонажей должны различаться.")
     character_ids = {item["id"] for item in character_bible}
     character_descriptions = {item["id"]: item["description"] for item in character_bible}
     character_labels = {item["id"]: item["display_name"] for item in character_bible}
@@ -1726,10 +1744,15 @@ def generate_story_scene_plan(
             candidate = beat_clips[clip_index]
         else:
             candidate = legacy_scenes[index] if index < len(legacy_scenes) and isinstance(legacy_scenes[index], dict) else {}
+        scene_props = list(dict.fromkeys(_story_character_id(v) for v in candidate.get("props") or []))
+        if any(v not in prop_ids for v in scene_props):
+            raise ValueError("В сцене указан предмет без описания в props.")
         visual = " ".join(str(candidate.get("visual") or window["narration_excerpt"] or "Переходный атмосферный кадр").split())
         age = _normalize_grandma_age(candidate.get("grandma_age"))
         cat_present = bool(candidate.get("cat_present"))
         chars = [_story_character_id(item) for item in candidate.get("characters") or []]
+        if narrative_format == ARCHIVE and not chars and not str(candidate.get("characters_absent_reason") or "").strip():
+            raise ValueError("В историческом кадре отсутствуют исполнители. Укажите character_id героя или объясните предметный план в characters_absent_reason.")
         if narrative_format == ARCHIVE and any(item not in character_ids for item in chars):
             raise ValueError("Историческая сцена содержит неизвестного исполнителя. Используйте утверждённые character_id проекта.")
         chars = [
@@ -1839,6 +1862,8 @@ def generate_story_scene_plan(
                 "grandma_age": age,
                 "cat_present": cat_present,
                 "characters": chars,
+                "characters_absent_reason": str(candidate.get("characters_absent_reason") or ""),
+                "story_prop_ids": scene_props,
                 "story_character_descriptions": {
                     key: character_descriptions[key] for key in chars if key in character_descriptions
                 },
@@ -2004,9 +2029,25 @@ def generate_story_scene_plan(
         # variant of the same protagonist. One-off background people do not
         # trigger extra paid image generations.
         character["requires_reference"] = bool(
-            not str(character.get("asset_uri") or "").strip()
-            and (character_usage.get(character_id, 0) >= 2 or len(group_members.get(group, set())) >= 2)
+            (narrative_format == ARCHIVE and character_usage.get(character_id, 0) > 0)
+            or (not str(character.get("asset_uri") or "").strip()
+                and (character_usage.get(character_id, 0) >= 2 or len(group_members.get(group, set())) >= 2))
         )
+    if narrative_format == ARCHIVE and re.search(r"Кинг|Кэрри", source_story, re.I) and re.search(r"Табит", source_story, re.I):
+        used = {key for scene in normalized for key in scene["characters"]}
+        female = _discipline_anastasia_character_id(fixed_project_characters)
+        male = next((c["id"] for c in fixed_project_characters if str(c.get("display_name") or "").casefold() in {"василий", "вася", "vasily", "vasiliy"} or c["id"].casefold() in {"vasily", "vasiliy", "discipline_vasily"}), "")
+        if not male or not female or not {male, female}.issubset(used):
+            raise ValueError("В истории Кинга должны действовать оба утверждённых исполнителя: Кинг и Табита. Дополните состав сцен до генерации референсов.")
+    raw_props = {str(item.get("id") or ""): item for item in data.get("props") or [] if isinstance(item, dict)}
+    minor_prop = re.compile(r"\b(?:кружк\w*|чашк\w*|стол(?:а|у|ом|е|ы|ов)?|комнат\w*|карандаш\w*|стул\w*|cups?|mugs?|tables?|desks?|rooms?|pencils?|chairs?)\b", re.I)
+    for prop in props:
+        prop["entity_type"] = "prop"
+        name = f"{prop['id']} {prop['display_name']}".replace("_", " ")
+        important = narrative_format == ARCHIVE and raw_props.get(prop["id"], {}).get("is_key_story_prop") is True and not minor_prop.search(name)
+        prop["requires_reference"] = bool(important and sum(prop["id"] in scene["story_prop_ids"] for scene in normalized) >= 2)
+        prop["asset_uri"] = ""
+    character_bible.extend(props)
     return {
         "json_plan": normalized,
         "text_plan": format_story_scene_plan(normalized),
