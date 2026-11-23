@@ -41,7 +41,7 @@ def test_vasya_visual_direction_is_schematic_2d():
     assert 'фотореализм' in direction
 
 
-@pytest.mark.parametrize('mode', modes.SHORT_FORMATS)
+@pytest.mark.parametrize('mode', [m for m in modes.SHORT_FORMATS if m != modes.ARCHIVE])
 def test_short_format_selects_its_illustration_and_script(monkeypatch, mode):
     session = {'selected_project_key': 'discipline', modes.MODE_KEY: mode}
     run = AsyncMock(return_value=True)
@@ -97,7 +97,7 @@ def test_short_format_reaches_both_media_prompts_with_minimal_model_response(mon
     minimal = {"start_frame_prompt_ru": "Вася и Кнопка держат книгу на столе.",
                "video_prompt_en": "4-second Kling 3.0 image-to-video shot. No audio. Slowly open the book."}
     monkeypatch.setattr(story_generation, "gemini_generate_sync", lambda *a, **kw: json.dumps({"prompts": [minimal]}))
-    scene = {modes.MODE_KEY: mode, "duration_sec": 4, "story_visual_style_key": fmt.style_key}
+    scene = {modes.MODE_KEY: mode, "duration_sec": 4, "story_visual_style_key": fmt.style_key, "action": "Slowly open the book"}
     produced = story_generation.generate_story_production(scenes_plan=[scene])["json_plan"][0]
     assert fmt.frame in _image_scene_prompt(produced)
     assert fmt.motion in produced["video_prompt_by_lang"]["ru"]
@@ -278,7 +278,7 @@ def test_narrative_cast_requires_approved_reference(tmp_path):
         handler._attach_story_character_references(session)
 
 
-@pytest.mark.parametrize('mode', list(modes.SHORT_FORMATS))
+@pytest.mark.parametrize('mode', [m for m in modes.SHORT_FORMATS if m != modes.ARCHIVE])
 def test_short_plans_preserve_four_second_clips_and_no_forced_camera(monkeypatch,mode):
     from app.discipline_craft import MOTION_RULES
     captured=[]

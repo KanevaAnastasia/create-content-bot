@@ -1,3 +1,5 @@
+from ..story_generation import STORY_VISUAL_STYLES
+from ..discipline_modes import ARCHIVE
 import json
 
 from ..story_style_previews import (
@@ -1382,7 +1384,7 @@ async def _handle_waiting_story_english_choice_state(
         )
         return True
     short_format = SHORT_FORMATS.get(active_mode(session))
-    if short_format:
+    if short_format and active_mode(session) != ARCHIVE:
         session[STORY_VISUAL_STYLE_SESSION_KEY] = short_format.style_key
         return await _start_initial_story_voiceover(update, context, chat_id=chat_id, session=session)
     session["state"] = STATE_WAITING_STORY_STYLE_CHOICE
@@ -1405,9 +1407,14 @@ async def _handle_waiting_story_style_choice_state(
         session.pop(PAGE_KEY, None)
         await _show_story_style_page(update, session)
         return True
-    text = resolve_choice(text)
+    text = resolve_choice(text, session)
     low = str(text or "").strip().lower()
-    if low in {"основной", "основная", "primary", "main"}:
+    custom = next(((key, style) for key, style in STORY_VISUAL_STYLES.items()
+                   if low == style["label"].casefold()), None)
+    if custom:
+        style_key, style = custom
+        label = style["label"]
+    elif low in {"основной", "основная", "primary", "main"}:
         style_key = STORY_STYLE_PRIMARY
         label = "Основной"
     elif low in {"сухая акварель", "акварель", "watercolor"}:
@@ -1467,6 +1474,14 @@ async def _handle_waiting_story_style_choice_state(
         )
     else:
         await update.message.reply_text(f"Стиль истории: «{label}». Применю его ко всем персонажам и всем кадрам.")
+    if session.get("discipline_queue_idea_id") and session.get(STORY_VOICEOVER_SESSION_KEY):
+        session["state"] = STATE_WAITING_STORY_SCRIPT_APPROVAL
+        SESSIONS[chat_id] = session
+        await _reply_text_chunked(update, "Текст RU-озвучки\n\n" + session[STORY_VOICEOVER_SESSION_KEY])
+        await _reply_text_with_optional_markup(update,
+            "Сценарий сохранён дословно. ОК создаст RU-озвучку; затем отдельно согласуем EN.",
+            reply_markup=_story_script_approval_markup())
+        return True
     if is_visualization_generation(session):
         from .handlers_state_scene import _approve_story_audio_and_build_scenes
 
@@ -1563,7 +1578,7 @@ async def _handle_waiting_generation_mode_state(
         message = (
             "Повторно составляю текст истории с тем же исходником."
             if retry_story
-            else "Ок, режим «История»: озвучка ElevenLabs до двух минут и немые 3-секундные сцены Kling. Сначала уточню, нужна ли EN-версия."
+            else "Ок, режим «История»: отдельная озвучка и видеоряд. Длительность кадров определяем по действию."
         )
     elif mode == GENERATION_MODE_VISUALIZATION:
         message = (
@@ -1615,6 +1630,13 @@ async def _handle_waiting_generation_mode_state(
             "Теперь обязательно пришлите фотографию рекламируемого товара. Можно добавить подпись с названием бренда "
             "или важными деталями. Без фото товара рекламный сценарий не запускается.",
         )
+        return True
+    if (mode == GENERATION_MODE_STORY and session.get("discipline_queue_idea_id")
+            and session.get(STORY_VOICEOVER_SESSION_KEY)):
+        session[STORY_ENGLISH_REQUESTED_SESSION_KEY] = True
+        session["state"] = STATE_WAITING_STORY_STYLE_CHOICE
+        SESSIONS[chat_id] = session
+        await _show_story_style_page(update, session)
         return True
     if mode == GENERATION_MODE_STORY:
         source_story = str(

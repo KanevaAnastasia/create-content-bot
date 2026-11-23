@@ -16,7 +16,7 @@ from pathlib import Path
 from typing import Any
 
 from .discipline_modes import (
-    TWO_LIVES, FLOW, LABELS, MODE_KEY, REFRAME, SHORT_FORMATS, opening_sentence, script_direction, visual_direction,
+    ARCHIVE, TWO_LIVES, FLOW, LABELS, MODE_KEY, REFRAME, SHORT_FORMATS, opening_sentence, script_direction, visual_direction,
 )
 from .llm_utils import GEMINI_MODEL_PROFILE_CREATIVE, extract_json_object, gemini_generate_sync
 
@@ -328,6 +328,10 @@ STORY_VISUAL_STYLES: dict[str, dict[str, str]] = {
 }
 
 
+from .history_visual_styles import HISTORY_STYLES
+STORY_VISUAL_STYLES.update(HISTORY_STYLES)
+
+
 def normalize_story_visual_style(value: Any) -> str:
     raw = str(value or "").strip().lower().replace("-", "_").replace(" ", "_")
     aliases = {
@@ -380,7 +384,7 @@ def normalize_story_visual_style(value: Any) -> str:
         "минималистичный_ретро_мультфильм": STORY_STYLE_MINIMAL_RETRO_CARTOON,
         "минималистичный_мультфильм": STORY_STYLE_MINIMAL_RETRO_CARTOON,
     }
-    return aliases.get(raw, STORY_DEFAULT_VISUAL_STYLE)
+    return raw if raw in STORY_VISUAL_STYLES else aliases.get(raw, STORY_DEFAULT_VISUAL_STYLE)
 
 
 def story_visual_style_config(value: Any) -> dict[str, str]:
@@ -427,7 +431,7 @@ def generate_story_voiceover(
     }
     length_direction = (
         "Целевая длительность 18–28 секунд спокойной речи, ориентир 38–60 русских слов. "
-        if discipline_mode in SHORT_FORMATS else
+        if discipline_mode in SHORT_FORMATS and discipline_mode != ARCHIVE else
         "Озвучка должна занимать от 45 до 110 секунд естественной спокойной речи и точно укладываться в две минуты. "
     )
     prompt = (
@@ -1083,6 +1087,19 @@ def _apply_discipline_cast_policy(
 
 def enforce_discipline_narrative_cast(scenes, project_characters):
     """Bind narrative heroes to approved project IDs, never invented model aliases."""
+    historical = [scene for scene in scenes if scene.get(MODE_KEY) == ARCHIVE]
+    if historical:
+        known = {str(c["id"]): c for c in project_characters}
+        for scene in historical:
+            ids = [str(v) for v in scene.get("characters") or []]
+            if any(i not in known for i in ids):
+                raise ValueError("Историческая сцена содержит неизвестного исполнителя. Используйте утверждённые character_id проекта.")
+            scene["characters"] = ids
+            scene["story_character_descriptions"] = {i: known[i].get("description", "") for i in ids}
+            scene["story_character_labels"] = {i: known[i].get("display_name", "") for i in ids}
+        scenes = [scene for scene in scenes if scene.get(MODE_KEY) != ARCHIVE]
+        if not scenes:
+            return
     anastasia = _discipline_anastasia_character_id(project_characters)
     vasily = next((_story_character_id(c.get("id")) for c in project_characters
                    if str(c.get("display_name") or "").casefold() in {"василий", "вася", "vasily", "vasiliy"}
@@ -1162,6 +1179,34 @@ def _normalize_story_character_bible(value: Any) -> list[dict[str, Any]]:
             }
         )
     return out
+
+
+def _history_beat_clips(beats):
+    """Follow semantic boundaries with whole-second takes and <= 1s of trimming."""
+    if not beats:
+        return []
+    total = max(float(b.get("end_sec") or 0) for b in beats)
+    if total < 2:
+        raise ValueError("История слишком короткая для экономного видеоклипа.")
+    boundaries = [0.0]
+    for beat in beats:
+        end = min(total, float(beat.get("end_sec") or 0))
+        if end - boundaries[-1] >= 3 and total - end >= 3:
+            boundaries.append(end)
+    boundaries.append(total)
+    result = []
+    for start, end in zip(boundaries, boundaries[1:]):
+        count = max(1, math.ceil((end - start) / 8))
+        for n in range(count):
+            a = start + (end - start) * n / count
+            b = start + (end - start) * (n + 1) / count
+            overlaps = [v for v in beats if float(v.get("end_sec") or 0) > a and float(v.get("start_sec") or 0) < b]
+            owner = overlaps[0] if overlaps else beats[0]
+            result.append({"scene": len(result)+1, "start_sec": round(a, 3), "end_sec": round(b, 3),
+                "generation_duration_sec": max(3, math.ceil(round(b-a, 3))),
+                "narration_excerpt": " ".join(str(v.get("narration_excerpt") or "") for v in overlaps),
+                "semantic_beat": int(owner.get("beat") or 1), "semantic_clip_index": n+1, "semantic_clip_count": count})
+    return result
 
 
 def _expand_semantic_beats_to_clips(
@@ -1282,8 +1327,11 @@ def _story_camera_direction(
     requested: Any,
     *,
     previous: str = "",
+    preserve_requested: bool = False,
 ) -> str:
     """Keep Story camera work explicit and varied even when the planner omits it."""
+    if preserve_requested:
+        return _safe_story_camera_direction(requested, default="locked-off camera")
     if scene_index == 0:
         return STORY_SAFE_ZOOM_IN_DIRECTION
     value = _safe_story_camera_direction(requested, default="")
@@ -1450,7 +1498,7 @@ def generate_story_scene_plan(
     narrative_format = discipline_mode if discipline_project and discipline_mode in LABELS else ""
     short_format = SHORT_FORMATS.get(narrative_format)
     continuous = narrative_format == FLOW
-    style_key = normalize_story_visual_style(short_format.style_key if short_format else story_visual_style)
+    style_key = normalize_story_visual_style(short_format.style_key if short_format and narrative_format != ARCHIVE else story_visual_style)
     style_config = story_visual_style_config(style_key)
     selected_visual_style = style_config["prompt"]
     reference_style_only = story_style_uses_character_references_only(style_key)
@@ -1487,10 +1535,11 @@ def generate_story_scene_plan(
     legacy_grandma_cast = not fixed_project_characters and not discipline_project
     grandma_story = legacy_grandma_cast or grandma_project
     semantic_beats = build_semantic_narration_beats(voiceover_text, duration_sec, alignment)
-    windows = _expand_semantic_beats_to_clips(semantic_beats, continuous=bool(short_format))
+    windows = (_history_beat_clips(semantic_beats) if narrative_format == ARCHIVE else
+               _expand_semantic_beats_to_clips(semantic_beats, continuous=bool(short_format)))
     if normalized_generation_mode == "visualization":
         windows = _apply_visualization_final_clip_policy(windows, visualization_output_policy)
-    clips_key = "continuous_clips" if continuous else ("four_second_clips" if short_format else "three_second_clips")
+    clips_key = "semantic_clips" if narrative_format == ARCHIVE else "continuous_clips" if continuous else ("four_second_clips" if short_format else "three_second_clips")
     payload = {
         "source_story": source_story,
         "approved_voiceover": voiceover_text,
@@ -1551,7 +1600,7 @@ def generate_story_scene_plan(
         )
     if narrative_format:
         project_character_direction = visual_direction(narrative_format)
-        project_character_direction += " Используй только точные id Василия и Кнопки из project_characters, не придумывай им новые id."
+        project_character_direction += (" Используй точные id исполнителей исторических ролей из project_characters. Василий играет главного героя, Анастасия женскую роль. Кнопку не добавляй автоматически. Лица остаются утверждёнными, меняются только согласованные костюмы эпохи." if narrative_format == ARCHIVE else " Используй только точные id Василия и Кнопки из project_characters, не придумывай им новые id.")
     if short_format:
         project_character_direction += " В этих выпусках весь актёрский состав ограничен project_characters."
     if continuous:
@@ -1575,10 +1624,17 @@ def generate_story_scene_plan(
         "over-the-shoulder shot, gentle orbit shot и другие подходящие кинематографичные варианты. "
         "Не повторяй одно и то же движение камеры в соседних клипах и не выбирай приём, который противоречит действию сцены."
     )
-    if short_format and not continuous:
+    if short_format and not continuous and narrative_format != ARCHIVE:
         camera_instruction = (
             "Выбери крупность по действию и ремаркам, внутри клипа camera_direction=locked-off camera. "
             "Не чередуй случайные движения камеры. Смена плана между клипами только по смыслу. "
+        )
+    if narrative_format == ARCHIVE:
+        camera_instruction = (
+            "Крупный план реакции и предметная деталь приветствуются. Выбирай крупность по смыслу. "
+            "Внутри клипа максимум одно мотивированное движение камеры, допустима неподвижная камера. "
+            "Сохраняй направление взгляда и ось действия, не навязывай случайное вращение или смену движения. "
+            "Опиши camera_direction на английском; оптический наезд внутри кадра безопаснее раскрытия неизвестного пространства. "
         )
     if narrative_format == TWO_LIVES:
         camera_instruction = (
@@ -1674,6 +1730,8 @@ def generate_story_scene_plan(
         age = _normalize_grandma_age(candidate.get("grandma_age"))
         cat_present = bool(candidate.get("cat_present"))
         chars = [_story_character_id(item) for item in candidate.get("characters") or []]
+        if narrative_format == ARCHIVE and any(item not in character_ids for item in chars):
+            raise ValueError("Историческая сцена содержит неизвестного исполнителя. Используйте утверждённые character_id проекта.")
         chars = [
             item
             for item in chars
@@ -1713,10 +1771,11 @@ def generate_story_scene_plan(
             allow_transition=location_transition,
         )
         environment_locks[time_period] = (location, lighting, color_palette)
-        camera_direction = "locked-off camera" if short_format else _story_camera_direction(
+        camera_direction = "locked-off camera" if short_format and narrative_format != ARCHIVE else _story_camera_direction(
             index,
             candidate.get("camera_direction") or candidate.get("camera_movement"),
             previous=previous_camera_direction,
+            preserve_requested=narrative_format == ARCHIVE,
         )
         previous_camera_direction = camera_direction
         if reference_style_only:
@@ -2038,13 +2097,13 @@ def _fallback_start_prompt(scene: dict[str, Any]) -> str:
 def _fallback_video_prompt(scene: dict[str, Any]) -> str:
     camera_direction = str(scene.get("camera_direction") or "subtle cinematic camera motion").strip()
     duration = int(round(float(scene.get("generation_duration_sec") or scene.get("duration_sec") or 3.0)))
-    duration = 4 if duration >= 4 else 3
+    duration = max(3, min(15, duration)) if scene.get(MODE_KEY) == ARCHIVE else (4 if duration >= 4 else 3)
     return (
         f"{duration}-second Kling 3.0 image-to-video shot. No audio. No dialogue, no speech, no lip sync, no music, "
         "no ambient sound, no on-screen text, no subtitles, no logos, no watermark. "
         f"Camera direction: {camera_direction}. "
         f"Animate only this visual beat: {scene.get('action')}. "
-        "Use subtle natural body, fabric, environmental and camera motion; preserve every character identity, object, era, "
+        "Use subtle natural body, fabric and environmental motion; use only the specified camera direction; preserve every character identity, object, era, "
         "location, lighting, color palette and composition from the start frame."
     )
 
@@ -2053,7 +2112,7 @@ def _ensure_story_camera_direction(video_prompt: str, camera_direction: Any, *, 
     direction = " ".join(str(camera_direction or "subtle cinematic camera motion").split())
     if direction.casefold() in video_prompt.casefold():
         return video_prompt
-    duration = 4 if int(round(float(duration_sec or 3.0))) >= 4 else 3
+    duration = max(3, min(15, int(round(float(duration_sec or 3.0)))))
     required_prefix = f"{duration}-second Kling 3.0 image-to-video shot. No audio."
     if video_prompt[: len(required_prefix)].casefold() == required_prefix.casefold():
         return f"{video_prompt[:len(required_prefix)]} Camera direction: {direction}.{video_prompt[len(required_prefix):]}"
@@ -2070,10 +2129,11 @@ def generate_story_production(
     previous_camera_direction = ""
     for index, source_scene in enumerate(scenes_plan):
         scene = dict(source_scene)
-        scene["camera_direction"] = "locked-off camera" if scene.get(MODE_KEY) in SHORT_FORMATS else _story_camera_direction(
+        scene["camera_direction"] = "locked-off camera" if scene.get(MODE_KEY) in SHORT_FORMATS and scene.get(MODE_KEY) != ARCHIVE else _story_camera_direction(
             index,
             scene.get("camera_direction"),
             previous=previous_camera_direction,
+            preserve_requested=scene.get(MODE_KEY) == ARCHIVE,
         )
         previous_camera_direction = str(scene["camera_direction"])
         safe_scenes_plan.append(scene)
@@ -2113,6 +2173,8 @@ def generate_story_production(
         "Later clips may use the approved varied tracking shot, POV shot, optical zoom-in, over-the-shoulder shot, gentle orbit shot "
         "or another planned camera technique that stays within the source frame. "
     )
+    if any(scene.get(MODE_KEY) == ARCHIVE for scene in safe_scenes_plan):
+        camera_instruction = "Use each approved camera_direction literally, including a locked-off first shot. Do not add an unplanned zoom or camera move. Stay inside the source-image boundaries. "
     prompt = (
         "Create production prompts for an approved narrated story timeline. Return only a JSON object with key prompts, "
         "one item per input scene in exactly the same order. Each item has start_frame_prompt_ru and video_prompt_en.\n"
@@ -2125,7 +2187,7 @@ def generate_story_production(
         + style_instruction
         +
         "No readable text, subtitles, logos, brands or watermarks.\n"
-        "VIDEO: use each scene's generation_duration_sec (3 or 4 seconds) for the Kling 3.0 image-to-video motion prompt in English. "
+        "VIDEO: use each scene's generation_duration_sec exactly as planned for the Kling 3.0 image-to-video motion prompt in English. "
         "It must begin with the matching '<duration>-second Kling 3.0 image-to-video shot. No audio.' prefix "
         "and explicitly forbid dialogue, speech, lip sync, music, ambient sound, on-screen text, subtitles, logos and watermark. "
         f"{camera_instruction}"
@@ -2142,7 +2204,8 @@ def generate_story_production(
     enriched: list[dict[str, Any]] = []
     for index, scene in enumerate(safe_scenes_plan):
         generation_duration = float(scene.get("generation_duration_sec") or scene.get("duration_sec") or STORY_CLIP_DURATION_SEC)
-        generation_duration = 4.0 if int(round(generation_duration)) >= 4 else 3.0
+        generation_duration = (float(max(3, min(15, math.ceil(generation_duration)))) if scene.get(MODE_KEY) == ARCHIVE
+                               else (4.0 if int(round(generation_duration)) >= 4 else 3.0))
         required_prefix = f"{int(generation_duration)}-second Kling 3.0 image-to-video shot. No audio."
         candidate = prompts[index] if index < len(prompts) and isinstance(prompts[index], dict) else {}
         start_prompt = (
@@ -2151,7 +2214,10 @@ def generate_story_production(
             else str(candidate.get("start_frame_prompt_ru") or "").strip() or _fallback_start_prompt(scene)
         )
         start_prompt = _ensure_story_environment_in_start_prompt(start_prompt, scene)
-        video_prompt = str(candidate.get("video_prompt_en") or "").strip() or _fallback_video_prompt(scene)
+        # Historical motion is compiled from the accepted action and camera; a second
+        # free-form camera interpretation can contradict the approved blocking.
+        video_prompt = (_fallback_video_prompt(scene) if scene.get(MODE_KEY) == ARCHIVE else
+                        str(candidate.get("video_prompt_en") or "").strip() or _fallback_video_prompt(scene))
         if not video_prompt.lower().startswith(required_prefix.lower()):
             video_prompt = _fallback_video_prompt(scene)
         short_format = SHORT_FORMATS.get(scene.get(MODE_KEY))

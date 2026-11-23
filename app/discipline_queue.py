@@ -227,7 +227,7 @@ async def deliver(bot, chat_id, *, force=False, locked=False):
 
 
 def build_story_session(row, *, english=True):
-    from .discipline_modes import MODE_KEY, SHORT_FORMATS
+    from .discipline_modes import ARCHIVE, MODE_KEY, SHORT_FORMATS
     from .directorial_notes import remember_notes
     from .handlers.handlers_state_start import STATE_WAITING_STORY_SCRIPT_APPROVAL
     creative_headings = ('Ведущий приём внимания\n', 'Операторское решение\n', 'Анимационное решение\n')
@@ -244,6 +244,12 @@ def build_story_session(row, *, english=True):
         'selected_concept': row.title, 'selected_concept_name': row.title,
         'state': STATE_WAITING_STORY_SCRIPT_APPROVAL,
     }
+    if row.mode == ARCHIVE:
+        from .handlers.handlers_state_start import STATE_WAITING_GENERATION_MODE
+        session.pop('story_visual_style', None)
+        session['state'] = STATE_WAITING_GENERATION_MODE
+        session['series_title_by_lang'] = {'ru': row.series, 'en': 'Stories of Imperfect Mistakes'}
+        session['series_counter_by_lang'] = {'ru': f'История {row.episode}', 'en': f'Story {row.episode}'}
     remember_notes(session, source)
     return session
 
@@ -329,6 +335,16 @@ async def callback(update, context):
         if action == 's':
             await deliver(context.bot, chat_id, force=True, locked=True)
         else:
+            from .handlers.handlers_state_start import STATE_WAITING_GENERATION_MODE, _ask_generation_mode
+            if story['state'] == STATE_WAITING_GENERATION_MODE:
+                from types import SimpleNamespace
+                class MessageAdapter:
+                    async def reply_text(self, text, **kwargs):
+                        return await context.bot.send_message(chat_id, text, **kwargs)
+                    async def reply_photo(self, **kwargs):
+                        return await context.bot.send_photo(chat_id, **kwargs)
+                await _ask_generation_mode(SimpleNamespace(message=MessageAdapter()), story)
+                return
             from .handlers.handlers_state_start import _story_script_approval_markup
             await context.bot.send_message(chat_id, 'Текст RU-озвучки\n\n' + story['story_voiceover_text'])
             await context.bot.send_message(chat_id, 'Проверьте текст. «ОК» создаст озвучку. '

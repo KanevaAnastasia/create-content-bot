@@ -26,22 +26,24 @@ DESCRIPTIONS = {'Сухая акварель': 'мягкая рисованна�
                                      'палитра.'}
 
 
-def catalog():
-    return [(key, style) for key, style in STORY_VISUAL_STYLES.items() if style.get("reference_path")]
+def catalog(session=None):
+    history = (session or {}).get("discipline_narrative_mode") == "lives_archive"
+    return [(key, style) for key, style in STORY_VISUAL_STYLES.items()
+            if (style.get("preview_path") if history else style.get("reference_path"))]
 
 
 def page_items(session=None):
-    return [(i, key, style) for i, (key, style) in enumerate(catalog(), 1)]
+    return [(i, key, style) for i, (key, style) in enumerate(catalog(session), 1)]
 
 
 def choice_label(number, style):
     return f"{number}. {style['label']}"
 
 
-def resolve_choice(text):
+def resolve_choice(text, session=None):
     # Global numbering also accepts a button from an earlier page.
     value = str(text or "").strip()
-    for i, (_, style) in enumerate(catalog(), 1):
+    for i, (_, style) in enumerate(catalog(session), 1):
         if value in {str(i), choice_label(i, style)}:
             return style['label']
     return value
@@ -54,9 +56,9 @@ def page_rows(session=None):
 
 def page_description(session=None):
     lines = ["Выберите стиль кадров ролика.",
-             "«Показать примеры» — все 14 картинок с номером, названием и описанием. Выберите одноимённую кнопку.", ""]
+             "«Показать примеры» — примеры с номером, названием и описанием. Выберите одноимённую кнопку.", ""]
     for number, _, style in page_items(session):
-        lines.append(f"{choice_label(number, style)} — {DESCRIPTIONS[style['label']]}")
+        lines.append(f"{choice_label(number, style)} — {style.get('description') or DESCRIPTIONS.get(style['label'], '')}")
     lines.extend(["", "Основной — сохранить внешний вид персонажей проекта.",
                   "Выбранная стилистика будет единой для всего ролика."])
     return "\n".join(lines)
@@ -68,10 +70,10 @@ async def send_story_style_previews(message, session=None) -> bool:
         return False
     complete = True
     for number, _, style in page_items(session):
-        path = ROOT / style['reference_path']
+        path = ROOT / (style.get('preview_path') or style['reference_path'])
         try:
             await sender(photo=path.read_bytes(),
-                         caption=f"{choice_label(number, style)}\n{DESCRIPTIONS[style['label']]}",
+                         caption=f"{choice_label(number, style)}\n{style.get('description') or DESCRIPTIONS.get(style['label'], '')}",
                          read_timeout=60, write_timeout=60)
         except Exception:
             complete = False

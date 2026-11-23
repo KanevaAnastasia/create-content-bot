@@ -28,6 +28,8 @@ def test_story_visual_style_catalog_contains_primary_and_all_named_choices():
         "minimal_retro_cartoon": "Минималистичный ретро-мультфильм",
     }
 
+    from app.history_visual_styles import HISTORY_STYLES
+    expected.update({key: item["label"] for key, item in HISTORY_STYLES.items()})
     assert {key: item["label"] for key, item in story_generation.STORY_VISUAL_STYLES.items()} == expected
     for key, label in expected.items():
         config = story_generation.story_visual_style_config(key)
@@ -37,7 +39,7 @@ def test_story_visual_style_catalog_contains_primary_and_all_named_choices():
             assert config["reference_path"] == ""
         else:
             assert config["prompt"]
-            assert (Path(__file__).parents[1] / config["reference_path"]).is_file()
+            assert (Path(__file__).parents[1] / (config.get("preview_path") or config["reference_path"])).is_file()
 
 
 def test_story_visual_style_aliases_normalize_new_russian_labels():
