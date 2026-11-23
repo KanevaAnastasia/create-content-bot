@@ -475,6 +475,13 @@ def _apply_overlay_title_to_production(session: dict, production: dict) -> None:
         if cleaned_titles:
             production[OVERLAY_TITLE_BY_LANG_SESSION_KEY] = cleaned_titles
     style = session.get(OVERLAY_TITLE_STYLE_SESSION_KEY)
+    from ..editorial_titles import ensure_discipline_series_hierarchy
+    style = ensure_discipline_series_hierarchy(
+        session,
+        style if isinstance(style, dict) else None,
+    )
+    if style:
+        session[OVERLAY_TITLE_STYLE_SESSION_KEY] = dict(style)
     if isinstance(style, dict) and style:
         cleaned_style = {str(key).strip(): value for key, value in style.items() if str(key).strip()}
         if cleaned_style:

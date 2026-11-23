@@ -66,6 +66,41 @@ def valid_hierarchy_parts(parts: object) -> bool:
     )
 
 
+def discipline_series_hierarchy(
+    session: dict,
+    titles: dict[str, str] | None = None,
+) -> dict[str, list[str]]:
+    """Return the required three-row title hierarchy for any Discipline series."""
+    if str(session.get("selected_project_key") or "").strip() != "discipline":
+        return {}
+    resolved_titles = titles if isinstance(titles, dict) else session.get("overlay_title_by_lang")
+    series_titles = session.get("series_title_by_lang")
+    series_counters = session.get("series_counter_by_lang")
+    if not all(isinstance(value, dict) for value in (resolved_titles, series_titles, series_counters)):
+        return {}
+    hierarchy: dict[str, list[str]] = {}
+    for raw_language, raw_title in resolved_titles.items():
+        language = str(raw_language or "").strip().lower()
+        title = normalized(raw_title)
+        series_title = normalized(series_titles.get(language) or series_titles.get("ru") or "")
+        series_counter = normalized(series_counters.get(language) or series_counters.get("ru") or "")
+        parts = [title, series_title, series_counter]
+        if language and valid_hierarchy_parts(parts):
+            hierarchy[language] = parts
+    return hierarchy
+
+
+def ensure_discipline_series_hierarchy(session: dict, style: dict | None = None) -> dict:
+    """Keep the Discipline series hierarchy in the style across every approval step."""
+    resolved_style = dict(style or {})
+    hierarchy = discipline_series_hierarchy(session)
+    if hierarchy:
+        resolved_style[HIERARCHY_KEY] = hierarchy
+    else:
+        resolved_style.pop(HIERARCHY_KEY, None)
+    return resolved_style
+
+
 def valid_parts(title: str, parts: object) -> bool:
     return (isinstance(parts, list) and len(parts) == min(3, len(normalized(title).split())) and bool(parts)
             and all(isinstance(x, str) and x.strip() for x in parts)

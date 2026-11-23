@@ -79,7 +79,7 @@ def test_picker_rejects_missing_words_and_preserves_style(monkeypatch):
     assert session['overlay_title_style'][titles.PARTS_KEY]['ru'] == ['У меня', 'нет', 'энергии']
 
 
-def test_archive_picker_builds_three_level_hierarchy_without_rewriting(monkeypatch):
+def test_discipline_series_picker_builds_three_level_hierarchy_without_rewriting(monkeypatch):
     replies = []
 
     async def reply_text(text, **_kwargs):
@@ -88,7 +88,6 @@ def test_archive_picker_builds_three_level_hierarchy_without_rewriting(monkeypat
     update = SimpleNamespace(message=SimpleNamespace(reply_text=reply_text))
     session = {
         'selected_project_key': 'discipline',
-        'discipline_narrative_mode': 'lives_archive',
         'overlay_title_by_lang': {'ru': 'Стивен Кинг', 'en': 'Stephen King'},
         'series_title_by_lang': {
             'ru': 'Истории несовершенных ошибок',
@@ -111,6 +110,28 @@ def test_archive_picker_builds_three_level_hierarchy_without_rewriting(monkeypat
     assert send.await_count == len(titles.STYLE_IDS)
     assert all(call.args[2][titles.HIERARCHY_KEY] == hierarchy for call in send.await_args_list)
     assert any('Стивен Кинг / Истории несовершенных ошибок / История 1' in text for text in replies)
+
+
+def test_discipline_series_style_selection_restores_missing_hierarchy(monkeypatch):
+    update = SimpleNamespace(message=SimpleNamespace(reply_text=AsyncMock()))
+    session = {
+        'selected_project_key': 'discipline',
+        'overlay_title_by_lang': {'ru': 'Стивен Кинг'},
+        'series_title_by_lang': {'ru': 'Истории несовершенных ошибок'},
+        'series_counter_by_lang': {'ru': 'История 1'},
+        'overlay_title_style': {},
+    }
+    send = AsyncMock()
+    monkeypatch.setattr(picker, '_send_card', send)
+
+    assert asyncio.run(picker.handle_picker_input(update, session, 'Стиль 9')) is True
+
+    style = session['overlay_title_style']
+    assert style[titles.STYLE_KEY] == '9'
+    assert style[titles.HIERARCHY_KEY] == {
+        'ru': ['Стивен Кинг', 'Истории несовершенных ошибок', 'История 1'],
+    }
+    assert send.await_args.args[2][titles.HIERARCHY_KEY] == style[titles.HIERARCHY_KEY]
 
 
 def test_final_ass_replaces_archive_series_row_with_editorial_hierarchy(tmp_path, monkeypatch):

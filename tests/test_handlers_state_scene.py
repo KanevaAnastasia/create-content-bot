@@ -3177,6 +3177,30 @@ def test_overlay_title_helpers_clean_sanitize_and_clamp_values():
     assert updated["side_margin_ratio"] == 0.04
 
 
+def test_apply_overlay_title_to_production_restores_discipline_series_hierarchy():
+    session = {
+        "selected_project_key": "discipline",
+        "overlay_title": "Стивен Кинг",
+        "overlay_title_by_lang": {"ru": "Стивен Кинг", "en": "Stephen King"},
+        "series_title_by_lang": {
+            "ru": "Истории несовершенных ошибок",
+            "en": "Stories of Imperfect Mistakes",
+        },
+        "series_counter_by_lang": {"ru": "История 1", "en": "Story 1"},
+        "overlay_title_style": {"editorial_style_id": "9"},
+    }
+    production = {}
+
+    _apply_overlay_title_to_production(session, production)
+
+    expected = {
+        "ru": ["Стивен Кинг", "Истории несовершенных ошибок", "История 1"],
+        "en": ["Stephen King", "Stories of Imperfect Mistakes", "Story 1"],
+    }
+    assert session["overlay_title_style"]["editorial_hierarchy_by_lang"] == expected
+    assert production["overlay_title_style"]["editorial_hierarchy_by_lang"] == expected
+
+
 def test_default_overlay_title_style_uses_five_percent_top_margin():
     style = _default_overlay_title_style({"overlay_title": "Борщ"})
 

@@ -16,12 +16,13 @@ from ..editorial_titles import (
     STYLE_IDS,
     STYLES,
     STYLE_KEY,
+    discipline_series_hierarchy,
+    ensure_discipline_series_hierarchy,
     propose_parts,
     valid_parts,
 )
 from ..editorial_font_selection import REVISION
 from ..post_production import render_title_overlay_preview
-from ..series_store import SERIES_COUNTER_BY_LANG_SESSION_KEY, SERIES_TITLE_BY_LANG_SESSION_KEY
 from .handlers_generation_utils import OVERLAY_TITLE_BY_LANG_SESSION_KEY, OVERLAY_TITLE_STYLE_SESSION_KEY
 
 
@@ -65,18 +66,10 @@ async def ask_picker(update, session, *, all_styles=True):
     if not titles:
         return False
     style = dict(session.get(OVERLAY_TITLE_STYLE_SESSION_KEY) or {})
-    from ..discipline_modes import ARCHIVE, active_mode, TWO_LIVES, FORK
+    from ..discipline_modes import active_mode, TWO_LIVES, FORK
     if active_mode(session) in (TWO_LIVES, FORK):
         style.setdefault('speaker_panel', 'top')
-    hierarchy = {}
-    if active_mode(session) == ARCHIVE:
-        series_titles = session.get(SERIES_TITLE_BY_LANG_SESSION_KEY) or {}
-        series_counters = session.get(SERIES_COUNTER_BY_LANG_SESSION_KEY) or {}
-        for lang, title in titles.items():
-            series_title = str(series_titles.get(lang) or series_titles.get('ru') or '').strip()
-            series_counter = str(series_counters.get(lang) or series_counters.get('ru') or '').strip()
-            if series_title and series_counter:
-                hierarchy[lang] = [title, series_title, series_counter]
+    hierarchy = discipline_series_hierarchy(session, titles)
     if hierarchy:
         style[HIERARCHY_KEY] = hierarchy
         parts = style.get(PARTS_KEY) or {}
@@ -110,7 +103,11 @@ async def ask_picker(update, session, *, all_styles=True):
 async def handle_picker_input(update, session, text):
     """Return True if consumed; False means continue the existing approval path."""
     low = text.strip().lower()
-    style = dict(session.get(OVERLAY_TITLE_STYLE_SESSION_KEY) or {})
+    style = ensure_discipline_series_hierarchy(
+        session,
+        session.get(OVERLAY_TITLE_STYLE_SESSION_KEY),
+    )
+    session[OVERLAY_TITLE_STYLE_SESSION_KEY] = style
     titles = session.get(OVERLAY_TITLE_BY_LANG_SESSION_KEY) or {}
     if low in {'ок', 'ok', 'okay', 'approve'}:
         if str(style.get(STYLE_KEY)) not in STYLE_IDS:
