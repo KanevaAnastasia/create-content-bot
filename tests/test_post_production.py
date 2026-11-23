@@ -360,6 +360,7 @@ def test_all_narrated_story_workflows_trim_each_internal_clip(monkeypatch, tmp_p
 
     def fake_normalize(**kwargs):
         normalized_durations.append(float(kwargs["target_duration_sec"]))
+        assert kwargs.get("fit_full_clip") is True
         kwargs["dest_path"].write_bytes(kwargs["src_path"].read_bytes())
 
     monkeypatch.setattr(post_production, "_normalize_segment", fake_normalize)
@@ -1923,6 +1924,36 @@ def test_continuous_take_keeps_ending_pose_in_shorter_narration_window(tmp_path)
     last = Image.open(BytesIO(extract_last_video_frame(video_path=dest))).convert("L")
     assert last.getpixel((32, 48)) > 240
     assert post_production._media_duration(dest) == pytest.approx(1, abs=1/30)
+
+
+@pytest.mark.parametrize("longer_source_audio", [False, True])
+def test_narration_fit_keeps_video_frames_through_longer_spoken_ending(tmp_path, longer_source_audio):
+    ffmpeg = post_production._resolve_ffmpeg()
+    if not ffmpeg:
+        pytest.skip("ffmpeg is unavailable")
+    src, dest = tmp_path / "take.mp4", tmp_path / "master.mp4"
+    audio = ["-f", "lavfi", "-i", "anullsrc=r=48000:cl=stereo:d=2", "-c:a", "aac"] if longer_source_audio else []
+    subprocess.run([ffmpeg, "-v", "error", "-f", "lavfi", "-i",
+                    "color=blue:s=64x96:d=1:r=30", *audio, "-c:v", "libx264", str(src)], check=True)
+    post_production._normalize_segment(
+        ffmpeg=ffmpeg, src_path=src, dest_path=dest, speed_coef=1.0,
+        target_width=64, target_height=96, target_duration_sec=2, fit_full_clip=True,
+    )
+    # Container duration can be satisfied by audio while the video already ended.
+    decoded = subprocess.run([ffmpeg, "-v", "error", "-i", str(dest),
+                              "-map", "0:v:0", "-f", "rawvideo", "-pix_fmt", "rgb24", "-"],
+                             capture_output=True, check=True).stdout
+    assert len(decoded) // (64 * 96 * 3) == 60
+
+
+def test_caption_block_keeps_every_year_together_without_losing_words():
+    for text in ["а без дисциплины каждый год одинаковый.", "and without discipline every year is the same."]:
+        words = [(word, i * .4, (i + 1) * .4) for i, word in enumerate(text.split())]
+        blocks = post_production._story_caption_word_blocks(words)
+        assert [row for block in blocks for row in block] == words
+        assert all(len(block) <= 4 for block in blocks)
+        assert any("каждый год" in " ".join(w[0] for w in block) or
+                   "every year" in " ".join(w[0] for w in block) for block in blocks)
 
 
 def test_has_audio_stream_falls_back_to_ffmpeg_input_probe(monkeypatch, tmp_path):

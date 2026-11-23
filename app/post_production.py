@@ -2416,6 +2416,13 @@ def _story_caption_word_blocks(
         current.append(row)
         token = str(row[0] or "").rstrip()
         if len(current) >= STORY_WORD_SYNC_MAX_WORDS or token.endswith((".", "!", "?", "…")):
+            # Keep determiners with their noun: «каждый год», "every year".
+            if len(current) >= STORY_WORD_SYNC_MAX_WORDS and token.casefold() in {
+                "каждый", "каждая", "каждое", "каждые", "every", "each",
+            }:
+                blocks.append(current[:-1])
+                current = [row]
+                continue
             blocks.append(current)
             current = []
     if current:
@@ -3132,6 +3139,17 @@ def _normalize_segment(
 ) -> None:
     source_duration = float(_media_duration(src_path) or 0.0)
     requested_duration = max(0.0, float(target_duration_sec or 0.0))
+    if fit_full_clip and requested_duration > 0 and _has_audio_stream(src_path):
+        # A longer audio stream must not make us underestimate the video slowdown.
+        # Remuxing just the video is lossless and also works without ffprobe.
+        with tempfile.TemporaryDirectory(prefix="cf_video_duration_") as tmp:
+            video_only = Path(tmp) / "video.mp4"
+            _run_ffmpeg(
+                [ffmpeg, "-y", "-i", str(src_path), "-map", "0:v:0",
+                 "-c:v", "copy", "-an", str(video_only)],
+                timeout=FFMPEG_SHORT_TIMEOUT_SEC, stage="probe_video_duration",
+            )
+            source_duration = float(_media_duration(video_only) or source_duration)
     if fit_full_clip and requested_duration > 0 and source_duration > 0:
         # The following shot starts at this take's last frame in both languages.
         speed_coef = source_duration / requested_duration
@@ -3940,7 +3958,10 @@ def build_post_production(
                         speed_coef=float(item["speed_coef"]),
                         target_width=target_width,
                         target_height=target_height,
-                        **({"fit_full_clip": True} if item["scene"].get(MODE_KEY) == FLOW else {}),
+                        **({"fit_full_clip": True} if (
+                            item["scene"].get(MODE_KEY) == FLOW
+                            or (is_story_track and narration_duration > 0 and item["target_duration"])
+                        ) else {}),
                         target_duration_sec=(
                             float(item["target_duration"] or 0.0)
                             if item.get("target_duration") is not None

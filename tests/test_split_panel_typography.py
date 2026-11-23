@@ -33,7 +33,7 @@ def test_panel_captions_stay_with_selected_speaker(tmp_path):
         assert f'\\pos(540,{y})' in p.read_text()
 
 
-def test_panel_title_uses_uniform_scale_and_requested_highlight(monkeypatch):
+def test_panel_title_uses_full_frame_and_requested_highlight(monkeypatch):
     from app import editorial_approved, editorial_font_selection
     monkeypatch.setattr(editorial_font_selection, 'drawings', lambda *a,**k: [('#ffffff','m 0 0 l 20 0 20 20')])
     cue={'text':'Every day is just like yesterday.', 'language':'en','start_sec':0,'end_sec':3}
@@ -41,9 +41,9 @@ def test_panel_title_uses_uniform_scale_and_requested_highlight(monkeypatch):
            'semantic_parts_by_lang':{'en':['Every day','is just like','yesterday.']},
            'part_colors_by_lang':{'en':{'0':'#ffd456'}}}
     events='\n'.join(editorial_approved.ass_events(cue,style,720,1280,'Default'))
-    assert '\\pos(180,0)\\fscx50.00000\\fscy50.00000' in events
+    assert '\\pos(0,0)\\fscx100.00000\\fscy100.00000' in events
     assert '\\1c&H56d4ff&' in events
-    assert '720 640 0 640' in events
+    assert '720 1280 0 1280' in events
 
 
 def test_invalid_alignment_never_hides_estimated_opening():

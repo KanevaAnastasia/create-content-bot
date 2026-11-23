@@ -161,12 +161,10 @@ def ass_events(cue,style,width,height,base_style):
         return f'Dialogue: {layer},{_timestamp(t0)},{_timestamp(t1)},{base_style},{name},0,0,0,,{tags}{path}{{\\p0}}'
     alpha=round(255*(1-opacity))
     from . import editorial_font_selection as selected
-    from .split_panel_typography import speaker_panel
-    panel = speaker_panel(style)
-    # Uniform scaling preserves the approved letterforms inside one half-frame.
-    scale = .5 if panel else 1.0
-    origin_x = width * (1 - scale) / 2
-    origin_y = height * .5 if panel == 'bottom' else 0
+    # Headlines use the whole frame; only dialogue captions follow the speaker.
+    scale = 1.0
+    origin_x = 0
+    origin_y = 0
     scrim_bottom = origin_y + height * scale
     output=[event(0,start,end,f'{{\\an7\\pos(0,0)\\bord0\\shad0\\1c&H000000&\\1a&H{alpha:02X}&\\p1}}',f'm 0 {origin_y:g} l {width} {origin_y:g} {width} {scrim_bottom:g} 0 {scrim_bottom:g}')]
     semantic_parts = tuple(zip(roles, parts))
