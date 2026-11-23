@@ -192,11 +192,9 @@
     "При замене исходного кандидата downstream-стыки становятся stale и пересогласуются.",
     "Непрерывное движение проверять парой реальных клипов; соответствиеJSONне доказывает качество.",
     "Не переносить новую локацию на остальные сцены без явного location_id.",
-    "Нельзя покупать8секунд ради5вмонтаже: выбранная оплачиваемая длительность используется целиком. Проверить это до отправки платного запроса."
+    "По умолчанию использовать клип целиком. Только для необходимого стыка разрешена обрезка суммарно до 1 секунды на новый платный исходник, например 0,25 секунды; причина обязательна. Лимит общий для начала и конца, а не на каждый край или повтор. Генерировать 8 секунд ради 5 нельзя."
   ],
   "budget_policy": {
-    "no_paid_unused_video_seconds": true,
-    "generate_longer_then_trim": false,
     "catalog_in_every_request": false,
     "planning_calls_per_initial_film": 1,
     "reuse_approved_media_by_hash": true,
@@ -213,7 +211,7 @@
       "supported_provider_values",
       "candidate_ids",
       "asset_hashes",
-      "paid_seconds_equal_unique_used_source_seconds"
+      "unused_source_seconds_within_per_source_trim_limit_with_reason"
     ],
     "cost_preview": {
       "new_images": null,
@@ -221,7 +219,8 @@
       "paid_video_seconds": null,
       "known_price": null,
       "unique_used_source_seconds": null,
-      "final_timeline_seconds_including_reuse": null
+      "final_timeline_seconds_including_reuse": null,
+      "trimmed_source_seconds": null
     },
     "source_purchases": [],
     "purchase_schema": {
@@ -229,7 +228,11 @@
       "source_clip_id": null,
       "generation_seconds": null,
       "source_frame_count": null,
-      "price_if_known": null
+      "price_if_known": null,
+      "trim_reason": null,
+      "planned_trim_start_seconds": 0,
+      "planned_trim_end_seconds": 0,
+      "source_fps": null
     },
     "edit_uses": [],
     "use_schema": {
@@ -240,7 +243,10 @@
       "speed": 1.0,
       "reuse_approved": false
     },
-    "coverage_rule": "For every new paid source clip, union of used frame intervals covers its complete intended duration at original speed. Reusing the same prefix does not compensate for an unused tail."
+    "coverage_rule": "For every new paid source clip, compute the union of used source-frame intervals at original speed. Default loss is zero. Only necessary boundary trimming with a recorded reason may discard at most 1 second total across start and end per source, never per use. Internal unused gaps are not boundary trims. Repeated intervals do not compensate for unused frames. Check before purchase and against actual edited media. Align fractional cuts to frame boundaries without exceeding the limit: for constant fps the maximum discarded frame count is floor(fps * 1 second); use actual frame timestamps for variable fps. Do not pad or retime to conceal waste.",
+    "default_trim_seconds": 0,
+    "max_total_trim_seconds_per_new_source": 1,
+    "trim_requires_reason": true
   },
   "frame_coordinate_system": "normalized_full_frame; panel coordinates are local to panel bounds"
 }
