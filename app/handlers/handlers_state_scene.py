@@ -1982,14 +1982,13 @@ async def _handle_waiting_discipline_intro_video_approval_state(
     return True
 
 
-def _story_character_approval_markup():
+def _story_character_approval_markup(*, allow_approve=True):
     try:
         from telegram import ReplyKeyboardMarkup
     except Exception:
         return None
     return ReplyKeyboardMarkup(
-        [
-            ["ОК"],
+        ([ ["ОК"] ] if allow_approve else []) + [
             ["ПЕРЕГЕНЕРИРОВАТЬ"],
             ["Не подходит", "ФИДБЕК:"],
             [DRAFT_BUTTON_SAVE],
@@ -2025,6 +2024,7 @@ def _story_character_reference_is_approved(session: dict, character: dict[str, A
     return bool(
         isinstance(record, dict)
         and record.get("approved")
+        and record.get("selected_path") not in (record.get("rejected_paths") or [])
         and Path(str(record.get("selected_path") or "")).is_file()
         and str(record.get("description") or "") == str(character.get("description") or "")
         and (not character.get("requires_reference") or str(record.get("reference_prompt") or "") == str(character.get("reference_prompt") or ""))
@@ -5135,6 +5135,9 @@ async def _handle_waiting_story_character_approval_state(
                 session=session,
                 index=index,
             )
+        if record.get("selected_path") in (record.get("rejected_paths") or []):
+            await _reply_text_with_optional_markup(update, "Этот вариант отклонён. Пришлите правку или нажмите «ПЕРЕГЕНЕРИРОВАТЬ», чтобы получить новый.", reply_markup=_story_character_approval_markup(allow_approve=False))
+            return True
         record["approved"] = True
         refs[character_id] = record
         session[STORY_CHARACTER_REFERENCES_SESSION_KEY] = refs
@@ -5159,12 +5162,17 @@ async def _handle_waiting_story_character_approval_state(
         refs = _story_character_reference_map(session)
         if isinstance(refs.get(character_id), dict):
             refs[character_id]["approved"] = False
+            rejected = list(refs[character_id].get("rejected_paths") or [])
+            selected = refs[character_id].get("selected_path")
+            if selected and selected not in rejected:
+                rejected.append(selected)
+            refs[character_id]["rejected_paths"] = rejected
         session[STORY_CHARACTER_REFERENCES_SESSION_KEY] = refs
         SESSIONS[chat_id] = session
         await _reply_text_with_optional_markup(
             update,
             "Пришлите конкретную правку к этому референсу одним сообщением.",
-            reply_markup=_story_character_approval_markup(),
+            reply_markup=_story_character_approval_markup(allow_approve=False),
         )
         return True
     return await _generate_story_character_reference(

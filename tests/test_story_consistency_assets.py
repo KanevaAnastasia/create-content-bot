@@ -151,3 +151,20 @@ def test_rejection_waits_for_feedback_without_generation(monkeypatch,tmp_path):
     assert session['story_character_references']['prop_machine']['approved'] is False
     image.assert_not_awaited();continuation.assert_not_awaited()
     assert 'правку' in msg.reply_text.call_args.args[0]
+
+
+@pytest.mark.parametrize('kind',['character','prop'])
+def test_rejected_version_cannot_be_approved_after_session_roundtrip(monkeypatch,tmp_path,kind):
+    monkeypatch.setattr(h,'SESSIONS',{})
+    image=AsyncMock();monkeypatch.setattr(h,'_generate_story_character_reference',image)
+    continuation=AsyncMock();monkeypatch.setattr(h,'_continue_after_scene_approval',continuation)
+    path=tmp_path/'rejected.png';path.write_bytes(b'preview')
+    c={'id':'item','entity_type':kind,'requires_reference':True}
+    s={'story_character_bible':[c],'story_character_references':{'item':{'approved':False,'selected_path':str(path)}}}
+    update=SimpleNamespace(message=SimpleNamespace(reply_text=AsyncMock()))
+    asyncio.run(h._handle_waiting_story_character_approval_state(update,None,chat_id=1,session=s,text='Не подходит'))
+    restored=json.loads(json.dumps(s))
+    asyncio.run(h._handle_waiting_story_character_approval_state(update,None,chat_id=1,session=restored,text='ОК'))
+    assert restored['story_character_references']['item']['approved'] is False
+    assert str(path) in restored['story_character_references']['item']['rejected_paths']
+    image.assert_not_awaited();continuation.assert_not_awaited()
