@@ -7,7 +7,7 @@ from datetime import datetime, timedelta, timezone
 from sqlalchemy import select
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup
 from .db import SessionLocal
-from .models import DisciplineIdea, DisciplineQueueSchedule
+from .models import DisciplineIdea, DisciplineQueueSchedule, GenerationArtifact
 from .advertising_queue import aware, chat_lock, owner_chat_id, session_is_busy
 
 logger = logging.getLogger('bot.discipline_queue')
@@ -106,6 +106,37 @@ def _persist(chat_id, session):
 def reconcile(chat_id):
     session = _session(chat_id)
     with SessionLocal() as db:
+        # Completion must survive leaving the chat and clearing its runtime flags.
+        for idea in db.scalars(select(DisciplineIdea).where(
+            DisciplineIdea.status.in_(['in_progress', 'paused']),
+            DisciplineIdea.run_id.is_not(None),
+        ).with_for_update()).all():
+            if (session.get(KEY) == str(idea.id)
+                    and session.get('generation_run_id') == idea.run_id
+                    and session_is_busy(session)
+                    and not session.get('social_descriptions_sent')):
+                # An owner may be revising a previously approved run right now.
+                continue
+            try:
+                run_id = uuid.UUID(idea.run_id)
+            except (ValueError, TypeError):
+                continue
+            artifacts = db.scalars(select(GenerationArtifact).where(
+                GenerationArtifact.run_id == run_id,
+                GenerationArtifact.artifact_type.in_(['publication_copy_approved', 'final_build_status']),
+            ).order_by(GenerationArtifact.created_at.desc())).all()
+            approved = any(a.artifact_type == 'publication_copy_approved' for a in artifacts)
+            builds = {}
+            for artifact in artifacts:
+                payload = artifact.payload_json or {}
+                if artifact.artifact_type == 'final_build_status':
+                    builds.setdefault((artifact.language, payload.get('variant')), payload.get('status'))
+            if approved and any(v == 'titled_subtitled_music' for _, v in builds) and all(
+                status == 'success' for status in builds.values()
+            ):
+                idea.status = 'completed'
+                idea.completed_at = datetime.now(timezone.utc)
+        db.flush()
         if session.get(KEY) and session.get('state') not in {STATE, '', None}:
             accepted = db.get(DisciplineIdea, uuid.UUID(session[KEY]), with_for_update=True)
             if accepted and accepted.status in {'offered', 'ready', 'paused'}:
@@ -114,6 +145,7 @@ def reconcile(chat_id):
         row = db.scalars(select(DisciplineIdea).where(DisciplineIdea.status == 'in_progress')
                          .with_for_update()).first()
         if not row:
+            db.commit()
             return
         if session.get(KEY) == str(row.id):
             row.run_id = str(session.get('generation_run_id') or row.run_id or '') or None
@@ -161,7 +193,11 @@ async def deliver(bot, chat_id, *, force=False, locked=False):
                                        reply_markup=markup(idea_id, paused=True))
         return
     owns_offer = session.get(KEY) == idea_id and session.get('state') == STATE
-    if (session_is_busy(session) and not owns_offer) or blocks_advertising(chat_id):
+    empty_start_menu = (
+        force and session.get('state') == 'state_waiting_first_step_generate_text'
+        and not session.get('generation_run_id') and not session.get('production')
+    )
+    if (session_is_busy(session) and not owns_offer and not empty_start_menu) or blocks_advertising(chat_id):
         if force:
             await bot.send_message(chat_id, 'Идея сохранена. Сначала завершите текущую работу или отмените её.')
         return

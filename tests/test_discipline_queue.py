@@ -259,3 +259,30 @@ def test_selected_craft_reaches_storyboard_but_analytics_does_not(db):
     assert 'Пауза перед касанием' in story['story_source_text']
     assert 'Замерить пересылки' not in story['story_source_text']
     assert story['story_voiceover_text']=='Точный утверждённый текст.'
+
+@pytest.mark.parametrize('approved,english_status,expected', [(True,'success','completed'), (False,'success','paused'), (True,'running','paused')])
+def test_completion_survives_leaving_chat(db, approved, english_status, expected):
+    import uuid
+    from app.models import GenerationArtifact
+    run_id=uuid.uuid4()
+    idea=add(db,status='paused',run_id=str(run_id))
+    with db() as s:
+        for language,status in [('ru','success'),('en',english_status)]:
+            s.add(GenerationArtifact(run_id=run_id,artifact_type='final_build_status',label='final',uri='test:'+language,language=language,payload_json={'variant':'titled_subtitled_music','status':status}))
+        if approved:
+            s.add(GenerationArtifact(run_id=run_id,artifact_type='publication_copy_approved',label='copy',uri='test:copy',payload_json={}))
+        s.commit()
+    state.SESSIONS[123]={'state':'state_waiting_first_step_generate_text'}
+    q.reconcile(123)
+    with db() as s: assert s.get(DisciplineIdea,idea).status==expected
+
+
+def test_manual_queue_can_open_from_empty_start_menu(db):
+    idea=add(db)
+    state.SESSIONS[123]={'state':'state_waiting_first_step_generate_text','selected_project_key':'discipline'}
+    bot=SimpleNamespace(send_message=AsyncMock())
+    asyncio.run(q.deliver(bot,123,force=True))
+    assert state.SESSIONS[123][q.KEY]==str(idea)
+    assert state.SESSIONS[123]['state']==q.STATE
+    assert any(q.ACCEPT==button.text for call in bot.send_message.call_args_list
+               for row in getattr(call.kwargs.get('reply_markup'),'inline_keyboard',[]) for button in row)
