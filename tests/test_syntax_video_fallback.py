@@ -2,6 +2,7 @@ import asyncio
 import base64
 import sys
 import threading
+import time
 from types import ModuleType
 
 import pytest
@@ -1795,87 +1796,25 @@ def test_syntax_session_candidates_include_multi_and_single_envs(monkeypatch):
     ]
 
 
-def test_try_generate_via_syntax_parallel_uses_distinct_sessions(monkeypatch):
-    import app.syntax_telethon_fallback as telethon_fallback
+def test_try_generate_via_syntax_parallel_is_globally_serialized(monkeypatch, tmp_path):
+    import app.syntax_video_fallback as adapter
 
-    class _ReplyTo:
-        def __init__(self, msg_id: int):
-            self.reply_to_msg_id = msg_id
+    monkeypatch.setenv("MEDIA_GENERATION_GATE_DIR", str(tmp_path / "gate"))
+    active = 0
+    maximum = 0
+    mutex = threading.Lock()
 
-    class _IncomingMessage:
-        def __init__(self, msg_id: int, reply_to: int):
-            self.id = msg_id
-            self.out = False
-            self.reply_to = _ReplyTo(reply_to)
-            self.raw_text = "done"
-            self.message = self.raw_text
-            self.entities = []
-            self.video = object()
-            self.document = None
+    def _fake_provider(**_kwargs):
+        nonlocal active, maximum
+        with mutex:
+            active += 1
+            maximum = max(maximum, active)
+        time.sleep(0.1)
+        with mutex:
+            active -= 1
+        return FallbackResult(True, b"mp4-content", None, "ok", "attempt")
 
-    class _SentMessage:
-        def __init__(self, msg_id: int):
-            self.id = msg_id
-
-    class _Entity:
-        id = 999
-
-    barrier = threading.Barrier(2)
-    seen_sessions: list[str] = []
-    seen_lock = threading.Lock()
-
-    class _FakeClient:
-        def __init__(self, session_obj, *_args, **_kwargs):
-            self._iter_once = False
-            with seen_lock:
-                seen_sessions.append(str(session_obj))
-
-        async def connect(self):
-            barrier.wait(timeout=1)
-            return None
-
-        async def disconnect(self):
-            return None
-
-        async def is_user_authorized(self):
-            return True
-
-        async def get_entity(self, _username):
-            return _Entity()
-
-        async def send_message(self, _target, _text, reply_to=None):
-            if _text in {"/start", "/video", "Veo", "Сгенерировать"}:
-                assert reply_to is None
-                return _SentMessage(90)
-            assert reply_to is not None
-            return _SentMessage(103)
-
-        async def send_file(self, _target, file, caption=None, force_document=False):
-            del file, caption, force_document
-            return _SentMessage(101)
-
-        async def download_media(self, _message, file):
-            assert file is bytes
-            return b"mp4-content"
-
-        async def get_messages(self, _target, limit=None, ids=None):
-            del limit, ids
-            return None
-
-        async def iter_messages(self, _target, limit=30):
-            del limit
-            if self._iter_once:
-                return
-            self._iter_once = True
-            yield _IncomingMessage(200, reply_to=103)
-
-    monkeypatch.setattr(telethon_fallback, "TelegramClient", _FakeClient)
-    monkeypatch.setattr(telethon_fallback, "StringSession", lambda value: value)
-    monkeypatch.setenv("TELEGRAM_API_ID", "123")
-    monkeypatch.setenv("TELEGRAM_API_HASH", "hash")
-    monkeypatch.delenv("TELETHON_STRING_SESSION", raising=False)
-    monkeypatch.setenv("TELETHON_STRING_SESSIONS", "session-a,session-b")
-
+    monkeypatch.setattr(adapter, "run_syntax_telethon_fallback", _fake_provider)
     results: list[FallbackResult | None] = [None, None]
 
     def _run(idx: int) -> None:
@@ -1884,22 +1823,16 @@ def test_try_generate_via_syntax_parallel_uses_distinct_sessions(monkeypatch):
             model="veo3_fast",
             duration_sec=6,
             start_image=_syntax_test_frame_bytes(),
-            timeout_sec=5,
-            acquire_timeout_sec=5,
         )
 
     threads = [threading.Thread(target=_run, args=(idx,)) for idx in range(2)]
     for thread in threads:
         thread.start()
-    # The current Syntax navigation deliberately pauses after /video, Veo and
-    # Generate so the bot can install each reply keyboard before the
-    # next selection. Give both parallel flows enough wall time to complete
-    # that real preflight while still bounding the test.
     for thread in threads:
-        thread.join(timeout=12)
+        thread.join(timeout=3)
 
     assert all(result is not None and result.success for result in results)
-    assert set(seen_sessions) == {"session-a", "session-b"}
+    assert maximum == 1
 
 
 @pytest.mark.parametrize("configure_error", [None, "Syntax Veo UI configure failed: upload counter timeout", "Syntax Veo not submitted: navigation failed", "Syntax Veo launch unconfirmed: no task status", "en_only_unconfirmed"])

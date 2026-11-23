@@ -7,6 +7,7 @@
 
 from __future__ import annotations
 
+from .media_generation_gate import media_generation_slot
 from tools.gen_video import (
     generate_video_via_vertex,
     get_last_video_result_source as _get_last_video_result_source,
@@ -63,17 +64,18 @@ def generate_video_bytes(
     eff_quality = (quality or default_quality).strip()
     eff_aspect_ratio = (aspect_ratio or default_aspect_ratio).strip()
     eff_audio_enabled = default_audio_enabled if audio_enabled is None else bool(audio_enabled)
-    return generate_video_via_vertex(
-        prompt=prompt,
-        model=model,
-        duration_sec=duration_sec,
-        start_image=start_image,
-        end_image=end_image,
-        quality=eff_quality,
-        aspect_ratio=eff_aspect_ratio,
-        audio_enabled=eff_audio_enabled,
-        location=location,
-    )
+    with media_generation_slot("video"):
+        return generate_video_via_vertex(
+            prompt=prompt,
+            model=model,
+            duration_sec=duration_sec,
+            start_image=start_image,
+            end_image=end_image,
+            quality=eff_quality,
+            aspect_ratio=eff_aspect_ratio,
+            audio_enabled=eff_audio_enabled,
+            location=location,
+        )
 
 
 def get_last_video_result_source() -> str | None:

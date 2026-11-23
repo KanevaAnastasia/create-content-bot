@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
+from .media_generation_gate import media_generation_slot
 from .syntax_telethon_fallback import run_syntax_telethon_fallback, run_syntax_telethon_fallback_batch
 
 
@@ -49,18 +50,19 @@ def try_generate_via_syntax(
     audio_enabled: bool = True,
 ) -> FallbackResult:
     """Try generating video via Syntax Telegram fallback channel."""
-    return run_syntax_telethon_fallback(
-        prompt=prompt,
-        model=model,
-        duration_sec=duration_sec,
-        start_image=start_image,
-        end_image=end_image,
-        timeout_sec=timeout_sec,
-        acquire_timeout_sec=acquire_timeout_sec,
-        syntax_provider=syntax_provider,
-        aspect_ratio=aspect_ratio,
-        audio_enabled=audio_enabled,
-    )
+    with media_generation_slot("video"):
+        return run_syntax_telethon_fallback(
+            prompt=prompt,
+            model=model,
+            duration_sec=duration_sec,
+            start_image=start_image,
+            end_image=end_image,
+            timeout_sec=timeout_sec,
+            acquire_timeout_sec=acquire_timeout_sec,
+            syntax_provider=syntax_provider,
+            aspect_ratio=aspect_ratio,
+            audio_enabled=audio_enabled,
+        )
 
 
 def try_generate_via_syntax_batch(
@@ -76,14 +78,15 @@ def try_generate_via_syntax_batch(
     result_sink: dict[str, FallbackResult] | None = None,
 ) -> dict[str, FallbackResult]:
     """Try generating multiple videos via one Syntax Telegram session."""
-    return run_syntax_telethon_fallback_batch(
-        requests=requests,
-        result_sink=result_sink,
-        model=model,
-        duration_sec=duration_sec,
-        timeout_sec=timeout_sec,
-        acquire_timeout_sec=acquire_timeout_sec,
-        syntax_provider=syntax_provider,
-        aspect_ratio=aspect_ratio,
-        audio_enabled=audio_enabled,
-    )
+    with media_generation_slot("video-batch"):
+        return run_syntax_telethon_fallback_batch(
+            requests=requests,
+            result_sink=result_sink,
+            model=model,
+            duration_sec=duration_sec,
+            timeout_sec=timeout_sec,
+            acquire_timeout_sec=acquire_timeout_sec,
+            syntax_provider=syntax_provider,
+            aspect_ratio=aspect_ratio,
+            audio_enabled=audio_enabled,
+        )

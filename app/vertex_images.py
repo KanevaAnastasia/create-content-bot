@@ -14,6 +14,7 @@ from pathlib import Path
 from .constants import VERTEX_IMAGE_GENERATE_TIMEOUT_SEC_ENV_NAME
 from .llm_queue import _run_llm_call_with_deadline
 from .llm_logging import get_llm_io_logger
+from .media_generation_gate import media_generation_slot
 from .media_file_store import image_mime_type
 from .openai_images import OPENAI_IMAGE_MODEL, generate_openai_image
 
@@ -418,7 +419,7 @@ def _generate_image_vertex_sdk(
     raise RuntimeError("Vertex image generation failed: generated image has no binary payload.")
 
 
-def generate_image_vertex_result(
+def _generate_image_vertex_result_unlocked(
     prompt: str,
     reference_image: bytes | None = None,
     *,
@@ -516,6 +517,30 @@ def generate_image_vertex_result(
     if last_error is not None:
         raise RuntimeError(f"Vertex image generation failed on model {models[0]}: {last_error}") from last_error
     raise RuntimeError("Vertex image generation failed: no image model configured.")
+
+
+def generate_image_vertex_result(
+    prompt: str,
+    reference_image: bytes | None = None,
+    *,
+    reference_images: list[bytes] | None = None,
+    request_id: str | None = None,
+    model: str | None = None,
+    model_candidates: list[str] | None = None,
+    aspect_ratio: str = "9:16",
+) -> ImageGenerationResult:
+    """Generate one image while holding the global cross-chat media slot."""
+    rid = request_id or uuid.uuid4().hex[:12]
+    with media_generation_slot("image", request_id=rid):
+        return _generate_image_vertex_result_unlocked(
+            prompt,
+            reference_image,
+            reference_images=reference_images,
+            request_id=rid,
+            model=model,
+            model_candidates=model_candidates,
+            aspect_ratio=aspect_ratio,
+        )
 
 
 def generate_image_vertex(

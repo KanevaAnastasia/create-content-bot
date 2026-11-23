@@ -48,6 +48,18 @@ ensure_runtime() {
   fi
 }
 
+media_generation_status() {
+  ensure_runtime
+  cd "$ROOT_DIR"
+  "$PYTHON_BIN" -m app.media_generation_gate status
+}
+
+wait_for_media_generation_idle() {
+  ensure_runtime
+  cd "$ROOT_DIR"
+  "$PYTHON_BIN" -m app.media_generation_gate wait-idle
+}
+
 pid_is_running() {
   local pid="${1:-}"
   [[ -n "$pid" ]] && {
@@ -256,6 +268,7 @@ stop_bot() {
     exit 1
   fi
 
+  wait_for_media_generation_idle
   terminate_bot_tree "$pid"
   for _ in {1..20}; do
     if ! pid_is_running "$pid"; then
@@ -292,6 +305,7 @@ status_bot() {
     print_unmanaged_processes
   fi
   echo "Status file: $STATUS_FILE"
+  media_generation_status
 }
 
 final_worker_pids() {
@@ -480,6 +494,7 @@ celery_worker_foreground() {
 
 celery_worker_reload() {
   ensure_runtime
+  wait_for_media_generation_idle
   local domain="gui/$(id -u)"
   local service="$domain/com.contentfabric.celery.worker"
   # launchd can reject bootstrapping a plist directly from /opt. Prefer the
@@ -627,6 +642,7 @@ ensure_redis_launchagent() {
 
 services_up() {
   ensure_runtime
+  wait_for_media_generation_idle
   ensure_redis_launchagent
   local label
   for label in "${CONTENT_FABRIC_SERVICE_LABELS[@]}"; do
@@ -638,6 +654,7 @@ services_up() {
 
 services_restart() {
   ensure_runtime
+  wait_for_media_generation_idle
   ensure_redis_launchagent
   local label service
   for label in "${CONTENT_FABRIC_SERVICE_LABELS[@]}"; do
