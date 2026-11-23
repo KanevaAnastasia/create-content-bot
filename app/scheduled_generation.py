@@ -1068,7 +1068,7 @@ def _scheduled_session_for_item(
     dish_visual_brief = build_dish_visual_brief(item.title, recipe_text)
     payload = item.payload_json if isinstance(item.payload_json, dict) else {}
     generation_mode = normalize_generation_mode(payload.get(GENERATION_MODE_SESSION_KEY))
-    target_languages = target_languages_for_generation_mode(generation_mode, ["ru", "en"])
+    target_languages = target_languages_for_generation_mode(generation_mode, ["ru"])
     generation_comment = normalize_scheduled_generation_comment(item.comment)
     every_start_prompt_comment = scheduled_generation_every_start_prompt_comment(item.comment)
     overlay_subtitle = " ".join(str(getattr(item, "overlay_subtitle", "") or "").split())
@@ -1701,7 +1701,7 @@ async def process_scheduled_generation_item(item_id: uuid.UUID) -> str:
                 generation_mode=normalize_generation_mode(item_payload.get(GENERATION_MODE_SESSION_KEY)),
                 target_languages=target_languages_for_generation_mode(
                     item_payload.get(GENERATION_MODE_SESSION_KEY),
-                    ["ru", "en"],
+                    ["ru"],
                 ),
             )
             plan = production.get("json_plan") if isinstance(production, dict) else None

@@ -42,6 +42,14 @@ def test_scheduled_generation_tables_registered_in_metadata():
     assert "generation_drafts" in db.Base.metadata.tables
 
 
+def test_new_night_queue_session_is_russian_only():
+    item = SimpleNamespace(id=uuid.uuid4(), title='Пирог', recipe='Рецепт пирога',
+                           payload_json={}, comment='', overlay_subtitle='',
+                           is_draft=True, title_color='#c72638')
+    session = scheduled_generation._scheduled_session_for_item(item, item.recipe, {}, [], {})
+    assert session['target_languages'] == ['ru']
+
+
 def test_scheduled_generation_template_imports_to_db(monkeypatch, tmp_path):
     _install_sqlite(monkeypatch)
     monkeypatch.setattr(scheduled_generation, "IMPORT_DIR", tmp_path)
