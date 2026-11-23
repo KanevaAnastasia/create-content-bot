@@ -14,6 +14,7 @@ from sqlalchemy import select
 from app.character_catalog import GRANDMA_KITCHEN_PROJECT_SLUG
 from app.db import SessionLocal
 from app.models import Project, VisualProp
+from .grandma_kitchen import GAS_STOVE_DESCRIPTION, GAS_OVEN_DESCRIPTION
 
 DEFAULT_PROJECT_SLUG = GRANDMA_KITCHEN_PROJECT_SLUG
 
@@ -32,7 +33,7 @@ DEFAULT_VISUAL_PROPS: tuple[VisualPropSpec, ...] = (
     VisualPropSpec(
         "stove",
         "Плита",
-        "Плита выглядит как аккуратная светлая варочная поверхность с четырьмя круглыми конфорками; передняя левая, передняя правая, задняя левая и задняя правая конфорки читаются по расположению, без логотипов и надписей.",
+        GAS_STOVE_DESCRIPTION,
         ("плита", "плите", "плиту", "плитой", "конфорка", "конфорке", "конфорку", "stove", "burner", "hob"),
     ),
     VisualPropSpec(
@@ -80,7 +81,7 @@ DEFAULT_VISUAL_PROPS: tuple[VisualPropSpec, ...] = (
     VisualPropSpec(
         "oven",
         "Духовка",
-        "Духовка выглядит как встроенная светлая духовка с прозрачным тёмным стеклом дверцы и простой металлической ручкой; внутри тёплый оранжевый свет, без цифр и надписей.",
+        GAS_OVEN_DESCRIPTION,
         ("духовка", "духовке", "духовку", "духовкой", "oven"),
     ),
     VisualPropSpec(

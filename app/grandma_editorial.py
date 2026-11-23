@@ -221,3 +221,7 @@ shot_type, visual_description и action должны реализовывать 
 реакция при пробе, световой акцент на текстуре, совпадающая композиция
 жидкой и застывшей начинки. Не добавляй декоративные движения ради разнообразия.
 Каталог операторских приёмов: """ + "; ".join(TECHNIQUES['camera']) + ".\n"
+
+from .grandma_kitchen import KITCHEN_LAYOUT_RULES
+GRANDMA_STORY_RULES += '\n' + KITCHEN_LAYOUT_RULES + '\n'
+GRANDMA_PRODUCTION_RULES += '\n' + KITCHEN_LAYOUT_RULES + '\n'

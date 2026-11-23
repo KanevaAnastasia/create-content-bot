@@ -1,6 +1,7 @@
 """Shared interior direction for image generation only."""
 
 import re
+from .grandma_kitchen import KITCHEN_LAYOUT_RULES
 
 SOVIET_IMAGE_ATMOSPHERE = (
     "Image interior direction: a cozy, visibly lived-in Soviet family home, never a blank studio, empty "
@@ -57,6 +58,8 @@ def _replace_empty_title_wall(prompt: str) -> str:
 
 def add_image_atmosphere(prompt: str) -> str:
     text = _replace_empty_title_wall(str(prompt or "").strip())
-    if SOVIET_IMAGE_ATMOSPHERE in text:
-        return text
-    return f"{text}\n\n{SOVIET_IMAGE_ATMOSPHERE}".strip()
+    if SOVIET_IMAGE_ATMOSPHERE not in text:
+        text = f"{text}\n\n{SOVIET_IMAGE_ATMOSPHERE}".strip()
+    if KITCHEN_LAYOUT_RULES not in text:
+        text = f"{text}\n\n{KITCHEN_LAYOUT_RULES}"
+    return text

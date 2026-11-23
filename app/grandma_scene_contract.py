@@ -1,4 +1,5 @@
 """Per-episode camera and prop continuity for grandmother scenes."""
+from .grandma_kitchen import canonical_kitchen_prop
 
 SINGLE_TAKE_RULE = (
     "veo3_framing: one continuous locked-camera shot, fixed angle and framing; "
@@ -21,7 +22,7 @@ def lock_episode_props(scenes: list[dict]) -> list[dict]:
         if isinstance(props, dict):
             for key, value in props.items():
                 if isinstance(key, str) and isinstance(value, str) and key.strip() and value.strip():
-                    catalog.setdefault(key.strip(), value.strip())
+                    catalog.setdefault(key.strip(), canonical_kitchen_prop(key, value.strip()))
     for scene in scenes:
         props = scene.get("prop_descriptions")
         props = props if isinstance(props, dict) else {}
@@ -38,7 +39,7 @@ def append_episode_prop_locks(prompt: str, scene: dict) -> str:
     props = scene.get("prop_descriptions")
     if not isinstance(props, dict) or not props or "ПРЕДМЕТЫ ЭТОГО РОЛИКА:" in prompt:
         return prompt
-    lines = [f"{key}: {value}" for key, value in props.items() if isinstance(value, str)]
+    lines = [f"{key}: {canonical_kitchen_prop(str(key), value)}" for key, value in props.items() if isinstance(value, str)]
     return prompt + "\n\nПРЕДМЕТЫ ЭТОГО РОЛИКА:\n" + "\n".join(lines) + (
         "\nЭти описания фиксируют внешность перечисленных предметов, но не отменяют "
         "постоянный советский интерьер, скатерть и оформление комнаты. "
