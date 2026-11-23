@@ -1,0 +1,35 @@
+{
+  "reviewer_thread": "01a1f966-e024-7110-89a9-8e7e3aafff85",
+  "reviewer_turn": "01a20a31-4fe0-73c0-81ee-4c66b9736f8e",
+  "accepted_episodes": [
+    2,
+    3,
+    4,
+    5,
+    6,
+    7,
+    8,
+    9,
+    10
+  ],
+  "scope": "Scripts and storyboards accepted for pending queue; no media or retention claim. King unchanged.",
+  "corrections": [
+    "Butler: two initial story sales, then five-year gap.",
+    "Morrison: chronological order of debut, morning routine, later awards.",
+    "Murakami: only opening tried in English, then returned to Japanese.",
+    "Biles: safe return after interruption, not a failure of discipline.",
+    "Angelou: explicit hotel-to-home transition."
+  ],
+  "script_sha256": {
+    "1": "fade244ac12d88c4b7e4ec6e0eeddf438192a24dea11c182e4c6a0e53b2a4b7e",
+    "2": "f421b53976799055ac0c6fa30cc073a612d840521b5fd9d148eeb5070a42ef11",
+    "3": "4db76710c584c4d707e24d95922013e7d0b7c15ac57f4d94d42eb79ee4550d61",
+    "4": "1146f47f106fcfb92c0b4368432c7a81c1e30f83e009bed9b550ed02987ae42b",
+    "5": "638f3c803c2fd285322d90092b1ec8bfbf1a11cc9c3381866c3ac2267414c3e8",
+    "6": "b74743ed0daa1f50547a2fdf107148f68bb638b7bd7bffd155827d92b82f4e88",
+    "7": "8c80e5bf4742b545c88ebae898cef36ce220219767257848d79ad3ef4f7f64cd",
+    "8": "cc6480ec87ca6c99c7654939acb6fc705039af0df84a6a35958e7912afde37c8",
+    "9": "d3aa2cf4ba94631f23a97bef4d2e967ec5763446c56e70d2b41e444b208b5126",
+    "10": "15d2cd85449f7b8bc2073c00d63f4e396d0854a76e0ec671135c166ab82e12cb"
+  }
+}
