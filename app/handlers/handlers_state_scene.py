@@ -2229,6 +2229,8 @@ async def _generate_story_character_reference(
             "selected_path": path,
             "versions": versions,
             "approved": False,
+            "delivery_pending": True,
+            "presented_message_id": None,
             "reference_prompt": str(character.get("reference_prompt") or ""),
             "description": str(character.get("description") or ""),
             "story_visual_style_key": normalize_story_visual_style(
@@ -2241,9 +2243,18 @@ async def _generate_story_character_reference(
     session[STORY_CHARACTER_INDEX_SESSION_KEY] = index
     session["state"] = STATE_WAITING_STORY_CHARACTER_APPROVAL
     SESSIONS[chat_id] = session
+    return await _send_saved_story_reference(update, chat_id=chat_id, session=session,
+        character=character, record=record, index=index, image_bytes=image_bytes)
+
+
+async def _send_saved_story_reference(update, *, chat_id, session, character, record, index, image_bytes=None):
+    if image_bytes is None:
+        image_bytes = Path(record["selected_path"]).read_bytes()
+    label = str(character.get("display_name") or character.get("id") or "герой")
+    characters = _required_story_characters(session)
     bio = io.BytesIO(image_bytes)
     bio.name = f"{character.get('id')}.png"
-    await safe_reply_photo(
+    preview_message = await safe_reply_photo(
         update.message,
         photo=bio,
         caption=(
@@ -2251,6 +2262,11 @@ async def _generate_story_character_reference(
             + ("Проверьте форму, материал, цвет и выбранную стилистику." if character.get("entity_type") == "prop" else "Проверьте лицо, возраст, одежду и выбранную стилистику.")
         ),
     )
+    message_id = getattr(preview_message, "message_id", None)
+    if isinstance(message_id, int):
+        record["presented_message_id"] = message_id
+        record["delivery_pending"] = False
+        SESSIONS[chat_id] = session
     await _reply_text_with_optional_markup(
         update,
         "«ОК» — закрепить этот референс во всех соответствующих кадрах. "
@@ -5131,6 +5147,30 @@ async def _handle_waiting_story_character_approval_state(
     session: dict,
     text: str,
 ) -> bool:
+    # A confirmation belongs to the displayed subject, not a later step/run.
+    if session.get("generation_run_id"):
+        persisted = load_session_if_possible(chat_id)
+        if not isinstance(persisted, dict):
+            await update.message.reply_text("Не удалось проверить актуальный референс. Подтверждение не применено; попробуйте ещё раз.")
+            return True
+        current = _required_story_characters(session)
+        current_index = int(session.get(STORY_CHARACTER_INDEX_SESSION_KEY) or 0)
+        current_id = current[current_index].get("id") if 0 <= current_index < len(current) else None
+        fresh = _required_story_characters(persisted)
+        fresh_index = int(persisted.get(STORY_CHARACTER_INDEX_SESSION_KEY) or 0)
+        fresh_id = fresh[fresh_index].get("id") if 0 <= fresh_index < len(fresh) else None
+        same_subject = (
+            persisted.get("generation_run_id") == session.get("generation_run_id")
+            and persisted.get("state") == STATE_WAITING_STORY_CHARACTER_APPROVAL
+            and current_id is not None and current_id == fresh_id
+        )
+        replacement = dict(persisted)
+        session.clear()
+        session.update(replacement)
+        if not same_subject:
+            await update.message.reply_text("Шаг согласования уже изменился. Это подтверждение не применено к следующему предмету. Проверьте актуальный запрос и подтвердите его отдельно.")
+            return True
+        SESSIONS[chat_id] = session
     characters = _required_story_characters(session)
     try:
         index = int(session.get(STORY_CHARACTER_INDEX_SESSION_KEY) or 0)
@@ -5149,6 +5189,16 @@ async def _handle_waiting_story_character_approval_state(
     if low in {"ок", "ok", "okay", "approve"}:
         refs = _story_character_reference_map(session)
         record = refs.get(character_id)
+        if isinstance(record, dict) and record.get("delivery_pending"):
+            await update.message.reply_text("Этот вариант ещё не был успешно показан. Отправляю сохранённое изображение повторно без новой генерации; после просмотра подтвердите его отдельно.")
+            return await _send_saved_story_reference(update, chat_id=chat_id, session=session,
+                character=character, record=record, index=index)
+        shown_message_id = record.get("presented_message_id") if isinstance(record, dict) else None
+        incoming_message_id = getattr(update.message, "message_id", None)
+        if (isinstance(shown_message_id, int) and isinstance(incoming_message_id, int)
+                and incoming_message_id <= shown_message_id):
+            await update.message.reply_text("Это «ОК» было отправлено до показа текущего варианта и не применено к нему. Подтвердите новое изображение отдельно.")
+            return True
         if isinstance(record, dict) and record.get("selected_path") in (record.get("rejected_paths") or []):
             await _reply_text_with_optional_markup(update, "Этот вариант отклонён. Пришлите правку или нажмите «ПЕРЕГЕНЕРИРОВАТЬ», чтобы получить новый.", reply_markup=_story_character_approval_markup(allow_approve=False))
             return True

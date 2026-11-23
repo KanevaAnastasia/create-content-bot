@@ -263,3 +263,83 @@ def test_puppet_prop_uses_miniature_object_style_not_face_instructions():
     assert 'not a photograph of a real manufactured object' in p
     assert 'oversized head' not in p
     assert 'Do not make every object knitted' in p
+
+
+def test_approval_refreshes_replaced_preview_in_same_run(monkeypatch,tmp_path):
+    import copy
+    monkeypatch.setattr(h,'SESSIONS',{})
+    old=tmp_path/'old.png';old.write_bytes(b'old')
+    new=tmp_path/'new.png';new.write_bytes(b'new')
+    c={'id':'prop_typewriter','entity_type':'prop','requires_reference':True}
+    stale={'generation_run_id':'same-run','state':h.STATE_WAITING_STORY_CHARACTER_APPROVAL,
+           'story_character_bible':[c],'story_character_approval_index':0,
+           'story_character_references':{'prop_typewriter':{'selected_path':str(old),'rejected_paths':[str(old)],'approved':False}}}
+    fresh=copy.deepcopy(stale)
+    fresh['story_character_references']['prop_typewriter']['selected_path']=str(new)
+    monkeypatch.setattr(h,'load_session_if_possible',lambda cid:fresh)
+    monkeypatch.setattr(h,'_attach_story_character_references',lambda s:None)
+    continuation=AsyncMock();monkeypatch.setattr(h,'_continue_after_scene_approval',continuation)
+    msg=SimpleNamespace(reply_text=AsyncMock())
+    asyncio.run(h._handle_waiting_story_character_approval_state(SimpleNamespace(message=msg),None,chat_id=1,session=stale,text='ОК'))
+    assert stale['story_character_references']['prop_typewriter']['selected_path']==str(new)
+    assert stale['story_character_references']['prop_typewriter']['approved'] is True
+    assert str(old) in stale['story_character_references']['prop_typewriter']['rejected_paths']
+    continuation.assert_awaited_once()
+
+
+@pytest.mark.parametrize('change',['subject','run','state','missing'])
+def test_stale_confirmation_never_approves_other_subject_or_run(monkeypatch,tmp_path,change):
+    import copy
+    monkeypatch.setattr(h,'SESSIONS',{})
+    p=tmp_path/'ref.png';p.write_bytes(b'image')
+    s={'generation_run_id':'run','state':h.STATE_WAITING_STORY_CHARACTER_APPROVAL,
+       'story_character_bible':[{'id':'prop_a','requires_reference':True},{'id':'prop_b','requires_reference':True}],
+       'story_character_approval_index':0,'story_character_references':{'prop_a':{'selected_path':str(p),'approved':False},'prop_b':{'selected_path':str(p),'approved':False}}}
+    fresh=copy.deepcopy(s)
+    if change=='subject':fresh['story_character_approval_index']=1
+    if change=='run':fresh['generation_run_id']='other'
+    if change=='state':fresh['state']='ready_for_production'
+    monkeypatch.setattr(h,'load_session_if_possible',lambda cid:None if change=='missing' else fresh)
+    gen=AsyncMock();monkeypatch.setattr(h,'_generate_story_character_reference',gen)
+    msg=SimpleNamespace(reply_text=AsyncMock())
+    asyncio.run(h._handle_waiting_story_character_approval_state(SimpleNamespace(message=msg),None,chat_id=1,session=s,text='ОК'))
+    assert not any(r.get('approved') for r in s['story_character_references'].values())
+    gen.assert_not_awaited()
+
+
+def test_double_ok_before_new_preview_does_not_approve_it(monkeypatch,tmp_path):
+    monkeypatch.setattr(h,'SESSIONS',{})
+    p=tmp_path/'ref.png';p.write_bytes(b'image')
+    s={'state':h.STATE_WAITING_STORY_CHARACTER_APPROVAL,'story_character_bible':[{'id':'prop_a','requires_reference':True}],
+       'story_character_references':{'prop_a':{'selected_path':str(p),'approved':False,'presented_message_id':200}}}
+    gen=AsyncMock();monkeypatch.setattr(h,'_generate_story_character_reference',gen)
+    msg=SimpleNamespace(reply_text=AsyncMock(),message_id=199)
+    asyncio.run(h._handle_waiting_story_character_approval_state(SimpleNamespace(message=msg),None,chat_id=1,session=s,text='ОК'))
+    assert s['story_character_references']['prop_a']['approved'] is False
+    gen.assert_not_awaited()
+
+
+@pytest.mark.parametrize('prior_message_id',[None,100])
+def test_failed_preview_delivery_cannot_be_approved(monkeypatch,tmp_path,prior_message_id):
+    monkeypatch.setattr(h,'SESSIONS',{})
+    c={'id':'prop_a','entity_type':'prop','requires_reference':True}
+    s={'story_character_bible':[c], 'story_character_references':{'prop_a':{'presented_message_id':prior_message_id}}}
+    image=tmp_path/'preview.png'
+    def store(*a):image.write_bytes(b'new');return str(image)
+    generator=__import__('unittest.mock',fromlist=['Mock']).Mock(return_value=b'new')
+    monkeypatch.setattr(h,'generate_image_vertex',generator)
+    monkeypatch.setattr(h,'_store_story_character_image',store)
+    monkeypatch.setattr(h,'safe_reply_photo',AsyncMock(side_effect=RuntimeError('delivery failed')))
+    msg=SimpleNamespace(reply_text=AsyncMock(),message_id=150)
+    update=SimpleNamespace(message=msg)
+    with pytest.raises(RuntimeError,match='delivery failed'):
+        asyncio.run(h._generate_story_character_reference(update,chat_id=1,session=s,index=0))
+    record=s['story_character_references']['prop_a']
+    assert record['delivery_pending'] is True and record['presented_message_id'] is None
+    monkeypatch.setattr(h,'safe_reply_photo',AsyncMock(return_value=SimpleNamespace(message_id=200)))
+    continuation=AsyncMock();monkeypatch.setattr(h,'_continue_after_scene_approval',continuation)
+    asyncio.run(h._handle_waiting_story_character_approval_state(update,None,chat_id=1,session=s,text='ОК'))
+    assert record['approved'] is False
+    assert record['delivery_pending'] is False and record['presented_message_id']==200
+    generator.assert_called_once()
+    continuation.assert_not_awaited()
