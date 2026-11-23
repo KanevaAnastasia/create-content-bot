@@ -217,7 +217,6 @@ _SERIES_SESSION_KEYS = (
 # Continuation/resume paths do not call _start_generation_with_recipe and keep
 # their run binding intact.
 _NEW_GENERATION_STALE_KEYS = (
-    "requested_scene_count",
     "social_descriptions_sent",
     "social_descriptions_approved",
     "social_descriptions_pending",
@@ -2087,7 +2086,6 @@ async def _continue_after_recipe_approval_plan(
                 analytics_feedback=session.get("analytics_feedback"),
                 generation_mode=session.get(GENERATION_MODE_SESSION_KEY, GENERATION_MODE_NORMAL),
                 generation_comment=direction_for_session(session),
-                requested_scene_count=session.get("requested_scene_count"),
             ),
         )
     except ServiceUnavailableRetriesExhaustedError as e:

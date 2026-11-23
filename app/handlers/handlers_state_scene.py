@@ -5942,7 +5942,6 @@ async def _handle_scene_approval_refine(update: Update, context: ContextTypes.DE
                     romantic_drama_subplot=session.get("romantic_drama_subplot"),
                     generation_mode=session.get(GENERATION_MODE_SESSION_KEY, GENERATION_MODE_NORMAL),
                     generation_comment=direction_for_session(session),
-                    requested_scene_count=session.get("requested_scene_count"),
                 ),
             )
     except ServiceUnavailableRetriesExhaustedError as e:

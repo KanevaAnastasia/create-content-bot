@@ -77,7 +77,6 @@ _CHAT_SESSION_CACHE_KEYS = {
     "scheduled_item_id",
     "is_draft",
     "generation_mode",
-    "requested_scene_count",
     "copy_mode_analysis",
     "copy_mode_chunks",
     "copy_mode_current_chunk_index",

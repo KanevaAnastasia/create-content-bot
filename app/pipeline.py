@@ -2460,11 +2460,9 @@ async def generate_scenes_plan(
     romantic_drama_subplot: dict[str, Any] | None = None,
     generation_comment: str | None = None,
     generation_mode: str = GENERATION_MODE_NORMAL,
-    requested_scene_count: int | None = None,
 ) -> dict[str, Any]:
     """
-    Один запрос к Gemini: сценарий из 3–6 сцен либо с явно заданным количеством до 8
-    по **полному тексту рецепта**, с репликами Veo3 в ``text``.
+    Один запрос к Gemini: сценарий из 3–6 сцен по **полному тексту рецепта**, с репликами Veo3 в ``text``.
 
     Кэш: (concept, full_recipe_text, feedback). Правки — через ``user_feedback`` и ``previous_scenes`` в промпте
     (см. ``pipeline_llm_steps``), без циклов валидации/fix в Python.
@@ -2477,13 +2475,6 @@ async def generate_scenes_plan(
     from .directorial_notes import RULE
     comment = RULE + (generation_comment or "").strip()
     mode = normalize_generation_mode(generation_mode)
-    exact_scene_count: int | None = None
-    if requested_scene_count is not None:
-        exact_scene_count = int(requested_scene_count)
-        if not 3 <= exact_scene_count <= 8:
-            raise ValueError("Точное число сцен должно быть от 3 до 8.")
-        if mode != GENERATION_MODE_NORMAL:
-            raise ValueError("Точное число сцен поддерживается только в обычном режиме.")
     if mode == GENERATION_MODE_ADVICE:
         comment = (comment + "\n\n" + ADVICE_SCENE_RULE).strip()
     remove_neighbor_cats = _feedback_requests_remove_neighbor_cats(fb)
@@ -2509,7 +2500,7 @@ async def generate_scenes_plan(
             "Optional Kling inserts are extra close-ups only, maximum 6 total."
         )
     has_previous_scenes = bool(previous_scenes)
-    cached = None if has_previous_scenes or comment or mode != GENERATION_MODE_NORMAL or exact_scene_count else get_scenes_plan(concept, body, fb or None)
+    cached = None if has_previous_scenes or comment or mode != GENERATION_MODE_NORMAL else get_scenes_plan(concept, body, fb or None)
     if cached is not None:
         if isinstance(cached, dict):
             cached_plan = cached.get("json_plan")
@@ -2580,7 +2571,6 @@ async def generate_scenes_plan(
             analytics_feedback=analytics_feedback,
             romantic_drama_subplot=effective_romantic_subplot,
             generation_comment=comment,
-            requested_scene_count=exact_scene_count,
         )
         prompt = llm_steps.build_scenes_plan_prompt(payload)
 
@@ -2621,16 +2611,8 @@ async def generate_scenes_plan(
         )
         arr = _ensure_scene_block_len(arr, min_n=LONG_MIN_VEO_SCENES, max_n=LONG_MAX_TOTAL_SCENES)
     else:
-        if exact_scene_count is not None:
-            arr = normalize_scenes_for_pipeline(
-                coerced,
-                min_scenes=exact_scene_count,
-                max_scenes=exact_scene_count,
-            )
-            arr = _ensure_scene_block_len(arr, min_n=exact_scene_count, max_n=exact_scene_count)
-        else:
-            arr = normalize_scenes_for_pipeline(coerced)
-            arr = _ensure_scene_block_len(arr)
+        arr = normalize_scenes_for_pipeline(coerced)
+        arr = _ensure_scene_block_len(arr)
     raw_scenes = _postprocess_scenes_output(
         arr,
         concept,
@@ -2693,7 +2675,7 @@ async def generate_scenes_plan(
         "retention_review": retention_review,
         "regeneration_events": [],
     }
-    if not has_previous_scenes and not comment and mode == GENERATION_MODE_NORMAL and exact_scene_count is None:
+    if not has_previous_scenes and not comment and mode == GENERATION_MODE_NORMAL:
         set_scenes_plan(concept, body, fb or None, out_raw)
     return out_raw
 

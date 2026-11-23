@@ -474,7 +474,6 @@ def build_scenes_plan_payload(
     analytics_feedback: dict[str, Any] | None = None,
     romantic_drama_subplot: dict[str, Any] | None = None,
     generation_comment: str | None = None,
-    requested_scene_count: int | None = None,
 ) -> dict[str, Any]:
     _ = allowed_locations
     if romantic_drama_subplot is not None:
@@ -488,7 +487,6 @@ def build_scenes_plan_payload(
         "full_recipe_text": full_recipe_text,
         "feedback": feedback,
         "generation_comment": (generation_comment or "").strip(),
-        "requested_scene_count": requested_scene_count,
         "dialogue_feedback_hint": _dialogue_feedback_hint(feedback),
         "previous_scenes": previous_scenes,
         "assets": _character_assets_only(),
@@ -504,16 +502,11 @@ def build_scenes_plan_payload(
 
 
 def build_scenes_plan_prompt(payload: dict[str, Any]) -> str:
-    requested_scene_count = payload.get("requested_scene_count")
-    if isinstance(requested_scene_count, int):
-        scene_range_text = f"ровно {requested_scene_count} сцен"
-    else:
-        scene_range_text = "3–6 сцен"
     return (
-        GRANDMA_STORY_RULES + GRANDMA_OBSERVED_EXAMPLES + GRANDMA_RETENTION_REVIEW_RULES + f"Ты режиссер вирусного кулинарного Shorts. По ПОЛНОМУ тексту рецепта ниже построй сценарий: {scene_range_text}.\n"
+        GRANDMA_STORY_RULES + GRANDMA_OBSERVED_EXAMPLES + GRANDMA_RETENTION_REVIEW_RULES + "Ты режиссер вирусного кулинарного Shorts. По ПОЛНОМУ тексту рецепта ниже построй сценарий из 3–6 сцен.\n"
         "Return ONLY valid JSON array of scenes. No markdown.\n"
         "Для этого ответа аудит каталогов выполняй внутренне с учётом brief; не добавляй объект аудита вне массива. В каждом объекте сцены обязательно сохрани camera_design.\n"
-        f"КРИТИЧЕСКОЕ ПРАВИЛО: {scene_range_text}; по порядку покрой весь рецепт от подготовки/старта до подачи; "
+        "КРИТИЧЕСКОЕ ПРАВИЛО: ровно 3–6 сцен; по порядку покрой весь рецепт от подготовки/старта до подачи; "
         "не выдумывай другое блюдо и не опускай ключевые этапы из текста рецепта.\n"
         "GENERATION COMMENT: если payload.generation_comment непустой, это обязательная правка ко всему ролику; "
         "учти её в сценах, репликах, хуке и production-подготовке, не ограничивай её только viral brief.\n"
