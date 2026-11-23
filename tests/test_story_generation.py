@@ -269,6 +269,27 @@ def test_story_voiceover_versions_archive_every_text_without_overwriting():
     assert versions[0]["version_id"] != versions[1]["version_id"]
 
 
+def test_archive_story_subject_titles_use_primary_real_person_in_both_languages():
+    titles = story_generation.archive_story_subject_titles(
+        [
+            {
+                "id": "tabitha_king_1973",
+                "display_name": "Табита Кинг",
+                "same_person_group": "tabitha_king",
+            },
+            {
+                "id": "stephen_king_1973",
+                "display_name": "Стивен Кинг",
+                "same_person_group": "stephen_king",
+                "is_primary": True,
+            },
+            {"id": "prop_manuscript", "display_name": "Рукопись «Кэрри»"},
+        ]
+    )
+
+    assert titles == {"ru": "Стивен Кинг", "en": "Stephen King"}
+
+
 def test_build_narration_windows_uses_elevenlabs_character_timestamps():
     alignment = {
         "characters": list("раз два три"),

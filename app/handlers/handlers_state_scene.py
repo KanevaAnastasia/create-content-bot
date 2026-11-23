@@ -331,6 +331,7 @@ from ..story_generation import (
     STORY_VOICEOVER_VERSIONS_EN_SESSION_KEY,
     archive_story_english_voiceover_version,
     archive_story_voiceover_version,
+    archive_story_subject_titles,
     build_narration_windows_for_intervals,
     format_story_scene_plan,
     story_style_uses_character_references_only,
@@ -3006,6 +3007,26 @@ async def _handle_waiting_story_english_script_approval_state(
     )
 
 
+def _apply_archive_subject_overlay_titles(
+    session: dict,
+    title_by_lang: dict[str, str],
+    *,
+    english_requested: bool,
+) -> bool:
+    """Use series, historical subject, and episode counter as the archive title hierarchy."""
+    from ..discipline_modes import ARCHIVE, active_mode
+
+    if active_mode(session) != ARCHIVE:
+        return False
+    subject_titles = archive_story_subject_titles(session.get(STORY_CHARACTER_BIBLE_SESSION_KEY))
+    if subject_titles.get("ru"):
+        title_by_lang["ru"] = subject_titles["ru"]
+        session[OVERLAY_TITLE_SESSION_KEY] = subject_titles["ru"]
+    if english_requested and subject_titles.get("en"):
+        title_by_lang["en"] = subject_titles["en"]
+    return True
+
+
 async def _approve_story_audio_and_build_scenes(
     update: Update,
     context: ContextTypes.DEFAULT_TYPE,
@@ -3187,7 +3208,12 @@ async def _approve_story_audio_and_build_scenes(
     if english_requested:
         title_by_lang["en"] = str(session.get(STORY_TITLE_EN_SESSION_KEY) or "Story").strip() or "Story"
     from ..discipline_modes import active_mode, REFRAME, TWO_LIVES, FORK, opening_sentence, title_word_timing
-    if active_mode(session) in (REFRAME, TWO_LIVES, FORK):
+    archive_titles_applied = _apply_archive_subject_overlay_titles(
+        session,
+        title_by_lang,
+        english_requested=english_requested,
+    )
+    if not archive_titles_applied and active_mode(session) in (REFRAME, TWO_LIVES, FORK):
         title_by_lang["ru"] = opening_sentence(voiceover)
         if english_requested:
             title_by_lang["en"] = opening_sentence(english_voiceover)

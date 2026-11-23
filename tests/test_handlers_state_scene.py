@@ -11,6 +11,7 @@ from sqlalchemy.orm import sessionmaker
 from app import db
 from app.models import ChatSession, GenerationArtifact
 from app.handlers.handlers_state_scene import (
+    _apply_archive_subject_overlay_titles,
     _apply_overlay_title_style_feedback,
     _apply_overlay_title_to_production,
     _clean_translated_title,
@@ -122,6 +123,35 @@ from app.advertising_generation import (
 )
 from app.state import SESSIONS
 from app.visualization_generation import PreparedVisualizationMedia, VisualizationTranscript
+
+
+def test_archive_overlay_uses_series_subject_and_story_counter_hierarchy():
+    session = {
+        "selected_project_key": "discipline",
+        "discipline_narrative_mode": "lives_archive",
+        "series_title_by_lang": {
+            "ru": "Истории несовершенных ошибок",
+            "en": "Stories of Imperfect Mistakes",
+        },
+        "series_counter_by_lang": {"ru": "История 1", "en": "Story 1"},
+        STORY_CHARACTER_BIBLE_SESSION_KEY: [
+            {
+                "id": "stephen_king_1973",
+                "display_name": "Стивен Кинг",
+                "same_person_group": "stephen_king",
+                "is_primary": True,
+            }
+        ],
+    }
+    titles = {"ru": "Кто достал «Кэрри» из корзины", "en": "Who Took Carrie Out?"}
+
+    applied = _apply_archive_subject_overlay_titles(session, titles, english_requested=True)
+
+    assert applied is True
+    assert session["series_title_by_lang"]["ru"] == "Истории несовершенных ошибок"
+    assert titles == {"ru": "Стивен Кинг", "en": "Stephen King"}
+    assert session["series_counter_by_lang"] == {"ru": "История 1", "en": "Story 1"}
+    assert session["overlay_title"] == "Стивен Кинг"
 
 
 @pytest.fixture(autouse=True)

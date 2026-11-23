@@ -1095,6 +1095,31 @@ def validate_historical_cast(characters):
             raise ValueError("В исторической серии нужны сами реальные люди, а не исполнители из проекта. Обновите состав истории.")
 
 
+def archive_story_subject_titles(characters: Any) -> dict[str, str]:
+    """Resolve the real person's RU/EN name for the archive-series main title."""
+    items = [
+        item
+        for item in (characters if isinstance(characters, list) else [])
+        if isinstance(item, dict) and not str(item.get("id") or "").startswith("prop_")
+    ]
+    subject = next((item for item in items if item.get("is_primary")), items[0] if items else None)
+    if not subject:
+        return {}
+    title_ru = " ".join(str(subject.get("display_name") or "").split())
+    title_en = " ".join(str(subject.get("display_name_en") or "").split())
+    if not title_en:
+        identity = str(subject.get("same_person_group") or subject.get("id") or "")
+        tokens = [
+            token
+            for token in re.split(r"[_\W]+", identity)
+            if token and not token.isdigit() and token.casefold() not in {
+                "young", "adult", "older", "old", "elderly", "child", "teen", "historical",
+            }
+        ]
+        title_en = " ".join(token.capitalize() for token in tokens)
+    return {language: title for language, title in (("ru", title_ru), ("en", title_en)) if title}
+
+
 def enforce_discipline_narrative_cast(scenes, project_characters):
     """Bind scenes to their own historical bible or to the regular project cast."""
     historical = [scene for scene in scenes if scene.get(MODE_KEY) == ARCHIVE]
@@ -1179,6 +1204,7 @@ def _normalize_story_character_bible(value: Any) -> list[dict[str, Any]]:
             {
                 "id": character_id,
                 "display_name": " ".join(str(item.get("display_name") or character_id).split()),
+                "display_name_en": " ".join(str(item.get("display_name_en") or "").split()),
                 "role": " ".join(str(item.get("role") or "исторический персонаж").split()),
                 "age_stage": " ".join(str(item.get("age_stage") or "adult").split()),
                 "same_person_group": _story_character_id(item.get("same_person_group") or character_id),
@@ -1681,7 +1707,7 @@ def generate_story_scene_plan(
         "characters — библия всех повторяющихся или сюжетно важных людей. Персонажи из project_characters уже утверждены: "
         "не меняй их id, внешность и роль, включи их в characters и используй подходящих из них в сценах. "
         "Для одного героя в разных возрастах создай отдельные id (например antonin_young и antonin_adult), но одинаковый "
-        "same_person_group. Поля: id, display_name, role, age_stage, same_person_group, description, reference_prompt, "
+        "same_person_group. Поля: id, display_name, display_name_en, role, age_stage, same_person_group, description, reference_prompt, "
         "requires_reference. Description фиксирует лицо, волосы, телосложение и отличительные признаки; одежда исторически точна.\n"
         "props — только основной сюжетный реквизит, узнаваемый в двух или более сценах, обычно 0–2 предмета, максимум 3. "
         "Не включай чашки, столы, комнаты, карандаши и бытовые мелочи: сохраняй их описанием в location и continuity_anchors. "
