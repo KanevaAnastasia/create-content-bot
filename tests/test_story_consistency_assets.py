@@ -154,7 +154,8 @@ def test_rejection_waits_for_feedback_without_generation(monkeypatch,tmp_path):
 
 
 @pytest.mark.parametrize('kind',['character','prop'])
-def test_rejected_version_cannot_be_approved_after_session_roundtrip(monkeypatch,tmp_path,kind):
+@pytest.mark.parametrize('remove_file',[False,True])
+def test_rejected_version_cannot_be_approved_after_session_roundtrip(monkeypatch,tmp_path,kind,remove_file):
     monkeypatch.setattr(h,'SESSIONS',{})
     image=AsyncMock();monkeypatch.setattr(h,'_generate_story_character_reference',image)
     continuation=AsyncMock();monkeypatch.setattr(h,'_continue_after_scene_approval',continuation)
@@ -164,6 +165,10 @@ def test_rejected_version_cannot_be_approved_after_session_roundtrip(monkeypatch
     update=SimpleNamespace(message=SimpleNamespace(reply_text=AsyncMock()))
     asyncio.run(h._handle_waiting_story_character_approval_state(update,None,chat_id=1,session=s,text='Не подходит'))
     restored=json.loads(json.dumps(s))
+    restored['state']=h.STATE_WAITING_STORY_CHARACTER_APPROVAL
+    if remove_file:path.unlink()
+    buttons=[b.text for row in h.keyboard_for_session_state(restored).keyboard for b in row]
+    assert 'ОК' not in buttons
     asyncio.run(h._handle_waiting_story_character_approval_state(update,None,chat_id=1,session=restored,text='ОК'))
     assert restored['story_character_references']['item']['approved'] is False
     assert str(path) in restored['story_character_references']['item']['rejected_paths']

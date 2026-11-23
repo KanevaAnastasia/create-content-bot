@@ -1283,7 +1283,7 @@ def keyboard_for_session_state(session: dict):
     if state == STATE_WAITING_STORY_ENGLISH_AUDIO_APPROVAL:
         return _story_audio_approval_markup()
     if state == STATE_WAITING_STORY_CHARACTER_APPROVAL:
-        return _story_character_approval_markup()
+        return _story_character_approval_markup(allow_approve=not _story_current_reference_rejected(session))
     if state == STATE_WAITING_ADVERTISING_PRODUCT_IMAGE:
         return remove_keyboard_markup()
     if state == _STATE_WAITING_PRODUCTION_RETRY:
@@ -2016,6 +2016,18 @@ def _required_story_characters(session: dict) -> list[dict[str, Any]]:
 def _story_character_reference_map(session: dict) -> dict[str, dict[str, Any]]:
     raw = session.get(STORY_CHARACTER_REFERENCES_SESSION_KEY)
     return raw if isinstance(raw, dict) else {}
+
+
+def _story_current_reference_rejected(session: dict) -> bool:
+    characters = _required_story_characters(session)
+    try:
+        index = int(session.get(STORY_CHARACTER_INDEX_SESSION_KEY) or 0)
+    except (ValueError, TypeError):
+        return False
+    if not 0 <= index < len(characters):
+        return False
+    record = _story_character_reference_map(session).get(characters[index]["id"]) or {}
+    return bool(record.get("selected_path") in (record.get("rejected_paths") or []))
 
 
 def _story_character_reference_is_approved(session: dict, character: dict[str, Any]) -> bool:
@@ -5127,6 +5139,9 @@ async def _handle_waiting_story_character_approval_state(
     if low in {"ок", "ok", "okay", "approve"}:
         refs = _story_character_reference_map(session)
         record = refs.get(character_id)
+        if isinstance(record, dict) and record.get("selected_path") in (record.get("rejected_paths") or []):
+            await _reply_text_with_optional_markup(update, "Этот вариант отклонён. Пришлите правку или нажмите «ПЕРЕГЕНЕРИРОВАТЬ», чтобы получить новый.", reply_markup=_story_character_approval_markup(allow_approve=False))
+            return True
         if not isinstance(record, dict) or not Path(str(record.get("selected_path") or "")).is_file():
             await update.message.reply_text("Сохранённый референс не найден. Создаю новый вариант.")
             return await _generate_story_character_reference(
@@ -5135,9 +5150,6 @@ async def _handle_waiting_story_character_approval_state(
                 session=session,
                 index=index,
             )
-        if record.get("selected_path") in (record.get("rejected_paths") or []):
-            await _reply_text_with_optional_markup(update, "Этот вариант отклонён. Пришлите правку или нажмите «ПЕРЕГЕНЕРИРОВАТЬ», чтобы получить новый.", reply_markup=_story_character_approval_markup(allow_approve=False))
-            return True
         record["approved"] = True
         refs[character_id] = record
         session[STORY_CHARACTER_REFERENCES_SESSION_KEY] = refs
