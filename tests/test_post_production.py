@@ -899,11 +899,19 @@ def test_ru_series_overlay_normalizes_uppercase_for_berezka_glyphs():
     assert "ЛЕТНИЕ" not in formatted
 
 
-def test_build_titled_post_production_reuses_existing_subtitled_master(tmp_path, monkeypatch):
+@pytest.mark.parametrize("source_has_subtitles", [True, False])
+def test_build_titled_post_production_reuses_existing_subtitled_master(tmp_path, monkeypatch, source_has_subtitles):
     source = tmp_path / "final_subtitled_music_master_ru.mp4"
     source.write_bytes(b"subtitled-source")
     rendered_inputs = []
     progress_events = []
+    rendered_ass = []
+    if not source_has_subtitles:
+        monkeypatch.setattr(post_production, '_subtitle_entries_for_language_from_plan', lambda *a, **k: [{}])
+        monkeypatch.setattr(post_production, '_build_burned_subtitle_cues', lambda *a, **k: [
+            {'text': 'Opening', 'start_sec': 0, 'end_sec': 1},
+            {'text': 'Next', 'start_sec': 2, 'end_sec': 3},
+        ])
 
     monkeypatch.setattr(post_production, "_resolve_ffmpeg", lambda: "/usr/bin/ffmpeg")
     monkeypatch.setattr(post_production, "_video_dimensions", lambda _path: (1080, 1920))
@@ -912,6 +920,7 @@ def test_build_titled_post_production_reuses_existing_subtitled_master(tmp_path,
 
     def fake_render_subtitled_music_master(*, ffmpeg, clean_path, subtitles_path, music_path, music_volume, dest_path):
         rendered_inputs.append((ffmpeg, Path(clean_path), music_path, music_volume))
+        rendered_ass.append(Path(subtitles_path).read_text())
         dest_path.write_bytes(Path(clean_path).read_bytes() + b"|title|" + Path(subtitles_path).read_bytes())
         return True
 
@@ -922,8 +931,11 @@ def test_build_titled_post_production_reuses_existing_subtitled_master(tmp_path,
     out = post_production.build_titled_post_production_from_subtitled_master(
         [{"duration_sec": 8, "text": "Первая сцена"}],
         subtitled_video_path=source,
+        source_has_subtitles=source_has_subtitles,
         language="ru",
         overlay_title_by_lang={"ru": "Борщ"},
+        overlay_title_style={'replace_subtitle_phrases': True,
+                             'subtitle_suppression_ranges_by_lang': {'ru': [[0, 1.5]]}},
         overlay_series_title_by_lang={"ru": "Супы у бабушки"},
         overlay_series_counter_by_lang={"ru": "день 2 из 7"},
         progress_callback=progress_events.append,
@@ -931,8 +943,11 @@ def test_build_titled_post_production_reuses_existing_subtitled_master(tmp_path,
 
     assert rendered_inputs == [("/usr/bin/ffmpeg", source, None, 0.0)]
     payload = out["renders_by_language"]["ru"]["titled_subtitled_music"]
-    assert payload["source_variant"] == "subtitled_music"
+    assert payload["source_variant"] == ("subtitled_music" if source_has_subtitles else "upscaled_4k")
     assert payload["source_video_path"] == str(source)
+    if not source_has_subtitles:
+        assert 'Next' in rendered_ass[0]
+        assert 'Opening' not in rendered_ass[0]
     assert [item["stage"] for item in progress_events] == ["reuse_subtitled", "title_building", "title_ready", "persisting"]
 
 

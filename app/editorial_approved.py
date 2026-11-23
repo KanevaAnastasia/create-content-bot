@@ -148,6 +148,9 @@ def ass_events(cue,style,width,height,base_style):
         # Keep the completed headline briefly, then return to the undimmed video.
         timed_end=max(start+.01,float(timing[-1]['end'])+.35)
         end=min(end,timed_end) if 'word_timing' in cue else timed_end
+        for begin, finish in (style.get('subtitle_suppression_ranges_by_lang') or {}).get(lang, []):
+            if float(begin) - .01 <= float(timing[0]['start']) < float(finish):
+                end = min(end, float(finish))
     if end<=start:
         return []
     try:

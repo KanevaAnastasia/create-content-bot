@@ -1852,14 +1852,17 @@ def _build_final_videos_for_run(
             include_background_music=not is_story_workflow,
         )
     elif (
-        source_subtitled_video_path
-        and target_language
+        target_language
         and requested_variants == ["titled_subtitled_music"]
-        and not (overlay_title_style or {}).get("replace_subtitle_phrases")
     ):
+        replaces_captions = bool((overlay_title_style or {}).get("replace_subtitle_phrases"))
+        title_source_path = source_upscaled_video_path if replaces_captions else source_subtitled_video_path
+        if not title_source_path:
+            raise RuntimeError("Для замены первой фразы нужен готовый чистый 4K-мастер. Сначала соберите его."
+                               if replaces_captions else "Сначала соберите версию с субтитрами.")
         post = build_titled_post_production_from_subtitled_master(
             scenes,
-            subtitled_video_path=source_subtitled_video_path,
+            subtitled_video_path=title_source_path,
             language=target_language,
             project_slug=project_slug,
             overlay_title_by_lang=overlay_title_by_lang,
@@ -1869,6 +1872,7 @@ def _build_final_videos_for_run(
             overlay_series_counter_by_lang=overlay_series_counter_by_lang,
             progress_callback=progress_callback,
             use_candidate_subtitle_snapshot=True,
+            source_has_subtitles=not replaces_captions,
         )
     else:
         post = build_post_production(
@@ -2338,6 +2342,7 @@ def _run_final_build_batch(
             )
         except Exception:
             reuse_scenes = []
+            _session, reuse_production = {}, {}
 
         def latest_variant_path(variant: str) -> Path | None:
             artifact = _latest_final_artifact(run.id, language, variant)
@@ -2352,8 +2357,12 @@ def _run_final_build_batch(
             for variant in FINAL_VIDEO_VARIANT_LABELS
         }
         if requested_variants == {"titled_subtitled_music"}:
-            if latest_paths.get("subtitled_music") is None:
-                raise RuntimeError("Сначала соберите версию с субтитрами. Сборка титров не пересоздаёт субтитры.")
+            replaces_captions = bool(_overlay_title_style_for_admin_render(
+                _session, reuse_production, run=run).get("replace_subtitle_phrases"))
+            required_source = "upscaled_4k" if replaces_captions else "subtitled_music"
+            if latest_paths.get(required_source) is None:
+                raise RuntimeError("Для замены первой фразы нужен готовый чистый 4K-мастер. Сначала соберите его."
+                                   if replaces_captions else "Сначала соберите версию с субтитрами. Сборка титров не пересоздаёт субтитры.")
             plan_variants = ["titled_subtitled_music"]
         else:
             for variant in required_variants:
@@ -2393,7 +2402,7 @@ def _run_final_build_batch(
 
         for active_variant in plan_variants:
             source_clean_video_path = latest_paths.get("clean") if active_variant == "upscaled_4k" else None
-            source_upscaled_video_path = latest_paths.get("upscaled_4k") if active_variant == "subtitled_music" else None
+            source_upscaled_video_path = latest_paths.get("upscaled_4k") if active_variant in ("subtitled_music", "titled_subtitled_music") else None
             source_subtitled_video_path = (
                 latest_paths.get("subtitled_music") if active_variant == "titled_subtitled_music" else None
             )

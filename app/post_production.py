@@ -4677,6 +4677,7 @@ def build_titled_post_production_from_subtitled_master(
     overlay_series_counter_by_lang: dict[str, Any] | None = None,
     progress_callback: Any | None = None,
     use_candidate_subtitle_snapshot: bool = True,
+    source_has_subtitles: bool = True,
 ) -> dict[str, Any]:
     ffmpeg = _resolve_ffmpeg()
     if not ffmpeg:
@@ -4726,20 +4727,28 @@ def build_titled_post_production_from_subtitled_master(
                     "stage": stage,
                     "label": label,
                     "requested_variants": ["titled_subtitled_music"],
-                    "source_variant": "subtitled_music",
+                    "source_variant": "subtitled_music" if source_has_subtitles else "upscaled_4k",
                 }
             )
         except Exception:
             logger.exception("post_production.progress_callback_failed language=%s stage=%s", lang, stage)
 
     artifact_bundle_key = _make_artifact_bundle_key(scenes, project_slug=project_slug)
+    caption_cues = []
+    entries = []
+    if not source_has_subtitles:
+        entries = _subtitle_entries_for_language_from_plan(
+            scenes, lang, use_candidate_subtitle_snapshot=use_candidate_subtitle_snapshot)
+        for entry in entries:
+            caption_cues.extend(_build_burned_subtitle_cues(entry, video_width=source_w, video_height=source_h))
+        caption_cues = _without_large_title_words(caption_cues, title_cues, overlay_title_style or {}, lang)
     with tempfile.TemporaryDirectory(prefix=f"post_production_title_{lang}_") as tmp:
         tmp_path = Path(tmp)
         emit_progress("reuse_subtitled", "Using existing subtitled/music master")
         titled_ass_path = tmp_path / f"title_overlay_{lang}.ass"
         _write_burned_subtitle_ass(
             titled_ass_path,
-            [],
+            caption_cues,
             title_cues=title_cues,
             title_style=overlay_title_style,
             video_width=source_w,
@@ -4775,7 +4784,7 @@ def build_titled_post_production_from_subtitled_master(
             "music_asset_uri": None,
             "music_volume": 0.0,
             "source_audio_preserved": bool(source_audio_preserved),
-            "source_variant": "subtitled_music",
+            "source_variant": "subtitled_music" if source_has_subtitles else "upscaled_4k",
             "source_video_path": str(source_path),
             "subtitle_fingerprint": subtitle_fingerprint,
             "scene_video_fingerprint": scene_video_fingerprint,
@@ -4806,8 +4815,8 @@ def build_titled_post_production_from_subtitled_master(
     return {
         "final_titled_subtitled_music_video": payload,
         "renders_by_language": {lang: {"titled_subtitled_music": payload}},
-        "subtitle_entries": [],
-        "subtitle_entries_by_language": {},
+        "subtitle_entries": entries,
+        "subtitle_entries_by_language": {lang: entries} if entries else {},
         "subtitle_fingerprint_by_language": {lang: subtitle_fingerprint},
         "title_overlay_by_language": title_overlay_by_language,
         "subtitle_overlay_by_language": subtitle_overlay_by_language,
