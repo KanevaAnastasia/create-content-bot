@@ -38,6 +38,41 @@ from app.scene_media_store import (
 from app.state import SESSIONS
 
 
+def test_restore_series_cursor_from_run_overrides_stale_session_and_production():
+    session = {
+        "series": {
+            "id": "old-series",
+            "video_index": 6,
+            "total_videos": 10,
+            "counter_by_lang": {"ru": "день 6 из 10", "en": "day 6 of 10"},
+        },
+        "series_video_index": 6,
+        "series_total_videos": 10,
+        "series_counter_by_lang": {"ru": "день 6 из 10", "en": "day 6 of 10"},
+        "production": {
+            "json_plan": [{"scene": 1}],
+            "series_video_index": 6,
+            "series_counter_by_lang": {"ru": "день 6 из 10", "en": "day 6 of 10"},
+        },
+    }
+    run = SimpleNamespace(
+        series_id=uuid.UUID("9e539932-0686-47b3-bf2a-6593e83ac3c8"),
+        series_video_index=7,
+        series_total_videos=10,
+    )
+
+    session_store._restore_series_cursor_from_run(session, run)
+
+    assert session["series_video_index"] == 7
+    assert session["series_counter_by_lang"] == {"ru": "день 7 из 10", "en": "day 7 of 10"}
+    assert session["production"]["series_video_index"] == 7
+    assert session["production"]["series_counter_by_lang"] == {
+        "ru": "день 7 из 10",
+        "en": "day 7 of 10",
+    }
+    assert session["production"]["json_plan"] == [{"scene": 1}]
+
+
 def _install_sqlite(monkeypatch):
     engine = create_engine("sqlite+pysqlite:///:memory:", future=True)
     db.create_tables(engine=engine)

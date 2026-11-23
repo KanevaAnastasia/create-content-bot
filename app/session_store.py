@@ -598,6 +598,43 @@ def _restore_missing_runtime_fields(current: dict, snapshot: dict) -> None:
                         _restore_missing_runtime_fields(scene, old)
 
 
+def _restore_series_cursor_from_run(session: dict[str, Any], run: Any) -> None:
+    """Keep the persisted run cursor authoritative over stale dialogue snapshots."""
+    try:
+        video_index = int(getattr(run, "series_video_index", None) or 0)
+        total_videos = int(getattr(run, "series_total_videos", None) or 0)
+    except (TypeError, ValueError):
+        return
+    if video_index <= 0 or total_videos <= 0:
+        return
+
+    counters = {
+        "ru": f"день {video_index} из {total_videos}",
+        "en": f"day {video_index} of {total_videos}",
+    }
+    series = dict(session.get("series") or {})
+    if getattr(run, "series_id", None):
+        series["id"] = str(run.series_id)
+    series["video_index"] = video_index
+    series["total_videos"] = total_videos
+    series["counter_by_lang"] = dict(counters)
+    session["series"] = series
+    session["series_video_index"] = video_index
+    session["series_total_videos"] = total_videos
+    session["series_counter_by_lang"] = dict(counters)
+
+    production = session.get("production")
+    if isinstance(production, dict):
+        production_series = dict(production.get("series") or series)
+        production_series["video_index"] = video_index
+        production_series["total_videos"] = total_videos
+        production_series["counter_by_lang"] = dict(counters)
+        production["series"] = production_series
+        production["series_video_index"] = video_index
+        production["series_total_videos"] = total_videos
+        production["series_counter_by_lang"] = dict(counters)
+
+
 def load_session(chat_id: int) -> dict[str, Any] | None:
     with SessionLocal() as db:
         row = db.execute(select(ChatSession).where(ChatSession.chat_id == int(chat_id))).scalar_one_or_none()
@@ -643,6 +680,8 @@ def load_session(chat_id: int) -> dict[str, Any] | None:
     if all(session.get(key) == runtime_snapshot.get(key) for key in
            ("state", "image_scene_index", "scene_media_substep")):
         _restore_missing_runtime_fields(session, runtime_snapshot)
+    if run is not None:
+        _restore_series_cursor_from_run(session, run)
     return session
 
 
