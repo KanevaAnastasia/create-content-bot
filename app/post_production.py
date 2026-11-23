@@ -1790,7 +1790,7 @@ def _build_title_subtitle_overlay_cue(
     }
 
 
-def _story_fixed_block_ass_text(cue: dict[str, Any], layout: SubtitleLayout) -> str | None:
+def _story_fixed_block_ass_text(cue: dict[str, Any], layout: SubtitleLayout, title_style=None) -> str | None:
     raw_words = cue.get("fixed_block_words")
     if not isinstance(raw_words, list):
         return None
@@ -1813,7 +1813,9 @@ def _story_fixed_block_ass_text(cue: dict[str, Any], layout: SubtitleLayout) -> 
     outline = max(2, int(round(3.0 * resolution_scale)))
     shadow = max(1, int(round(1.5 * resolution_scale)))
     anchor_x = layout.width // 2
-    anchor_y = int(round(layout.height * STORY_WORD_SYNC_ANCHOR_Y_RATIO))
+    from .split_panel_typography import caption_anchor
+    anchor_ratio = caption_anchor(title_style)
+    anchor_y = int(round(layout.height * (anchor_ratio if anchor_ratio is not None else STORY_WORD_SYNC_ANCHOR_Y_RATIO)))
     prefix = (
         "{"
         f"\\an2\\pos({anchor_x},{anchor_y})"
@@ -1840,6 +1842,9 @@ def _without_large_title_words(cues, title_cues, style, language):
             replacements.extend(timing)
 
     def replaced(word, start):
+        ranges = (style.get('subtitle_suppression_ranges_by_lang') or {}).get(language, [])
+        if any(float(begin) - .01 <= start < float(end) for begin, end in ranges):
+            return True
         return any(normalize(word) == normalize(row.get("text"))
                    and float(row["start"]) - .08 <= start < float(row["end"]) + .08
                    for row in replacements)
@@ -2305,7 +2310,7 @@ def _write_burned_subtitle_ass(
                 )
             )
     for cue in cues:
-        fixed_block_text = _story_fixed_block_ass_text(cue, layout)
+        fixed_block_text = _story_fixed_block_ass_text(cue, layout, title_style)
         if fixed_block_text:
             lines.append(
                 "Dialogue: 0,{start},{end},{style},,0,0,0,,{text}".format(
@@ -2319,6 +2324,10 @@ def _write_burned_subtitle_ass(
         cue_lines = str(cue.get("text") or " ").splitlines() or [" "]
         for index, line in enumerate(cue_lines):
             anchor_y = _subtitle_line_anchor_y(layout, line_count=len(cue_lines), index=index)
+            from .split_panel_typography import caption_anchor
+            panel_anchor = caption_anchor(title_style)
+            if panel_anchor is not None:
+                anchor_y += round(layout.height * panel_anchor) - _subtitle_line_anchor_y(layout, line_count=1, index=0)
             colour_override = f"\\c{STORY_WORD_SYNC_SUBTITLE_COLOUR}" if cue.get("word_synced") else ""
             text = f"{{\\an1\\pos({layout.margin_l},{anchor_y}){colour_override}}}" + _escape_ass_text(line)
             lines.append(
@@ -4145,6 +4154,7 @@ def build_post_production(
                 _write_burned_subtitle_ass(
                     ass_path,
                     subtitle_cues,
+                    title_style=overlay_title_style,
                     video_width=render_base_w,
                     video_height=render_base_h,
                 )
@@ -4178,6 +4188,7 @@ def build_post_production(
                     _write_burned_subtitle_ass(
                         ass_path,
                         subtitle_cues,
+                        title_style=overlay_title_style,
                         video_width=render_base_w,
                         video_height=render_base_h,
                     )
@@ -4577,6 +4588,7 @@ def build_subtitled_post_production_from_upscaled_master(
         _write_burned_subtitle_ass(
             ass_path,
             subtitle_cues,
+            title_style=overlay_title_style,
             video_width=source_w,
             video_height=source_h,
         )

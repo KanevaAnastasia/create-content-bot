@@ -1761,6 +1761,7 @@ def _build_final_videos_for_run(
     reuse_subtitled_master = bool(
         source_subtitled_video_path and target_language
         and requested_variants == ["titled_subtitled_music"]
+        and not _overlay_title_style_for_admin_render(session, production, run=run).get("replace_subtitle_phrases")
     )
     needs_subtitle_timings = requested_variants is None or bool(
         set(requested_variants) & {"subtitled_music", "titled_subtitled_music"}
@@ -1854,6 +1855,7 @@ def _build_final_videos_for_run(
         source_subtitled_video_path
         and target_language
         and requested_variants == ["titled_subtitled_music"]
+        and not (overlay_title_style or {}).get("replace_subtitle_phrases")
     ):
         post = build_titled_post_production_from_subtitled_master(
             scenes,

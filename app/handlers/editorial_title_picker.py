@@ -14,10 +14,10 @@ from ..post_production import render_title_overlay_preview
 from .handlers_generation_utils import OVERLAY_TITLE_BY_LANG_SESSION_KEY, OVERLAY_TITLE_STYLE_SESSION_KEY
 
 
-def picker_markup():
+def picker_markup(speaker=False):
     return ReplyKeyboardMarkup([
         ['Стиль 1', 'Стиль 2', 'Стиль 3'], ['Стиль 5', 'Стиль 9'], ['Все стили', 'ОК'], ['В начало'],
-    ], resize_keyboard=True)
+    ] + ([['Говорит верхний', 'Говорит нижний']] if speaker else []), resize_keyboard=True)
 
 
 def render_card(titles: dict, style: dict, background_bytes: bytes) -> bytes:
@@ -54,6 +54,9 @@ async def ask_picker(update, session, *, all_styles=True):
     if not titles:
         return False
     style = dict(session.get(OVERLAY_TITLE_STYLE_SESSION_KEY) or {})
+    from ..discipline_modes import active_mode, TWO_LIVES, FORK
+    if active_mode(session) in (TWO_LIVES, FORK):
+        style.setdefault('speaker_panel', 'top')
     parts = style.get(PARTS_KEY) or {}
     if not all(valid_parts(title, parts.get(lang)) for lang, title in titles.items()):
         parts = await propose_parts(titles)
@@ -65,7 +68,7 @@ async def ask_picker(update, session, *, all_styles=True):
     await update.message.reply_text(
         'Нажмите номер стиля. Смысловые части:\n' + '\n'.join(f'{lang.upper()}: ' + ' | '.join(value) for lang, value in parts.items())
         + '\nМожно исправить: RU: У меня | нет | энергии (или EN: I have | no | energy). '
-        'Затемнение: «затемнение 32%». После выбора нажмите «ОК».', reply_markup=picker_markup())
+        'Затемнение: «затемнение 32%». После выбора нажмите «ОК».', reply_markup=picker_markup(style.get('speaker_panel') in ('top', 'bottom')))
     return True
 
 
@@ -76,7 +79,7 @@ async def handle_picker_input(update, session, text):
     titles = session.get(OVERLAY_TITLE_BY_LANG_SESSION_KEY) or {}
     if low in {'ок', 'ok', 'okay', 'approve'}:
         if str(style.get(STYLE_KEY)) not in STYLE_IDS:
-            await update.message.reply_text('Сначала выберите стиль по номеру.', reply_markup=picker_markup())
+            await update.message.reply_text('Сначала выберите стиль по номеру.', reply_markup=picker_markup(style.get('speaker_panel') in ('top', 'bottom')))
             return True
         return False
     if low == 'все стили':
@@ -96,13 +99,13 @@ async def handle_picker_input(update, session, text):
     else:
         dim = re.fullmatch(r'затемнение\s+(\d{1,2})\s*%', low)
         if not dim or not 0 <= int(dim.group(1)) <= 60:
-            await update.message.reply_text('Выберите стиль, измените смысловые части через | или напишите «затемнение 32%».', reply_markup=picker_markup())
+            await update.message.reply_text('Выберите стиль, измените смысловые части через | или напишите «затемнение 32%».', reply_markup=picker_markup(style.get('speaker_panel') in ('top', 'bottom')))
             return True
         style['dim_opacity'] = int(dim.group(1)) / 100
     session[OVERLAY_TITLE_STYLE_SESSION_KEY] = style
     if style.get(STYLE_KEY):
         await _send_card(update, titles, style, session)
-        await update.message.reply_text('Если оформление подходит — «ОК». Можно выбрать другой стиль.', reply_markup=picker_markup())
+        await update.message.reply_text('Если оформление подходит — «ОК». Можно выбрать другой стиль.', reply_markup=picker_markup(style.get('speaker_panel') in ('top', 'bottom')))
     else:
         await ask_picker(update, session)
     return True

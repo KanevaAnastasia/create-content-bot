@@ -157,8 +157,15 @@ def ass_events(cue,style,width,height,base_style):
     def event(layer,t0,t1,tags,path,name=""):
         return f'Dialogue: {layer},{_timestamp(t0)},{_timestamp(t1)},{base_style},{name},0,0,0,,{tags}{path}{{\\p0}}'
     alpha=round(255*(1-opacity))
-    output=[event(0,start,end,f'{{\\an7\\pos(0,0)\\bord0\\shad0\\1c&H000000&\\1a&H{alpha:02X}&\\p1}}',f'm 0 0 l {width} 0 {width} {height} 0 {height}')]
     from . import editorial_font_selection as selected
+    from .split_panel_typography import speaker_panel
+    panel = speaker_panel(style)
+    # Uniform scaling preserves the approved letterforms inside one half-frame.
+    scale = .5 if panel else 1.0
+    origin_x = width * (1 - scale) / 2
+    origin_y = height * .5 if panel == 'bottom' else 0
+    scrim_bottom = origin_y + height * scale
+    output=[event(0,start,end,f'{{\\an7\\pos(0,0)\\bord0\\shad0\\1c&H000000&\\1a&H{alpha:02X}&\\p1}}',f'm 0 {origin_y:g} l {width} {origin_y:g} {width} {scrim_bottom:g} 0 {scrim_bottom:g}')]
     semantic_parts = tuple(zip(roles, parts))
     offset=0
     for role,text in zip(roles,parts):
@@ -171,8 +178,12 @@ def ass_events(cue,style,width,height,base_style):
                 continue
             ink = selected.drawings(sid, lang, semantic_parts, role, visible, foreground=always_front)
             for color,path in ink:
+                overrides = (style.get('part_colors_by_lang') or {}).get(lang, {})
+                override = overrides.get(str(role), '')
+                if re.fullmatch(r'#[0-9a-fA-F]{6}', str(override)):
+                    color = override
                 bgr=color[5:7]+color[3:5]+color[1:3]
-                tags=(f'{{\\an7\\pos(0,0)\\fscx{width/W*100:.5f}\\fscy{height/H*100:.5f}'
+                tags=(f'{{\\an7\\pos({origin_x:g},{origin_y:g})\\fscx{width/W*100*scale:.5f}\\fscy{height/H*100*scale:.5f}'
                       f'\\bord0\\shad0\\1c&H{bgr}&\\1a&H00&\\p1}}')
                 behind = role == 0 and sid in ('3','9') and not always_front
                 output.append(event(1 if behind else 2,max(start,t0),t1,tags,path,

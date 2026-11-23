@@ -646,6 +646,10 @@ def _semantic_overlay_title_color(title: str) -> str:
 def _default_overlay_title_style(session: dict) -> dict[str, object]:
     title = str(session.get(OVERLAY_TITLE_SESSION_KEY) or "").strip()
     existing = session.get(OVERLAY_TITLE_STYLE_SESSION_KEY)
+    from ..discipline_modes import active_mode, TWO_LIVES, FORK
+    if active_mode(session) in (TWO_LIVES, FORK):
+        existing = dict(existing or {})
+        existing.setdefault('speaker_panel', 'top')
     from ..series_theme import HOLIDAY_THEME, holiday_dish_color
     if isinstance(existing, dict) and existing.get("series_theme") == HOLIDAY_THEME:
         return {**existing, "title_color": holiday_dish_color(existing)}
@@ -666,6 +670,9 @@ def _format_overlay_title_style(style: dict[str, object]) -> str:
         f"Цвет заголовка: {color}\n"
         f"Отступ сверху: {top:.0f}%\n"
         f"Боковые поля: {side:.0f}%"
+        + ("\nГоворит " + ("верхний" if style['speaker_panel'] == 'top' else "нижний")
+           + " герой. Можно выбрать: «Говорит верхний» / «Говорит нижний»."
+           if style.get('speaker_panel') in ('top', 'bottom') else '')
     )
 
 
@@ -3099,8 +3106,8 @@ async def _approve_story_audio_and_build_scenes(
     title_by_lang = {"ru": title}
     if english_requested:
         title_by_lang["en"] = str(session.get(STORY_TITLE_EN_SESSION_KEY) or "Story").strip() or "Story"
-    from ..discipline_modes import active_mode, REFRAME, opening_sentence, title_word_timing
-    if active_mode(session) == REFRAME:
+    from ..discipline_modes import active_mode, REFRAME, TWO_LIVES, FORK, opening_sentence, title_word_timing
+    if active_mode(session) in (REFRAME, TWO_LIVES, FORK):
         title_by_lang["ru"] = opening_sentence(voiceover)
         if english_requested:
             title_by_lang["en"] = opening_sentence(english_voiceover)
@@ -3111,6 +3118,8 @@ async def _approve_story_audio_and_build_scenes(
         "top_margin_ratio": _DEFAULT_OVERLAY_TITLE_TOP_MARGIN_RATIO,
         "side_margin_ratio": _DEFAULT_OVERLAY_TITLE_SIDE_MARGIN_RATIO,
     }
+    if active_mode(session) in (TWO_LIVES, FORK):
+        session[OVERLAY_TITLE_STYLE_SESSION_KEY]['speaker_panel'] = 'top'
     if active_mode(session):
         session[OVERLAY_TITLE_STYLE_SESSION_KEY]["replace_subtitle_phrases"] = True
         session[OVERLAY_TITLE_STYLE_SESSION_KEY]["word_timing_by_lang"] = {
@@ -3118,6 +3127,11 @@ async def _approve_story_audio_and_build_scenes(
             **({"en": title_word_timing(title_by_lang["en"], english_voiceover, english_duration, english_alignment)}
                if english_requested else {}),
         }
+    if active_mode(session) in (TWO_LIVES, FORK):
+        from ..split_panel_typography import configure_opening_titles
+        configure_opening_titles(session, title_by_lang, session[OVERLAY_TITLE_STYLE_SESSION_KEY])
+        session[OVERLAY_TITLE_BY_LANG_SESSION_KEY] = title_by_lang
+        session[OVERLAY_TITLE_SESSION_KEY] = title_by_lang['ru']
     if active_mode(session) == REFRAME:
         from ..discipline_modes import reframe_title_cues
         session[OVERLAY_TITLE_STYLE_SESSION_KEY]["extra_title_cues_by_lang"] = {
@@ -5598,6 +5612,20 @@ async def _handle_waiting_overlay_title_style_approval_state(
     text: str,
     deferred: bool = False,
 ) -> bool:
+    from ..discipline_modes import active_mode, TWO_LIVES, FORK
+    speaker_choice = {'говорит верхний': 'top', 'говорит нижний': 'bottom'}.get(text.strip().lower())
+    if speaker_choice and active_mode(session) in (TWO_LIVES, FORK):
+        style = _default_overlay_title_style(session)
+        style['speaker_panel'] = speaker_choice
+        session[OVERLAY_TITLE_STYLE_SESSION_KEY] = style
+        _apply_overlay_title_to_production(session, session.get('production') or {})
+        SESSIONS[chat_id] = session
+        await update.message.reply_text(_format_overlay_title_style(style))
+        if _overlay_first_frame(session):
+            from .editorial_title_picker import ask_picker
+            await ask_picker(update, session, all_styles=False)
+            SESSIONS[chat_id] = session
+        return True
     if (session.get(OVERLAY_TITLE_PENDING_NEXT_SESSION_KEY) == "first_frame"
             and not _overlay_first_frame(session)):
         # Sessions opened before this approval ordering changed must also return
