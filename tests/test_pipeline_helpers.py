@@ -1070,6 +1070,46 @@ def test_generate_scenes_plan_caps_steps_to_six(monkeypatch):
     assert "single continuous shot with a locked camera" in captured_prompt["text"]
 
 
+def test_generate_scenes_plan_honors_requested_exact_count_of_seven(monkeypatch):
+    scenes_payload = [
+        {
+            "scene": index,
+            "location": "kitchen",
+            "shot_type": "closeup",
+            "characters": ["grandma", "cat"],
+            "action": f"действие {index} с едой",
+            "text": "я готОвлю [пауза] аккурАтно",
+            "duration_sec": 8,
+            "model": "veo3_fast",
+            "voice_needed": True,
+            "has_lipsync": True,
+        }
+        for index in range(1, 8)
+    ]
+    captured_prompt = {"text": ""}
+    cache_writes: list[object] = []
+
+    def _fake_gemini(prompt: str, **_kwargs) -> str:
+        captured_prompt["text"] = prompt
+        return json.dumps(scenes_payload, ensure_ascii=False)
+
+    monkeypatch.setattr(pipeline, "get_scenes_plan", lambda *a, **k: None)
+    monkeypatch.setattr(pipeline, "set_scenes_plan", lambda *args, **kwargs: cache_writes.append((args, kwargs)))
+    monkeypatch.setattr("app.pipeline_llm_steps.gemini_generate_sync", _fake_gemini)
+
+    out = asyncio.run(
+        pipeline.generate_scenes_plan(
+            "мандариновый десерт",
+            full_recipe_text="Подготовить мандарины, сварить сливочную смесь и охладить.",
+            requested_scene_count=7,
+        )
+    )
+
+    assert len(out["json_plan"]) == 7
+    assert "ровно 7 сцен" in captured_prompt["text"]
+    assert cache_writes == []
+
+
 def test_normalize_production_prompts_accepts_string_items():
     prompts = ["video one", "video two"]
     out = _normalize_production_prompts(prompts, scenes_count=2, require_frames=False)
