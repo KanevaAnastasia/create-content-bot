@@ -215,6 +215,18 @@ def test_paused_can_restart_text_without_generating(db):
     idea=add(db,status='paused');bot=SimpleNamespace(send_message=AsyncMock())
     asyncio.run(q.callback(click('r',idea),SimpleNamespace(bot=bot)))
     assert state.SESSIONS[123]['state']=='waiting_story_script_approval'
+    assert state.SESSIONS[123]['story_english_requested'] is True
+
+
+def test_scheduled_idea_requests_english_before_media_generation(db):
+    idea = add(db, status='offered')
+    bot = SimpleNamespace(send_message=AsyncMock())
+    asyncio.run(q.callback(click('a', idea), SimpleNamespace(bot=bot)))
+    session = state.SESSIONS[123]
+    assert session['story_english_requested'] is True
+    assert session['story_voiceover_text'] == 'Точный утверждённый текст.'
+    # EN visuals are enabled only after its narration is prepared and approved.
+    assert session['target_languages'] == ['ru']
 
 
 def test_review_plan_is_visible_but_never_added_to_approved_voice(db):

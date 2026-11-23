@@ -190,7 +190,7 @@ async def deliver(bot, chat_id, *, force=False, locked=False):
         db.commit()
 
 
-def build_story_session(row, *, english=False):
+def build_story_session(row, *, english=True):
     from .discipline_modes import MODE_KEY, SHORT_FORMATS
     from .directorial_notes import remember_notes
     from .handlers.handlers_state_start import STATE_WAITING_STORY_SCRIPT_APPROVAL
@@ -296,7 +296,8 @@ async def callback(update, context):
             from .handlers.handlers_state_start import _story_script_approval_markup
             await context.bot.send_message(chat_id, 'Текст RU-озвучки\n\n' + story['story_voiceover_text'])
             await context.bot.send_message(chat_id, 'Проверьте текст. «ОК» создаст озвучку. '
-                'Можно исправить текст обычными кнопками. Сейчас выбрана RU-версия; публикация согласуется отдельно.',
+                'Можно исправить текст обычными кнопками. После RU подготовим полный дословный EN-перевод '
+                'и английскую озвучку. Публикация согласуется отдельно.',
                 reply_markup=_story_script_approval_markup())
 
 
