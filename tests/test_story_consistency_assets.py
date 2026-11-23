@@ -138,3 +138,16 @@ def test_other_projects_do_not_gain_paid_prop_approval(monkeypatch,tmp_path):
     planned(monkeypatch,tmp_path)
     result=g.generate_story_scene_plan(source_story='Пишет.',voiceover_text='Пишет.',duration_sec=12,alignment={},project_slug='other_project',project_characters=[{'id':'vasily','description':'герой'}])
     assert all(not c['requires_reference'] for c in result['character_bible'] if c.get('entity_type')=='prop')
+
+
+def test_rejection_waits_for_feedback_without_generation(monkeypatch,tmp_path):
+    monkeypatch.setattr(h,'SESSIONS',{})
+    image=AsyncMock();monkeypatch.setattr(h,'_generate_story_character_reference',image)
+    continuation=AsyncMock();monkeypatch.setattr(h,'_continue_after_scene_approval',continuation)
+    c={'id':'prop_machine','entity_type':'prop','requires_reference':True}
+    session={'story_character_bible':[c],'story_character_references':{'prop_machine':{'approved':False}}}
+    msg=SimpleNamespace(reply_text=AsyncMock())
+    asyncio.run(h._handle_waiting_story_character_approval_state(SimpleNamespace(message=msg),None,chat_id=1,session=session,text='Не подходит'))
+    assert session['story_character_references']['prop_machine']['approved'] is False
+    image.assert_not_awaited();continuation.assert_not_awaited()
+    assert 'правку' in msg.reply_text.call_args.args[0]

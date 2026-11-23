@@ -1991,7 +1991,7 @@ def _story_character_approval_markup():
         [
             ["ОК"],
             ["ПЕРЕГЕНЕРИРОВАТЬ"],
-            ["ФИДБЕК:"],
+            ["Не подходит", "ФИДБЕК:"],
             [DRAFT_BUTTON_SAVE],
             [NAV_BUTTON_PREVIOUS_STEP],
             [NAV_BUTTON_START_OVER],
@@ -5155,7 +5155,12 @@ async def _handle_waiting_story_character_approval_state(
             session=session,
         )
     feedback = "" if low == "перегенерировать" or low == "фидбек:" else str(text or "").strip()
-    if low == "фидбек:":
+    if low in {"фидбек:", "не подходит", "нет", "отклонить"}:
+        refs = _story_character_reference_map(session)
+        if isinstance(refs.get(character_id), dict):
+            refs[character_id]["approved"] = False
+        session[STORY_CHARACTER_REFERENCES_SESSION_KEY] = refs
+        SESSIONS[chat_id] = session
         await _reply_text_with_optional_markup(
             update,
             "Пришлите конкретную правку к этому референсу одним сообщением.",
