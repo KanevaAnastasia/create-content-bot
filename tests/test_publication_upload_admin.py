@@ -349,7 +349,7 @@ def test_publication_external_url_prefers_saved_permalink() -> None:
 
 
 def test_publication_video_previews_are_scoped_per_language(monkeypatch) -> None:
-    ru = SimpleNamespace(id=uuid.uuid4(), language="ru", label="RU final")
+    ru = SimpleNamespace(id=uuid.uuid4(), language="ru", label="RU final", payload_json={"cover_frame_suggestion_sec": 1.8})
     en = SimpleNamespace(id=uuid.uuid4(), language="en", label="EN final")
     monkeypatch.setattr(admin_module, "_publication_all_final_artifacts", lambda _run: [ru, en])
     monkeypatch.setattr(admin_module, "_artifact_media_url", lambda artifact: f"/media/{artifact.id}/")
@@ -360,11 +360,13 @@ def test_publication_video_previews_are_scoped_per_language(monkeypatch) -> None
         "source": f"artifact:{ru.id}",
         "url": f"/media/{ru.id}/",
         "label": "RU final",
+        "cover_time": "1.8",
     },)
     assert previews["en"] == ({
         "source": f"artifact:{en.id}",
         "url": f"/media/{en.id}/",
         "label": "EN final",
+        "cover_time": "1",
     },)
 
 

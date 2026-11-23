@@ -93,9 +93,16 @@
         <div class="cf-source-list">{{ panel.source.errors }}{{ panel.source }}</div>
         <div class="cf-file-row cf-video-upload" data-language="{{ panel.code }}">{{ panel.upload.label_tag }}{{ panel.upload }}{{ panel.upload.errors }}</div>
         <div class="cf-cover-builder" data-language="{{ panel.code }}">
-          {% for preview in panel.video_previews %}<span data-video-source="{{ preview.source }}" data-video-url="{{ preview.url }}" hidden></span>{% endfor %}
-          <button class="button cf-build-cover" type="button">Сформировать обложку</button>
-          <div class="cf-cover-status">Кадр будет взят примерно на 1-й секунде выбранного видео.</div>
+          {% for preview in panel.video_previews %}<span data-video-source="{{ preview.source }}" data-video-url="{{ preview.url }}" data-cover-time="{{ preview.cover_time }}" hidden></span>{% endfor %}
+          <button class="button cf-build-cover" type="button">Выбрать кадр для обложки</button>
+          <div class="cf-frame-picker" hidden>
+            <video class="cf-cover-video" controls muted playsinline preload="metadata" style="display:block;width:min(300px,100%);max-height:480px;background:#111"></video>
+            <label>Кадр по времени <input class="cf-cover-time" type="number" min="0" step="0.01" value="0"> сек.</label>
+            <input class="cf-cover-range" type="range" min="0" max="1" step="0.01" value="0" aria-label="Момент обложки">
+            <div><button type="button" class="button cf-frame-back">← Кадр</button> <button type="button" class="button cf-frame-next">Кадр →</button></div>
+            <button type="button" class="button cf-use-frame" disabled>Выбрать этот кадр</button>
+          </div>
+          <div class="cf-cover-status">Откройте видео и выберите момент, когда заголовок виден целиком.</div>
           <figure class="cf-cover-preview" hidden><img alt="Предпросмотр обложки"><figcaption>Эта обложка будет отправлена вместе с выбранным видео.</figcaption></figure>
         </div>
         <div class="cf-file-row">{{ panel.cover.label_tag }}{{ panel.cover }}<span class="help">{{ panel.cover.help_text }} {{ panel.cover_hint }}</span>{{ panel.cover.errors }}</div>
@@ -206,9 +213,57 @@
   function showCoverPreview(lang,url){const builder=coverBuilder(lang);if(!builder)return;const preview=builder.querySelector('.cf-cover-preview');preview.querySelector('img').src=url;preview.hidden=false;}
   function clearGeneratedCover(lang){const input=document.getElementById('id_cover_'+lang);if(input&&input.dataset.generated==='1'){input.value='';delete input.dataset.generated;const preview=coverBuilder(lang).querySelector('.cf-cover-preview');preview.hidden=true;}}
   function syncUpload(lang){const selected=form.querySelector('input[name="video_source_'+lang+'"]:checked');const row=form.querySelector('.cf-video-upload[data-language="'+lang+'"]');if(row)row.style.display=selected&&selected.value==='upload'?'grid':'none';}
-  async function frameBlob(videoUrl){return new Promise((resolve,reject)=>{const video=document.createElement('video');video.muted=true;video.playsInline=true;video.preload='auto';video.onerror=()=>reject(new Error('Не удалось открыть выбранное видео.'));video.onloadeddata=()=>{const target=Math.min(1,Math.max(0,(Number.isFinite(video.duration)?video.duration:1)-0.05));if(target>0.01){video.currentTime=target;}else{capture();}};video.onseeked=capture;function capture(){try{const canvas=document.createElement('canvas');canvas.width=video.videoWidth;canvas.height=video.videoHeight;canvas.getContext('2d').drawImage(video,0,0);canvas.toBlob(blob=>blob?resolve(blob):reject(new Error('Не удалось сформировать JPG.')),'image/jpeg',.92);}catch(error){reject(error);}}video.src=videoUrl;video.load();});}
-  async function buildCover(lang){const builder=coverBuilder(lang);const status=builder.querySelector('.cf-cover-status');const selected=form.querySelector('input[name="video_source_'+lang+'"]:checked');if(!selected){status.textContent='Сначала выберите версию видео.';return;}let videoUrl='';let temporaryUrl='';if(selected.value==='upload'){const upload=document.getElementById('id_custom_video_'+lang);if(!upload||!upload.files.length){status.textContent='Сначала выберите свой MP4.';return;}temporaryUrl=URL.createObjectURL(upload.files[0]);videoUrl=temporaryUrl;}else{const source=builder.querySelector('[data-video-source="'+CSS.escape(selected.value)+'"]');videoUrl=source?source.dataset.videoUrl:'';}if(!videoUrl){status.textContent='Предпросмотр этой версии недоступен.';return;}status.textContent='Формирую кадр около 1-й секунды…';try{const blob=await frameBlob(videoUrl);const file=new File([blob],lang+'_cover.jpg',{type:'image/jpeg'});const transfer=new DataTransfer();transfer.items.add(file);const input=document.getElementById('id_cover_'+lang);input.files=transfer.files;input.dataset.generated='1';showCoverPreview(lang,URL.createObjectURL(blob));status.textContent='Обложка сформирована и подставлена. Можно заменить своим файлом.';}catch(error){status.textContent=error.message||'Не удалось сформировать обложку.';}finally{if(temporaryUrl)URL.revokeObjectURL(temporaryUrl);}}
-  ['ru','en'].forEach(lang=>{form.querySelectorAll('input[name="video_source_'+lang+'"]').forEach(el=>el.addEventListener('change',()=>{clearGeneratedCover(lang);syncUpload(lang);}));const upload=document.getElementById('id_custom_video_'+lang);if(upload)upload.addEventListener('change',()=>clearGeneratedCover(lang));const cover=document.getElementById('id_cover_'+lang);if(cover)cover.addEventListener('change',()=>{delete cover.dataset.generated;if(cover.files.length)showCoverPreview(lang,URL.createObjectURL(cover.files[0]));});const button=coverBuilder(lang)&&coverBuilder(lang).querySelector('.cf-build-cover');if(button)button.addEventListener('click',()=>buildCover(lang));syncUpload(lang);});
+  ['ru','en'].forEach(lang=>{
+    const builder=coverBuilder(lang);if(!builder)return;
+    const picker=builder.querySelector('.cf-frame-picker'),video=builder.querySelector('video');
+    const status=builder.querySelector('.cf-cover-status'),time=builder.querySelector('.cf-cover-time');
+    const range=builder.querySelector('.cf-cover-range'),use=builder.querySelector('.cf-use-frame');
+    const cover=document.getElementById('id_cover_'+lang),upload=document.getElementById('id_custom_video_'+lang);
+    let localUrl='',previewUrl='',revision=0;
+    function syncTime(){time.value=video.currentTime.toFixed(2);range.value=video.currentTime;}
+    function reset(clearCover=true){revision++;video.pause();video.removeAttribute('src');video.load();picker.hidden=true;use.disabled=true;if(localUrl)URL.revokeObjectURL(localUrl);localUrl='';if(clearCover)clearGeneratedCover(lang);status.textContent='Выберите кадр из выбранной версии видео.';}
+    function seek(value){if(!Number.isFinite(video.duration))return;video.pause();use.disabled=true;video.currentTime=Math.min(Math.max(0,Number(value)||0),Math.max(0,video.duration-1/30));}
+    video.addEventListener('timeupdate',syncTime);
+    video.addEventListener('seeking',()=>use.disabled=true);
+    video.addEventListener('seeked',()=>{syncTime();use.disabled=false;});
+    video.addEventListener('loadeddata',()=>{if(!video.seeking)use.disabled=false;});
+    video.addEventListener('error',()=>{use.disabled=true;status.textContent='Не удалось открыть видео. Выберите файл или другую версию.';});
+    time.addEventListener('change',()=>seek(time.value));range.addEventListener('input',()=>seek(range.value));
+    builder.querySelector('.cf-frame-back').addEventListener('click',()=>seek(video.currentTime-1/30));
+    builder.querySelector('.cf-frame-next').addEventListener('click',()=>seek(video.currentTime+1/30));
+    builder.querySelector('.cf-build-cover').addEventListener('click',()=>{
+      reset(false);const selected=form.querySelector('input[name="video_source_'+lang+'"]:checked');
+      if(!selected){status.textContent='Сначала выберите версию видео.';return;}
+      let url='',suggested=1;
+      if(selected.value==='upload'){
+        if(!upload||!upload.files.length){status.textContent='Сначала выберите свой MP4.';return;}
+        localUrl=URL.createObjectURL(upload.files[0]);url=localUrl;
+      }else{
+        const source=builder.querySelector('[data-video-source="'+CSS.escape(selected.value)+'"]');
+        if(source){url=source.dataset.videoUrl;const raw=source.dataset.coverTime;const value=Number(raw);suggested=raw&&Number.isFinite(value)?Math.max(0,value):1;}
+      }
+      if(!url){status.textContent='Предпросмотр этой версии недоступен.';return;}
+      video.onloadedmetadata=()=>{range.max=time.max=Math.max(0,video.duration-1/30);seek(suggested);};
+      picker.hidden=false;video.src=url;video.load();status.textContent='Перемотайте видео до полного заголовка и нажмите «Выбрать этот кадр».';
+    });
+    use.addEventListener('click',()=>{
+      if(video.readyState<2||video.seeking)return;video.pause();use.disabled=true;
+      const version=revision,stamp=video.currentTime;
+      const canvas=document.createElement('canvas');canvas.width=video.videoWidth;canvas.height=video.videoHeight;
+      try{canvas.getContext('2d').drawImage(video,0,0);canvas.toBlob(blob=>{
+        if(version!==revision)return;use.disabled=false;
+        if(!blob){status.textContent='Не удалось сохранить кадр.';return;}
+        const transfer=new DataTransfer();transfer.items.add(new File([blob],lang+'_cover_'+stamp.toFixed(2)+'.jpg',{type:'image/jpeg'}));
+        cover.files=transfer.files;cover.dataset.generated='1';
+        if(previewUrl)URL.revokeObjectURL(previewUrl);previewUrl=URL.createObjectURL(blob);showCoverPreview(lang,previewUrl);
+        status.textContent='Выбран кадр '+stamp.toFixed(2)+' сек. Обложка подставлена в форму.';
+      },'image/jpeg',.92);}catch(error){use.disabled=false;status.textContent='Не удалось сохранить кадр: '+error.message;}
+    });
+    form.querySelectorAll('input[name="video_source_'+lang+'"]').forEach(el=>el.addEventListener('change',()=>{reset();syncUpload(lang);}));
+    if(upload)upload.addEventListener('change',reset);
+    if(cover)cover.addEventListener('change',()=>{revision++;delete cover.dataset.generated;if(previewUrl)URL.revokeObjectURL(previewUrl);if(cover.files.length){previewUrl=URL.createObjectURL(cover.files[0]);showCoverPreview(lang,previewUrl);status.textContent='Выбрана загруженная обложка.';}});
+    syncUpload(lang);
+  });
   const growingTextareas=document.querySelectorAll('.cf-upload-textarea');
   growingTextareas.forEach(el=>{el.addEventListener('input',()=>grow(el));grow(el);});
   requestAnimationFrame(()=>growingTextareas.forEach(grow));

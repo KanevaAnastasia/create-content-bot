@@ -114,7 +114,7 @@ class PublicationUploadForm(legacy.PublicationQueueAdminForm):
                 required=False,
                 label=f"Обложка · {label}",
                 widget=forms.ClearableFileInput(attrs={"accept": "image/jpeg,image/png,.jpg,.jpeg,.png"}),
-                help_text="Сформируйте кадр около 1-й секунды кнопкой ниже или загрузите свой JPG/PNG до 50 МБ.",
+                help_text="Выберите кадр в видеоплеере кнопкой выше или загрузите свой JPG/PNG до 50 МБ.",
             )
         for name, field in self.fields.items():
             if isinstance(field.widget, forms.Textarea):
@@ -337,6 +337,7 @@ def _publication_video_previews(run: GenerationRun) -> dict[str, tuple[dict[str,
                 "source": f"artifact:{artifact.id}",
                 "url": legacy._artifact_media_url(artifact),
                 "label": str(artifact.label or "Final video"),
+                "cover_time": str((getattr(artifact, "payload_json", None) or {}).get("cover_frame_suggestion_sec", 1)),
             }
         )
     return {language: tuple(rows) for language, rows in result.items()}
