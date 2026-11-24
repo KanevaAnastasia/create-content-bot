@@ -209,3 +209,22 @@ def test_discipline_style_approval_resumes_scene_review(monkeypatch):
     assert session['overlay_title_style'][titles.STYLE_KEY] == '9'
     assert 'editorial_font_revision' not in session['overlay_title_style']
     assert scene.OVERLAY_TITLE_PENDING_NEXT_SESSION_KEY not in session
+
+
+def test_queue_restores_series_composition_before_snapshot(monkeypatch):
+    from app import final_build_queue as queue
+    import copy
+    session = {'selected_project_key': 'discipline',
+               'overlay_title_by_lang': {'ru': 'Стивен Кинг', 'en': 'Stephen King'},
+               'series_title_by_lang': {'ru': 'Истории несовершенных ошибок', 'en': 'Stories of Imperfect Mistakes'},
+               'series_counter_by_lang': {'ru': 'История 1', 'en': 'Story 1'},
+               'overlay_title_style': {'editorial_style_id': '9'}}
+    saved = []
+    monkeypatch.setattr(queue, 'ensure_generation_run_for_session', lambda s: ('05e7e668-f88e-4db9-ae16-b3113c7819a9', {}))
+    monkeypatch.setattr(queue, '_persist_queue_session_snapshot', lambda chat, s, run: saved.append(copy.deepcopy(s)))
+    monkeypatch.setattr(queue, '_upsert_final_build_status', lambda **kw: 'pending')
+    queue.queue_final_builds_for_session(1, session, [{'scene': 1}], languages=['ru','en'],
+                                        variants=['titled_subtitled_music'], kick_worker=False)
+    for source in [saved[0], saved[0]['production']]:
+        assert source['overlay_title_style'][titles.HIERARCHY_KEY]['ru'] == ['Стивен Кинг','Истории несовершенных ошибок','История 1']
+        assert source['overlay_title_style'][titles.HIERARCHY_KEY]['en'] == ['Stephen King','Stories of Imperfect Mistakes','Story 1']

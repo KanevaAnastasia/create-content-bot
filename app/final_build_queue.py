@@ -234,6 +234,11 @@ def queue_final_builds_for_session(
     if not isinstance(production, dict):
         production = session["production"] = {}
     production["json_plan"] = scenes
+    from .editorial_titles import ensure_discipline_series_hierarchy
+    if session.get("selected_project_key") == "discipline":
+        style = ensure_discipline_series_hierarchy(session, session.get("overlay_title_style"))
+        session["overlay_title_style"] = style
+        production["overlay_title_style"] = dict(style)
     run_id_str, _scene_map = ensure_generation_run_for_session(session)
     if not run_id_str:
         raise RuntimeError("No generation run is available for final build queue.")

@@ -3162,3 +3162,24 @@ def test_title_worker_reuses_saved_subtitles_and_local_build_sends_nothing(monke
     assert builds[0]["source_subtitled_video_path"] == source
     assert statuses[-1]["status"] == "success"
     assert updates[-1]["status"] == "final_videos_built"
+
+
+def test_final_render_recovers_discipline_hierarchy_from_legacy_style():
+    import copy
+    admin_dir = Path(__file__).resolve().parents[1] / "admin_panel"
+    sys.path.insert(0, str(admin_dir))
+    os.environ.setdefault("DJANGO_SETTINGS_MODULE", "cf_admin.settings")
+    import django
+    django.setup()
+    import pipeline_admin.admin as admin_module
+    session = {"selected_project_key": "discipline", "overlay_title_by_lang": {"ru": "Стивен Кинг", "en": "Stephen King"},
+               "series_title_by_lang": {"ru": "Истории несовершенных ошибок", "en": "Stories of Imperfect Mistakes"},
+               "series_counter_by_lang": {"ru": "История 1", "en": "Story 1"},
+               "overlay_title_style": {"editorial_style_id": "9", "semantic_parts_by_lang": {"ru": ["Стивен", "Кинг"]}}}
+    original = copy.deepcopy(session)
+    style = admin_module._overlay_title_style_for_admin_render(session, {})
+    assert style["editorial_hierarchy_by_lang"] == {
+        "ru": ["Стивен Кинг", "Истории несовершенных ошибок", "История 1"],
+        "en": ["Stephen King", "Stories of Imperfect Mistakes", "Story 1"]}
+    assert style["editorial_style_id"] == "9"
+    assert session == original

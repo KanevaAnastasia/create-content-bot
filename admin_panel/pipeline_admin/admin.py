@@ -1441,6 +1441,12 @@ def _overlay_title_style_for_admin_render(
         top = None
     if top is None or abs(top - 0.15) < 0.000001:
         style["top_margin_ratio"] = 0.05
+    # Old drafts can retain the font preset but lose the series composition.
+    # Reconstruct from the approved title/series/counter at the render boundary.
+    from app.editorial_titles import ensure_discipline_series_hierarchy
+    title_context = {**session, **production}
+    if title_context.get("selected_project_key") == "discipline":
+        style = ensure_discipline_series_hierarchy(title_context, style)
     return style
 
 
