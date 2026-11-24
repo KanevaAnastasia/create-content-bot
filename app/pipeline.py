@@ -37,7 +37,6 @@ from .formatting import (
     build_human_readable_plan,
     format_concepts,
     format_frame_prompts_for_approval,
-    format_romantic_drama_status,
 )
 from .llm_utils import TEXT_MODEL_PROFILE_SHORT
 from .llm_utils import (
@@ -2525,11 +2524,7 @@ async def generate_scenes_plan(
                 )
                 _enforce_romantic_subplot_characters(fixed, romantic_subplot)
                 return {
-                    "text_plan": (
-                        format_romantic_drama_status(romantic_subplot, fixed)
-                        + "\n\n"
-                        + build_human_readable_plan(fixed)
-                    ),
+                    "text_plan": build_human_readable_plan(fixed),
                     "json_plan": fixed,
                     "viral_concept_brief": viral_concept_brief or cached.get("viral_concept_brief") or {},
                     "romantic_drama_subplot": romantic_subplot,
@@ -2666,9 +2661,7 @@ async def generate_scenes_plan(
                 str(scene.get("scene_purpose") or scene.get("action") or "") for scene in raw_scenes
             )
     out_raw = {
-        "text_plan": format_romantic_drama_status(romantic_subplot, raw_scenes)
-        + "\n\n"
-        + build_human_readable_plan(raw_scenes),
+        "text_plan": build_human_readable_plan(raw_scenes),
         "json_plan": raw_scenes,
         "viral_concept_brief": viral_concept_brief or {},
         "romantic_drama_subplot": romantic_subplot,

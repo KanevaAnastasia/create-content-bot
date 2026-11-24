@@ -32,8 +32,6 @@ from .handlers_state_deps import (
     asyncio,
     ok_only_markup,
     format_full_recipe_for_approval,
-    format_viral_application_summary,
-    format_viral_concept_brief,
     gemini_generate_sync,
     generate_recipe_from_source_text,
     generate_recipe_concepts,
@@ -2133,14 +2131,6 @@ async def _continue_after_recipe_approval_plan(
     report = _format_scenes_regeneration_report(scenes.get("regeneration_events") or [])
     if report:
         await _reply_text_chunked(update, report)
-    await _reply_text_chunked(
-        update,
-        format_viral_application_summary(
-            session["viral_concept_brief"],
-            session["scenes_plan"],
-            session.get("retention_review"),
-        ),
-    )
     await _reply_text_chunked(update, scenes["text_plan"])
     await _reply_text_with_optional_markup(
         update,

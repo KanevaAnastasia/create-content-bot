@@ -44,8 +44,6 @@ from .handlers_state_deps import (
     format_frame_prompts_for_approval,
     format_full_recipe_for_approval,
     format_production_bundle_for_approval,
-    format_viral_application_summary,
-    format_viral_concept_brief,
     generate_frame_prompts_for_approval,
     generate_full_production,
     generate_scenes_plan,
@@ -6137,23 +6135,6 @@ async def _handle_scene_approval_refine(update: Update, context: ContextTypes.DE
     report = _format_scenes_regeneration_report(scenes.get("regeneration_events") or [])
     if report: await _reply_text_chunked(update, report)
     await update.message.reply_text("Обновила план по правкам:")
-    rft = session.get("recipe_full_text")
-    if isinstance(rft, str) and rft.strip():
-        approval_text = (
-            format_advice_for_approval(rft)
-            if normalize_generation_mode(session.get(GENERATION_MODE_SESSION_KEY)) == GENERATION_MODE_ADVICE
-            else format_full_recipe_for_approval(rft)
-        )
-        await _reply_text_chunked(update, approval_text)
-    if session.get("viral_concept_brief"):
-        await _reply_text_chunked(
-            update,
-            format_viral_application_summary(
-                session["viral_concept_brief"],
-                session["scenes_plan"],
-                session.get("retention_review"),
-            ),
-        )
     await _reply_text_chunked(update, scenes["text_plan"])
     await _reply_text_with_optional_markup(
         update,

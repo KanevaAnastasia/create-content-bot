@@ -28,9 +28,36 @@ def test_cost_label_known_and_unknown():
     assert cost_label("unknown") == "~n/a"
 
 
+def test_approval_plan_contains_only_speech_and_action_without_mutating_scene():
+    import copy
+    scenes = [{"scene": 3, "text": "Запечённую картошку разрезала вдоль.",
+               "action": "Бабушка вынимает сердцевину ложкой.",
+               "model": "veo3_fast", "duration_sec": 8,
+               "first_phrase_score": 10, "continuity_anchors": ["кухня"],
+               "camera_design": {"technique": "Крупный план"}}]
+    before = copy.deepcopy(scenes)
+    assert build_human_readable_plan(scenes) == (
+        "Сцена 3\n\nБабушка: Запечённую картошку разрезала вдоль."
+        "\n\nВ кадре: Бабушка вынимает сердцевину ложкой.")
+    assert scenes == before
+
+
+def test_compact_plan_keeps_dialogue_speakers_and_does_not_invent_silent_speech():
+    scenes = [
+        {"dialogue_mode": "multi", "dialogue": [
+            {"speaker": "grandfather", "text": "Уже готово?"},
+            {"speaker": "grandma", "text": "Садись за стол."}],
+         "text": "Не дублировать", "action": "Бабушка ставит блюдо."},
+        {"generation_mode": "silence", "text": "Технический шаг", "action": "Пар над чашкой."},
+    ]
+    assert build_human_readable_plan(scenes) == (
+        "Сцена 1\n\nДедушка: Уже готово?\n\nБабушка: Садись за стол."
+        "\n\nВ кадре: Бабушка ставит блюдо.\n\nСцена 2\n\nВ кадре: Пар над чашкой.")
+
+
 def test_build_human_readable_plan_includes_defaults():
     scenes = [{"scene": 1, "text": "привет", "characters": ["grandma", "cat", "zaya"], "action": "Zaya смотрит на Timosha", "romantic_drama_beat": "Zaya машет Timosha за окном"}]
-    out = build_human_readable_plan(scenes)
+    out = build_human_readable_plan(scenes, detailed=True)
     assert "СЦЕНА 1 [neutral]" in out
     assert "Нужна ли озвучка: да" in out
     assert "Вид/ракурс: medium" in out
@@ -52,7 +79,7 @@ def test_build_human_readable_plan_supports_raw_scene_aliases():
             "duration_sec": 6,
         }
     ]
-    out = build_human_readable_plan(scenes)
+    out = build_human_readable_plan(scenes, detailed=True)
     assert "СЦЕНА 3 [neutral]" in out
     assert "Нейросеть: veo3_fast" in out
     assert "Lip sync: да" in out
@@ -60,7 +87,7 @@ def test_build_human_readable_plan_supports_raw_scene_aliases():
 
 def test_build_human_readable_plan_shows_scene_audience_type():
     scenes = [{"scene": 2, "dish_audience_type": "child", "text": "корн-доги готовы"}]
-    out = build_human_readable_plan(scenes)
+    out = build_human_readable_plan(scenes, detailed=True)
     assert "СЦЕНА 2 [child]" in out
 
 
@@ -77,7 +104,7 @@ def test_build_human_readable_plan_shows_dialogue_for_multi_speaker_scene():
             "text": "Ммм [пауза] Одна сковорода",
         }
     ]
-    out = build_human_readable_plan(scenes)
+    out = build_human_readable_plan(scenes, detailed=True)
     assert "Диалог сцены (будет в озвучке):" in out
     assert "дедушка: Ммм, вот это я понимаю, настоящий ужин!" in out
     assert "бабушка: Одна сковорода и вкуснейшее жаркое на всю неделю готово." in out
@@ -102,7 +129,7 @@ def test_build_human_readable_plan_skips_invalid_dialogue_items_and_supports_hey
         },
     ]
 
-    out = build_human_readable_plan(scenes)
+    out = build_human_readable_plan(scenes, detailed=True)
 
     assert "сложный lip sync крупным планом" in out
     assert "привет  5" in out

@@ -123,7 +123,28 @@ def human_model_reason(scene: dict[str, Any]) -> str:
     return "без речи, экономичный вариант"
 
 
-def build_human_readable_plan(scenes: list[dict[str, Any]]) -> str:
+def build_human_readable_plan(scenes: list[dict[str, Any]], *, detailed: bool = False) -> str:
+    """Readable approval card; technical details remain available explicitly."""
+    if detailed:
+        return _build_detailed_scene_plan(scenes)
+    blocks: list[str] = []
+    for index, scene in enumerate(scenes, 1):
+        number = scene.get("scene") or scene.get("scene_id") or index
+        action = _display_text(scene.get("display_action") or scene.get("action") or scene.get("visual_description")).strip()
+        dialogue = _scene_dialogue_lines(scene)
+        if dialogue:
+            speech = "\n\n".join(line[0].upper() + line[1:] for line in dialogue)
+        else:
+            text = _safe_text(scene.get("text")).strip()
+            silent = str(scene.get("generation_mode") or "").lower() == "silence"
+            speech = f"Бабушка: {text}" if text and not silent else ""
+        blocks.append("\n\n".join(part for part in (
+            f"Сцена {number}", speech, f"В кадре: {action}" if action else "В кадре: не описано.",
+        ) if part))
+    return "\n\n".join(blocks)
+
+
+def _build_detailed_scene_plan(scenes: list[dict[str, Any]]) -> str:
     """
     Собирает многострочный текст «план сцен» для апрува пользователем.
 

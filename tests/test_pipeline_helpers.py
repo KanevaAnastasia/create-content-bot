@@ -477,7 +477,7 @@ def test_scenes_payload_does_not_auto_enable_romantic_drama():
     assert payload["romantic_drama_subplot"]["characters"] == []
 
 
-def test_generate_scenes_plan_text_reports_romantic_drama(monkeypatch):
+def test_generate_scenes_plan_keeps_drama_in_data_not_approval_text(monkeypatch):
     scenes_payload = [
         {
             "scene": i + 1,
@@ -523,15 +523,17 @@ def test_generate_scenes_plan_text_reports_romantic_drama(monkeypatch):
 
     assert out["romantic_drama_subplot"]["enabled"] is True
     assert out["romantic_drama_subplot"]["brief"] == "черно-белый кот ревнует к ложке, которую белая кошка похвалила у рыжего кота."
-    assert "Драма с персонажем: белая кошка - да" in out["text_plan"]
-    assert "Дополнительный соседский кот: черно-белый кот - да" in out["text_plan"]
-    assert "черно-белый кот ревнует к ложке" in out["text_plan"]
-    assert "рыжий кот + белая кошка" in out["text_plan"]
+    assert "Драма с персонажем: белая кошка - да" not in out["text_plan"]
+    assert "Дополнительный соседский кот: черно-белый кот - да" not in out["text_plan"]
+    assert "черно-белый кот ревнует к ложке" not in out["text_plan"]
+    assert "рыжий кот + белая кошка" not in out["text_plan"]
     assert out["romantic_drama_subplot"]["happy_end"] == "белая кошка и рыжий кот радуются у окна, а черно-белый кот спокойно улыбается снаружи."
-    assert "Хэппи-энд: белая кошка и рыжий кот радуются у окна" in out["text_plan"]
+    assert "Хэппи-энд: белая кошка и рыжий кот радуются у окна" not in out["text_plan"]
     assert "Зая" not in out["text_plan"]
     assert "Маркиз" not in out["text_plan"]
-    assert "Сквозное правило" in out["text_plan"]
+    assert "Сквозное правило" not in out["text_plan"]
+    assert out["text_plan"].startswith("Сцена 1\n\n")
+    assert "В кадре:" in out["text_plan"]
 
 
 def test_generate_scenes_plan_infers_and_keeps_zaya_drama_from_refine(monkeypatch):
@@ -697,8 +699,8 @@ def test_silence_scene_feedback_pins_hook_beats_asmr_and_loop(monkeypatch):
     assert all("Pixar-like non-realistic cartoon style" in scene["silence_base_rules"] for scene in plan)
     assert all("no dialogue" in scene["silence_base_rules"] for scene in plan)
     assert all("Шорох нори" in scene["sound_design"] for scene in plan)
-    assert "Базовые правила silence:" in out["text_plan"]
-    assert "Pixar-like non-realistic cartoon style" in out["text_plan"]
+    assert "Базовые правила silence:" not in out["text_plan"]
+    assert "Pixar-like non-realistic cartoon style" not in out["text_plan"]
     assert "Retention:" not in out["text_plan"]
     assert "Проверка первой фразы" not in out["text_plan"]
     assert "previous_scenes" in captured[0]
