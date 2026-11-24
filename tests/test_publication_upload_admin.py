@@ -392,6 +392,50 @@ def test_publication_bundle_history_groups_runs_and_links_to_control(monkeypatch
     assert bundle["monitor_url"].endswith(f"/control/{root}/")
 
 
+def test_publication_bundle_history_shows_time_for_scheduled_run(monkeypatch) -> None:
+    root = "11111111-2222-3333-4444-555555555555"
+    scheduled_at = datetime(2026, 11, 24, 13, 3, tzinfo=timezone.utc)
+    created = datetime(2026, 11, 24, 10, 0, tzinfo=timezone.utc)
+    project = SimpleNamespace(title="Grandma Kitchen", __str__=lambda self: self.title)
+    jobs = [
+        SimpleNamespace(
+            project=project,
+            bundle_key=root,
+            platform=platform,
+            language=language,
+            status="scheduled",
+            scheduled_at=scheduled_at,
+            payload_json={},
+            title="Мандариновый десерт",
+            description="",
+            created_at=created,
+            updated_at=created,
+        )
+        for platform, language in (("youtube", "ru"), ("instagram", "en"))
+    ]
+
+    class FakeQuerySet:
+        def select_related(self, *_args):
+            return self
+
+        def order_by(self, *_args):
+            return self
+
+        def __iter__(self):
+            return iter(jobs)
+
+    monkeypatch.setattr(admin_module.PublicationJob, "objects", FakeQuerySet())
+
+    history = admin_module._publication_bundle_history_context(
+        RequestFactory().get("/admin/pipeline_admin/publicationjob/")
+    )
+
+    bundle = history["bundles"][0]
+    assert bundle["status_label"] == "Запланировано"
+    assert bundle["scheduled_at"] == scheduled_at
+    assert bundle["all_scheduled_at_same_time"] is True
+
+
 def test_publication_monitor_shows_verified_vk_processing_without_stale_retry(monkeypatch) -> None:
     root = "11111111-2222-3333-4444-555555555555"
     vk_job = SimpleNamespace(

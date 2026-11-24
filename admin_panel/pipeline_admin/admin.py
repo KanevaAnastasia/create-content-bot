@@ -5501,14 +5501,29 @@ def _publication_bundle_history_context(request) -> dict[str, Any]:
         statuses = [str(job.status or "draft") for job in bundle_jobs]
         published = statuses.count("published")
         failed = sum(status in _PUBLICATION_ERROR_STATUSES for status in statuses)
-        active = any(status in {"approved", "scheduled", "publishing"} for status in statuses)
+        vk_processing = any(
+            job.status == "scheduled"
+            and bool((job.payload_json or {}).get("vk_video_processing"))
+            and not bool((job.payload_json or {}).get("vk_wall_post_verified"))
+            for job in bundle_jobs
+        )
+        publishing = vk_processing or any(status in {"approved", "publishing"} for status in statuses)
+        scheduled_times = [
+            job.scheduled_at
+            for job in bundle_jobs
+            if job.status == "scheduled"
+            and getattr(job, "scheduled_at", None) is not None
+            and not bool((job.payload_json or {}).get("vk_video_processing"))
+        ]
         finished = sum(status in _PUBLICATION_FINISHED_STATUSES for status in statuses)
         if published == len(bundle_jobs):
             status_label, status_class = "Всё опубликовано", "success"
         elif failed:
             status_label, status_class = f"Нужна проверка · {failed}", "error"
-        elif active:
+        elif publishing:
             status_label, status_class = "Публикуется", "active"
+        elif scheduled_times:
+            status_label, status_class = "Запланировано", "waiting"
         elif finished == len(bundle_jobs):
             status_label, status_class = "Завершено", "waiting"
         else:
@@ -5553,6 +5568,8 @@ def _publication_bundle_history_context(request) -> dict[str, Any]:
                 "published": published,
                 "failed": failed,
                 "finished": finished,
+                "scheduled_at": min(scheduled_times) if scheduled_times else None,
+                "all_scheduled_at_same_time": bool(scheduled_times) and len(set(scheduled_times)) == 1,
                 "status_label": status_label,
                 "status_class": status_class,
                 "targets": target_labels,

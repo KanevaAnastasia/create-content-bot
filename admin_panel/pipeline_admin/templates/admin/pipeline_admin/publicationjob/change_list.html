@@ -15,6 +15,7 @@
     .cf-history{margin:0 0 22px}.cf-history-head{display:flex;align-items:end;justify-content:space-between;gap:16px;margin-bottom:12px}.cf-history-head h1{margin:0}.cf-history-head p{margin:5px 0 0;color:var(--body-quiet-color)}
     .cf-history-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(320px,1fr));gap:12px}.cf-bundle{display:block;padding:16px;border:1px solid var(--border-color);border-radius:14px;background:var(--body-bg);color:var(--body-fg);text-decoration:none;transition:transform .12s ease,box-shadow .12s ease}.cf-bundle:hover{transform:translateY(-1px);box-shadow:0 8px 24px rgba(15,23,42,.09)}
     .cf-bundle-top{display:flex;align-items:start;justify-content:space-between;gap:12px}.cf-bundle h3{margin:0 0 5px;font-size:16px}.cf-bundle-meta,.cf-bundle-targets{color:var(--body-quiet-color);font-size:12px}.cf-bundle-targets{margin-top:12px;line-height:1.5}.cf-technical{margin:22px 0 10px}.cf-technical h2{margin-bottom:4px}.cf-technical p{margin:0;color:var(--body-quiet-color)}
+    .cf-bundle-schedule{margin-top:7px;color:#1d4ed8;font-size:13px;font-weight:750}
     @media(max-width:800px){.cf-monitor-head{display:block}.cf-monitor-table th:nth-child(3),.cf-monitor-table td:nth-child(3){display:none}}
   </style>
 {% endblock %}
@@ -51,6 +52,12 @@
               <div>
                 <h3>{{ bundle.title }}</h3>
                 <div class="cf-bundle-meta">{{ bundle.project }} · {{ bundle.created_at|date:"d.m.Y H:i" }}</div>
+                {% if bundle.scheduled_at %}
+                  <div class="cf-bundle-schedule">
+                    {% if bundle.all_scheduled_at_same_time %}Запланировано:{% else %}Ближайшая публикация:{% endif %}
+                    {{ bundle.scheduled_at|date:"d.m.Y в H:i" }} по Москве
+                  </div>
+                {% endif %}
               </div>
               <span class="cf-status {{ bundle.status_class }}">{{ bundle.status_label }}</span>
             </div>
