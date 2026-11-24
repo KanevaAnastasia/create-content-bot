@@ -296,7 +296,7 @@ def test_learning_series_voice_and_bilingual_titles(db):
     from app.session_store import _CHAT_SESSION_CACHE_KEYS
     idea_id = add(db)
     with db() as s:
-        series = ContentSeries(slug='learning', title_ru='Учиться учиться',
+        series = ContentSeries(slug='learning', title_ru='Учимся учиться',
                                title_en='Learning to Learn', narrator_voice_id='anastasia-test')
         s.add(series)
         row = s.get(DisciplineIdea, idea_id)
@@ -310,6 +310,6 @@ def test_learning_series_voice_and_bilingual_titles(db):
     assert 'discipline_content_series_id' in _CHAT_SESSION_CACHE_KEYS
     assert session['series_counter_by_lang'] == {'ru': 'Метод 1', 'en': 'Method 1'}
     assert discipline_series_hierarchy(session, {'ru': 'Активное вспоминание'})['ru'] == [
-        'Учиться учиться', 'Активное вспоминание', 'Метод 1']
+        'Учимся учиться', 'Активное вспоминание', 'Метод 1']
     session.pop('series_voice_id')
     assert resolve_story_voice_id(session) == MALE_VOICE_ID

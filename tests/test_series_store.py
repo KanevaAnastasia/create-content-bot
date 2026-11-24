@@ -166,7 +166,7 @@ def test_advance_series_after_successful_render_closes_last_day(monkeypatch):
 def test_series_voice_follows_selection_and_is_cleared():
     from app.project_profiles import resolve_story_voice_id
     from app.discipline_modes import LEARNING, MODE_KEY, MALE_VOICE_ID
-    row = SimpleNamespace(id='learning', title_ru='Учиться учиться', title_en='Learning to Learn',
+    row = SimpleNamespace(id='learning', title_ru='Учимся учиться', title_en='Learning to Learn',
                           current_video_index=1, total_videos=10, meta_json={}, narrator_voice_id='anastasia')
     payload = series_store.payload_for_series(row)
     session = {'selected_project_key': 'discipline', MODE_KEY: LEARNING}

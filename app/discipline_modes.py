@@ -112,7 +112,7 @@ SHORT_FORMATS.update({
     ),
 })
 SHORT_FORMATS[LEARNING] = ShortFormat(
-    'Учиться учиться', 'storybook_gouache',
+    'Учимся учиться', 'storybook_gouache',
     'Один метод обучения в рисованном опыте Васи и Кнопки, с источником и проверкой.',
     LEARNING_RULES,
     '2D книжная гуашь, учебная мастерская Васи и Кнопки. Один опыт, один главный предмет. '
