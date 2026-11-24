@@ -71,6 +71,8 @@ SCENE_META_SNAPSHOT_KEYS = (
     "advertising_product_lock_ru",
     "advertising_product_lock_en",
     "narration_excerpt",
+    "performance_direction",
+    "cut_to_next",
     "start_sec",
     "end_sec",
     "timeline_duration_sec",

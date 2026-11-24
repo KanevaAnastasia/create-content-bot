@@ -1760,7 +1760,8 @@ def generate_story_scene_plan(
         + json.dumps(payload, ensure_ascii=False, indent=2)
     )
     from .directorial_notes import RULE
-    prompt = RULE + prompt
+    from .discipline_craft import SHOT_DIRECTION_RULES
+    prompt = RULE + SHOT_DIRECTION_RULES + prompt
     raw = gemini_generate_sync(prompt, model_profile=GEMINI_MODEL_PROFILE_CREATIVE)
     data = extract_json_object(raw)
     generated_character_bible = _normalize_story_character_bible(data.get("characters"))
@@ -1912,6 +1913,8 @@ def generate_story_scene_plan(
                 "display_action": visual,
                 "shot_type": normalized[0]["shot_type"] if continuous and normalized else str(candidate.get("shot_type") or "medium").strip(),
                 "camera_direction": camera_direction,
+                "performance_direction": str(candidate.get("performance_direction") or "").strip()[:800],
+                "cut_to_next": str(candidate.get("cut_to_next") or "").strip()[:800],
                 "location": location,
                 "lighting": lighting,
                 "color_palette": color_palette,
@@ -2160,6 +2163,9 @@ def format_story_scene_plan(scenes: list[dict[str, Any]]) -> str:
                 f"  Локация: {scene.get('location') or '—'}; свет: {scene.get('lighting') or '—'}; "
                 f"палитра: {scene.get('color_palette') or '—'}\n"
                 f"  Видеоряд: {scene.get('action') or '—'}\n"
+                + (f"  Действие и внимание: {scene['performance_direction']}\n" if scene.get("performance_direction") else "")
+                + (f"  Стык: {scene['cut_to_next']}\n" if scene.get("cut_to_next") else "")
+                +
                 f"  План: {scene.get('shot_type') or '—'}; камера: {scene.get('camera_direction') or '—'}; "
                 f"стиль/эпоха: {scene.get('era_style') or '—'}\n"
                 f"  Бабушка: {age}; кот: {'да' if scene.get('cat_present') else 'нет'}"
@@ -2333,6 +2339,11 @@ def generate_story_production(
             start_prompt = f"{start_prompt} {short_format.frame}"
             from .discipline_craft import MOTION_RULES
             video_prompt = f"{video_prompt} {short_format.motion} {MOTION_RULES}"
+        from .discipline_craft import shot_direction_text
+        shot_direction = shot_direction_text(scene)
+        if shot_direction:
+            video_prompt += " " + shot_direction + " Execute only this clip's action; the boundary describes an edit, not a location morph inside this clip."
+            start_prompt += " Starting pose must prepare the following action, not show its completed result: " + str(scene.get("performance_direction") or "")[:800]
         video_prompt = _ensure_story_camera_direction(
             video_prompt,
             scene.get("camera_direction"),
