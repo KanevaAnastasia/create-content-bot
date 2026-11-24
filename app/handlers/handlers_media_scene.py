@@ -1017,6 +1017,9 @@ def _append_scene_identity_to_image_prompt(
     for key in scene.get("story_prop_ids") or []:
         description = (scene.get("story_prop_descriptions") or {}).get(key, "")
         character_lines.append(f"Основной предмет {key}: {description}. Сохранять форму, материал и цвет по утверждённому референсу.")
+    if scene.get("generation_mode") == "story":
+        from ..story_visual_text import STORY_VISUAL_TEXT_RULES
+        character_lines.append(STORY_VISUAL_TEXT_RULES)
     if scene.get("story_prop_ids") and scene.get("story_prop_reference_catalog"):
         character_lines.append("Утверждённое оформление предметов, включая рисунок и надписи на самих предметах, сохранять по приложенным референсам. Это исключение из общего запрета текста: не добавлять субтитры, интерфейс и посторонние надписи поверх кадра.")
     for key in normalized_keys:

@@ -2105,15 +2105,17 @@ def _story_character_reference_prompt(
     feedback: str = "",
     has_project_style_reference: bool = False,
 ) -> str:
+    from ..story_visual_text import STORY_VISUAL_TEXT_RULES
     if character.get("entity_type") == "prop":
         style = story_visual_style_config(story_visual_style)
         return (
             f"Создай референс одного сюжетного предмета: {character.get('display_name')}. "
             f"Стиль {style['label']}: {style.get('prop_prompt', style['prompt'])}. "
             "На нейтральном фоне покажи предмет целиком и один дополнительный ракурс. "
-            "Без людей, лиц, рук, окружения, надписей и логотипов. Форма и масштаб предмета едины. "
+            "Без людей, лиц, рук, окружения и добавленных логотипов. Форма и масштаб предмета едины. "
             f"Описание: {character.get('description')}. {character.get('reference_prompt')}. "
-            f"Правка пользователя: {feedback}"
+            f"Правка пользователя: {feedback}\n"
+            + STORY_VISUAL_TEXT_RULES
         )
     age_stage = str(character.get("age_stage") or "adult")
     same_group = str(character.get("same_person_group") or character.get("id") or "")
@@ -2145,6 +2147,7 @@ def _story_character_reference_prompt(
         f"Описание героя: {character.get('description')}.\n"
         f"Уточнение для референса: {character.get('reference_prompt')}.\n"
         + (f"Правка пользователя: {feedback.strip()}.\n" if feedback.strip() else "")
+        + STORY_VISUAL_TEXT_RULES
     )
 
 

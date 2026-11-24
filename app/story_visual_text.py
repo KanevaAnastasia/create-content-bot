@@ -1,0 +1,16 @@
+"""Separate the language of production instructions from text inside story images."""
+STORY_VISUAL_TEXT_RULES = (
+    "Visual text policy: the language of this prompt, display_name, narration and subtitles "
+    "does not determine the language printed inside the image. Internal names and descriptions "
+    "are metadata, never captions or labels to draw. Do not add reference-sheet labels, names, "
+    "translations, UI, subtitles or watermarks. Necessary writing on a physical story prop "
+    "must match its original language, setting and period; never translate it to match the "
+    "Russian or English release. Preserve explicitly approved wording and lettering from "
+    "the supplied prop reference. This physical lettering is an exception to a general "
+    "no-text instruction, not permission to add overlays. If the exact wording is unknown, "
+    "use indistinct text texture in the appropriate script instead of inventing readable "
+    "sentences. For Stephen King's American story, Carrie stays Carrie, manuscript text "
+    "and typewriter keys use English/Latin lettering, not Cyrillic. For other stories, "
+    "follow their own setting; do not impose English globally. A direct user request for "
+    "a different inscription takes precedence."
+)

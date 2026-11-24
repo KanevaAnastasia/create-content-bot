@@ -19,6 +19,7 @@ from .discipline_modes import (
     ARCHIVE, TWO_LIVES, FLOW, LABELS, MODE_KEY, REFRAME, SHORT_FORMATS, opening_sentence, script_direction, visual_direction,
 )
 from .llm_utils import GEMINI_MODEL_PROFILE_CREATIVE, extract_json_object, gemini_generate_sync
+from .story_visual_text import STORY_VISUAL_TEXT_RULES
 
 
 STATE_WAITING_STORY_SCRIPT_APPROVAL = "waiting_story_script_approval"
@@ -1713,6 +1714,8 @@ def generate_story_scene_plan(
         "Не включай чашки, столы, комнаты, карандаши и бытовые мелочи: сохраняй их описанием в location и continuity_anchors. "
         "Для истории Кинга важны машинка и рукопись; не создавай отдельный референс каждому листу. "
         "Каждый prop: id с префиксом prop_, display_name, description (форма, размер, материал, цвет), reference_prompt, is_key_story_prop. Последнее true только для главного сюжетного предмета, не для фонового реквизита. "
+        "В description и reference_prompt предмета явно зафиксируй язык необходимой надписи и точное оригинальное название, если оно известно из источника. "
+        f"{STORY_VISUAL_TEXT_RULES}\n"
         "В каждом clip_visual добавь props: точные id только видимых в этом кадре предметов из props. "
         f"Каждый beat: beat, visual_concept, clip_visuals. Число clip_visuals равно числу {clips_key} "
         "этого semantic_beat. Каждый clip_visual: visual, shot_type, camera_direction, location, lighting, color_palette, "
@@ -2169,7 +2172,8 @@ def _fallback_start_prompt(scene: dict[str, Any]) -> str:
         f"Свет: {scene.get('lighting') or 'кинематографичный естественный свет'}. "
         f"Цветовая гамма: {scene.get('color_palette') or 'гармоничная цветная палитра проекта'}. "
         f"{era_line}План: {scene.get('shot_type')}. Подготовка движения камеры: {scene.get('camera_direction') or 'static shot'}. "
-        "Без логотипов, водяных знаков, субтитров и читаемых надписей."
+        "Без добавленных логотипов, водяных знаков и субтитров. "
+        + STORY_VISUAL_TEXT_RULES
     )
     return _ensure_story_environment_in_start_prompt(prompt, scene)
 
@@ -2266,7 +2270,8 @@ def generate_story_production(
         "Never invent an unapproved change of setting. Follow the planned camera direction. "
         + style_instruction
         +
-        "No readable text, subtitles, logos, brands or watermarks.\n"
+        "No added text overlays, subtitles, logos or watermarks.\n"
+        f"{STORY_VISUAL_TEXT_RULES}\n"
         "VIDEO: use each scene's generation_duration_sec exactly as planned for the Kling 3.0 image-to-video motion prompt in English. "
         "It must begin with the matching '<duration>-second Kling 3.0 image-to-video shot. No audio.' prefix "
         "and explicitly forbid dialogue, speech, lip sync, music, ambient sound, on-screen text, subtitles, logos and watermark. "
