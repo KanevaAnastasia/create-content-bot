@@ -3,6 +3,7 @@ from __future__ import annotations
 import os
 import sys
 import uuid
+from contextlib import nullcontext
 from datetime import datetime, timezone
 from pathlib import Path
 from types import SimpleNamespace
@@ -229,6 +230,108 @@ def test_publication_monitor_groups_trial_and_main_jobs(monkeypatch) -> None:
     assert row['vk_story_results'] == [{'url': 'https://vk.com/story-123_7', 'verified': True}]
     assert row['publish_error'] == 'API error'
     assert 'private-result' not in str(row)
+
+
+def test_publication_monitor_shows_schedule_and_publish_now_action(monkeypatch) -> None:
+    root = "11111111-2222-3333-4444-555555555555"
+    scheduled_at = datetime(2026, 11, 24, 10, 28, tzinfo=timezone.utc)
+    job = SimpleNamespace(
+        pk=uuid.uuid4(),
+        project=SimpleNamespace(slug="grandma_kitchen"),
+        bundle_key=root,
+        platform="youtube",
+        language="ru",
+        status="scheduled",
+        scheduled_at=scheduled_at,
+        payload_json={},
+        attempt_count=0,
+        external_post_id=None,
+        publish_error=None,
+        published_at=None,
+    )
+
+    class FakeQuerySet:
+        def select_related(self, *_args):
+            return self
+
+        def filter(self, **_kwargs):
+            return self
+
+        def order_by(self, *_args):
+            return self
+
+        def __iter__(self):
+            return iter([job])
+
+    monkeypatch.setattr(admin_module.PublicationJob, "objects", FakeQuerySet())
+
+    monitor = admin_module._publication_monitor_context(
+        RequestFactory().get(f"/admin/pipeline_admin/publicationjob/control/{root}/"),
+        bundle_key=root,
+    )
+
+    assert monitor is not None
+    assert monitor["next_scheduled_at"] == scheduled_at
+    assert monitor["all_scheduled_at_same_time"] is True
+    assert monitor["publish_now_url"].endswith(f"/control/{root}/publish-now/")
+    assert monitor["rows"][0]["scheduled_at"] == scheduled_at
+
+
+def test_publish_bundle_now_marks_scheduled_jobs_due_and_dispatches_them(monkeypatch) -> None:
+    from pipeline_admin import tasks
+
+    root = "11111111-2222-3333-4444-555555555555"
+    original_schedule = datetime(2026, 11, 24, 10, 28, tzinfo=timezone.utc)
+    job = SimpleNamespace(
+        pk=uuid.uuid4(),
+        status="scheduled",
+        scheduled_at=original_schedule,
+        payload_json={"scheduled_at": original_schedule.isoformat()},
+        updated_at=original_schedule,
+        save_calls=[],
+    )
+    job.save = lambda **kwargs: job.save_calls.append(kwargs)
+
+    class FakeQuerySet:
+        def select_for_update(self):
+            return self
+
+        def filter(self, **_kwargs):
+            return self
+
+        def order_by(self, *_args):
+            return self
+
+        def __iter__(self):
+            return iter([job])
+
+    dispatched = []
+    messages = []
+    monkeypatch.setattr(admin_module.PublicationJob, "objects", FakeQuerySet())
+    monkeypatch.setattr(admin_module.transaction, "atomic", lambda: nullcontext())
+    monkeypatch.setattr(tasks, "dispatch_publication_jobs", lambda job_ids: dispatched.extend(job_ids))
+
+    model_admin = admin_module.PublicationJobAdmin(admin_module.PublicationJob, admin_module.admin.site)
+    monkeypatch.setattr(model_admin, "has_change_permission", lambda *_args, **_kwargs: True)
+    monkeypatch.setattr(
+        model_admin,
+        "message_user",
+        lambda _request, message, **_kwargs: messages.append(message),
+    )
+
+    response = model_admin.publish_bundle_now_view(
+        RequestFactory().post(f"/admin/pipeline_admin/publicationjob/control/{root}/publish-now/"),
+        root,
+    )
+
+    assert isinstance(response, HttpResponseRedirect)
+    assert response.url.endswith(f"/control/{root}/")
+    assert job.status == "approved"
+    assert job.scheduled_at <= datetime.now(timezone.utc)
+    assert job.payload_json["publish_now_requested_at"]
+    assert job.save_calls
+    assert dispatched == [str(job.pk)]
+    assert messages == ["Немедленная заливка запущена. Площадок: 1."]
 
 
 def test_publication_bundle_history_groups_runs_and_links_to_control(monkeypatch) -> None:

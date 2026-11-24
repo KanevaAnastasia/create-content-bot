@@ -5587,6 +5587,8 @@ def _publication_monitor_context(request, *, bundle_key: str = "") -> dict[str, 
         )
     )
     rows = []
+    scheduled_times = []
+    can_publish_now = False
     for job in jobs:
         payload = job.payload_json if isinstance(job.payload_json, dict) else {}
         is_trial = bool(payload.get("instagram_trial"))
@@ -5604,6 +5606,10 @@ def _publication_monitor_context(request, *, bundle_key: str = "") -> dict[str, 
             and bool(payload.get("vk_video_processing"))
             and not bool(payload.get("vk_wall_post_verified"))
         )
+        scheduled_at = getattr(job, "scheduled_at", None)
+        if status == "scheduled" and scheduled_at is not None and not vk_processing:
+            scheduled_times.append(scheduled_at)
+            can_publish_now = True
         display_status = "vk_processing" if vk_processing else status
         display_error = "" if vk_processing else str(job.publish_error or "")
         rows.append(
@@ -5653,6 +5659,7 @@ def _publication_monitor_context(request, *, bundle_key: str = "") -> dict[str, 
                 ),
                 "publish_error": display_error,
                 "published_at": job.published_at,
+                "scheduled_at": scheduled_at,
                 "change_url": reverse("admin:pipeline_admin_publicationjob_change", args=[job.pk]),
                 "retry_url": (
                     reverse("admin:pipeline_admin_publicationjob_retry", args=[job.pk])
@@ -5681,6 +5688,7 @@ def _publication_monitor_context(request, *, bundle_key: str = "") -> dict[str, 
         for row in rows
     )
     pending = finished < len(rows)
+    next_scheduled_at = min(scheduled_times) if scheduled_times else None
     return {
         "bundle_key": root_bundle,
         "rows": rows,
@@ -5689,6 +5697,13 @@ def _publication_monitor_context(request, *, bundle_key: str = "") -> dict[str, 
         "failed": failed,
         "finished": finished,
         "pending": pending,
+        "next_scheduled_at": next_scheduled_at,
+        "all_scheduled_at_same_time": bool(scheduled_times) and len(set(scheduled_times)) == 1,
+        "publish_now_url": (
+            reverse("admin:pipeline_admin_publicationjob_publish_now", args=[root_bundle])
+            if can_publish_now
+            else ""
+        ),
         "auto_refresh": bool(requested) and pending,
         "percent": round(100 * finished / len(rows)),
     }
@@ -5795,6 +5810,11 @@ class PublicationJobAdmin(admin.ModelAdmin):
                 name="pipeline_admin_publicationjob_tiktok_oauth_callback",
             ),
             path(
+                "control/<str:bundle_key>/publish-now/",
+                self.admin_site.admin_view(self.publish_bundle_now_view),
+                name="pipeline_admin_publicationjob_publish_now",
+            ),
+            path(
                 "control/<str:bundle_key>/",
                 self.admin_site.admin_view(self.monitor_view),
                 name="pipeline_admin_publicationjob_monitor",
@@ -5836,6 +5856,65 @@ class PublicationJobAdmin(admin.ModelAdmin):
             "publication_list_url": reverse("admin:pipeline_admin_publicationjob_changelist"),
         }
         return TemplateResponse(request, "admin/pipeline_admin/publicationjob/monitor.html", context)
+
+    def publish_bundle_now_view(self, request, bundle_key: str):
+        root_bundle = _publication_root_bundle_key(bundle_key)
+        monitor_url = _publication_monitor_url(root_bundle)
+        if request.method != "POST":
+            return HttpResponseRedirect(monitor_url)
+        if not self.has_change_permission(request):
+            raise PermissionDenied
+
+        now = timezone.now()
+        with transaction.atomic():
+            jobs = list(
+                PublicationJob.objects.select_for_update()
+                .filter(bundle_key__in=(root_bundle, f"{root_bundle}-trial"))
+                .order_by("created_at", "platform", "language")
+            )
+            eligible = [
+                job
+                for job in jobs
+                if job.status == "scheduled"
+                and not bool((job.payload_json or {}).get("vk_video_processing"))
+            ]
+            for job in eligible:
+                job.status = "approved"
+                job.scheduled_at = now
+                job.payload_json = {
+                    **(job.payload_json or {}),
+                    "scheduled_at": now.isoformat(),
+                    "publish_now_requested_at": now.isoformat(),
+                }
+                job.updated_at = now
+                job.save(update_fields=("status", "scheduled_at", "payload_json", "updated_at"))
+
+        if not eligible:
+            self.message_user(
+                request,
+                "В этом запуске нет запланированных публикаций, которые можно залить сейчас.",
+                level=messages.WARNING,
+            )
+            return HttpResponseRedirect(monitor_url)
+
+        try:
+            from .tasks import dispatch_publication_jobs
+
+            dispatch_publication_jobs([str(job.pk) for job in eligible])
+        except Exception as exc:
+            self.message_user(
+                request,
+                "Публикации переведены на немедленный запуск. Не удалось сразу передать их воркеру: "
+                f"{exc}. Фоновая очередь подхватит их автоматически.",
+                level=messages.WARNING,
+            )
+        else:
+            self.message_user(
+                request,
+                f"Немедленная заливка запущена. Площадок: {len(eligible)}.",
+                level=messages.SUCCESS,
+            )
+        return HttpResponseRedirect(monitor_url)
 
     def instagram_recovery_view(self, request, job_id):
         job = self.get_object(request, str(job_id))
