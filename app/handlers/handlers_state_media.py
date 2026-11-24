@@ -3895,21 +3895,47 @@ def _sync_scene_text_into_video_prompt(video_prompt: str, new_text: str) -> str:
     return f"{prompt}\n{marker} {new_text}".strip() if prompt else f"{marker} {new_text}"
 
 
+def _strip_speech_language_instruction(text: str) -> str:
+    return re.split(
+        r"(?i)\ball spoken phrases and voiceover are in (?:English|Russian) language only\b",
+        str(text or ""), maxsplit=1,
+    )[0].strip()
+
+
 def _speech_from_video_prompt(video_prompt: str) -> str:
-    """Extract the spoken phrase after `CHARACTERS SPEAKS:` from an existing prompt."""
+    """Extract spoken text from either legacy or structured video prompt metadata."""
     prompt = str(video_prompt or "")
     match = re.search(r"characters\s+speaks\s*:", prompt, flags=re.IGNORECASE)
-    if not match:
+    if match:
+        tail = prompt[match.end():].strip()
+        if not tail:
+            return ""
+        tail = re.split(
+            r"(?i)\b(?:voice_lock_full(?:_[a-z_]+)?|speech_timing_plan|speaker_dialogue_order|character_dialogue_script)\s*:",
+            tail,
+            maxsplit=1,
+        )[0]
+        return normalize_speech_phrase_for_voice(_strip_speech_language_instruction(tail.splitlines()[0]))
+
+    structured = re.search(r"character_dialogue_script\s*:", prompt, flags=re.IGNORECASE)
+    if not structured:
         return ""
-    tail = prompt[match.end():].strip()
-    if not tail:
-        return ""
+    tail = prompt[structured.end():].strip()
     tail = re.split(
-        r"(?i)\b(?:voice_lock_full(?:_[a-z_]+)?|speech_timing_plan|speaker_dialogue_order|character_dialogue_script)\s*:",
+        r"(?i)\b(?:voice_lock_full(?:_[a-z_]+)?|speech_timing_plan|speaker_dialogue_order)\s*:",
         tail,
         maxsplit=1,
-    )[0]
-    return normalize_speech_phrase_for_voice(tail.splitlines()[0].strip())
+    )[0].strip()
+    speaker_marks = list(re.finditer(r"\b[A-Z][A-Z_]{2,}\s*:\s*", tail))
+    utterances: list[str] = []
+    for index, speaker in enumerate(speaker_marks):
+        end = speaker_marks[index + 1].start() if index + 1 < len(speaker_marks) else len(tail)
+        utterance = _strip_speech_language_instruction(tail[speaker.end():end])
+        if utterance:
+            utterances.append(utterance)
+    if not utterances:
+        return ""
+    return normalize_speech_phrase_for_voice(" [пауза] ".join(utterances))
 
 
 def _scene_speech_for_language_or_prompt(scene: dict, language: str) -> str:
@@ -3978,12 +4004,11 @@ def _cancel_scene_speech_timeout(chat_id: int | None) -> None:
 
 
 def _set_scene_speech_pending(session: dict, *, scene_idx: int, duration_sec: int, stage: str) -> None:
-    """Сохраняет контекст ожидания решения по длинной реплике."""
-    session[SCENE_SPEECH_PENDING_KEY] = {
-        "scene_idx": scene_idx,
-        "duration_sec": duration_sec,
-        "stage": stage,
-    }
+    previous = session.get(SCENE_SPEECH_PENDING_KEY) or {}
+    pending = {"scene_idx": scene_idx, "duration_sec": duration_sec, "stage": stage}
+    if previous.get("scene_idx") == scene_idx and previous.get("regenerate_language"):
+        pending["regenerate_language"] = previous["regenerate_language"]
+    session[SCENE_SPEECH_PENDING_KEY] = pending
 
 
 def _schedule_scene_speech_timeout(
@@ -4402,7 +4427,7 @@ def _dialogue_from_prompt_timing_plan(prompt: str) -> list[dict[str, str]]:
         # A colon inside narration is punctuation, not an arbitrary speaker label.
         if speaker not in _DIALOGUE_SPEAKER_PROMPT_LABELS:
             continue
-        text = normalize_speech_phrase_for_voice(match.group(2))
+        text = normalize_speech_phrase_for_voice(_strip_speech_language_instruction(match.group(2)))
         if speaker and text:
             out.append({"speaker": speaker, "text": text})
     return out
@@ -4443,7 +4468,7 @@ def _dialogue_from_character_dialogue_script(prompt: str) -> list[dict[str, str]
         if not match:
             break
         speaker = _normalize_dialogue_speaker(match.group(1))
-        text = normalize_speech_phrase_for_voice(match.group(2))
+        text = normalize_speech_phrase_for_voice(_strip_speech_language_instruction(match.group(2)))
         if speaker and text:
             out.append({"speaker": speaker, "text": text})
     return out
@@ -7720,6 +7745,20 @@ async def _scene_media_video_ok(
     scoped_regenerate_language = normalize_language_code(str(regenerate_language or ""))
     if scoped_regenerate_language not in languages:
         scoped_regenerate_language = ""
+    results_map = scene.get("video_results_by_lang")
+    if not isinstance(results_map, dict):
+        results_map = {}
+    if scoped_regenerate_language:
+        pending_languages = [scoped_regenerate_language]
+    else:
+        requested_languages = [lang for lang in languages if _video_regeneration_requested(scene, lang)]
+        missing_languages = [lang for lang in languages if not isinstance(results_map.get(lang), dict)]
+        pending_languages = list(dict.fromkeys([*requested_languages, *missing_languages]))
+        if not pending_languages:
+            pending_languages = [lang for lang in languages if _scene_video_prompt_for_language(scene, lang).strip()]
+        if not pending_languages:
+            pending_languages = [normalize_language_code(_scene_current_language(session, scene)) or "ru"]
+
     selected_start_image = resolve_scene_image_for_video(scene, kind="start")
     start_bytes = selected_image_bytes_for_video(scene, kind="start")
     if not start_bytes:
@@ -7744,7 +7783,7 @@ async def _scene_media_video_ok(
     if speechless_video and syntax_provider != SYNTAX_PROVIDER_VEO:
         duration_sec = max(3, min(4, duration_sec))
         scene["duration_sec"] = duration_sec
-    if not speechless_video and "ru" in languages and not any(_scene_video_prompt_raw(scene, lang) for lang in languages) and await _maybe_shorten_scene_speech_for_video_budget(
+    if not speechless_video and "ru" in pending_languages and not _scene_video_prompt_raw(scene, "ru") and await _maybe_shorten_scene_speech_for_video_budget(
         update,
         context=context,
         session=session,
@@ -7753,6 +7792,8 @@ async def _scene_media_video_ok(
         scene=scene,
         duration_sec=duration_sec,
     ):
+        if scoped_regenerate_language:
+            session[SCENE_SPEECH_PENDING_KEY]["regenerate_language"] = scoped_regenerate_language
         return True
     try:
         duration_sec = int(scene.get("duration_sec", duration_sec))
@@ -7764,7 +7805,7 @@ async def _scene_media_video_ok(
     if speechless_video and syntax_provider != SYNTAX_PROVIDER_VEO:
         duration_sec = max(3, min(4, duration_sec))
         scene["duration_sec"] = duration_sec
-    if not speechless_video and "en" in languages and not any(_scene_video_prompt_raw(scene, lang) for lang in languages):
+    if not speechless_video and "en" in pending_languages and not _scene_video_prompt_raw(scene, "en"):
         should_stop = await _maybe_adjust_english_speech_for_video_budget(
             update,
             context=context,
@@ -7774,21 +7815,9 @@ async def _scene_media_video_ok(
             duration_sec=duration_sec,
         )
         if should_stop:
+            if scoped_regenerate_language:
+                session[SCENE_SPEECH_PENDING_KEY]["regenerate_language"] = scoped_regenerate_language
             return True
-
-    results_map = scene.get("video_results_by_lang")
-    if not isinstance(results_map, dict):
-        results_map = {}
-    if scoped_regenerate_language:
-        pending_languages = [scoped_regenerate_language]
-    else:
-        requested_languages = [lang for lang in languages if _video_regeneration_requested(scene, lang)]
-        missing_languages = [lang for lang in languages if not isinstance(results_map.get(lang), dict)]
-        pending_languages = list(dict.fromkeys([*requested_languages, *missing_languages]))
-        if not pending_languages:
-            pending_languages = [lang for lang in languages if _scene_video_prompt_for_language(scene, lang).strip()]
-        if not pending_languages:
-            pending_languages = [normalize_language_code(_scene_current_language(session, scene)) or "ru"]
 
     prompts_by_language: dict[str, str] = {}
     for language in pending_languages:
@@ -9810,7 +9839,6 @@ async def _handle_waiting_scene_media_state(
             if text == SCENE_SPEECH_OPTION_SHORTEN_AI:
                 _cancel_scene_speech_timeout(chat_id)
                 duration = int(pending.get("duration_sec", 8))
-                session.pop(SCENE_SPEECH_PENDING_KEY, None)
                 if language == "en":
                     return await _maybe_adjust_english_speech_for_video_budget(
                         update, context=context, chat_id=chat_id, session=session,
@@ -9825,7 +9853,7 @@ async def _handle_waiting_scene_media_state(
                 return await _scene_media_video_ok(
                     update, context=context, chat_id=chat_id, session=session,
                     scene=scene, idx=idx, total=len(scenes),
-                    regenerate_language="en" if language == "en" and _scene_video_bytes_for_language(scene, "ru") else None)
+                    regenerate_language=pending.get("regenerate_language") or ("en" if language == "en" and _scene_video_bytes_for_language(scene, "ru") else None))
             if text == SCENE_SPEECH_OPTION_EDIT:
                 pending["stage"] = "approval_manual_phrase"
                 await _reply_text_with_optional_markup(update, f"Пришлите новую {language.upper()}-фразу.",
@@ -9878,6 +9906,7 @@ async def _handle_waiting_scene_media_state(
                     scene=scene,
                     idx=idx,
                     total=len(scenes),
+                    regenerate_language=pending.get("regenerate_language"),
                 )
             if text == SCENE_SPEECH_OPTION_EDIT:
                 _set_scene_speech_pending(
