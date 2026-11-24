@@ -1,4 +1,4 @@
-"""Persistent administrator text model selection, isolated from guest workflows."""
+"""Text model selection for administrator and guest workflows."""
 from contextvars import ContextVar
 from functools import wraps
 import json
@@ -8,6 +8,7 @@ import re
 import tempfile
 
 LEGACY_GUEST_TEXT = ContextVar("legacy_guest_text", default=False)
+GUEST_TEXT_MODEL = "gpt-6-luna"
 SETTINGS_PATH = Path(__file__).resolve().parents[1] / "runtime" / "text_model.json"
 _MODEL_ID = re.compile(r"gpt-[A-Za-z0-9][A-Za-z0-9._-]{0,95}\Z")
 
@@ -25,7 +26,7 @@ def guest_text_context(callback):
 
 def selected_text_model() -> str | None:
     if LEGACY_GUEST_TEXT.get():
-        return None
+        return GUEST_TEXT_MODEL
     try:
         value = json.loads(SETTINGS_PATH.read_text())["model"]
     except FileNotFoundError:

@@ -43,7 +43,7 @@ def test_guest_isolation_in_concurrent_tasks_threads_and_after_error(monkeypatch
             guest(None, None, SimpleNamespace(role='guest')),
             guest(None, None, SimpleNamespace(role='admin')),
         )
-        assert results[0] == (None, 'gemini', HUMAN_WRITING_RULES + '\n\nsource')
+        assert results[0] == ('gpt-6-luna', 'openai', HUMAN_WRITING_RULES + '\n\nsource')
         assert results[1] == ('gpt-6-astra', 'openai', HUMAN_WRITING_RULES + '\n\nsource')
         assert not settings.LEGACY_GUEST_TEXT.get()
 
@@ -104,3 +104,18 @@ def test_guest_context_resets_on_failure():
             await failing(None, None, SimpleNamespace(role='guest'))
         assert not settings.LEGACY_GUEST_TEXT.get()
     asyncio.run(run())
+
+
+def test_guest_text_context_routes_every_profile_to_luna(monkeypatch):
+    monkeypatch.setenv('TEXT_LLM_PROVIDER', 'gemini')
+    monkeypatch.setenv('OPENAI_MODEL', 'gpt-6.2-sol')
+    monkeypatch.setenv('OPENAI_CREATIVE_MODEL', 'gpt-6.2-astra')
+    monkeypatch.setenv('OPENAI_EDIT_MODEL', 'gpt-6.2-sol')
+    monkeypatch.setenv('OPENAI_SHORT_MODEL', 'gpt-6.1-sol')
+    token = settings.LEGACY_GUEST_TEXT.set(True)
+    try:
+        assert llm.text_llm_provider() == 'openai'
+        for profile in (None, 'creative', 'edit', 'short'):
+            assert llm.openai_text_model(profile) == 'gpt-6-luna'
+    finally:
+        settings.LEGACY_GUEST_TEXT.reset(token)

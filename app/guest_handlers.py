@@ -31,6 +31,7 @@ from .media_file_store import (
     store_project_artifact_media,
 )
 from .models import (
+    BotUser,
     Character,
     GenerationArtifact,
     GenerationDraft,
@@ -765,6 +766,26 @@ def _guest_generated_images_today(session: dict[str, Any], *, now: datetime | No
                 .join(Project, Project.id == GenerationRun.project_id)
                 .where(
                     Project.owner_user_id == uuid.UUID(str(session["bot_user_id"])),
+                    GenerationArtifact.artifact_type == GUEST_IMAGE_QUOTA_ARTIFACT_TYPE,
+                    GenerationArtifact.created_at >= day_start,
+                    GenerationArtifact.created_at < day_end,
+                )
+            ).scalar_one()
+        )
+
+
+def guest_generated_images_today(*, now: datetime | None = None) -> int:
+    """Count successful AI image generations by guest users for the Moscow day."""
+    day_start, day_end = _guest_image_quota_window(now)
+    with SessionLocal() as db:
+        return int(
+            db.execute(
+                select(func.count(GenerationArtifact.id))
+                .join(GenerationRun, GenerationRun.id == GenerationArtifact.run_id)
+                .join(Project, Project.id == GenerationRun.project_id)
+                .join(BotUser, BotUser.id == Project.owner_user_id)
+                .where(
+                    BotUser.role == "guest",
                     GenerationArtifact.artifact_type == GUEST_IMAGE_QUOTA_ARTIFACT_TYPE,
                     GenerationArtifact.created_at >= day_start,
                     GenerationArtifact.created_at < day_end,

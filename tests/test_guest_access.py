@@ -856,6 +856,25 @@ def test_guest_image_generation_is_limited_to_four_successes_per_moscow_day(gues
     assert "только из собственных изображений" in message.sent[-1][1]
 
 
+def test_guest_image_statistics_count_only_guest_ai_images(guest_db, monkeypatch, tmp_path):
+    guest_session, _project_id = _guest_session_with_project(guest_db)
+    guest_handlers._new_run(guest_session, "image", title="Изображение")
+    monkeypatch.setenv("SCENE_MEDIA_ARTIFACTS_DIR", str(tmp_path / "artifacts"))
+    guest_handlers._persist_image_candidate(
+        guest_session,
+        b"generated-image",
+        kind="result",
+        generated_by_ai=True,
+    )
+    guest_handlers._persist_image_candidate(
+        guest_session,
+        b"uploaded-image",
+        kind="start",
+    )
+
+    assert guest_handlers.guest_generated_images_today() == 1
+
+
 def test_failed_and_user_uploaded_images_do_not_consume_guest_daily_limit(guest_db, monkeypatch, tmp_path):
     session, _project_id = _guest_session_with_project(guest_db)
     session["guest_data"] = {"image_description": "Портрет в саду"}

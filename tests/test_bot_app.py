@@ -200,6 +200,7 @@ def test_stat_command_reports_guest_generation_usage_to_owner(monkeypatch):
         },
     )
     monkeypatch.setattr(bot_app, "_admin_keyboard_for_current_session", lambda *_args: current_markup)
+    monkeypatch.setattr(bot_app, "guest_generated_images_today", lambda: 3)
     monkeypatch.setattr(
         bot_app,
         "speech_alignment_monthly_usage",
@@ -215,6 +216,7 @@ def test_stat_command_reports_guest_generation_usage_to_owner(monkeypatch):
     assert sent == [
         (
             "Гостевой режим: использовано 4 из 15 генераций сегодня.\n"
+            "Изображения: сгенерировано 3 сегодня.\n"
             "Точная синхронизация субтитров: осталось 59 мин 20 сек из 60 мин в этом месяце "
             "(использовано 0 мин 40 сек по учёту бота).",
             current_markup,

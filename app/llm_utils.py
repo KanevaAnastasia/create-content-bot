@@ -39,7 +39,7 @@ from .constants import (
 from .llm_logging import get_llm_io_logger
 from .llm_queue import LLMCallTimeoutError, resolve_llm_generate_timeout_sec, submit_llm
 from .writing_style import with_writing_style
-from .text_settings import selected_text_model
+from .text_settings import GUEST_TEXT_MODEL, LEGACY_GUEST_TEXT, selected_text_model
 
 logger = logging.getLogger("bot")
 _llm_io = get_llm_io_logger()
@@ -735,6 +735,8 @@ def text_llm_provider() -> str:
 
 def openai_text_model(model_profile: str | None = None) -> str:
     """Short operations have their own model; admin selection controls complex work."""
+    if LEGACY_GUEST_TEXT.get():
+        return GUEST_TEXT_MODEL
     if model_profile == TEXT_MODEL_PROFILE_SHORT:
         return (os.getenv("OPENAI_SHORT_MODEL") or "").strip() or "gpt-6-luna"
     model = (os.getenv("OPENAI_MODEL") or "").strip() or "gpt-6.2-sol"

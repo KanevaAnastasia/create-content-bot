@@ -34,6 +34,7 @@ from .handlers import (
 )
 from .guest_access import resolve_bot_identity
 from .guest_handlers import (
+    guest_generated_images_today,
     guest_cancel,
     guest_on_photo,
     guest_on_text,
@@ -213,6 +214,12 @@ async def quiet_mode_stats_command(update, context) -> None:
         target = int(status["generation_target"])
         text = f"Гостевой режим: использовано {count} из {target} генераций сегодня."
         enabled = bool(status["quiet_mode_enabled"])
+    try:
+        image_count = guest_generated_images_today()
+        text += f"\nИзображения: сгенерировано {image_count} сегодня."
+    except Exception:
+        logger.exception("guest.image_usage_stats_failed")
+        text += "\nИзображения: статистика временно недоступна."
     try:
         speech_status = speech_alignment_monthly_usage()
         text += "\n" + format_speech_alignment_remaining(speech_status)
