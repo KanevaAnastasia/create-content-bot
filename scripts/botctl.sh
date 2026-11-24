@@ -36,7 +36,7 @@ ADMIN_MANAGE="$ROOT_DIR/admin_panel/manage.py"
 LOCK_FILE="/tmp/content_fabric_bot.lock"
 
 usage() {
-  echo "Usage: $0 {start [-f|--follow]|launchd-foreground|stop|restart [-f|--follow]|status|logs [-f|--follow]|adopt <pid>|services-up|services-restart|services-status|final-worker <run_id> [--no-delivery]|final-worker-foreground <run_id> [--no-delivery]|final-worker-status|scheduled-worker [limit]|scheduled-worker-status|celery-worker|celery-worker-foreground|celery-worker-reload|celery-worker-status|celery-beat|celery-beat-foreground|celery-beat-status}"
+  echo "Usage: $0 {start [-f|--follow]|launchd-foreground|stop [--interrupt-media]|restart [-f|--follow|--interrupt-media]|status|logs [-f|--follow]|adopt <pid>|services-up|services-restart|services-status|final-worker <run_id> [--no-delivery]|final-worker-foreground <run_id> [--no-delivery]|final-worker-status|scheduled-worker [limit]|scheduled-worker-status|celery-worker|celery-worker-foreground|celery-worker-reload|celery-worker-status|celery-beat|celery-beat-foreground|celery-beat-status}"
 }
 
 ensure_runtime() {
@@ -268,7 +268,11 @@ stop_bot() {
     exit 1
   fi
 
-  wait_for_media_generation_idle
+  if [[ "${1:-}" == "--interrupt-media" ]]; then
+    echo "Interrupting active media wait by explicit operator request; no retry will be submitted."
+  else
+    wait_for_media_generation_idle
+  fi
   terminate_bot_tree "$pid"
   for _ in {1..20}; do
     if ! pid_is_running "$pid"; then
@@ -765,10 +769,10 @@ case "${1:-}" in
     launchd_foreground_bot
     ;;
   stop)
-    stop_bot
+    stop_bot "${2:-}"
     ;;
   restart)
-    stop_bot
+    stop_bot "${2:-}"
     start_bot
     if follow_requested "${2:-}"; then
       show_logs --follow

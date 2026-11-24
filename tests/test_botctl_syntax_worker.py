@@ -35,3 +35,24 @@ def test_worker_and_service_restarts_wait_for_global_media_gate():
     ):
         block = script[script.index(start):script.index(end)]
         assert 'wait_for_media_generation_idle' in block
+
+
+def test_media_interruption_requires_explicit_operator_flag():
+    script = Path('scripts/botctl.sh').read_text()
+    stop = script[script.index('stop_bot() {'):script.index('status_bot() {')]
+    harness = '''
+PID_FILE=unused
+stopped=0
+current_pid() { echo 20; }
+pid_is_running() { [[ "$stopped" == 0 ]]; }
+is_bot_pid() { return 0; }
+wait_for_media_generation_idle() { echo WAIT; }
+terminate_bot_tree() { echo TERMINATE; stopped=1; }
+rm() { :; }
+write_status() { :; }
+'''
+    for argument, waits in [('', True), ('--follow', True), ('--interrupt-media', False)]:
+        result = subprocess.run(['bash', '-c', stop + harness + '\nstop_bot "$1"', '_', argument],
+                                capture_output=True, text=True, check=True)
+        assert ('WAIT' in result.stdout.splitlines()) is waits
+        assert 'TERMINATE' in result.stdout.splitlines()
