@@ -343,3 +343,19 @@ def test_failed_preview_delivery_cannot_be_approved(monkeypatch,tmp_path,prior_m
     assert record['delivery_pending'] is False and record['presented_message_id']==200
     generator.assert_called_once()
     continuation.assert_not_awaited()
+
+
+def test_archive_epilogue_allows_vasily_only_in_final_present_scene():
+    from app.discipline_modes import ARCHIVE, MODE_KEY
+    cast = [{'id': 'king', 'display_name': 'Стивен Кинг'},
+            {'id': 'vasily', 'same_person_group': 'vasily', 'display_name': 'Василий',
+             'story_role': 'modern_epilogue'}]
+    scenes = [{MODE_KEY: ARCHIVE, 'characters': ['king'], 'time_period': 'past'},
+              {MODE_KEY: ARCHIVE, 'characters': ['vasily'], 'time_period': 'present'}]
+    g.enforce_discipline_narrative_cast(scenes, cast)
+    assert g.archive_story_subject_titles(cast)['ru'] == 'Стивен Кинг'
+    scenes[0]['characters'] = ['vasily']
+    with pytest.raises(ValueError, match='последнем современном'):
+        g.enforce_discipline_narrative_cast(scenes, cast)
+    with pytest.raises(ValueError, match='реальные люди'):
+        g.validate_historical_cast([{'id': 'vasily', 'display_name': 'Василий'}])

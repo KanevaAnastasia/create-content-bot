@@ -1086,10 +1086,17 @@ def _apply_discipline_cast_policy(
         }
 
 
+def _is_vasily_identity(character):
+    return (str(character.get("display_name") or "").casefold() in {"василий", "вася", "vasily", "vasiliy"}
+            or str(character.get("id") or "") in {"vasily", "vasiliy", "discipline_vasily"})
+
+
 def validate_historical_cast(characters):
     """Fail closed on old project-cast sessions before spending on references."""
     for character in characters:
         if character.get("entity_type") == "prop":
+            continue
+        if character.get("story_role") == "modern_epilogue" and _is_vasily_identity(character):
             continue
         identity = str(character.get("display_name") or character.get("id") or "")
         if re.search(r"Василий|Вася|Анастасия|Кнопка|vasil[iy]|anastasia|knopka", identity, re.I):
@@ -1101,7 +1108,7 @@ def archive_story_subject_titles(characters: Any) -> dict[str, str]:
     items = [
         item
         for item in (characters if isinstance(characters, list) else [])
-        if isinstance(item, dict) and not str(item.get("id") or "").startswith("prop_")
+        if isinstance(item, dict) and item.get("story_role") != "modern_epilogue" and not str(item.get("id") or "").startswith("prop_")
     ]
     subject = next((item for item in items if item.get("is_primary")), items[0] if items else None)
     if not subject:
@@ -1131,6 +1138,9 @@ def enforce_discipline_narrative_cast(scenes, project_characters):
             ids = [str(v) for v in scene.get("characters") or []]
             if any(i not in known for i in ids):
                 raise ValueError("Историческая сцена содержит неизвестного исполнителя. Укажите character_id реального человека из библии этой истории.")
+            if any(known[i].get("story_role") == "modern_epilogue" for i in ids):
+                if scene is not scenes[-1] or scene.get("time_period") != "present":
+                    raise ValueError("Вася разрешён только в последнем современном кадре вывода, не в исторических событиях.")
             scene["characters"] = ids
             scene["story_character_descriptions"] = {i: known[i].get("description", "") for i in ids}
             scene["story_character_labels"] = {i: known[i].get("display_name", "") for i in ids}
@@ -1207,6 +1217,7 @@ def _normalize_story_character_bible(value: Any) -> list[dict[str, Any]]:
                 "display_name": " ".join(str(item.get("display_name") or character_id).split()),
                 "display_name_en": " ".join(str(item.get("display_name_en") or "").split()),
                 "role": " ".join(str(item.get("role") or "исторический персонаж").split()),
+                "story_role": str(item.get("story_role") or ""),
                 "age_stage": " ".join(str(item.get("age_stage") or "adult").split()),
                 "same_person_group": _story_character_id(item.get("same_person_group") or character_id),
                 "description": description,
@@ -1587,6 +1598,7 @@ def generate_story_scene_plan(
         clips_key: windows,
         "previous_scenes": previous_scenes or [],
         "user_feedback": str(user_feedback or "").strip(),
+        "modern_epilogue_character": next((c for c in (project_characters or []) if _is_vasily_identity(c)), None) if narrative_format == ARCHIVE else None,
         "project_characters": fixed_project_characters,
         "primary_project_character_id": primary_id or None,
         "primary_project_character_ids": primary_ids,
@@ -1640,7 +1652,7 @@ def generate_story_scene_plan(
         )
     if narrative_format:
         project_character_direction = visual_direction(narrative_format)
-        project_character_direction += (" Показывай самих реальных людей из исходной истории, а не персонажей проекта в их ролях. Создай для каждого собственный id и полное настоящее имя в display_name. В description и reference_prompt укажи полное имя, возраст на момент событий, узнаваемые черты реального лица, волосы и одежду эпохи. Стилизуй внешность, сохраняя сходство; не делай фотореализм. Не используй Василия, Анастасию или Кнопку. Каждый используемый образ сначала утверждает пользователь." if narrative_format == ARCHIVE else " Используй только точные id Василия и Кнопки из project_characters, не придумывай им новые id.")
+        project_character_direction += (" Показывай самих реальных людей из исходной истории, а не персонажей проекта в их ролях. Создай для каждого собственный id и полное настоящее имя в display_name. В description и reference_prompt укажи полное имя, возраст на момент событий, узнаваемые черты реального лица, волосы и одежду эпохи. Стилизуй внешность, сохраняя сходство; не делай фотореализм. В исторических событиях не используй Василия, Анастасию или Кнопку. Исключение: последний современный кадр вывода с Васей из modern_epilogue_character. Включи его в characters с точным id проекта, story_role=modern_epilogue, same_person_group равным id проекта; сохрани внешность, но перерисуй в выбранной стилистике. Последний clip_visual: time_period=present, location_transition=true, конкретная узнаваемая проблема зрителя и одно действие, связанное с выводом. Никакого выдуманного успеха за пять секунд. Каждый используемый образ сначала утверждает пользователь." if narrative_format == ARCHIVE else " Используй только точные id Василия и Кнопки из project_characters, не придумывай им новые id.")
     if short_format and narrative_format != ARCHIVE:
         project_character_direction += " В этих выпусках весь актёрский состав ограничен project_characters."
     if continuous:
@@ -1757,6 +1769,16 @@ def generate_story_scene_plan(
         # Historical people have their own identities. Never inherit project portraits.
         project_ids = {str(c.get("id")) for c in project_characters or []}
         for character in generated_character_bible:
+            if character.get("story_role") == "modern_epilogue":
+                source = next((c for c in (project_characters or []) if str(c.get("id")) == character["id"] and _is_vasily_identity(c)), None)
+                if not source:
+                    raise ValueError("Для современного вывода нужен исходный образ Васи из проекта.")
+                character["asset_uri"] = str(source.get("asset_uri") or "")
+                character["display_name"] = str(source.get("display_name") or "Василий")
+                character["description"] = str(source.get("description") or character["description"])
+                character["same_person_group"] = character["id"]
+                character["is_primary"] = False
+                continue
             if character["id"] in project_ids:
                 raise ValueError("Исторический герой не может использовать id персонажа проекта.")
             character["asset_uri"] = ""
