@@ -3992,122 +3992,8 @@ def _schedule_scene_speech_timeout(
     session: dict,
     chat_id: int | None,
 ) -> None:
-    """Запускает 10-минутный таймер; по таймауту пытается автосокращение снова."""
+    """Cancel legacy retries: silence is never consent to edit speech."""
     _cancel_scene_speech_timeout(chat_id)
-    if context is None or chat_id is None:
-        return
-
-    async def _job() -> None:
-        try:
-            await asyncio.sleep(SCENE_SPEECH_WAIT_TIMEOUT_SEC)
-            pending = session.get(SCENE_SPEECH_PENDING_KEY)
-            if not isinstance(pending, dict):
-                return
-            production = session.get("production") or {}
-            scenes = production.get("json_plan") if isinstance(production, dict) else None
-            idx = int(pending.get("scene_idx", -1))
-            if not isinstance(scenes, list) or idx < 0 or idx >= len(scenes):
-                return
-            scene = scenes[idx]
-            duration_sec = int(pending.get("duration_sec", 6))
-            max_chars = max_speech_chars_for_duration(duration_sec)
-            spoken_len = speech_chars_excluding_pauses(str(scene.get("text", "")).strip())
-            if spoken_len <= max_chars:
-                session.pop(SCENE_SPEECH_PENDING_KEY, None)
-                return
-            await safe_send_message(
-                context.bot,
-                chat_id=chat_id,
-                text="Прошло 10 минут без ответа. Пробую сократить реплику автоматически ещё раз…",
-            )
-            shortened = await _call_with_503_retries(
-                None,
-                context,
-                chat_id,
-                "retry_shorten_scene_speech_after_timeout",
-                lambda: asyncio.to_thread(
-                    shorten_scene_speech_and_sync_video_prompt_sync,
-                    scene,
-                    duration_sec,
-                    max_llm_attempts=1,
-                    rate_limit_max_attempts=1,
-                ),
-                retry_ai_rate_limit=False,
-            )
-            if shortened is None:
-                await safe_send_message(
-                    context.bot,
-                    chat_id=chat_id,
-                    text=(
-                        "Снова не получилось автоматически сократить реплику. "
-                        "Нажмите кнопку для повтора или пришлите короткую фразу."
-                    ),
-                    reply_markup=_scene_speech_options_markup(session=session),
-                )
-                _schedule_scene_speech_timeout(context=context, session=session, chat_id=chat_id)
-                return
-            prompt = _compose_locked_video_prompt(
-                scene,
-                "ru",
-                shortened["video_prompt"],
-            )
-            _set_scene_video_prompt_for_language(scene, "ru", prompt)
-            _apply_scene_phrase_update_to_scene(
-                session,
-                scene,
-                scene_idx=idx,
-                language="ru",
-                phrase_text=shortened["text"],
-                origin="auto_shorten",
-            )
-            updated_langs, failed_langs = await _sync_scene_phrase_translations(
-                update=None,
-                context=context,
-                chat_id=chat_id,
-                session=session,
-                scene=scene,
-                scene_idx=idx,
-                source_language="ru",
-                source_text=shortened["text"],
-            )
-            _set_scene_speech_pending(
-                session,
-                scene_idx=idx,
-                duration_sec=duration_sec,
-                stage="approval",
-            )
-            await safe_send_message(
-                context.bot,
-                chat_id=chat_id,
-                text=(
-                    "Реплика автоматически сокращена.\n"
-                    + f"Новая фраза:\n{scene['text']}\n\n"
-                    + (
-                        f"Обновила переводы для языков: {', '.join(updated_langs)}.\n"
-                        if updated_langs
-                        else ""
-                    )
-                    + (
-                        f"Не удалось обновить переводы для языков: {', '.join(failed_langs)}.\n\n"
-                        if failed_langs
-                        else ""
-                    )
-                    + "Подтвердите запуск видео кнопкой или выберите правку."
-                ),
-                reply_markup=_scene_speech_approval_markup(session=session),
-            )
-        except asyncio.CancelledError:
-            return
-        except ServiceUnavailableRetriesExhaustedError as e:
-            logger.warning("scene speech timeout LLM retries exhausted: %s", e)
-            try:
-                await safe_send_message(context.bot, chat_id=chat_id, text=str(e))
-            except Exception:
-                logger.exception("failed to notify about exhausted scene speech timeout retries")
-        except Exception:
-            logger.exception("scene speech timeout handler failed")
-
-    _SCENE_SPEECH_TIMEOUT_TASKS[chat_id] = asyncio.create_task(_job())
 
 
 def _video_policy_approval_user_message(scene: dict, candidate_prompt: str) -> str:
@@ -7557,6 +7443,24 @@ async def _scene_media_video_not_ok(
     return True
 
 
+async def _offer_scene_speech_shortening(update, *, session, scene, scene_idx, duration_sec, language, text):
+    _set_scene_media_manual_approval(session)
+    count = speech_chars_excluding_pauses(text)
+    limit = max_speech_chars_for_duration(duration_sec, language)
+    _set_scene_speech_pending(session, scene_idx=scene_idx, duration_sec=duration_sec,
+                              stage="user_long_phrase_choice")
+    session[SCENE_SPEECH_PENDING_KEY]["language"] = language
+    await _reply_text_with_optional_markup(
+        update,
+        f"Реплика {language.upper()}: {count} символов без меток пауз. "
+        f"Ориентир для {duration_sec} сек: {limit}, превышение: {count - limit}.\n\n"
+        f"{text}\n\nСократить? Можно оставить фразу как есть или изменить вручную. "
+        "Без вашего согласия текст не меняю.",
+        reply_markup=_scene_speech_user_long_phrase_markup(session=session),
+    )
+    return True
+
+
 async def _maybe_shorten_scene_speech_for_video_budget(
     update: Update,
     *,
@@ -7566,9 +7470,10 @@ async def _maybe_shorten_scene_speech_for_video_budget(
     scene_idx: int,
     scene: dict,
     duration_sec: int,
+    shortening_approved: bool = False,
 ) -> bool:
     """
-    Если реплика длиннее лимита (символы без ``[пауза]``), зовёт Gemini и обновляет ``text`` / ``video_prompt``.
+    Предлагает сократить длинную реплику. Вызывает модель только после явного согласия.
 
     Returns:
         ``True`` — остановить шаг (пользователь уведомлён об ошибке).
@@ -7584,41 +7489,11 @@ async def _maybe_shorten_scene_speech_for_video_budget(
     if spoken_len <= current_max_chars:
         _refresh_scene_language_speech_metadata(scene, "ru")
         return False
-    if duration_sec < 8:
-        scene["duration_sec"] = 8
-        duration_sec = 8
-        max_chars_for_8 = max_speech_chars_for_duration(8, "ru")
-        if spoken_len <= max_chars_for_8:
-            _refresh_scene_language_speech_metadata(scene, "ru")
-            await update.message.reply_text(
-                "Реплика длиннее лимита для текущей длительности — увеличила видео до 8 сек вместо сокращения фразы."
-            )
-            return False
-        await update.message.reply_text(
-            "Реплика не помещается в текущую длительность — сначала увеличила видео до 8 сек, затем сокращаю фразу под новый лимит."
-        )
-    max_chars = max_speech_chars_for_duration(duration_sec, "ru")
-    if _scene_speech_budget_override_enabled(scene, "ru"):
-        return False
-    auto_approve = _is_scene_media_auto_approve_enabled(session) or _is_scheduled_unattended_ai_mode(session)
-    if _scene_phrase_origin(scene, "ru") == "user":
-        _set_scene_speech_pending(
-            session,
-            scene_idx=scene_idx,
-            duration_sec=duration_sec,
-            stage="user_long_phrase_choice",
-        )
-        await _reply_text_with_optional_markup(
-            update,
-            "Пользовательская фраза всё ещё длиннее лимита даже после увеличения сцены. "
-            f"Сейчас {spoken_len} символов речи без учёта [пауза] при лимите {max_chars}. "
-            "Выберите: оставить фразу как есть для генерации видео или укоротить её через нейросеть.",
-            reply_markup=_scene_speech_user_long_phrase_markup(session=session),
-        )
-        return True
-    if not auto_approve:
-        await update.message.reply_text(
-            "Реплика длиннее лимита озвучки — отправляю описание нейросети для сокращения…"
+    max_chars = current_max_chars
+    if not shortening_approved:
+        return await _offer_scene_speech_shortening(
+            update, session=session, scene=scene, scene_idx=scene_idx,
+            duration_sec=duration_sec, language="ru", text=speech_text,
         )
     try:
         shortened = await _call_with_503_retries(
@@ -7643,39 +7518,6 @@ async def _maybe_shorten_scene_speech_for_video_budget(
         await update.message.reply_text(f"Не удалось автоматически сократить реплику: {_user_error_message(e)}")
         return True
     if shortened is None:
-        if auto_approve:
-            fallback_text = _fallback_scheduled_ru_speech_for_budget(speech_text, max_chars)
-            prompt = _sync_scene_text_into_video_prompt(
-                _compose_locked_video_prompt(scene, "ru", _scene_video_prompt_for_language(scene, "ru")),
-                fallback_text,
-            )
-            _set_scene_video_prompt_for_language(scene, "ru", prompt)
-            _apply_scene_phrase_update_to_scene(
-                session,
-                scene,
-                scene_idx=scene_idx,
-                language="ru",
-                phrase_text=fallback_text,
-                origin="auto_shorten",
-            )
-            await _sync_scene_phrase_translations(
-                update=update,
-                context=context,
-                chat_id=chat_id,
-                session=session,
-                scene=scene,
-                scene_idx=scene_idx,
-                source_language="ru",
-                source_text=fallback_text,
-            )
-            spoken_after = speech_chars_excluding_pauses(str(scene.get("text", "")).strip())
-            _refresh_scene_language_speech_metadata(scene, "ru", status="auto_shortened", auto_shortened=True)
-            _cancel_scene_speech_timeout(chat_id)
-            session.pop(SCENE_SPEECH_PENDING_KEY, None)
-            await update.message.reply_text(
-                f"Ночной режим: авто-сокращение не вернуло валидный ответ, поставила короткую реплику ({spoken_len} → {spoken_after}) и продолжаю."
-            )
-            return False
         _refresh_scene_language_speech_metadata(scene, "ru", status="overflow")
         _set_scene_speech_pending(
             session,
@@ -7739,12 +7581,6 @@ async def _maybe_shorten_scene_speech_for_video_budget(
         return True
     _refresh_scene_language_speech_metadata(scene, "ru", status="auto_shortened", auto_shortened=True)
     _cancel_scene_speech_timeout(chat_id)
-    if auto_approve:
-        session.pop(SCENE_SPEECH_PENDING_KEY, None)
-        await update.message.reply_text(
-            f"Автоапрув: реплика сокращена ({spoken_len} → {spoken_after}), запускаю видео."
-        )
-        return False
     _set_scene_speech_pending(
         session,
         scene_idx=scene_idx,
@@ -7817,6 +7653,7 @@ async def _maybe_adjust_english_speech_for_video_budget(
     session: dict,
     scene: dict,
     duration_sec: int,
+    shortening_approved: bool = False,
 ) -> bool:
     """Shorten English semantically; preserve the original if no valid result exists."""
     if _scene_speech_budget_override_enabled(scene, "en"):
@@ -7829,6 +7666,12 @@ async def _maybe_adjust_english_speech_for_video_budget(
     _refresh_scene_language_speech_metadata(scene, "en")
     if current_chars <= max_chars:
         return False
+    if not shortening_approved:
+        return await _offer_scene_speech_shortening(
+            update, session=session, scene=scene,
+            scene_idx=int(session.get("image_scene_index", 0) or 0),
+            duration_sec=duration_sec, language="en", text=text_en,
+        )
     try:
         shortened = await _call_with_503_retries(
             update, context, chat_id,
@@ -9962,6 +9805,36 @@ async def _handle_waiting_scene_media_state(
         is_ok_pending = text.lower() in {"ок", "ok", "okay", "approve"}
         if text == SCENE_SPEECH_OPTION_APPROVE:
             is_ok_pending = True
+        if stage == "user_long_phrase_choice":
+            language = str(pending.get("language") or "ru")
+            if text == SCENE_SPEECH_OPTION_SHORTEN_AI:
+                _cancel_scene_speech_timeout(chat_id)
+                duration = int(pending.get("duration_sec", 8))
+                session.pop(SCENE_SPEECH_PENDING_KEY, None)
+                if language == "en":
+                    return await _maybe_adjust_english_speech_for_video_budget(
+                        update, context=context, chat_id=chat_id, session=session,
+                        scene=scene, duration_sec=duration, shortening_approved=True)
+                return await _maybe_shorten_scene_speech_for_video_budget(
+                    update, context=context, chat_id=chat_id, session=session,
+                    scene=scene, scene_idx=idx, duration_sec=duration, shortening_approved=True)
+            if text == SCENE_SPEECH_OPTION_KEEP_AS_IS:
+                _set_scene_speech_budget_override(scene, language, True)
+                session.pop(SCENE_SPEECH_PENDING_KEY, None)
+                save_loaded_session_if_possible(chat_id)
+                return await _scene_media_video_ok(
+                    update, context=context, chat_id=chat_id, session=session,
+                    scene=scene, idx=idx, total=len(scenes),
+                    regenerate_language="en" if language == "en" and _scene_video_bytes_for_language(scene, "ru") else None)
+            if text == SCENE_SPEECH_OPTION_EDIT:
+                pending["stage"] = "approval_manual_phrase"
+                await _reply_text_with_optional_markup(update, f"Пришлите новую {language.upper()}-фразу.",
+                                                      reply_markup=ReplyKeyboardRemove())
+                return True
+            await _reply_text_with_optional_markup(
+                update, "Выберите: оставить фразу, сократить или изменить вручную.",
+                reply_markup=_scene_speech_user_long_phrase_markup(session=session))
+            return True
         if pending.get("language") == "en":
             if stage == "approval" and is_ok_pending:
                 session.pop(SCENE_SPEECH_PENDING_KEY, None)
@@ -10120,15 +9993,10 @@ async def _handle_waiting_scene_media_state(
                 "Запускаю повторное автосокращение…",
                 reply_markup=ReplyKeyboardRemove(),
             )
-            return await _scene_media_video_ok(
-                update,
-                context=context,
-                chat_id=chat_id,
-                session=session,
-                scene=scene,
-                idx=idx,
-                total=len(scenes),
-            )
+            return await _maybe_shorten_scene_speech_for_video_budget(
+                update, context=context, chat_id=chat_id, session=session,
+                scene=scene, scene_idx=idx, duration_sec=int(pending.get("duration_sec", 8)),
+                shortening_approved=True)
         if text == SCENE_SPEECH_OPTION_WAIT and stage == "choice":
             _set_scene_speech_pending(
                 session,
@@ -10139,7 +10007,7 @@ async def _handle_waiting_scene_media_state(
             _schedule_scene_speech_timeout(context=context, session=session, chat_id=chat_id)
             await _reply_text_with_optional_markup(
                 update,
-                "Жду короткую фразу до 10 минут. Если ответа не будет, попробую автосокращение снова.",
+                "Жду вашу фразу. Без ответа текст останется прежним.",
                 reply_markup=_scene_speech_options_markup(session=session),
             )
             return True
@@ -10190,62 +10058,6 @@ async def _handle_waiting_scene_media_state(
                 scene_idx=idx,
                 duration_sec=int(pending.get("duration_sec", 6)),
                 stage="approval",
-            )
-            return True
-        if stage == "user_long_phrase_choice":
-            if text == SCENE_SPEECH_OPTION_EDIT:
-                _set_scene_speech_pending(
-                    session,
-                    scene_idx=idx,
-                    duration_sec=int(pending.get("duration_sec", 6)),
-                    stage="approval_manual_phrase",
-                )
-                await _reply_text_with_optional_markup(
-                    update,
-                    "Пришлите новую фразу для озвучки.",
-                    reply_markup=ReplyKeyboardRemove(),
-                )
-                return True
-            if text == SCENE_SPEECH_OPTION_KEEP_AS_IS:
-                _cancel_scene_speech_timeout(chat_id)
-                for language in _scene_target_languages(session, scene):
-                    _set_scene_speech_budget_override(scene, language, True)
-                session.pop(SCENE_SPEECH_PENDING_KEY, None)
-                save_loaded_session_if_possible(chat_id)
-                await reply_text_without_keyboard(
-                    update.message,
-                    "Оставляю фразу как есть и запускаю видео без автосокращения.",
-                )
-                return await _scene_media_video_ok(
-                    update,
-                    context=context,
-                    chat_id=chat_id,
-                    session=session,
-                    scene=scene,
-                    idx=idx,
-                    total=len(scenes),
-                )
-            if text == SCENE_SPEECH_OPTION_SHORTEN_AI:
-                _cancel_scene_speech_timeout(chat_id)
-                _set_scene_speech_budget_override(scene, "ru", False)
-                session.pop(SCENE_SPEECH_PENDING_KEY, None)
-                await reply_text_without_keyboard(
-                    update.message,
-                    "Запускаю сокращение фразы через нейросеть.",
-                )
-                return await _scene_media_video_ok(
-                    update,
-                    context=context,
-                    chat_id=chat_id,
-                    session=session,
-                    scene=scene,
-                    idx=idx,
-                    total=len(scenes),
-                )
-            await _reply_text_with_optional_markup(
-                update,
-                "Выберите один вариант: оставить фразу как есть, укоротить её нейросетью или изменить вручную.",
-                reply_markup=_scene_speech_user_long_phrase_markup(session=session),
             )
             return True
     like_feedback = _apply_scene_like_fallback(

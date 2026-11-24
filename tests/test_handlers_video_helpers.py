@@ -7374,14 +7374,15 @@ def test_prompt_ai_feedback_relocks_multispeaker_video_prompt(monkeypatch):
     assert any("Prompts сцены 1 обновлены" in message for message in messages)
 
 
-def test_waiting_scene_media_retry_button_restarts_auto_shorten(monkeypatch):
+def test_waiting_scene_media_retry_button_requests_shortening(monkeypatch):
     called = {"video_ok": False}
 
     async def _fake_video_ok(update, **kwargs):
+        assert kwargs["shortening_approved"] is True
         called["video_ok"] = True
         return True
 
-    monkeypatch.setattr(handlers_state_media, "_scene_media_video_ok", _fake_video_ok)
+    monkeypatch.setattr(handlers_state_media, "_maybe_shorten_scene_speech_for_video_budget", _fake_video_ok)
 
     messages: list[str] = []
 
@@ -7673,12 +7674,13 @@ def test_scene_media_video_ok_blocks_too_long_speech(monkeypatch):
     assert out is True
     joined = " ".join(messages)
     assert "увеличила видео" not in joined
-    assert "нейросети" in joined
-    assert "Не удалось автоматически" in joined
+    assert "Сократить?" in joined
+    assert "130 символов" in joined
+    assert scene["text"] == "x" * 130
     assert scene["duration_sec"] == 8
 
 
-def test_scheduled_speech_auto_shorten_failure_uses_fallback_and_continues(monkeypatch):
+def test_scheduled_speech_waits_for_consent_without_fallback(monkeypatch):
     def _shorten_fail(_scene: dict, _dur: int, **_kwargs):
         return None
 
@@ -7723,12 +7725,11 @@ def test_scheduled_speech_auto_shorten_failure_uses_fallback_and_continues(monke
         )
     )
 
-    assert out is False
-    assert handlers_state_media.SCENE_SPEECH_PENDING_KEY not in session
-    assert handlers_state_media.speech_chars_excluding_pauses(scene["text"]) <= handlers_state_media.max_speech_chars_for_duration(8, "ru")
-    assert handlers_state_media.FINAL_SCENE_SUBSCRIBE_CTA in scene["text"]
-    assert f"CHARACTERS SPEAKS: {scene['text']}" in scene["video_prompt_by_lang"]["ru"]
-    assert any("Ночной режим" in message for message in messages)
+    assert out is True
+    assert session[handlers_state_media.SCENE_SPEECH_PENDING_KEY]["stage"] == "user_long_phrase_choice"
+    assert scene["text"] == scene_text
+    assert f"CHARACTERS SPEAKS: {scene_text}" in scene["video_prompt_by_lang"]["ru"]
+    assert any("символов" in message for message in messages)
 
 
 def test_scene_media_video_ok_sends_only_start_and_optional_end_frames(monkeypatch):
@@ -9642,6 +9643,11 @@ def test_run_syntax_fallback_payload_accepts_scene_frame_image_keys(monkeypatch)
 
 
 def test_scene_media_video_ok_auto_shortens_then_waits_for_phrase_approval(monkeypatch):
+    # Exercise the shortening implementation after an explicit user request.
+    original = handlers_state_media._maybe_shorten_scene_speech_for_video_budget
+    async def approved_shortening(*args, **kwargs):
+        return await original(*args, **kwargs, shortening_approved=True)
+    monkeypatch.setattr(handlers_state_media, "_maybe_shorten_scene_speech_for_video_budget", approved_shortening)
     called = {"video": False}
 
     async def _gen_ok(*args, **kwargs):
@@ -9702,6 +9708,11 @@ def test_scene_media_video_ok_auto_shortens_then_waits_for_phrase_approval(monke
 
 
 def test_scene_media_video_ok_auto_shorten_updates_other_languages(monkeypatch):
+    # Exercise the shortening implementation after an explicit user request.
+    original = handlers_state_media._maybe_shorten_scene_speech_for_video_budget
+    async def approved_shortening(*args, **kwargs):
+        return await original(*args, **kwargs, shortening_approved=True)
+    monkeypatch.setattr(handlers_state_media, "_maybe_shorten_scene_speech_for_video_budget", approved_shortening)
     async def _gen_ok(*args, **kwargs):
         raise AssertionError("video generation should not start before phrase approval")
 
@@ -9759,6 +9770,11 @@ def test_scene_media_video_ok_auto_shorten_updates_other_languages(monkeypatch):
 
 
 def test_scene_media_video_ok_shortens_ru_without_touching_approved_en(monkeypatch):
+    # Exercise the shortening implementation after an explicit user request.
+    original = handlers_state_media._maybe_shorten_scene_speech_for_video_budget
+    async def approved_shortening(*args, **kwargs):
+        return await original(*args, **kwargs, shortening_approved=True)
+    monkeypatch.setattr(handlers_state_media, "_maybe_shorten_scene_speech_for_video_budget", approved_shortening)
     messages: list[str] = []
 
     def _shorten_ok(_scene: dict, _dur: int, **_kwargs):
@@ -9864,6 +9880,11 @@ def test_scene_media_video_ok_keeps_english_within_125_chars(monkeypatch):
 
 
 def test_scene_media_video_ok_shortens_only_english_phrase(monkeypatch):
+    # Exercise the shortening implementation after an explicit user request.
+    original = handlers_state_media._maybe_adjust_english_speech_for_video_budget
+    async def approved_shortening(*args, **kwargs):
+        return await original(*args, **kwargs, shortening_approved=True)
+    monkeypatch.setattr(handlers_state_media, "_maybe_adjust_english_speech_for_video_budget", approved_shortening)
     async def _gen_ok(*args, **kwargs):
         raise AssertionError("EN shortening must wait for approval")
 
@@ -9928,6 +9949,11 @@ def test_scene_media_video_ok_shortens_only_english_phrase(monkeypatch):
 
 
 def test_scene_media_video_ok_english_shorten_failure_waits_for_approval(monkeypatch):
+    # Exercise the shortening implementation after an explicit user request.
+    original = handlers_state_media._maybe_adjust_english_speech_for_video_budget
+    async def approved_shortening(*args, **kwargs):
+        return await original(*args, **kwargs, shortening_approved=True)
+    monkeypatch.setattr(handlers_state_media, "_maybe_adjust_english_speech_for_video_budget", approved_shortening)
     calls: list[str] = []
     messages: list[str] = []
 
@@ -10881,7 +10907,7 @@ def test_english_speech_edit_and_approval_preserve_russian(monkeypatch):
     assert handlers_state_media._scene_speech_budget_override_enabled(scene, "en")
 
 
-def test_keep_without_shortening_also_protects_english(monkeypatch):
+def test_keep_without_shortening_applies_only_to_selected_language(monkeypatch):
     scene = {
         "text": "Длинная фраза." * 20,
         "speech_by_lang": {"en": "Long English phrase. " * 20},
@@ -10906,10 +10932,10 @@ def test_keep_without_shortening_also_protects_english(monkeypatch):
         text=handlers_state_media.SCENE_SPEECH_OPTION_KEEP_AS_IS,
     ))
     assert handlers_state_media._scene_speech_budget_override_enabled(scene, "ru")
-    assert handlers_state_media._scene_speech_budget_override_enabled(scene, "en")
+    assert not handlers_state_media._scene_speech_budget_override_enabled(scene, "en")
     assert asyncio.run(handlers_state_media._maybe_adjust_english_speech_for_video_budget(
         update, session=session, scene=scene, duration_sec=8,
-    )) is False
+    )) is True
     assert scene["speech_by_lang"]["en"] == original
     shorten.assert_not_called()
 
@@ -10996,7 +11022,7 @@ def test_english_budget_preserves_full_phrase_and_requests_approval(monkeypatch)
             assert session[handlers_state_media.SCENE_SPEECH_PENDING_KEY]["language"] == "en"
         else:
             update.message.reply_text.assert_not_called()
-    assert shorten.call_count == 2
+    assert shorten.call_count == 0
 
 
 def test_ok_ru_during_english_prompt_edit_is_approval_not_feedback(monkeypatch):
