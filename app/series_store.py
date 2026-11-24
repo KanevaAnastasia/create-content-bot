@@ -32,10 +32,12 @@ class SeriesPayload:
     total_videos: int
     counter_by_lang: dict[str, str]
     series_theme: str = ""
+    narrator_voice_id: str = ""
 
     def as_session_dict(self) -> dict[str, Any]:
         return {
             "series_theme": self.series_theme,
+            "narrator_voice_id": self.narrator_voice_id,
             "id": self.id,
             "title_by_lang": dict(self.title_by_lang),
             "video_index": self.video_index,
@@ -81,6 +83,7 @@ def payload_for_series(row: ContentSeries) -> SeriesPayload:
         counter_by_lang.setdefault(lang, counter_by_lang["en"])
     return SeriesPayload(
         series_theme=str(meta.get("series_theme") or ""),
+        narrator_voice_id=str(getattr(row, "narrator_voice_id", None) or "").strip(),
         id=str(row.id),
         title_by_lang=title_by_lang,
         video_index=video_index,
@@ -220,6 +223,12 @@ def create_series(
 
 
 def attach_series_to_session(session: dict[str, Any], payload: SeriesPayload | None) -> None:
+    previous_voice = session.pop("series_voice_id", None)
+    session.pop("discipline_content_series_id", None)
+    if previous_voice and session.get("project_voice_id") == previous_voice:
+        session.pop("project_voice_id", None)
+    if payload is not None and payload.narrator_voice_id:
+        session["series_voice_id"] = payload.narrator_voice_id
     style = dict(session.get("overlay_title_style") or {})
     style.pop("series_theme", None)
     if payload is not None and payload.series_theme:

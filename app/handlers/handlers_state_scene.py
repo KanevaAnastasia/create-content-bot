@@ -2440,15 +2440,9 @@ async def _generate_and_send_story_audio(
             update.message,
             "Генерирую цельную озвучку ElevenLabs с проектным voice ID и точными таймкодами, ждите.",
         )
-        from ..project_profiles import resolve_project_voice_id
+        from ..project_profiles import resolve_story_voice_id
 
-        project_voice_id = resolve_project_voice_id(
-            str(session.get(PROJECT_KEY_SESSION) or ""),
-            str(session.get("project_voice_id") or ""),
-        )
-        from ..discipline_modes import active_mode, MALE_VOICE_ID
-        if active_mode(session):
-            project_voice_id = MALE_VOICE_ID
+        project_voice_id = resolve_story_voice_id(session)
         if project_voice_id:
             session["project_voice_id"] = project_voice_id
         if project_voice_id:
@@ -2871,15 +2865,9 @@ async def _generate_and_send_story_english_audio(
             update.message,
             "Генерирую EN-озвучку ElevenLabs v4 с тем же проектным voice ID. Результат обязательно сохраню.",
         )
-        from ..project_profiles import resolve_project_voice_id
+        from ..project_profiles import resolve_story_voice_id
 
-        project_voice_id = resolve_project_voice_id(
-            str(session.get(PROJECT_KEY_SESSION) or ""),
-            str(session.get("project_voice_id") or ""),
-        )
-        from ..discipline_modes import active_mode, MALE_VOICE_ID
-        if active_mode(session):
-            project_voice_id = MALE_VOICE_ID
+        project_voice_id = resolve_story_voice_id(session)
         if project_voice_id:
             session["project_voice_id"] = project_voice_id
         if project_voice_id:

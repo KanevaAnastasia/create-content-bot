@@ -250,6 +250,17 @@ def build_story_session(row, *, english=True):
         session['state'] = STATE_WAITING_GENERATION_MODE
         session['series_title_by_lang'] = {'ru': row.series, 'en': 'Stories of Imperfect Mistakes'}
         session['series_counter_by_lang'] = {'ru': f'История {row.episode}', 'en': f'Story {row.episode}'}
+    series = getattr(row, 'content_series', None)
+    if series is not None:
+        session['discipline_content_series_id'] = str(series.id)
+        session['series_title_by_lang'] = {'ru': series.title_ru, 'en': series.title_en}
+        if series.narrator_voice_id:
+            session['series_voice_id'] = series.narrator_voice_id.strip()
+            session['project_voice_id'] = session['series_voice_id']
+    from .discipline_modes import LEARNING
+    if row.mode == LEARNING:
+        session.setdefault('series_title_by_lang', {'ru': row.series, 'en': 'Learning to Learn'})
+        session['series_counter_by_lang'] = {'ru': f'Метод {row.episode}', 'en': f'Method {row.episode}'}
     remember_notes(session, source)
     return session
 

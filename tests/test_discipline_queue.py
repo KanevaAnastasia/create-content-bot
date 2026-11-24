@@ -286,3 +286,30 @@ def test_manual_queue_can_open_from_empty_start_menu(db):
     assert state.SESSIONS[123]['state']==q.STATE
     assert any(q.ACCEPT==button.text for call in bot.send_message.call_args_list
                for row in getattr(call.kwargs.get('reply_markup'),'inline_keyboard',[]) for button in row)
+
+
+def test_learning_series_voice_and_bilingual_titles(db):
+    from app.models import ContentSeries
+    from app.discipline_modes import LEARNING, MALE_VOICE_ID
+    from app.project_profiles import resolve_story_voice_id
+    from app.editorial_titles import discipline_series_hierarchy
+    from app.session_store import _CHAT_SESSION_CACHE_KEYS
+    idea_id = add(db)
+    with db() as s:
+        series = ContentSeries(slug='learning', title_ru='Учиться учиться',
+                               title_en='Learning to Learn', narrator_voice_id='anastasia-test')
+        s.add(series)
+        row = s.get(DisciplineIdea, idea_id)
+        row.mode = LEARNING
+        row.content_series = series
+        s.commit()
+        session = q.build_story_session(row)
+    assert resolve_story_voice_id(session) == 'anastasia-test'
+    assert session['story_english_requested'] is True
+    assert 'series_voice_id' in _CHAT_SESSION_CACHE_KEYS
+    assert 'discipline_content_series_id' in _CHAT_SESSION_CACHE_KEYS
+    assert session['series_counter_by_lang'] == {'ru': 'Метод 1', 'en': 'Method 1'}
+    assert discipline_series_hierarchy(session, {'ru': 'Активное вспоминание'})['ru'] == [
+        'Учиться учиться', 'Активное вспоминание', 'Метод 1']
+    session.pop('series_voice_id')
+    assert resolve_story_voice_id(session) == MALE_VOICE_ID

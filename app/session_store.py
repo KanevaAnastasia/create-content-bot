@@ -55,6 +55,8 @@ _CHAT_SESSION_CACHE_KEYS = {
     "project_workspace_mode",
     "force_story_mode",
     "project_voice_id",
+    "series_voice_id",
+    "discipline_content_series_id",
     "generation_run_id",
     "scene_db_ids_by_index",
     "image_scene_index",

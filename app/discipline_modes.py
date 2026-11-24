@@ -12,7 +12,7 @@ EXPERIMENT = 'small_experiment'
 TWO_LIVES = 'two_lives'
 ARCHIVE = 'lives_archive'
 LEARNING = 'learning_lab'
-MALE_VOICE_ID = 'P1bg08DkjqiVEzOn76yG'
+MALE_VOICE_ID = '6Pm064JKx8KhPSIAdbHd'
 
 
 @dataclass(frozen=True)
@@ -112,7 +112,7 @@ SHORT_FORMATS.update({
     ),
 })
 SHORT_FORMATS[LEARNING] = ShortFormat(
-    'Учимся учиться', 'storybook_gouache',
+    'Учиться учиться', 'storybook_gouache',
     'Один метод обучения в рисованном опыте Васи и Кнопки, с источником и проверкой.',
     LEARNING_RULES,
     '2D книжная гуашь, учебная мастерская Васи и Кнопки. Один опыт, один главный предмет. '

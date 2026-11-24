@@ -163,3 +163,17 @@ def resolve_project_id(project_slug: str | None) -> uuid.UUID | None:
         return None
     with SessionLocal() as db:
         return db.execute(select(Project.id).where(Project.slug == slug)).scalar_one_or_none()
+
+
+def resolve_story_voice_id(session: dict) -> str:
+    """An explicitly selected series voice wins over format and project defaults."""
+    voice = str(session.get("series_voice_id") or "").strip()
+    if voice:
+        return voice
+    from .discipline_modes import active_mode, MALE_VOICE_ID
+    if active_mode(session):
+        return MALE_VOICE_ID
+    return resolve_project_voice_id(
+        str(session.get("selected_project_key") or ""),
+        str(session.get("project_voice_id") or ""),
+    )

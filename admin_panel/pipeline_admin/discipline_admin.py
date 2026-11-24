@@ -6,6 +6,8 @@ from django.db import transaction
 from app.discipline_modes import SHORT_FORMATS
 from .models import DisciplineIdea, DisciplineQueueSchedule
 
+EDITABLE = {"pending", "skipped", "paused", "ready", "offered", "deferred"}
+
 
 class IdeaForm(forms.ModelForm):
     mode = forms.ChoiceField(label='Режим', choices=[(key, value.label) for key, value in SHORT_FORMATS.items()])
@@ -21,8 +23,14 @@ class IdeaForm(forms.ModelForm):
         cleaned = super().clean()
         if not self.instance._state.adding:
             row = DisciplineIdea.objects.select_for_update().get(pk=self.instance.pk)
-            if row.status not in {'pending', 'skipped', 'paused'}:
-                raise ValidationError('Сценарий уже предложен или в работе. Правки текста делайте в диалоге генерации.')
+            if row.status not in EDITABLE or row.run_id:
+                raise ValidationError('Генерация уже начата. Правки текста делайте в диалоге генерации.')
+        series = cleaned.get('content_series')
+        if series:
+            from .models import Project
+            if not Project.objects.filter(pk=series.project_id, slug='discipline').exists():
+                raise ValidationError('Выберите серию проекта Дисциплина.')
+            cleaned['series'] = series.title_ru
         return cleaned
 
 
@@ -33,7 +41,7 @@ class DisciplineIdeaAdmin(admin.ModelAdmin):
     list_filter = ('status', 'series', 'mode')
     search_fields = ('title', 'script', 'problem')
     readonly_fields = ('status', 'offered_at', 'completed_at', 'run_id', 'created_at')
-    fields = ('position', 'title', 'slug', 'series', 'episode', 'mode', 'problem', 'hook', 'script', 'direction', 'payoff', 'review_plan', 'sources', 'status', 'offered_at', 'completed_at', 'run_id', 'created_at')
+    fields = ('position', 'title', 'slug', 'content_series', 'series', 'episode', 'mode', 'problem', 'hook', 'script', 'direction', 'payoff', 'review_plan', 'sources', 'status', 'offered_at', 'completed_at', 'run_id', 'created_at')
     actions = ('skip', 'return_to_queue')
 
     @admin.display(description='Режим')
@@ -42,7 +50,7 @@ class DisciplineIdeaAdmin(admin.ModelAdmin):
         return fmt.label if fmt else obj.mode
 
     def has_change_permission(self, request, obj=None):
-        return super().has_change_permission(request, obj) and (obj is None or obj.status in {'pending','skipped','paused'})
+        return super().has_change_permission(request, obj) and (obj is None or (obj.status in EDITABLE and not obj.run_id))
 
     def has_delete_permission(self, request, obj=None):
         return super().has_delete_permission(request, obj) and (obj is None or obj.status in {'pending','skipped'})

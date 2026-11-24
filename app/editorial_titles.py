@@ -78,13 +78,15 @@ def discipline_series_hierarchy(
     series_counters = session.get("series_counter_by_lang")
     if not all(isinstance(value, dict) for value in (resolved_titles, series_titles, series_counters)):
         return {}
+    from .discipline_modes import LEARNING, active_mode
     hierarchy: dict[str, list[str]] = {}
     for raw_language, raw_title in resolved_titles.items():
         language = str(raw_language or "").strip().lower()
         title = normalized(raw_title) if isinstance(raw_title, str) else ""
         series_title = normalized(series_titles.get(language) or "")
         series_counter = normalized(series_counters.get(language) or "")
-        parts = [title, series_title, series_counter]
+        parts = ([series_title, title, series_counter] if active_mode(session) == LEARNING
+                 else [title, series_title, series_counter])
         if language and valid_hierarchy_parts(parts):
             hierarchy[language] = parts
     return hierarchy

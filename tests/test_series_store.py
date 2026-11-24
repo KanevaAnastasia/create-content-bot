@@ -161,3 +161,25 @@ def test_advance_series_after_successful_render_closes_last_day(monkeypatch):
 
     assert row.current_video_index == 3
     assert row.is_active is False
+
+
+def test_series_voice_follows_selection_and_is_cleared():
+    from app.project_profiles import resolve_story_voice_id
+    from app.discipline_modes import LEARNING, MODE_KEY, MALE_VOICE_ID
+    row = SimpleNamespace(id='learning', title_ru='Учиться учиться', title_en='Learning to Learn',
+                          current_video_index=1, total_videos=10, meta_json={}, narrator_voice_id='anastasia')
+    payload = series_store.payload_for_series(row)
+    session = {'selected_project_key': 'discipline', MODE_KEY: LEARNING}
+    series_store.attach_series_to_session(session, payload)
+    assert resolve_story_voice_id(session) == 'anastasia'
+    assert session['series']['narrator_voice_id'] == 'anastasia'
+    session['project_voice_id'] = 'anastasia'  # TTS caches the chosen voice.
+    row.narrator_voice_id = None
+    series_store.attach_series_to_session(session, series_store.payload_for_series(row))
+    assert 'series_voice_id' not in session
+    assert 'project_voice_id' not in session
+    assert resolve_story_voice_id(session) == MALE_VOICE_ID
+    series_store.attach_series_to_session(session, payload)
+    series_store.attach_series_to_session(session, None)
+    assert 'series_voice_id' not in session
+    assert 'series' not in session

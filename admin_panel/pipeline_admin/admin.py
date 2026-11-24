@@ -4965,11 +4965,32 @@ class GenerationRunAdmin(admin.ModelAdmin):
         return _publication_prep_panel(obj)
 
 
+class ContentSeriesVoiceForm(django_forms.ModelForm):
+    class Meta:
+        model = ContentSeries
+        fields = "__all__"
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        from app.discipline_modes import MALE_VOICE_ID
+        from app.project_profiles import DISCIPLINE_VOICE_ID
+        choices = [("", "По умолчанию для проекта / режима"),
+                   (DISCIPLINE_VOICE_ID, "Анастасия"), (MALE_VOICE_ID, "Василий")]
+        current = self.instance.narrator_voice_id
+        if current and current not in {value for value, _ in choices}:
+            choices.append((current, current))
+        self.fields["narrator_voice_id"] = django_forms.ChoiceField(
+            label="Голос серии", choices=choices, required=False,
+            help_text="Используется для RU и EN в новых историях из очереди. Уже начатые генерации сохраняют выбранный голос.")
+
+
 @admin.register(ContentSeries)
 class ContentSeriesAdmin(admin.ModelAdmin):
+    form = ContentSeriesVoiceForm
     list_display = (
         "title_ru",
         "title_en",
+        "narrator_voice_id",
         "current_video_index",
         "total_videos",
         "is_active",
@@ -4986,6 +5007,7 @@ class ContentSeriesAdmin(admin.ModelAdmin):
         "slug",
         "title_ru",
         "title_en",
+        "narrator_voice_id",
         "current_video_index",
         "total_videos",
         "is_active",
