@@ -48,6 +48,10 @@ def test_editorial_rules_reach_both_brief_and_scene_plan():
         assert "Последняя явная правка пользователя важнее" in prompt
         assert "660840" in prompt
         assert "не доказательство причины" in prompt
+        assert "ПРАВИЛО БУКВЫ П ДЛЯ ПЕРВОЙ СЦЕНЫ" in prompt
+        assert "Это не акроним из слов на П" in prompt
+        assert "какой один вопрос у него остался и где сюжет ответит" in prompt
+        assert "Утверждённое пользователем начало сохраняй дословно" in prompt
 
 
 def test_review_does_not_reward_directorial_speech_or_truncate_user_line():
