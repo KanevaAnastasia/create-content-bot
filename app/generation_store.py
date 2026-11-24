@@ -90,6 +90,8 @@ SCENE_META_SNAPSHOT_KEYS = (
     "story_character_descriptions",
     "story_character_reference_prompts",
     "story_prop_ids",
+    "story_prop_reference_catalog",
+    "story_excluded_prop_ids",
     "story_required_reference_ids",
     "characters_absent_reason",
     "story_prop_descriptions",

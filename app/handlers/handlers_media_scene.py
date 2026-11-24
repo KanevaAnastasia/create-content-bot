@@ -1017,6 +1017,8 @@ def _append_scene_identity_to_image_prompt(
     for key in scene.get("story_prop_ids") or []:
         description = (scene.get("story_prop_descriptions") or {}).get(key, "")
         character_lines.append(f"Основной предмет {key}: {description}. Сохранять форму, материал и цвет по утверждённому референсу.")
+    if scene.get("story_prop_ids") and scene.get("story_prop_reference_catalog"):
+        character_lines.append("Утверждённое оформление предметов, включая рисунок и надписи на самих предметах, сохранять по приложенным референсам. Это исключение из общего запрета текста: не добавлять субтитры, интерфейс и посторонние надписи поверх кадра.")
     for key in normalized_keys:
         approved_look = (scene.get("story_character_reference_prompts") or {}).get(key, "")
         if approved_look:
@@ -1215,6 +1217,8 @@ def _resolve_scene_references(scene: dict, *, prompt_keys: tuple[str, ...] | Non
     """
     Возвращает полный набор референсов для сцены даже если `scene["references"]` отсутствует.
     """
+    from ..story_prop_references import reconcile_story_prop_references
+    reconcile_story_prop_references(scene, prompt_keys=prompt_keys)
     out: dict[str, str] = {}
     refs = scene.get("references")
     prompt_blob = _scene_prompt_blob(scene, prompt_keys)

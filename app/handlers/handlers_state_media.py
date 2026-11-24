@@ -6767,12 +6767,27 @@ async def _scene_media_edit_generated_image(
         f"Исходный промпт кадра:\n{base_prompt or '-'}"
     )
     edit_refs = [current_bytes]
+    prop_edit_scene = None
+    try:
+        if scene.get("story_prop_reference_catalog"):
+            from ..story_prop_references import reconcile_story_prop_references
+            prop_edit_scene = dict(scene, prop_edit_instruction=instruction)
+            reconcile_story_prop_references(prop_edit_scene, prompt_keys=("prop_edit_instruction",), explicit_edit=True)
+            edit_refs = _dedupe_image_reference_bytes([
+                current_bytes, *_load_scene_reference_images(prop_edit_scene, include_location=False),
+            ])
+            edit_prompt = _append_scene_identity_to_image_prompt(
+                edit_prompt, prop_edit_scene, include_location=False, allow_grandma_face_crop_rule=False,
+            )
+    except ValueError as exc:
+        await update.message.reply_text(str(exc))
+        return True
     await update.message.reply_text("Изменяю текущий кадр по вашему описанию.")
     await _send_image_reference_debug(
         update,
         f"Сцена {idx + 1} {'end' if is_end else 'start'} image edit",
         edit_refs,
-        source_counts={"current_image": 1},
+        source_counts={"current_image": 1, "scene_references": len(edit_refs) - 1},
     )
     try:
         edited_bytes = await _generate_image_with_lenient_fallback(
@@ -6791,6 +6806,10 @@ async def _scene_media_edit_generated_image(
         photo=bio,
         caption=f"Сцена {idx + 1}: {'конечный' if is_end else 'стартовый'} кадр изменён.",
     )
+    if prop_edit_scene is not None:
+        for key in ("story_prop_ids", "story_excluded_prop_ids", "references", "story_required_reference_ids", "story_prop_descriptions"):
+            if key in prop_edit_scene:
+                scene[key] = prop_edit_scene[key]
     scene[image_key] = _encode_b64(edited_bytes)
     image_candidate = register_image_candidate(scene, kind="end" if is_end else "start", image_bytes=edited_bytes)
     _persist_image_candidate_best_effort(session, scene_idx=idx, candidate=image_candidate)

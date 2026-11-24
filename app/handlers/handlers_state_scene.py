@@ -2299,9 +2299,20 @@ def _attach_story_character_references(session: dict) -> None:
     if active_mode(session):
         from ..story_generation import enforce_discipline_narrative_cast
         enforce_discipline_narrative_cast(scenes, list(bible.values()))
+    prop_catalog = {
+        key: {"display_name": item.get("display_name", key),
+              "description": item.get("description", ""),
+              "aliases": item.get("reference_aliases") or [],
+              "path": (refs.get(key) or {}).get("selected_path"),
+              "style": session.get(STORY_VISUAL_STYLE_SESSION_KEY),
+              "approved": _story_character_reference_is_approved(session, item)}
+        for key, item in bible.items()
+        if item.get("entity_type") == "prop" and item.get("requires_reference")
+    }
     for scene in scenes:
         if not isinstance(scene, dict):
             continue
+        scene["story_prop_reference_catalog"] = prop_catalog
         scene_refs = dict(scene.get("references") or {}) if isinstance(scene.get("references"), dict) else {}
         descriptions = (
             dict(scene.get("story_character_descriptions") or {})
@@ -2324,6 +2335,8 @@ def _attach_story_character_references(session: dict) -> None:
         scene["story_prop_descriptions"] = {key: bible[key].get("description", "") for key in scene.get("story_prop_ids") or [] if key in bible}
         scene["story_character_reference_prompts"] = {key: bible[key].get("reference_prompt", "") for key in scene.get("characters") or [] if key in bible}
         scene["story_character_descriptions"] = descriptions
+        from ..story_prop_references import reconcile_story_prop_references
+        reconcile_story_prop_references(scene)
     from ..story_continuity import save_continuity_manifest
     save_continuity_manifest(session)
 
