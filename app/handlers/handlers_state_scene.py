@@ -2322,6 +2322,7 @@ def _attach_story_character_references(session: dict) -> None:
             if isinstance(scene.get("story_character_descriptions"), dict)
             else {}
         )
+        identity_only = []
         for character_id in [str(x) for x in [*(scene.get("characters") or []), *(scene.get("story_prop_ids") or [])]]:
             record = refs.get(character_id)
             character = bible.get(character_id)
@@ -2329,12 +2330,20 @@ def _attach_story_character_references(session: dict) -> None:
                 raise ValueError(f"Сначала утвердите референс: {character.get('display_name') or character_id}.")
             if isinstance(record, dict) and record.get("approved") and Path(str(record.get("selected_path") or "")).is_file():
                 scene_refs[character_id] = str(record["selected_path"])
+            elif isinstance(character, dict) and not character.get("requires_reference") and character.get("asset_uri"):
+                source_uri = str(character["asset_uri"])
+                source_path = Path(source_uri[7:] if source_uri.startswith("file://") else source_uri)
+                if not source_path.is_file():
+                    raise ValueError(f"Исходный образ {character.get('display_name') or character_id} недоступен.")
+                scene_refs[character_id] = str(source_path)
+                identity_only.append(character_id)
             elif active_mode(session) and isinstance(character, dict) and character.get("display_name") in {"Василий", "Кнопка"}:
                 raise ValueError(f"Не найден утверждённый референс персонажа {character['display_name']}. Генерация без него остановлена.")
             if isinstance(character, dict):
                 descriptions[character_id] = str(character.get("description") or "")
         scene["references"] = scene_refs
-        scene["story_required_reference_ids"] = [key for key in [*(scene.get("characters") or []), *(scene.get("story_prop_ids") or [])] if key in bible and bible[key].get("requires_reference")]
+        scene["story_identity_only_reference_ids"] = identity_only
+        scene["story_required_reference_ids"] = [key for key in [*(scene.get("characters") or []), *(scene.get("story_prop_ids") or [])] if key in bible and (bible[key].get("requires_reference") or key in identity_only)]
         scene["story_prop_descriptions"] = {key: bible[key].get("description", "") for key in scene.get("story_prop_ids") or [] if key in bible}
         scene["story_character_reference_prompts"] = {key: bible[key].get("reference_prompt", "") for key in scene.get("characters") or [] if key in bible}
         scene["story_character_descriptions"] = descriptions

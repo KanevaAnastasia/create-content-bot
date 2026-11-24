@@ -2094,13 +2094,11 @@ def generate_story_scene_plan(
     for character in character_bible:
         character_id = str(character["id"])
         group = str(character.get("same_person_group") or character_id)
-        # Reference approval is valuable for recurring people and for every age
-        # variant of the same protagonist. One-off background people do not
-        # trigger extra paid image generations.
+        # Approval is for identities reused across scenes, including age variants.
+        # A one-scene identity uses its source asset directly in the selected medium.
+        group_usage = sum(character_usage.get(member, 0) for member in group_members.get(group, {character_id}))
         character["requires_reference"] = bool(
-            (narrative_format == ARCHIVE and character_usage.get(character_id, 0) > 0)
-            or (not str(character.get("asset_uri") or "").strip()
-                and (character_usage.get(character_id, 0) >= 2 or len(group_members.get(group, set())) >= 2))
+            group_usage >= 2 and (narrative_format == ARCHIVE or not str(character.get("asset_uri") or "").strip())
         )
     if narrative_format == ARCHIVE:
         from .historical_people import validate_story_people

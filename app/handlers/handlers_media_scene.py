@@ -1025,7 +1025,10 @@ def _append_scene_identity_to_image_prompt(
     for key in normalized_keys:
         approved_look = (scene.get("story_character_reference_prompts") or {}).get(key, "")
         if approved_look:
-            character_lines.append(f"Образ {key} для этого ролика: {approved_look}. Лицо исполнителя и костюм брать с утверждённого референса этого ролика; описание базовой одежды проекта не заменяет костюм роли.")
+            if key in (scene.get("story_identity_only_reference_ids") or []):
+                character_lines.append(f"Образ {key}: {approved_look}. Приложенный исходный образ задаёт только узнаваемость лица. Материал, пропорции, одежду и способ изображения полностью адаптировать к выбранной стилистике этой сцены; не переносить базовую стилистику проекта. Не рисовать референс-лист: один герой внутри действия.")
+            else:
+                character_lines.append(f"Образ {key} для этого ролика: {approved_look}. Лицо исполнителя и костюм брать с утверждённого референса этого ролика; описание базовой одежды проекта не заменяет костюм роли.")
     descriptions = "\n".join(character_lines)
     drama_beat = "" if fruit_only_closeup else sanitize_character_names_and_keys(scene.get("romantic_drama_beat") or "").strip()
     identity_lines = [

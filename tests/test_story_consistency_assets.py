@@ -370,3 +370,38 @@ def test_archive_rejects_empty_cast_even_with_object_insert_explanation(monkeypa
         g.generate_story_scene_plan(source_story='История.', voiceover_text='История.',
                                     duration_sec=5, alignment={}, project_slug='discipline',
                                     discipline_mode='lives_archive')
+
+
+def test_single_scene_vasily_uses_source_without_approval_in_selected_style(tmp_path, monkeypatch):
+    from app.generation_store import _scene_prompt_payload, merge_scene_prompt_payload
+    source = tmp_path / 'vasily.png'; source.write_bytes(b'identity-only')
+    scene = {'generation_mode': 'story', 'discipline_narrative_mode': 'lives_archive',
+             'story_visual_style_key': 'history_yarn_puppet', 'characters': ['vasily'],
+             'time_period': 'present', 'story_prop_ids': []}
+    session = {'generation_mode': 'story', 'selected_project_key': 'discipline',
+               'discipline_narrative_mode': 'lives_archive', 'story_visual_style': 'history_yarn_puppet',
+               'scenes_plan': [scene], 'story_character_bible': [{'id': 'vasily', 'display_name': 'Василий',
+               'story_role': 'modern_epilogue', 'description': 'Молодой человек',
+               'reference_prompt': 'Вася в кукольной стилистике', 'requires_reference': False,
+               'asset_uri': source.as_uri()}]}
+    h._attach_story_character_references(session)
+    assert h._required_story_characters(session) == []
+    restored = {}; merge_scene_prompt_payload(restored, _scene_prompt_payload(scene))
+    monkeypatch.setattr('app.story_image_postprocess.crop_story_reference_border', lambda b: b)
+    assert media._load_scene_reference_images(restored) == [b'identity-only']
+    prompt = media._append_scene_identity_to_image_prompt('Вася убирает телефон.', restored)
+    assert 'только узнаваемость лица' in prompt
+    assert 'не переносить базовую стилистику проекта' in prompt
+    source.unlink()
+    with pytest.raises(ValueError): media._load_scene_reference_images(restored)
+
+
+def test_single_scene_historical_person_does_not_require_separate_approval(monkeypatch):
+    monkeypatch.setattr(g, 'gemini_generate_sync', lambda *a, **kw: json.dumps({
+        'characters': [{'id': 'writer', 'display_name': 'Писатель', 'description': 'Мужчина в очках'}],
+        'scenes': [{'characters': ['writer'], 'visual': 'Писатель закрывает блокнот.'}]}))
+    result = g.generate_story_scene_plan(source_story='История.', voiceover_text='Закрыл блокнот.',
+                                         duration_sec=5, alignment={}, project_slug='discipline',
+                                         discipline_mode='lives_archive')
+    assert len(result['json_plan']) == 1
+    assert result['character_bible'][0]['requires_reference'] is False
