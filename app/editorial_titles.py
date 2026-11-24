@@ -73,6 +73,8 @@ def discipline_series_hierarchy(
     """Return the required three-row title hierarchy for any Discipline series."""
     if str(session.get("selected_project_key") or "").strip() != "discipline":
         return {}
+    from .series_store import refresh_discipline_series_titles
+    refresh_discipline_series_titles(session)
     resolved_titles = titles if isinstance(titles, dict) else session.get("overlay_title_by_lang")
     series_titles = session.get("series_title_by_lang")
     series_counters = session.get("series_counter_by_lang")

@@ -258,3 +258,20 @@ def attach_series_to_session(session: dict[str, Any], payload: SeriesPayload | N
 
 def format_series_label(payload: SeriesPayload) -> str:
     return f"{payload.title_by_lang['ru']} / {payload.title_by_lang['en']} ({payload.video_index}/{payload.total_videos})"
+
+
+def refresh_discipline_series_titles(session: dict[str, Any]) -> None:
+    """The editable series name takes precedence over an old dialogue checkpoint."""
+    if session.get("selected_project_key") != "discipline":
+        return
+    try:
+        series_id = uuid.UUID(str(session.get("discipline_content_series_id") or ""))
+    except (ValueError, TypeError):
+        return
+    with SessionLocal() as db:
+        row = db.get(ContentSeries, series_id)
+        if row is None:
+            return
+        titles = dict(session.get(SERIES_TITLE_BY_LANG_SESSION_KEY) or {})
+        titles.update(ru=row.title_ru, en=row.title_en)
+    session[SERIES_TITLE_BY_LANG_SESSION_KEY] = titles

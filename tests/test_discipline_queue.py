@@ -17,6 +17,8 @@ def db(monkeypatch):
     Base.metadata.create_all(engine)
     factory = sessionmaker(engine, expire_on_commit=False)
     monkeypatch.setattr(q, 'SessionLocal', factory)
+    from app import series_store
+    monkeypatch.setattr(series_store, 'SessionLocal', factory)
     monkeypatch.setattr(q, 'owner_chat_id', lambda: 123)
     monkeypatch.setattr(state, 'SESSIONS', {})
     monkeypatch.setattr(state, 'get_loaded_session', lambda chat_id: state.SESSIONS.get(chat_id))
@@ -313,3 +315,23 @@ def test_learning_series_voice_and_bilingual_titles(db):
         'Учимся учиться', 'Активное вспоминание', 'Метод 1']
     session.pop('series_voice_id')
     assert resolve_story_voice_id(session) == MALE_VOICE_ID
+
+
+def test_series_rename_overrides_stale_live_title_metadata(db):
+    from app.models import ContentSeries
+    from app.editorial_titles import ensure_discipline_series_hierarchy
+    from app.discipline_modes import LEARNING, MODE_KEY
+    with db() as s:
+        series = ContentSeries(slug='renamed', title_ru='Учимся учиться', title_en='Learning to Learn')
+        s.add(series); s.commit(); series_id = str(series.id)
+    session = {'selected_project_key': 'discipline', MODE_KEY: LEARNING,
+               'discipline_content_series_id': series_id,
+               'series_title_by_lang': {'ru': 'Учиться учиться', 'en': 'Learning to Learn'},
+               'series_counter_by_lang': {'ru': 'Метод 1', 'en': 'Method 1'},
+               'overlay_title_by_lang': {'ru': 'Активное вспоминание', 'en': 'Active Recall'}}
+    style = ensure_discipline_series_hierarchy(session, {'editorial_style_id': '9',
+        'editorial_hierarchy_by_lang': {'ru': ['Учиться учиться', 'Активное вспоминание', 'Метод 1']}})
+    assert session['series_title_by_lang']['ru'] == 'Учимся учиться'
+    assert style['editorial_hierarchy_by_lang']['ru'][0] == 'Учимся учиться'
+    assert style['editorial_hierarchy_by_lang']['en'][0] == 'Learning to Learn'
+    assert style['editorial_style_id'] == '9'

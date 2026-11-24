@@ -684,6 +684,15 @@ def load_session(chat_id: int) -> dict[str, Any] | None:
         _restore_missing_runtime_fields(session, runtime_snapshot)
     if run is not None:
         _restore_series_cursor_from_run(session, run)
+    from .series_store import refresh_discipline_series_titles
+    refresh_discipline_series_titles(session)
+    if session.get("discipline_content_series_id"):
+        from .editorial_titles import ensure_discipline_series_hierarchy
+        style = ensure_discipline_series_hierarchy(session, session.get("overlay_title_style"))
+        if style:
+            session["overlay_title_style"] = style
+            if isinstance(session.get("production"), dict):
+                session["production"]["overlay_title_style"] = dict(style)
     return session
 
 
