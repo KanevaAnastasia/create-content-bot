@@ -12,7 +12,7 @@ from app.handlers import handlers_media_scene as media
 def planned(monkeypatch, tmp_path):
     actor=tmp_path/'actor.png';actor.write_bytes(b'identity')
     monkeypatch.setattr(g,'build_semantic_narration_beats',lambda *a:[{'beat':i+1,'start_sec':i*4,'end_sec':(i+1)*4,'narration_excerpt':'Пишет.'} for i in range(3)])
-    monkeypatch.setattr(g,'gemini_generate_sync',lambda *a,**kw:json.dumps({'characters':[{'id':'stephen_king','display_name':'Стивен Кинг','description':'Молодой Стивен Кинг'}], 'props':[{'id':'prop_typewriter','description':'чёрная машинка','is_key_story_prop':True},{'id':'prop_letter','description':'письмо'}], 'scenes':[{'characters':['stephen_king'],'props':['prop_typewriter']},{'characters':['stephen_king'],'props':['prop_typewriter']},{'characters':[],'characters_absent_reason':'Крупно письмо без людей','props':['prop_letter']}]}))
+    monkeypatch.setattr(g,'gemini_generate_sync',lambda *a,**kw:json.dumps({'characters':[{'id':'stephen_king','display_name':'Стивен Кинг','description':'Молодой Стивен Кинг'}], 'props':[{'id':'prop_typewriter','description':'чёрная машинка','is_key_story_prop':True},{'id':'prop_letter','description':'письмо'}], 'scenes':[{'characters':['stephen_king'],'props':['prop_typewriter']},{'characters':['stephen_king'],'props':['prop_typewriter']},{'characters':['stephen_king'],'visual':'Кинг разворачивает письмо, крупно руки.','props':['prop_letter']}]}))
     return g.generate_story_scene_plan(source_story='Кинг пишет.',voiceover_text='Кинг пишет.',duration_sec=12,alignment={},project_slug='discipline',discipline_mode='lives_archive',story_visual_style='history_yarn_puppet',project_characters=[{'id':'vasily','description':'Василий','asset_uri':actor.as_uri(),'is_primary':True}])
 
 
@@ -22,7 +22,7 @@ def test_real_person_requires_new_approval_and_only_recurring_props(monkeypatch,
     assert bible['stephen_king']['requires_reference'] is True
     assert bible['prop_typewriter']['requires_reference'] is True
     assert bible['prop_letter']['requires_reference'] is False
-    assert result['json_plan'][2]['characters']==[]
+    assert result['json_plan'][2]['characters']==['stephen_king']
 
 
 def test_approved_prop_reaches_matching_scene_image_input_and_manifest(monkeypatch,tmp_path):
@@ -35,7 +35,7 @@ def test_approved_prop_reaches_matching_scene_image_input_and_manifest(monkeypat
     h._attach_story_character_references(s)
     monkeypatch.setattr('app.story_image_postprocess.crop_story_reference_border',lambda b:b)
     assert media._load_scene_reference_images(s['scenes_plan'][0])==[b'stephen_king',b'prop_typewriter']
-    assert media._load_scene_reference_images(s['scenes_plan'][2])==[]
+    assert media._load_scene_reference_images(s['scenes_plan'][2])==[b'stephen_king']
     manifest=json.loads(Path(s['scenes_plan'][0]['continuity_manifest_path']).read_text())
     assert {a['id'] for a in manifest['assets']}=={'stephen_king','prop_typewriter'}
     s['story_visual_style']='history_comic'
@@ -76,7 +76,7 @@ def test_missing_reference_blocks_production(monkeypatch,entry):
 
 def test_history_cannot_silently_drop_cast(monkeypatch):
     monkeypatch.setattr(g,'gemini_generate_sync',lambda *a,**kw:json.dumps({'scenes':[{'visual':'Кинг печатает, Табита читает','characters':[]}]}))
-    with pytest.raises(ValueError,match="исполнители"):
+    with pytest.raises(ValueError,match="Предметный план без персонажа"):
         g.generate_story_scene_plan(source_story='Кинг пишет.',voiceover_text='Кинг пишет.',duration_sec=5,alignment={},project_slug='discipline',discipline_mode='lives_archive',project_characters=[{'id':'vasily','description':'Василий'}])
 
 
@@ -359,3 +359,14 @@ def test_archive_epilogue_allows_vasily_only_in_final_present_scene():
         g.enforce_discipline_narrative_cast(scenes, cast)
     with pytest.raises(ValueError, match='реальные люди'):
         g.validate_historical_cast([{'id': 'vasily', 'display_name': 'Василий'}])
+
+
+def test_archive_rejects_empty_cast_even_with_object_insert_explanation(monkeypatch):
+    monkeypatch.setattr(g, 'gemini_generate_sync', lambda *a, **kw: json.dumps({
+        'characters': [{'id': 'king', 'display_name': 'Стивен Кинг', 'description': 'В очках'}],
+        'scenes': [{'characters': [], 'characters_absent_reason': 'Красивый предметный план',
+                    'visual': 'Камера приближается к неподвижной книге.'}]}))
+    with pytest.raises(ValueError, match='Предметный план без персонажа запрещён'):
+        g.generate_story_scene_plan(source_story='История.', voiceover_text='История.',
+                                    duration_sec=5, alignment={}, project_slug='discipline',
+                                    discipline_mode='lives_archive')

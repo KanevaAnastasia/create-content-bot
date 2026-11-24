@@ -1733,7 +1733,7 @@ def generate_story_scene_plan(
         "этого semantic_beat. Каждый clip_visual: visual, shot_type, camera_direction, location, lighting, color_palette, "
         "grandma_age (young/current/none), cat_present, time_period (present/past), "
         "characters (grandma, cat и/или id из characters), continuity_anchors, location_segment, "
-        "characters_absent_reason: если людей нет, явно объясни предметный или пейзажный план; при действующем герое characters не может быть пустым. "
+        "В каждом кадре нужен видимый персонаж, конкретное действие и его наблюдаемое следствие или реакция. Для Дисциплины characters не может быть пустым, characters_absent_reason не разрешает исключений. В крупных предметных планах показывай руки действующего героя, его профиль или плечо и указывай его id; не подменяй действие движением камеры. "
         "location_transition (true/false), transition_note.\n"
         "Все clip_visuals одного beat подтверждают ПОЛНЫЙ смысл narration_excerpt, а не отдельные обрывки слов. "
         "Первый clip_visual сразу устанавливает весь смысловой тезис; следующие развивают его визуально. "
@@ -1818,8 +1818,8 @@ def generate_story_scene_plan(
         age = _normalize_grandma_age(candidate.get("grandma_age"))
         cat_present = bool(candidate.get("cat_present"))
         chars = [_story_character_id(item) for item in candidate.get("characters") or []]
-        if narrative_format == ARCHIVE and not chars and not str(candidate.get("characters_absent_reason") or "").strip():
-            raise ValueError("В историческом кадре отсутствуют исполнители. Укажите character_id героя или объясните предметный план в characters_absent_reason.")
+        if narrative_format == ARCHIVE and not chars:
+            raise ValueError("В каждом кадре Дисциплины нужны реальные люди истории или утверждённые герои проекта и понятное действие. Предметный план без персонажа запрещён.")
         if narrative_format == ARCHIVE and any(item not in character_ids for item in chars):
             raise ValueError("Историческая сцена содержит неизвестного исполнителя. Укажите character_id реального человека из библии этой истории.")
         chars = [
@@ -2085,6 +2085,8 @@ def generate_story_scene_plan(
     for character in character_bible:
         group = str(character.get("same_person_group") or character["id"])
         group_members.setdefault(group, set()).add(str(character["id"]))
+    if discipline_project and any(not scene.get("characters") for scene in normalized):
+        raise ValueError("В каждом кадре Дисциплины нужен действующий персонаж. Пустой предметный план запрещён.")
     for scene in normalized:
         for character_id in set(str(x) for x in scene.get("characters") or []):
             if character_id in character_usage:
