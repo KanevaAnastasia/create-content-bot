@@ -228,3 +228,42 @@ def test_queue_restores_series_composition_before_snapshot(monkeypatch):
     for source in [saved[0], saved[0]['production']]:
         assert source['overlay_title_style'][titles.HIERARCHY_KEY]['ru'] == ['Стивен Кинг','Истории несовершенных ошибок','История 1']
         assert source['overlay_title_style'][titles.HIERARCHY_KEY]['en'] == ['Stephen King','Stories of Imperfect Mistakes','Story 1']
+
+
+def test_legacy_approved_hierarchy_survives_missing_metadata_per_language():
+    approved = {'ru': ['Стивен Кинг','Истории несовершенных ошибок','История 1'],
+                'en': ['Stephen King','Stories of Imperfect Mistakes','Story 1']}
+    style = {'editorial_style_id': '9', titles.HIERARCHY_KEY: approved}
+    assert titles.ensure_discipline_series_hierarchy({'selected_project_key':'discipline'},style) == style
+
+
+def test_queue_preserves_production_only_approved_style(monkeypatch):
+    from app import final_build_queue as queue
+    approved = {'editorial_style_id': '9', titles.HIERARCHY_KEY: {'ru':['Стивен Кинг','Серия','История 1']}}
+    session = {'selected_project_key':'discipline','production':{'overlay_title_style': approved}}
+    monkeypatch.setattr(queue, 'ensure_generation_run_for_session', lambda s: ('05e7e668-f88e-4db9-ae16-b3113c7819a9', {}))
+    monkeypatch.setattr(queue, '_persist_queue_session_snapshot', lambda *args: None)
+    monkeypatch.setattr(queue, '_upsert_final_build_status', lambda **kw: 'pending')
+    queue.queue_final_builds_for_session(1, session, [{'scene':1}], languages=['ru'], variants=['clean'],kick_worker=False)
+    assert session['overlay_title_style'] == approved
+    assert session['production']['overlay_title_style'] == approved
+
+
+def test_partial_english_metadata_never_overwrites_approved_english_with_russian():
+    approved = {'en': ['Stephen King','Stories of Imperfect Mistakes','Story 1']}
+    session = {'selected_project_key':'discipline',
+               'overlay_title_by_lang': {'en':'Stephen King','ru':'Стивен Кинг'},
+               'series_title_by_lang': {'ru':'Истории несовершенных ошибок'},
+               'series_counter_by_lang': {'ru':'История 1'}}
+    result = titles.ensure_discipline_series_hierarchy(session, {'editorial_style_id':'9',titles.HIERARCHY_KEY:approved})
+    assert result[titles.HIERARCHY_KEY]['en'] == approved['en']
+    assert result[titles.HIERARCHY_KEY]['ru'] == ['Стивен Кинг','Истории несовершенных ошибок','История 1']
+
+
+@pytest.mark.parametrize('missing_title', [None, '', '   '])
+def test_missing_name_preserves_approved_language_hierarchy(missing_title):
+    approved = ['Stephen King','Stories of Imperfect Mistakes','Story 1']
+    session = {'selected_project_key':'discipline', 'overlay_title_by_lang': {'en':missing_title},
+               'series_title_by_lang': {'en':approved[1]}, 'series_counter_by_lang': {'en':approved[2]}}
+    style = {'editorial_style_id':'9', titles.HIERARCHY_KEY:{'en':approved}}
+    assert titles.ensure_discipline_series_hierarchy(session, style)[titles.HIERARCHY_KEY]['en'] == approved

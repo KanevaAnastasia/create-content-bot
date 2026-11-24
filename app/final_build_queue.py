@@ -236,7 +236,17 @@ def queue_final_builds_for_session(
     production["json_plan"] = scenes
     from .editorial_titles import ensure_discipline_series_hierarchy
     if session.get("selected_project_key") == "discipline":
-        style = ensure_discipline_series_hierarchy(session, session.get("overlay_title_style"))
+        saved_style = dict(production.get("overlay_title_style") or {})
+        saved_style.update(session.get("overlay_title_style") or {})
+        hierarchy_key = "editorial_hierarchy_by_lang"
+        saved_style[hierarchy_key] = {
+            **((production.get("overlay_title_style") or {}).get(hierarchy_key) or {}),
+            **((session.get("overlay_title_style") or {}).get(hierarchy_key) or {}),
+        }
+        title_context = {**production, **session}
+        for key in ("overlay_title_by_lang", "series_title_by_lang", "series_counter_by_lang"):
+            title_context[key] = {**(production.get(key) or {}), **(session.get(key) or {})}
+        style = ensure_discipline_series_hierarchy(title_context, saved_style)
         session["overlay_title_style"] = style
         production["overlay_title_style"] = dict(style)
     run_id_str, _scene_map = ensure_generation_run_for_session(session)

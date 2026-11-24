@@ -81,9 +81,9 @@ def discipline_series_hierarchy(
     hierarchy: dict[str, list[str]] = {}
     for raw_language, raw_title in resolved_titles.items():
         language = str(raw_language or "").strip().lower()
-        title = normalized(raw_title)
-        series_title = normalized(series_titles.get(language) or series_titles.get("ru") or "")
-        series_counter = normalized(series_counters.get(language) or series_counters.get("ru") or "")
+        title = normalized(raw_title) if isinstance(raw_title, str) else ""
+        series_title = normalized(series_titles.get(language) or "")
+        series_counter = normalized(series_counters.get(language) or "")
         parts = [title, series_title, series_counter]
         if language and valid_hierarchy_parts(parts):
             hierarchy[language] = parts
@@ -93,7 +93,14 @@ def discipline_series_hierarchy(
 def ensure_discipline_series_hierarchy(session: dict, style: dict | None = None) -> dict:
     """Keep the Discipline series hierarchy in the style across every approval step."""
     resolved_style = dict(style or {})
-    hierarchy = discipline_series_hierarchy(session)
+    # Preserve approved rows from older drafts when standalone metadata is absent.
+    # Complete current metadata can refresh a language without erasing the other.
+    hierarchy = {
+        language: list(parts)
+        for language, parts in (resolved_style.get(HIERARCHY_KEY) or {}).items()
+        if valid_hierarchy_parts(parts)
+    } if isinstance(resolved_style.get(HIERARCHY_KEY), dict) else {}
+    hierarchy.update(discipline_series_hierarchy(session))
     if hierarchy:
         resolved_style[HIERARCHY_KEY] = hierarchy
     else:

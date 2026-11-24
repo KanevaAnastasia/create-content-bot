@@ -1445,6 +1445,16 @@ def _overlay_title_style_for_admin_render(
     # Reconstruct from the approved title/series/counter at the render boundary.
     from app.editorial_titles import ensure_discipline_series_hierarchy
     title_context = {**session, **production}
+    hierarchy_key = "editorial_hierarchy_by_lang"
+    preserved_hierarchy = {}
+    for source_style in [*(post.get("title_overlay_style") for post in _post_production_sources(session, production)),
+                         session.get("overlay_title_style"), production.get("overlay_title_style")]:
+        if isinstance(source_style, dict) and isinstance(source_style.get(hierarchy_key), dict):
+            preserved_hierarchy.update(source_style[hierarchy_key])
+    if preserved_hierarchy:
+        style[hierarchy_key] = preserved_hierarchy
+    for key in ("overlay_title_by_lang", "series_title_by_lang", "series_counter_by_lang"):
+        title_context[key] = {**(session.get(key) or {}), **(production.get(key) or {})}
     if title_context.get("selected_project_key") == "discipline":
         style = ensure_discipline_series_hierarchy(title_context, style)
     return style
