@@ -71,7 +71,8 @@ def test_short_format_selects_its_illustration_and_script(monkeypatch, mode):
         return '{"title":"Книга","voiceover_text":"Вася открыл книгу."}'
     monkeypatch.setattr(story_generation, 'gemini_generate_sync', writer)
     story_generation.generate_story_voiceover('Книга', discipline_mode=mode)
-    assert ('90 секунд' if mode == modes.BOSS else '18–28') in prompts[0]
+    expected_duration = {modes.BOSS: '90 секунд', modes.LITERARY: 'около минуты'}
+    assert expected_duration.get(mode, '18–28') in prompts[0]
     assert '45 до 110' not in prompts[0]
     assert modes.SHORT_FORMATS[mode].script in prompts[0]
     assert modes.LABELS[mode] not in start.project_mode_labels('grandma_kitchen')
@@ -293,7 +294,7 @@ def test_narrative_cast_requires_approved_reference(tmp_path):
         handler._attach_story_character_references(session)
 
 
-@pytest.mark.parametrize('mode', [m for m in modes.SHORT_FORMATS if m != modes.ARCHIVE])
+@pytest.mark.parametrize('mode', [m for m in modes.SHORT_FORMATS if m not in modes.STORY_CAST_MODES])
 def test_short_plans_preserve_four_second_clips_and_no_forced_camera(monkeypatch,mode):
     from app.discipline_craft import MOTION_RULES
     captured=[]
@@ -376,3 +377,76 @@ def test_workspace_boss_menu_opens_idea_step_without_an_extra_prompt(monkeypatch
     ))
     writer.assert_awaited_once()
     assert writer.await_args.kwargs['session'][start.STORY_SOURCE_SESSION_KEY].endswith('после ошибки.')
+
+
+def test_literary_story_reuses_only_approved_recurring_book_characters(monkeypatch, tmp_path):
+    from app.handlers import handlers_state_scene as scene_handler
+
+    book_cast = [
+        {"id": "alan_greenmor", "display_name": "Алан Гринмор", "description": "Тёмные волосы, синий пиджак"},
+        {"id": "baker", "display_name": "Булочница", "description": "Белый фартук"},
+    ]
+
+    def fake_planner(prompt, **kwargs):
+        if '"scenes_plan"' in prompt:
+            return '{"prompts": []}'
+        return json.dumps({
+            "characters": book_cast,
+            "scenes": [
+                {"characters": ["alan_greenmor", "baker"], "visual": "Алан тянется за багетом.",
+                 "camera_direction": "locked-off camera"},
+                {"characters": ["alan_greenmor"], "visual": "Алан замечает чёрствый хлеб.",
+                 "camera_direction": "slow optical zoom-in"},
+            ],
+        })
+
+    monkeypatch.setattr(story_generation, "gemini_generate_sync", fake_planner)
+    result = story_generation.generate_story_scene_plan(
+        source_story="Алан Гринмор соглашается взять чёрствый багет.",
+        voiceover_text="Алан берёт багет.",
+        duration_sec=11.0,
+        alignment={},
+        project_slug="discipline",
+        discipline_mode=modes.LITERARY,
+        project_characters=[{"id": "vasily", "display_name": "Василий", "description": "Персонаж проекта"}],
+    )
+    scenes = result["json_plan"]
+    assert [scene["characters"] for scene in scenes] == [["alan_greenmor", "baker"], ["alan_greenmor"]]
+    assert [scene["duration_sec"] for scene in scenes] == [6.0, 6.0]
+    assert sum(scene["timeline_duration_sec"] for scene in scenes) == pytest.approx(11)
+    assert scenes[0]["camera_direction"] == "locked-off camera"
+    assert scenes[1]["camera_direction"] != scenes[0]["camera_direction"]
+    assert all(scene["story_visual_style_key"] == "literary_illustration" for scene in scenes)
+    bible = result["character_bible"]
+    assert [(character["id"], character["requires_reference"]) for character in bible] == [
+        ("alan_greenmor", True), ("baker", False),
+    ]
+
+    session = {
+        "selected_project_key": "discipline",
+        modes.MODE_KEY: modes.LITERARY,
+        "scenes_plan": scenes,
+        "story_visual_style": "literary_illustration",
+        scene_handler.STORY_CHARACTER_BIBLE_SESSION_KEY: bible,
+    }
+    with pytest.raises(ValueError, match="Сначала утвердите референс: Алан"):
+        scene_handler._attach_story_character_references(session)
+
+    reference = tmp_path / "alan.png"
+    reference.write_bytes(b"approved character image")
+    session[scene_handler.STORY_CHARACTER_REFERENCES_SESSION_KEY] = {
+        "alan_greenmor": {
+            "selected_path": str(reference),
+            "approved": True,
+            "description": bible[0]["description"],
+            "reference_prompt": bible[0]["reference_prompt"],
+            "story_visual_style_key": "literary_illustration",
+        },
+    }
+    monkeypatch.setattr("app.story_continuity.save_continuity_manifest", lambda session: None)
+    scene_handler._attach_story_character_references(session)
+    assert all(scene["references"] == {"alan_greenmor": str(reference)} for scene in scenes)
+
+    produced = story_generation.generate_story_production(scenes_plan=scenes)["json_plan"]
+    assert all(scene["video_prompt"].startswith("6-second Kling") for scene in produced)
+    assert all("hand-painted 2D book illustration" in scene["video_prompt"] for scene in produced)

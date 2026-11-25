@@ -2160,9 +2160,16 @@ def _story_character_reference_prompt(
             if style_config["prompt"]
             else ""
         )
+    from ..discipline_modes import LITERARY, SHORT_FORMATS
+
+    literary = normalize_story_visual_style(story_visual_style) == SHORT_FORMATS[LITERARY].style_key
+    reference_subject = (
+        "Создай чистый character reference sheet для повторяющегося персонажа художественной книги. "
+        if literary else "Создай чистый character reference sheet для повторяющегося героя короткого исторического ролика. "
+    )
     return (
-        "Создай чистый character reference sheet для повторяющегося героя короткого исторического ролика. "
-        "Вертикальное изображение 9:16, без текста, букв, подписей, логотипов и рамок. "
+        reference_subject
+        + "Вертикальное изображение 9:16, без текста, букв, подписей, логотипов и рамок. "
         "Покажи одного и того же персонажа дважды: крупный портрет лица и фигуру в полный рост в нейтральной позе. "
         + style_clause
         +
@@ -3107,6 +3114,9 @@ async def _approve_story_audio_and_build_scenes(
     chat_id: int,
     session: dict,
 ) -> bool:
+    from ..discipline_modes import FORK, LITERARY, REFRAME, TWO_LIVES, active_mode, opening_sentence, title_word_timing
+
+    narrative_mode = active_mode(session)
     audio_path = str(session.get(STORY_AUDIO_PATH_SESSION_KEY) or "").strip()
     duration = float(session.get(STORY_AUDIO_DURATION_SESSION_KEY) or 0.0)
     alignment = session.get(STORY_AUDIO_ALIGNMENT_SESSION_KEY)
@@ -3246,7 +3256,7 @@ async def _approve_story_audio_and_build_scenes(
     session[STORY_CHARACTER_BIBLE_SESSION_KEY] = (
         scenes.get("character_bible") if isinstance(scenes.get("character_bible"), list) else []
     )
-    if project_characters:
+    if project_characters and narrative_mode != LITERARY:
         existing_refs = _story_character_reference_map(session)
         for character in project_characters:
             character_id = str(character.get("id") or "")
@@ -3280,13 +3290,12 @@ async def _approve_story_audio_and_build_scenes(
     title_by_lang = {"ru": title}
     if english_requested:
         title_by_lang["en"] = str(session.get(STORY_TITLE_EN_SESSION_KEY) or "Story").strip() or "Story"
-    from ..discipline_modes import active_mode, REFRAME, TWO_LIVES, FORK, opening_sentence, title_word_timing
     archive_titles_applied = _apply_archive_subject_overlay_titles(
         session,
         title_by_lang,
         english_requested=english_requested,
     )
-    if not archive_titles_applied and active_mode(session) in (REFRAME, TWO_LIVES, FORK):
+    if not archive_titles_applied and narrative_mode in (REFRAME, TWO_LIVES, FORK):
         title_by_lang["ru"] = opening_sentence(voiceover)
         if english_requested:
             title_by_lang["en"] = opening_sentence(english_voiceover)
@@ -3297,21 +3306,21 @@ async def _approve_story_audio_and_build_scenes(
         "top_margin_ratio": _DEFAULT_OVERLAY_TITLE_TOP_MARGIN_RATIO,
         "side_margin_ratio": _DEFAULT_OVERLAY_TITLE_SIDE_MARGIN_RATIO,
     }
-    if active_mode(session) in (TWO_LIVES, FORK):
+    if narrative_mode in (TWO_LIVES, FORK):
         session[OVERLAY_TITLE_STYLE_SESSION_KEY]['speaker_panel'] = 'top'
-    if active_mode(session):
+    if narrative_mode and narrative_mode != LITERARY:
         session[OVERLAY_TITLE_STYLE_SESSION_KEY]["replace_subtitle_phrases"] = True
         session[OVERLAY_TITLE_STYLE_SESSION_KEY]["word_timing_by_lang"] = {
             "ru": title_word_timing(title_by_lang["ru"], voiceover, duration, alignment),
             **({"en": title_word_timing(title_by_lang["en"], english_voiceover, english_duration, english_alignment)}
                if english_requested else {}),
         }
-    if active_mode(session) in (TWO_LIVES, FORK):
+    if narrative_mode in (TWO_LIVES, FORK):
         from ..split_panel_typography import configure_opening_titles
         configure_opening_titles(session, title_by_lang, session[OVERLAY_TITLE_STYLE_SESSION_KEY])
         session[OVERLAY_TITLE_BY_LANG_SESSION_KEY] = title_by_lang
         session[OVERLAY_TITLE_SESSION_KEY] = title_by_lang['ru']
-    if active_mode(session) == REFRAME:
+    if narrative_mode == REFRAME:
         from ..discipline_modes import reframe_title_cues
         session[OVERLAY_TITLE_STYLE_SESSION_KEY]["extra_title_cues_by_lang"] = {
             "ru": reframe_title_cues(voiceover, duration, alignment, "ru"),

@@ -17,7 +17,9 @@ from typing import Any
 
 from . import inner_boss_mix
 from .discipline_modes import (
-    ARCHIVE, BOSS, TWO_LIVES, FLOW, LABELS, MODE_KEY, REFRAME, SHORT_FORMATS, boss_opening_has_alarm, opening_sentence, script_direction, visual_direction,
+    ARCHIVE, BOSS, FLEXIBLE_SHOT_MODES, FLOW, LABELS, LITERARY, MODE_KEY, REFRAME,
+    SHORT_FORMATS, STORY_CAST_MODES, TWO_LIVES, boss_opening_has_alarm, opening_sentence,
+    script_direction, visual_direction,
 )
 from .llm_utils import GEMINI_MODEL_PROFILE_CREATIVE, extract_json_object, gemini_generate_sync
 from .story_visual_text import STORY_VISUAL_TEXT_RULES
@@ -340,6 +342,13 @@ STORY_VISUAL_STYLES["inner_boss_2d"] = {
 }
 
 
+STORY_VISUAL_STYLES[SHORT_FORMATS[LITERARY].style_key] = {
+    "label": "Рисованная художественная книга",
+    "prompt": SHORT_FORMATS[LITERARY].frame,
+    "reference_path": "",
+}
+
+
 def normalize_story_visual_style(value: Any) -> str:
     raw = str(value or "").strip().lower().replace("-", "_").replace(" ", "_")
     aliases = {
@@ -440,6 +449,8 @@ def generate_story_voiceover(
     length_direction = (
         "Целевая длительность ролика около 90 секунд. Оставь место для пауз и действий. "
         if discipline_mode == BOSS else
+        "Целевая длительность около минуты, 105–135 русских слов. "
+        if discipline_mode == LITERARY else
         "Целевая длительность 18–28 секунд спокойной речи, ориентир 38–60 русских слов. "
         if discipline_mode in SHORT_FORMATS and discipline_mode != ARCHIVE else
         "Озвучка должна занимать от 45 до 110 секунд естественной спокойной речи и точно укладываться в две минуты. "
@@ -1210,6 +1221,17 @@ def enforce_discipline_narrative_cast(scenes, project_characters):
         scenes = [scene for scene in scenes if scene.get(MODE_KEY) != ARCHIVE]
         if not scenes:
             return
+    if scenes and scenes[0].get(MODE_KEY) == LITERARY:
+        named_cast = {str(character["id"]): character for character in project_characters
+                      if character.get("entity_type") != "prop"}
+        for scene in scenes:
+            ids = list(dict.fromkeys(str(value) for value in scene.get("characters") or []))
+            if not ids or any(key not in named_cast for key in ids):
+                raise ValueError("Укажите действующих персонажей книги из библии в каждом кадре.")
+            scene["characters"] = ids
+            scene["story_character_descriptions"] = {key: named_cast[key]["description"] for key in ids}
+            scene["story_character_labels"] = {key: named_cast[key]["display_name"] for key in ids}
+        return
     if scenes and scenes[0].get(MODE_KEY) == BOSS:
         hero = next((c for c in project_characters if _is_vasily_identity(c)), None)
         if not hero:
@@ -1644,7 +1666,7 @@ def generate_story_scene_plan(
     )
     grandma_project = normalized_project_slug in {"grandma_kitchen", "grandma_cat_cooking"}
     fixed_project_characters = _normalize_story_character_bible(
-        [] if narrative_format == ARCHIVE else (project_characters or [])
+        [] if narrative_format in STORY_CAST_MODES else (project_characters or [])
     )
     if narrative_format == BOSS:
         fixed_project_characters = [c for c in fixed_project_characters if _is_vasily_identity(c)]
@@ -1669,11 +1691,11 @@ def generate_story_scene_plan(
     legacy_grandma_cast = not fixed_project_characters and not discipline_project and narrative_format != ARCHIVE
     grandma_story = legacy_grandma_cast or grandma_project
     semantic_beats = build_semantic_narration_beats(voiceover_text, duration_sec, alignment)
-    windows = (_history_beat_clips(semantic_beats) if narrative_format in {ARCHIVE, BOSS} else
+    windows = (_history_beat_clips(semantic_beats) if narrative_format in FLEXIBLE_SHOT_MODES else
                _expand_semantic_beats_to_clips(semantic_beats, continuous=bool(short_format)))
     if normalized_generation_mode == "visualization":
         windows = _apply_visualization_final_clip_policy(windows, visualization_output_policy)
-    clips_key = "semantic_clips" if narrative_format in {ARCHIVE, BOSS} else "continuous_clips" if continuous else ("four_second_clips" if short_format else "three_second_clips")
+    clips_key = "semantic_clips" if narrative_format in FLEXIBLE_SHOT_MODES else "continuous_clips" if continuous else ("four_second_clips" if short_format else "three_second_clips")
     payload = {
         "source_story": source_story,
         "approved_voiceover": voiceover_text,
@@ -1735,8 +1757,13 @@ def generate_story_scene_plan(
         )
     if narrative_format:
         project_character_direction = visual_direction(narrative_format)
-        project_character_direction += (" Показывай самих реальных людей из исходной истории, а не персонажей проекта в их ролях. Создай для каждого собственный id и полное настоящее имя в display_name. В description и reference_prompt укажи полное имя, возраст на момент событий, узнаваемые черты реального лица, волосы и одежду эпохи. Стилизуй внешность, сохраняя сходство; не делай фотореализм. В исторических событиях не используй Василия, Анастасию или Кнопку. Исключение: последний современный кадр вывода с Васей из modern_epilogue_character. Включи его в characters с точным id проекта, story_role=modern_epilogue, same_person_group равным id проекта; сохрани внешность, но перерисуй в выбранной стилистике. Последний clip_visual: time_period=present, location_transition=true, конкретная узнаваемая проблема зрителя и одно действие, связанное с выводом. Никакого выдуманного успеха за пять секунд. Каждый используемый образ сначала утверждает пользователь." if narrative_format == ARCHIVE else (" Используй точный id Василия, его тень описывай в действии." if narrative_format == BOSS else " Используй только точные id Василия и Кнопки из project_characters, не придумывай им новые id."))
-    if short_format and narrative_format != ARCHIVE:
+    if narrative_format == ARCHIVE:
+        project_character_direction += " Показывай самих реальных людей из исходной истории, а не персонажей проекта в их ролях. Создай для каждого собственный id и полное настоящее имя в display_name. В description и reference_prompt укажи полное имя, возраст на момент событий, узнаваемые черты реального лица, волосы и одежду эпохи. Стилизуй внешность, сохраняя сходство; не делай фотореализм. В исторических событиях не используй Василия, Анастасию или Кнопку. Исключение: последний современный кадр вывода с Васей из modern_epilogue_character. Включи его в characters с точным id проекта, story_role=modern_epilogue, same_person_group равным id проекта; сохрани внешность, но перерисуй в выбранной стилистике. Последний clip_visual: time_period=present, location_transition=true, конкретная узнаваемая проблема зрителя и одно действие, связанное с выводом. Никакого выдуманного успеха за пять секунд. Каждый используемый образ сначала утверждает пользователь."
+    elif narrative_format == BOSS:
+        project_character_direction += " Используй точный id Василия, его тень описывай в действии."
+    elif narrative_format and narrative_format != LITERARY:
+        project_character_direction += " Используй только точные id Василия и Кнопки из project_characters, не придумывай им новые id."
+    if short_format and narrative_format not in STORY_CAST_MODES:
         project_character_direction += " В этих выпусках весь актёрский состав ограничен project_characters."
     if continuous:
         project_character_direction += " Начни с Василия и Кнопки вместе и держи их в одной декорации до конца."
@@ -1759,12 +1786,12 @@ def generate_story_scene_plan(
         "over-the-shoulder shot, gentle orbit shot и другие подходящие кинематографичные варианты. "
         "Не повторяй одно и то же движение камеры в соседних клипах и не выбирай приём, который противоречит действию сцены."
     )
-    if short_format and not continuous and narrative_format not in {ARCHIVE, BOSS}:
+    if short_format and not continuous and narrative_format not in FLEXIBLE_SHOT_MODES:
         camera_instruction = (
             "Выбери крупность по действию и ремаркам, внутри клипа camera_direction=locked-off camera. "
             "Не чередуй случайные движения камеры. Смена плана между клипами только по смыслу. "
         )
-    if narrative_format == ARCHIVE:
+    if narrative_format in STORY_CAST_MODES:
         camera_instruction = (
             "Крупный план реакции и предметная деталь приветствуются. Выбирай крупность по смыслу. "
             "Внутри клипа максимум одно мотивированное движение камеры, допустима неподвижная камера. "
@@ -1807,6 +1834,10 @@ def generate_story_scene_plan(
             "короткая законченная ключевая реплика, заслуживающая отдельного экранного акцента. "
             "Для остальных поставь accent=false. Надписи добавит монтаж. "
         )
+    prop_example = (
+        "Для истории Кинга важны машинка и рукопись; не создавай отдельный референс каждому листу. "
+        if narrative_format != LITERARY else ""
+    )
     prompt = (
         "Ты режиссёр короткой немой визуальной истории под уже утверждённую закадровую дорожку. "
         "Верни только JSON-объект с ключами characters, props, scenario_environment, historical_environment и beats. "
@@ -1819,7 +1850,7 @@ def generate_story_scene_plan(
         "requires_reference. Description фиксирует лицо, волосы, телосложение и отличительные признаки; одежда исторически точна.\n"
         "props — только основной сюжетный реквизит, узнаваемый в двух или более сценах, обычно 0–2 предмета, максимум 3. "
         "Не включай чашки, столы, комнаты, карандаши и бытовые мелочи: сохраняй их описанием в location и continuity_anchors. "
-        "Для истории Кинга важны машинка и рукопись; не создавай отдельный референс каждому листу. "
+        f"{prop_example}"
         "Каждый prop: id с префиксом prop_, display_name, description (форма, размер, материал, цвет), reference_prompt, is_key_story_prop. Последнее true только для главного сюжетного предмета, не для фонового реквизита. "
         "В description и reference_prompt предмета явно зафиксируй язык необходимой надписи и точное оригинальное название, если оно известно из источника. "
         f"{STORY_VISUAL_TEXT_RULES}\n"
@@ -1880,6 +1911,13 @@ def generate_story_scene_plan(
             character["asset_uri"] = ""
         validate_historical_cast(generated_character_bible)
         character_bible = generated_character_bible
+    elif narrative_format == LITERARY:
+        project_ids = {str(character.get("id")) for character in project_characters or []}
+        for character in generated_character_bible:
+            if character["id"] in project_ids or character.get("story_role") == "modern_epilogue":
+                raise ValueError("Для книжной истории нужны персонажи из книги и их собственные образы.")
+            character["asset_uri"] = ""
+        character_bible = generated_character_bible
     elif not short_format:
         character_bible.extend(item for item in generated_character_bible if item["id"] not in fixed_character_ids)
     props = _normalize_story_character_bible(data.get("props"))
@@ -1916,6 +1954,8 @@ def generate_story_scene_plan(
         chars = [_story_character_id(item) for item in candidate.get("characters") or []]
         if narrative_format == ARCHIVE and not chars:
             raise ValueError("В каждом кадре Дисциплины нужны реальные люди истории или утверждённые герои проекта и понятное действие. Предметный план без персонажа запрещён.")
+        if narrative_format == LITERARY and any(item not in character_ids for item in chars):
+            raise ValueError("В книжной сцене указан персонаж вне утверждаемой библии.")
         if narrative_format == ARCHIVE and any(item not in character_ids for item in chars):
             raise ValueError("Историческая сцена содержит неизвестного исполнителя. Укажите character_id реального человека из библии этой истории.")
         chars = [
@@ -1957,11 +1997,11 @@ def generate_story_scene_plan(
             allow_transition=location_transition,
         )
         environment_locks[time_period] = (location, lighting, color_palette)
-        camera_direction = "locked-off camera" if short_format and narrative_format != ARCHIVE else _story_camera_direction(
+        camera_direction = "locked-off camera" if short_format and narrative_format not in STORY_CAST_MODES else _story_camera_direction(
             index,
             candidate.get("camera_direction") or candidate.get("camera_movement"),
             previous=previous_camera_direction,
-            preserve_requested=narrative_format == ARCHIVE,
+            preserve_requested=narrative_format in STORY_CAST_MODES,
         )
         previous_camera_direction = camera_direction
         if reference_style_only:
@@ -2069,7 +2109,7 @@ def generate_story_scene_plan(
         )
         final_scene["visualization_output_policy"] = dict(visualization_output_policy)
     if narrative_format:
-        enforce_discipline_narrative_cast(normalized, character_bible if narrative_format == ARCHIVE else fixed_project_characters)
+        enforce_discipline_narrative_cast(normalized, character_bible if narrative_format in STORY_CAST_MODES else fixed_project_characters)
     if discipline_project and not narrative_format:
         present_scenes = [item for item in normalized if str(item.get("time_period") or "present") == "present"]
         first_person_scenes = [
@@ -2200,9 +2240,13 @@ def generate_story_scene_plan(
         group = str(character.get("same_person_group") or character_id)
         # Approval is for identities reused across scenes, including age variants.
         # A one-scene identity uses its source asset directly in the selected medium.
-        group_usage = sum(character_usage.get(member, 0) for member in group_members.get(group, {character_id}))
+        members = group_members[group]
+        if narrative_format == LITERARY:
+            group_usage = sum(bool(members.intersection(scene["characters"])) for scene in normalized)
+        else:
+            group_usage = sum(character_usage.get(member, 0) for member in members)
         character["requires_reference"] = bool(
-            group_usage >= 2 and (narrative_format in {ARCHIVE, BOSS} or not str(character.get("asset_uri") or "").strip())
+            group_usage >= 2 and (narrative_format in FLEXIBLE_SHOT_MODES or not str(character.get("asset_uri") or "").strip())
         )
     if narrative_format == ARCHIVE:
         from .historical_people import validate_story_people
@@ -2212,7 +2256,7 @@ def generate_story_scene_plan(
     for prop in props:
         prop["entity_type"] = "prop"
         name = f"{prop['id']} {prop['display_name']}".replace("_", " ")
-        important = narrative_format == ARCHIVE and raw_props.get(prop["id"], {}).get("is_key_story_prop") is True and not minor_prop.search(name)
+        important = narrative_format in STORY_CAST_MODES and raw_props.get(prop["id"], {}).get("is_key_story_prop") is True and not minor_prop.search(name)
         prop["requires_reference"] = bool(important and sum(prop["id"] in scene["story_prop_ids"] for scene in normalized) >= 2)
         prop["asset_uri"] = ""
     character_bible.extend(props)
@@ -2310,7 +2354,7 @@ def _fallback_start_prompt(scene: dict[str, Any]) -> str:
 def _fallback_video_prompt(scene: dict[str, Any]) -> str:
     camera_direction = str(scene.get("camera_direction") or "subtle cinematic camera motion").strip()
     duration = int(round(float(scene.get("generation_duration_sec") or scene.get("duration_sec") or 3.0)))
-    duration = max(3, min(15, duration)) if scene.get(MODE_KEY) in {ARCHIVE, BOSS} else (4 if duration >= 4 else 3)
+    duration = max(3, min(15, duration)) if scene.get(MODE_KEY) in FLEXIBLE_SHOT_MODES else (4 if duration >= 4 else 3)
     return (
         f"{duration}-second Kling 3.0 image-to-video shot. No audio. No dialogue, no speech, no lip sync, no music, "
         "no ambient sound, no on-screen text, no subtitles, no logos, no watermark. "
@@ -2342,11 +2386,11 @@ def generate_story_production(
     previous_camera_direction = ""
     for index, source_scene in enumerate(scenes_plan):
         scene = dict(source_scene)
-        scene["camera_direction"] = "locked-off camera" if scene.get(MODE_KEY) in SHORT_FORMATS and scene.get(MODE_KEY) != ARCHIVE else _story_camera_direction(
+        scene["camera_direction"] = "locked-off camera" if scene.get(MODE_KEY) in SHORT_FORMATS and scene.get(MODE_KEY) not in STORY_CAST_MODES else _story_camera_direction(
             index,
             scene.get("camera_direction"),
             previous=previous_camera_direction,
-            preserve_requested=scene.get(MODE_KEY) == ARCHIVE,
+            preserve_requested=scene.get(MODE_KEY) in STORY_CAST_MODES,
         )
         previous_camera_direction = str(scene["camera_direction"])
         safe_scenes_plan.append(scene)
@@ -2386,7 +2430,7 @@ def generate_story_production(
         "Later clips may use the approved varied tracking shot, POV shot, optical zoom-in, over-the-shoulder shot, gentle orbit shot "
         "or another planned camera technique that stays within the source frame. "
     )
-    if any(scene.get(MODE_KEY) == ARCHIVE for scene in safe_scenes_plan):
+    if any(scene.get(MODE_KEY) in STORY_CAST_MODES for scene in safe_scenes_plan):
         camera_instruction = "Use each approved camera_direction literally, including a locked-off first shot. Do not add an unplanned zoom or camera move. Stay inside the source-image boundaries. "
     prompt = (
         "Create production prompts for an approved narrated story timeline. Return only a JSON object with key prompts, "
@@ -2418,7 +2462,7 @@ def generate_story_production(
     enriched: list[dict[str, Any]] = []
     for index, scene in enumerate(safe_scenes_plan):
         generation_duration = float(scene.get("generation_duration_sec") or scene.get("duration_sec") or STORY_CLIP_DURATION_SEC)
-        generation_duration = (float(max(3, min(15, math.ceil(generation_duration)))) if scene.get(MODE_KEY) in {ARCHIVE, BOSS}
+        generation_duration = (float(max(3, min(15, math.ceil(generation_duration)))) if scene.get(MODE_KEY) in FLEXIBLE_SHOT_MODES
                                else (4.0 if int(round(generation_duration)) >= 4 else 3.0))
         required_prefix = f"{int(generation_duration)}-second Kling 3.0 image-to-video shot. No audio."
         candidate = prompts[index] if index < len(prompts) and isinstance(prompts[index], dict) else {}
@@ -2428,9 +2472,9 @@ def generate_story_production(
             else str(candidate.get("start_frame_prompt_ru") or "").strip() or _fallback_start_prompt(scene)
         )
         start_prompt = _ensure_story_environment_in_start_prompt(start_prompt, scene)
-        # Historical motion is compiled from the accepted action and camera; a second
+        # Motion in cast-led stories uses the accepted action and camera; a second
         # free-form camera interpretation can contradict the approved blocking.
-        video_prompt = (_fallback_video_prompt(scene) if scene.get(MODE_KEY) == ARCHIVE else
+        video_prompt = (_fallback_video_prompt(scene) if scene.get(MODE_KEY) in STORY_CAST_MODES else
                         str(candidate.get("video_prompt_en") or "").strip() or _fallback_video_prompt(scene))
         if not video_prompt.lower().startswith(required_prefix.lower()):
             video_prompt = _fallback_video_prompt(scene)

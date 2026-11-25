@@ -232,7 +232,7 @@ async def deliver(bot, chat_id, *, force=False, locked=False):
 
 
 def build_story_session(row, *, english=True):
-    from .discipline_modes import ARCHIVE, MODE_KEY, SHORT_FORMATS
+    from .discipline_modes import ARCHIVE, LITERARY, MODE_KEY, SHORT_FORMATS
     from .directorial_notes import remember_notes
     from .handlers.handlers_state_start import STATE_WAITING_STORY_SCRIPT_APPROVAL
     creative_headings = ('Ведущий приём внимания\n', 'Операторское решение\n', 'Анимационное решение\n')
@@ -254,6 +254,9 @@ def build_story_session(row, *, english=True):
         session.pop('story_visual_style', None)
         session['state'] = STATE_WAITING_GENERATION_MODE
         session['series_title_by_lang'] = {'ru': row.series, 'en': 'Stories of Imperfect Mistakes'}
+        session['series_counter_by_lang'] = {'ru': f'История {row.episode}', 'en': f'Story {row.episode}'}
+    if row.mode == LITERARY:
+        session['series_title_by_lang'] = {'ru': row.series, 'en': 'How the Character Acted'}
         session['series_counter_by_lang'] = {'ru': f'История {row.episode}', 'en': f'Story {row.episode}'}
     series = getattr(row, 'content_series', None)
     if series is not None:

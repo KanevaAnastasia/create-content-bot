@@ -11,7 +11,10 @@ FORK = 'two_outcomes'
 EXPERIMENT = 'small_experiment'
 TWO_LIVES = 'two_lives'
 ARCHIVE = 'lives_archive'
+LITERARY = 'literary_story'
+STORY_CAST_MODES = {ARCHIVE, LITERARY}
 BOSS = 'inner_boss'
+FLEXIBLE_SHOT_MODES = {*STORY_CAST_MODES, BOSS}
 BOSS_VOICE_ID = 'vfaqCOvlrKi4Zp7C2IAm'
 LEARNING = 'learning_lab'
 MALE_VOICE_ID = '6Pm064JKx8KhPSIAdbHd'
@@ -113,6 +116,32 @@ SHORT_FORMATS.update({
         'camera move at most. Preserve faces, costumes, props, screen axis and gaze continuity. Only the final takeaway may cut to present-day Vasily, in the same selected medium and with his approved stylized identity. Never insert him into historical events.',
     ),
 })
+SHORT_FORMATS[LITERARY] = ShortFormat(
+    'Книжная история', 'literary_illustration',
+    'Короткий пересказ художественной книги. Один выбор героя, его последствия и книжная 2D-иллюстрация.',
+    'Перескажи примерно за минуту один законченный конфликт из художественной книги. '
+    'Начни с конкретного затруднения, которое зритель узнаёт по себе, и назови книгу после первой фразы. '
+    'Дай сцену попытки, поворот и итог из книги. Практический вывод выведи из этих событий. '
+    'Сохраняй имена, место, эпоху и исход событий. Диалоги только если они проверены по тексту. '
+    'Литературные персонажи остаются героями до финала, включая вывод.',
+    'Вертикальная рисованная 2D-иллюстрация к художественной книге. В кадре персонажи самой книги. '
+    'Составь собственную библию персонажей: имя, характерный силуэт, лицо, причёска и одежда. '
+    'Героев, которые появляются в двух и более сценах, отправляй на утверждение в этой рисовке. '
+    'Разовых персонажей опиши для их сцены. Фоновую толпу не включай отдельными людьми в библию. '
+    'Только ключевой повторяющийся предмет утверждается отдельно; бытовые детали фиксируй в описании. '
+    'Покажи завязку с первого кадра. Используй крупный план для решения или реакции, меняй масштаб по смыслу. '
+    'Сохраняй взгляд, ось, жест, лица, одежду и геометрию локации между кадрами. '
+    'Длительность определяет действие и утверждённая речь, обрезка до секунды.',
+    'Hand-painted 2D narrative book illustration for adults. Opaque gouache and fine dry-pencil grain on matte paper. '
+    'Expressive stylized faces with a clean readable silhouette, simplified graphic shapes and hand-brushed shadows. '
+    'Architectural perspective and three distinct planes, with atmospheric color in the distance. '
+    'Amber and terracotta accents against muted blue-gray and sage. Warm natural light and textured fabrics. '
+    'Create original characters and locations from the approved story and reference sheets. '
+    'Full-bleed artwork, no page mockup, photorealism, glossy 3D, readable lettering, or borders.',
+    'Animate like a hand-painted 2D book illustration: subtle layered parallax, restrained cloth motion, '
+    'a readable gesture and a reaction. Use only the approved camera direction. Preserve brush texture, '
+    'silhouette, character proportions and architecture. Keep the gaze and screen axis for the next cut.',
+)
 SHORT_FORMATS[LEARNING] = ShortFormat(
     'Учимся учиться', 'storybook_gouache',
     'Один метод обучения в рисованном опыте Васи и Кнопки, с источником и проверкой.',
@@ -282,7 +311,7 @@ def script_direction(mode):
 def visual_direction(mode):
     if mode not in LABELS:
         return ''
-    if mode in {ARCHIVE, BOSS}:
+    if mode in FLEXIBLE_SHOT_MODES:
         return SHORT_FORMATS[mode].visual
     if mode in SHORT_FORMATS:
         return (
