@@ -17,11 +17,17 @@ def test_mode_selection_survives_resume_and_disables_dialogue(monkeypatch,label,
     session={'selected_project_key':'discipline','series_pending_recipe':'Не успеваю читать'}
     session[start.SERIES_PENDING_RECIPE_SESSION_KEY]='Не успеваю читать'
     message=SimpleNamespace(reply_text=AsyncMock())
+    launch = AsyncMock(return_value=True)
+    monkeypatch.setattr(start, '_start_initial_story_voiceover', launch)
     asyncio.run(start._handle_waiting_generation_mode_state(SimpleNamespace(message=message),None,chat_id=1,session=session,text=label))
     assert session[modes.MODE_KEY]==mode
     assert session['generation_mode']=='story'
     assert session['discipline_intro_enabled'] is False
-    assert session['state']==start.STATE_WAITING_STORY_ENGLISH_CHOICE
+    if mode == modes.BOSS:
+        assert session[start.STORY_ENGLISH_REQUESTED_SESSION_KEY] is True
+        launch.assert_awaited_once()
+    else:
+        assert session['state'] == start.STATE_WAITING_STORY_ENGLISH_CHOICE
     assert _chat_session_cache_payload(session)[modes.MODE_KEY]==mode
     assert modes.MODE_KEY not in start._session_for_new_generation(session)
 
@@ -57,7 +63,8 @@ def test_short_format_selects_its_illustration_and_script(monkeypatch, mode):
         return '{"title":"Книга","voiceover_text":"Вася открыл книгу."}'
     monkeypatch.setattr(story_generation, 'gemini_generate_sync', writer)
     story_generation.generate_story_voiceover('Книга', discipline_mode=mode)
-    assert '18–28' in prompts[0] and '45 до 110' not in prompts[0]
+    assert ('55–65' if mode == modes.BOSS else '18–28') in prompts[0]
+    assert '45 до 110' not in prompts[0]
     assert modes.SHORT_FORMATS[mode].script in prompts[0]
     assert modes.LABELS[mode] not in start.project_mode_labels('grandma_kitchen')
 
@@ -290,10 +297,14 @@ def test_short_plans_preserve_four_second_clips_and_no_forced_camera(monkeypatch
         voiceover_text='Вася закрывает книгу. Потом вспоминает и сверяет.',duration_sec=12.4,
         alignment={},project_slug='discipline',discipline_mode=mode,
         project_characters=[{'id':'vasily','description':'Вася'},{'id':'knopka','description':'Кнопка'}])['json_plan']
-    assert all(row['duration_sec']>=4 for row in plan)
+    if mode == modes.BOSS:
+        assert all(0 <= row['duration_sec'] - row['timeline_duration_sec'] < 1.01 for row in plan)
+    else:
+        assert all(row['duration_sec'] >= 4 for row in plan)
     assert all(row['camera_direction']=='locked-off camera' for row in plan)
     assert sum(row['timeline_duration_sec'] for row in plan)==pytest.approx(12.4)
-    assert 'Не повторяй одно и то же движение камеры' not in captured[0]
+    if mode != modes.BOSS:
+        assert 'Не повторяй одно и то же движение камеры' not in captured[0]
     result=story_generation.generate_story_production(scenes_plan=plan)['json_plan']
     assert all(MOTION_RULES in row['video_prompt'] for row in result)
     if mode==modes.LEARNING:
