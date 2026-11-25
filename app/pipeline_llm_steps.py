@@ -13,6 +13,7 @@ import json
 import re
 from typing import Any
 
+from .llm_payload import scene_context
 from .assets import ASSETS
 from .character_catalog import character_prompt_catalog, maybe_choose_romantic_subplot
 from .llm_utils import GEMINI_MODEL_PROFILE_CREATIVE, gemini_generate_sync
@@ -333,7 +334,7 @@ def build_viral_concept_brief_prompt(
         "brand_integration_safety_score, risk_of_boring_scene; и строки expected_rewatch_reason, "
         "expected_comment_reason, expected_save_reason.\n\n"
         "INPUT:\n"
-        + json.dumps(payload, ensure_ascii=False, indent=2)
+        + json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
     )
 
 
@@ -488,7 +489,7 @@ def build_scenes_plan_payload(
         "feedback": feedback,
         "generation_comment": (generation_comment or "").strip(),
         "dialogue_feedback_hint": _dialogue_feedback_hint(feedback),
-        "previous_scenes": previous_scenes,
+        "previous_scenes": scene_context(previous_scenes),
         "assets": _character_assets_only(),
         "character_short_descriptions": _character_short_descriptions(),
         "required_characters": ["grandma", "cat"],
@@ -650,5 +651,5 @@ def build_scenes_plan_prompt(payload: dict[str, Any]) -> str:
         "измени именно эти scene.text/action/visual_description/dialogue и не игнорируй ни один пункт. "
         "Сцены без упомянутых правок сохраняй максимально близко к previous_scenes, сохранив блюдо и логику рецепта.\n"
         "ЗАПРЕЩЕНО сухое «готовит» без деталей. voice_needed и lip sync; модель veo3_fast предпочтительна.\n\nINPUT:\n"
-        + json.dumps(payload, ensure_ascii=False, indent=2)
+        + json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
     )

@@ -53,9 +53,10 @@ def test_routes_existing_entrypoint_to_openai_with_images(monkeypatch):
     assert url == 'https://api.openai.com/v1/responses'
     assert kwargs['json']['model'] == 'creative-model'
     assert kwargs['json']['store'] is False
-    content = kwargs['json']['input'][0]['content']
+    content = kwargs['json']['input'][1]['content']
     from app.writing_style import with_writing_style
-    assert content[0] == {'type': 'input_text', 'text': with_writing_style('script')}
+    assert content[0] == {'type': 'input_text', 'text': 'script'}
+    assert kwargs['json']['input'][0]['content'][0]['text'].startswith(with_writing_style('')[:-2])
     assert len(content) == 2
     assert content[1]['image_url'].startswith('data:image/png;base64,')
 
@@ -144,7 +145,8 @@ def test_persistent_admin_choice_wins_over_profile_but_guest_uses_luna(monkeypat
         settings.LEGACY_GUEST_TEXT.reset(token)
     payload = calls[-1][1]['json']
     assert payload['model'] == 'gpt-6-luna'
-    assert payload['input'][0]['content'][0]['text'] == HUMAN_WRITING_RULES + '\n\nscript'
+    assert payload['input'][0]['content'][0]['text'].startswith(HUMAN_WRITING_RULES)
+    assert payload['input'][1]['content'][0]['text'] == 'script'
 
 
 @pytest.mark.parametrize('profile, expected', [
@@ -189,3 +191,12 @@ def test_concept_and_json_repair_are_short_but_full_recipe_is_creative(monkeypat
     asyncio.run(pipeline.generate_recipe_concepts('Ужин'))
     assert asyncio.run(pipeline.generate_recipe_full_text('Ужин')) == 'Готовый рецепт'
     assert calls == ['short', 'short', 'creative']
+
+
+def test_incomplete_billed_response_is_recorded_before_rejection(monkeypatch):
+    from app.openai_usage import usage_summary
+    data = {'id': 'resp-incomplete', 'status': 'incomplete', 'usage': {'input_tokens': 100, 'output_tokens': 20}}
+    response(monkeypatch, data)
+    with pytest.raises(RuntimeError):
+        llm.gemini_generate_sync('hello')
+    assert usage_summary()['month_nano'] > 0

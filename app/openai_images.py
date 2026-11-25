@@ -14,6 +14,7 @@ import requests
 from PIL import Image
 
 from .media_file_store import image_file_extension, image_mime_type
+from .openai_usage import record_usage, operation_name
 
 logger = logging.getLogger("bot.image")
 OPENAI_IMAGE_MODEL = "gpt-image-2.6-sunburst"
@@ -51,6 +52,7 @@ def generate_openai_image(
     key = (os.getenv("OPENAI_API_KEY") or "").strip()
     if not key:
         raise RuntimeError("Missing environment variable: OPENAI_API_KEY")
+    operation = operation_name()
     size = _output_size(aspect_ratio)
     fields = {"model": model, "prompt": prompt, "size": size, "quality": "high", "output_format": "png", "n": 1}
     endpoint = "edits" if references else "generations"
@@ -72,6 +74,11 @@ def generate_openai_image(
             reason = code if isinstance(code, str) and re.fullmatch(r"[a-z_]{1,70}", code) else "request_failed"
             raise RuntimeError(f"OpenAI Images HTTP {response.status_code} ({reason})")
         result = response.json()
+        provider_request_id = response.headers.get("x-request-id")
+    usage = result.get("usage") or {}
+    # Provider billing survives local decode/validation failures.
+    record_usage(event_id=provider_request_id, model=model, kind="image", usage=usage,
+                 operation=operation, prompt=prompt)
     try:
         data = base64.b64decode(result["data"][0]["b64_json"], validate=True)
         with Image.open(io.BytesIO(data)) as image:

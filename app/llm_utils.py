@@ -39,6 +39,8 @@ from .constants import (
 from .llm_logging import get_llm_io_logger
 from .llm_queue import LLMCallTimeoutError, resolve_llm_generate_timeout_sec, submit_llm
 from .writing_style import with_writing_style
+from .openai_requests import text_request
+from .openai_usage import record_usage, operation_name
 from .text_settings import GUEST_TEXT_MODEL, LEGACY_GUEST_TEXT, selected_text_model
 
 logger = logging.getLogger("bot")
@@ -757,7 +759,8 @@ def openai_generate_sync(
     if not api_key:
         raise RuntimeError("Missing environment variable: OPENAI_API_KEY")
     model = openai_text_model(model_profile)
-    content: list[dict[str, Any]] = [{"type": "input_text", "text": with_writing_style(prompt)}]
+    content: list[dict[str, Any]] = []
+    operation = operation_name()
     for payload in _dedupe_binary_payloads(images):
         mime = _guess_media_mime_type(payload)
         if not mime.startswith("image/"):
@@ -765,12 +768,15 @@ def openai_generate_sync(
         encoded = base64.b64encode(payload).decode("ascii")
         content.append({"type": "input_image", "image_url": f"data:{mime};base64,{encoded}"})
 
+    payload = text_request(prompt, model=model, profile=model_profile, images=content)
+
     def _call() -> str:
         logger.info("OpenAI text generation model=%s profile=%s", model, model_profile)
         with requests.post(
             "https://api.openai.com/v1/responses",
             headers={"Authorization": f"Bearer {api_key}"},
-            json={"model": model, "input": [{"role": "user", "content": content}], "store": False},
+            json=payload,
+            allow_redirects=False,
             timeout=(15, 150),
         ) as response:
             if not response.ok:
@@ -786,6 +792,9 @@ def openai_generate_sync(
                     raise ConnectionError(f"OpenAI HTTP {response.status_code}")
                 raise RuntimeError(f"OpenAI HTTP {response.status_code}")
             data = response.json()
+        record_usage(event_id=data.get("id"), model=data.get("model") or model,
+                     kind="text", usage=data.get("usage"), profile=model_profile,
+                     operation=operation, status=data.get("status", "unknown"), prompt=prompt)
         if data.get("status") != "completed":
             raise RuntimeError("OpenAI did not complete the response")
         text = "\n".join(

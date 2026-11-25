@@ -61,6 +61,7 @@ from .session_store import recover_interrupted_guest_syntax_sessions
 from .speech_usage import format_speech_alignment_remaining, speech_alignment_monthly_usage
 from .handlers.instagram_stats import handle_calendar, send_instagram_stats
 from .bot_commands import configure_owner_commands
+from .openai_usage import usage_summary, format_usage_summary, run_alerts
 from .text_settings import text_model_command as admin_text_model_command
 
 logger = logging.getLogger("bot")
@@ -226,6 +227,15 @@ async def quiet_mode_stats_command(update, context) -> None:
     except Exception:
         logger.exception("speech_alignment.usage_stats_failed")
         text += "\nТочная синхронизация субтитров: статистика временно недоступна."
+    chat = getattr(update, "effective_chat", None)
+    user = getattr(update, "effective_user", None)
+    if (getattr(chat, "type", None) == "private"
+            and getattr(chat, "id", None) == getattr(user, "id", None)):
+        try:
+            text += "\n" + format_usage_summary(await asyncio.to_thread(usage_summary))
+        except Exception:
+            logger.exception("openai.usage_stats_failed")
+            text += "\nOpenAI API: статистика временно недоступна."
     await message.reply_text(
         text,
         reply_markup=_admin_keyboard_for_current_session(update, identity, enabled),
@@ -449,6 +459,9 @@ async def _quiet_mode_midnight_loop() -> None:
 
 
 async def _post_init(application: Application) -> None:
+    application.bot_data["openai_usage_alert_task"] = asyncio.create_task(
+        run_alerts(application.bot), name="openai-usage-alerts",
+    )
     try:
         await configure_owner_commands(application.bot)
     except Exception as exc:
@@ -476,7 +489,7 @@ async def _post_init(application: Application) -> None:
 
 
 async def _post_shutdown(application: Application) -> None:
-    for key in (_QUIET_MODE_MIDNIGHT_TASK_KEY, "advertising_queue_task", "article_queue_task", "discipline_queue_task"):
+    for key in (_QUIET_MODE_MIDNIGHT_TASK_KEY, "advertising_queue_task", "article_queue_task", "discipline_queue_task", "openai_usage_alert_task"):
         task = application.bot_data.pop(key, None)
         if task is not None:
             task.cancel()

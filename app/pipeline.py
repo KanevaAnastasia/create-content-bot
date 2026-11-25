@@ -277,6 +277,7 @@ def _strip_location_context_for_llm(value: Any) -> Any:
     Location data может храниться в проекте для совместимости, но в LLM-запросы
     больше не уходит: консистентность держится на предметных continuity anchors.
     """
+    from .llm_payload import RUNTIME_SCENE_FIELDS
     if isinstance(value, list):
         return [_strip_location_context_for_llm(v) for v in value]
     if not isinstance(value, dict):
@@ -284,7 +285,7 @@ def _strip_location_context_for_llm(value: Any) -> Any:
     out: dict[str, Any] = {}
     for key, raw in value.items():
         k = str(key)
-        if k in {"location", "location_top_view", "allowed_locations_strict"}:
+        if k in RUNTIME_SCENE_FIELDS or k in {"location", "location_top_view", "allowed_locations_strict"}:
             continue
         if k in {"character_descriptions", "visual_prop_descriptions"}:
             continue
@@ -2230,7 +2231,7 @@ def _build_silence_scenes_plan_prompt(
         "Grandma's hands may dominate the frame while the orange cat's action remains readable.\n"
         "Include dynamic visible actions and rich natural cooking sounds in sound_design: pouring sauce, bubbling, sizzling, spoon on ceramic, cloth movement, plus cat purrs or tiny paw taps only when the cat is visible.\n"
         "Never include background music.\n\n"
-        + json.dumps(payload, ensure_ascii=False, indent=2)
+        + json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
     )
 
 
@@ -2411,7 +2412,7 @@ def _build_long_scenes_plan_prompt(
         "Grandmother and exactly one orange cartoon cat are present in every ordinary scene unless the scene is a tight "
         "food-only macro insert; no extra people or duplicate animals. Never use low angle/from-below camera.\n"
         "If previous_scenes are present, edit them according to user_feedback while preserving the long-mode contract.\n\n"
-        + json.dumps(payload, ensure_ascii=False, indent=2)
+        + json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
     )
 
 
@@ -3059,7 +3060,7 @@ async def _generate_silence_full_production(
         "Use dish_visual_brief to keep the food accurate and appetizing.\n\n"
         "If feedback is present, apply it literally to the requested scene. "
         "If targeted_final_scene_feedback is non-empty, the LAST scene start_frame_prompt_ru and video_prompt_en must visibly contain that requested food/composition.\n\n"
-        + json.dumps(payload, ensure_ascii=False, indent=2)
+        + json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
     )
     raw = await asyncio.to_thread(gemini_generate_sync, prompt, model_profile=GEMINI_MODEL_PROFILE_CREATIVE)
     try:
@@ -3214,7 +3215,7 @@ async def generate_frame_prompts_for_approval(
         "Do not use location names or location references. Preserve continuity through continuity_anchors and continuity_state.\n"
         "Do not reference other scenes; each prompt must be independent.\n"
         "If a scene contains romantic_drama_beat, include it visibly and clearly in start_frame_prompt_ru for that exact scene.\n"
-        + json.dumps(payload, ensure_ascii=False, indent=2)
+        + json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
     )
     image_payloads = [image for image in (reference_images or []) if isinstance(image, bytes) and image]
     raw = await asyncio.to_thread(
@@ -3491,7 +3492,7 @@ async def generate_full_production(
             + (f"DISH VISUAL BRIEF:\n{dish_brief}\n" if dish_brief else "")
             + feedback_block
             + "\n"
-            + json.dumps(payload, ensure_ascii=False, indent=2)
+            + json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
         )
         raw = await asyncio.to_thread(gemini_generate_sync, prompt, model_profile=GEMINI_MODEL_PROFILE_CREATIVE)
         try:
@@ -3750,7 +3751,7 @@ async def generate_full_production(
         "If a scene contains romantic_drama_beat, both start_frame_prompt_ru and video_prompt_en must show that beat as visible background action for that exact scene.\n"
         + (f"MANDATORY GENERATION COMMENT FROM QUEUE/USER:\n{comment}\n" if comment else "")
         + (f"DISH VISUAL BRIEF:\n{dish_brief}\n" if dish_brief else "")
-        + json.dumps(payload, ensure_ascii=False, indent=2)
+        + json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
     )
     raw = await asyncio.to_thread(gemini_generate_sync, prompt, model_profile=GEMINI_MODEL_PROFILE_CREATIVE)
     try:

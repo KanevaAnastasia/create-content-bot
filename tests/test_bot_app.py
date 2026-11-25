@@ -211,17 +211,17 @@ def test_stat_command_reports_guest_generation_usage_to_owner(monkeypatch):
         async def reply_text(self, text, reply_markup=None):
             sent.append((text, reply_markup))
 
-    asyncio.run(bot_app.quiet_mode_stats_command(SimpleNamespace(message=Message()), SimpleNamespace()))
+    asyncio.run(bot_app.quiet_mode_stats_command(SimpleNamespace(message=Message(),
+        effective_chat=SimpleNamespace(id=123, type="private"), effective_user=SimpleNamespace(id=123)), SimpleNamespace()))
 
-    assert sent == [
-        (
+    assert sent[0][0].startswith(
             "Гостевой режим: использовано 4 из 15 генераций сегодня.\n"
             "Изображения: сгенерировано 3 сегодня.\n"
             "Точная синхронизация субтитров: осталось 59 мин 20 сек из 60 мин в этом месяце "
-            "(использовано 0 мин 40 сек по учёту бота).",
-            current_markup,
-        )
-    ]
+            "(использовано 0 мин 40 сек по учёту бота)."
+    )
+    assert "OpenAI API (по учёту бота" in sent[0][0]
+    assert sent[0][1] is current_markup
     instagram.assert_not_awaited()
 
 
@@ -268,3 +268,21 @@ def test_instagram_calendar_is_owner_only(monkeypatch):
     asyncio.run(bot_app.instagram_stats_callback(update, SimpleNamespace()))
     calendar.assert_not_awaited()
     update.callback_query.answer.assert_awaited_once()
+
+
+def test_financial_statistics_never_appear_in_group_chat(monkeypatch):
+    owner = SimpleNamespace(role="admin", normalized_username="a_kaneva")
+    monkeypatch.setattr(bot_app, "_identity_for_update", lambda *_: owner)
+    monkeypatch.setattr(bot_app, "automatic_quiet_mode_status", lambda: None)
+    monkeypatch.setattr(bot_app, "_quiet_mode_enabled_safe", lambda: False)
+    monkeypatch.setattr(bot_app, "guest_generated_images_today", lambda: 0)
+    monkeypatch.setattr(bot_app, "speech_alignment_monthly_usage", lambda: {})
+    monkeypatch.setattr(bot_app, "_admin_keyboard_for_current_session", lambda *_: None)
+    def forbidden():
+        raise AssertionError('Financial data must not be read in groups')
+    monkeypatch.setattr(bot_app, "usage_summary", forbidden)
+    message = SimpleNamespace(reply_text=AsyncMock())
+    update = SimpleNamespace(message=message, effective_chat=SimpleNamespace(id=-123, type="group"),
+                             effective_user=SimpleNamespace(id=123))
+    asyncio.run(bot_app.quiet_mode_stats_command(update, SimpleNamespace()))
+    assert 'OpenAI' not in message.reply_text.call_args.args[0]
