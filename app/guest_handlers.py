@@ -807,6 +807,156 @@ def _scene_index_map(session: dict[str, Any]) -> dict[int, str]:
     return {int(key): str(value) for key, value in raw.items()}
 
 
+def _approved_cartoon_candidate_id(scene_payload: dict[str, Any]) -> str:
+    candidates = ((scene_payload.get("video_candidates_by_lang") or {}).get("ru") or [])
+    approved = [
+        str(candidate.get("candidate_id") or "").strip()
+        for candidate in candidates
+        if isinstance(candidate, dict) and candidate.get("approved_for_production") is True
+    ]
+    if approved:
+        return approved[-1]
+    return ""
+
+
+def _reconcile_approved_cartoon_scene_map(
+    session: dict[str, Any],
+    approved_scenes: list[dict[str, Any]] | None = None,
+) -> dict[int, str]:
+    """Rebuild the exact approved UUID map without relying on scene ordinals."""
+    approved = approved_scenes
+    if approved is None:
+        approved = [
+            item
+            for item in (_guest_data(session).get("approved_scenes") or [])
+            if isinstance(item, dict)
+        ]
+    existing = _scene_index_map(session)
+    run_id = _run_uuid(session)
+    candidate_by_index = {
+        index: candidate_id
+        for index, payload in enumerate(approved)
+        if (candidate_id := _approved_cartoon_candidate_id(payload))
+    }
+    candidate_ids = list(candidate_by_index.values())
+    existing_ids = []
+    for index in range(len(approved)):
+        if index not in existing:
+            continue
+        try:
+            existing_ids.append(uuid.UUID(str(existing[index])))
+        except (TypeError, ValueError, AttributeError):
+            continue
+    with SessionLocal() as db:
+        candidate_rows = []
+        if candidate_ids:
+            candidate_rows = db.execute(
+                select(SceneVideoCandidate.candidate_id, SceneVideoCandidate.scene_id)
+                .join(Scene, Scene.id == SceneVideoCandidate.scene_id)
+                .where(
+                    Scene.run_id == run_id,
+                    SceneVideoCandidate.candidate_id.in_(candidate_ids),
+                    SceneVideoCandidate.approved_for_production.is_(True),
+                )
+            ).all()
+        valid_existing_ids = set()
+        if existing_ids:
+            valid_existing_ids = set(
+                db.execute(
+                    select(Scene.id).where(Scene.run_id == run_id, Scene.id.in_(existing_ids))
+                ).scalars().all()
+            )
+    scene_id_by_candidate = {str(candidate_id): str(scene_id) for candidate_id, scene_id in candidate_rows}
+    reconciled: dict[int, str] = {}
+    for index in range(len(approved)):
+        candidate_id = candidate_by_index.get(index)
+        if candidate_id:
+            scene_id = scene_id_by_candidate.get(candidate_id)
+            if not scene_id:
+                raise RuntimeError(f"Утверждённый кандидат сцены {index + 1} не найден в текущем запуске.")
+        else:
+            existing_id = existing.get(index)
+            try:
+                existing_uuid = uuid.UUID(str(existing_id or ""))
+            except (TypeError, ValueError, AttributeError):
+                existing_uuid = None
+            if existing_uuid is None or existing_uuid not in valid_existing_ids:
+                raise RuntimeError(f"Не удалось восстановить UUID утверждённой сцены {index + 1}.")
+            scene_id = str(existing_uuid)
+        if scene_id in reconciled.values():
+            raise RuntimeError("Несколько утверждённых сцен ссылаются на один UUID.")
+        reconciled[index] = scene_id
+    session["scene_db_ids_by_index"] = reconciled
+    return reconciled
+
+
+def _scene_has_persisted_work(scene: Scene) -> bool:
+    if any(
+        str(value or "").strip()
+        for value in (
+            scene.text,
+            scene.start_frame_prompt,
+            scene.start_frame_prompt_effective,
+            scene.end_frame_prompt,
+        )
+    ):
+        return True
+    if any((scene.video_prompt_by_lang, scene.speech_by_lang, scene.syntax_prompt_by_lang, scene.prompt_meta_json)):
+        return True
+    return any(
+        (
+            scene.video_results,
+            scene.image_candidates,
+            scene.media_message_links,
+            scene.video_candidates,
+            scene.artifacts,
+            scene.text_revisions,
+        )
+    )
+
+
+def _repair_cartoon_scene_state(
+    session: dict[str, Any],
+    *,
+    prune_empty_unmapped: bool = False,
+) -> list[str]:
+    """Reconcile approved scene UUIDs and optionally remove only empty orphan rows."""
+    mapping = _reconcile_approved_cartoon_scene_map(session)
+    if not prune_empty_unmapped:
+        return []
+    run_id = _run_uuid(session)
+    mapped_ids = {uuid.UUID(scene_id) for scene_id in mapping.values()}
+    with SessionLocal() as db:
+        scenes = list(db.execute(select(Scene).where(Scene.run_id == run_id)).scalars().all())
+        nonempty_unmapped = [
+            scene for scene in scenes if scene.id not in mapped_ids and _scene_has_persisted_work(scene)
+        ]
+        if nonempty_unmapped:
+            ids = ", ".join(str(scene.id) for scene in nonempty_unmapped)
+            raise RuntimeError(f"Нельзя удалить сцены с сохранёнными материалами: {ids}")
+        removable = [scene for scene in scenes if scene.id not in mapped_ids]
+        removed_ids = [str(scene.id) for scene in removable]
+        for scene in removable:
+            db.delete(scene)
+        mapped_rows = {
+            str(scene.id): scene
+            for scene in scenes
+            if scene.id in mapped_ids
+        }
+        for index, scene_id in mapping.items():
+            mapped_rows[scene_id].scene_order = -(index + 1)
+        db.flush()
+        for index, scene_id in mapping.items():
+            mapped_rows[scene_id].scene_order = index + 1
+        db.commit()
+    if mapping:
+        last_index = len(mapping) - 1
+        data = _guest_data(session)
+        data["scene_index"] = last_index
+        data["scene_id"] = mapping[last_index]
+    return removed_ids
+
+
 def _list_project_characters(project_id: uuid.UUID) -> list[GuestCharacter]:
     with SessionLocal() as db:
         rows = db.execute(
@@ -1257,14 +1407,38 @@ def _ensure_character_run(session: dict[str, Any]) -> tuple[uuid.UUID, uuid.UUID
 
 def _append_cartoon_scene(session: dict[str, Any]) -> uuid.UUID:
     run_id = _run_uuid(session)
+    mapping = _scene_index_map(session)
+    mapped_ids = set()
+    for scene_id in mapping.values():
+        try:
+            mapped_ids.add(uuid.UUID(str(scene_id)))
+        except (TypeError, ValueError, AttributeError):
+            continue
     with SessionLocal() as db:
-        max_order = db.execute(select(func.max(Scene.scene_order)).where(Scene.run_id == run_id)).scalar_one() or 0
-        scene = Scene(run_id=run_id, scene_order=int(max_order) + 1, text="", duration_sec=8.0)
-        db.add(scene)
-        db.flush()
+        scenes = list(
+            db.execute(
+                select(Scene).where(Scene.run_id == run_id).order_by(Scene.scene_order.asc())
+            ).scalars().all()
+        )
+        mapped_orders = [scene.scene_order for scene in scenes if scene.id in mapped_ids]
+        latest_mapped_order = max(mapped_orders, default=0)
+        scene = next(
+            (
+                row
+                for row in scenes
+                if row.id not in mapped_ids
+                and row.scene_order > latest_mapped_order
+                and not _scene_has_persisted_work(row)
+            ),
+            None,
+        )
+        if scene is None:
+            max_order = max((row.scene_order for row in scenes), default=0)
+            scene = Scene(run_id=run_id, scene_order=int(max_order) + 1, text="", duration_sec=8.0)
+            db.add(scene)
+            db.flush()
         scene_id = scene.id
         db.commit()
-    mapping = _scene_index_map(session)
     index = len(mapping)
     mapping[index] = str(scene_id)
     session["scene_db_ids_by_index"] = mapping
@@ -3342,7 +3516,8 @@ async def guest_on_text(update: Update, context: ContextTypes.DEFAULT_TYPE, iden
                     str(value)
                     for value in previous.get("selected_character_ids") or data.get("selected_character_ids") or []
                 ]
-                _append_cartoon_scene(session)
+                _reconcile_approved_cartoon_scene_map(session, approved)
+                new_scene_id = _append_cartoon_scene(session)
                 data.clear()
                 data["approved_scenes"] = approved
                 data["selected_character_ids"] = previous_selection
@@ -3351,7 +3526,7 @@ async def guest_on_text(update: Update, context: ContextTypes.DEFAULT_TYPE, iden
                 data["allow_empty_character_selection"] = False
                 data["previous_video_uri"] = str(previous.get("video_uri") or "")
                 data["scene_index"] = len(approved)
-                data["scene_id"] = _scene_index_map(session)[len(approved)]
+                data["scene_id"] = str(new_scene_id)
                 data["aspect_ratio"] = aspect_ratio if aspect_ratio in {"9:16", "16:9"} else "9:16"
                 session["state"] = STATE_CARTOON_CHARACTERS
                 selection_text = (

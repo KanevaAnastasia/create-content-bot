@@ -17,10 +17,26 @@ from .yandex_disk import upload_file_to_yandex_disk, yandex_disk_upload_required
 logger = logging.getLogger("bot.artifacts")
 
 
-def _scene_uuid_for_session(session: dict[str, Any], scene_idx: int | None) -> uuid.UUID | None:
+def _run_and_scene_map_for_session(session: dict[str, Any]) -> tuple[str | None, dict[int, str]]:
+    if session.get("guest_mode") is not True:
+        return ensure_generation_run_for_session(session)
+    run_id = str(session.get("generation_run_id") or "").strip() or None
+    raw_map = session.get("scene_db_ids_by_index")
+    scene_map: dict[int, str] = {}
+    if isinstance(raw_map, dict):
+        for raw_index, raw_scene_id in raw_map.items():
+            try:
+                index = int(raw_index)
+                scene_id = str(uuid.UUID(str(raw_scene_id)))
+            except (TypeError, ValueError, AttributeError):
+                continue
+            scene_map[index] = scene_id
+    return run_id, scene_map
+
+
+def _scene_uuid_for_map(scene_map: dict[int, str], scene_idx: int | None) -> uuid.UUID | None:
     if scene_idx is None:
         return None
-    _run_id, scene_map = ensure_generation_run_for_session(session)
     raw = scene_map.get(int(scene_idx))
     if not raw:
         return None
@@ -46,11 +62,11 @@ def persist_generation_artifact(
     if not uri:
         return None
     try:
-        run_id_str, _scene_map = ensure_generation_run_for_session(session)
+        run_id_str, scene_map = _run_and_scene_map_for_session(session)
         if not run_id_str:
             return None
         run_id = uuid.UUID(run_id_str)
-        scene_id = _scene_uuid_for_session(session, scene_idx)
+        scene_id = _scene_uuid_for_map(scene_map, scene_idx)
         normalized_language = str(language or "").strip().lower() or None
         with SessionLocal() as db:
             row = (

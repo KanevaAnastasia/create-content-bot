@@ -6,7 +6,7 @@ from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 
 import pytest
-from sqlalchemy import create_engine, select
+from sqlalchemy import create_engine, func, select
 from sqlalchemy.orm import sessionmaker
 from sqlalchemy.pool import StaticPool
 
@@ -14,6 +14,7 @@ from app import guest_access, guest_handlers, session_store
 from app.models import (
     Base,
     BotUser,
+    ChatSession,
     Character,
     GenerationArtifact,
     GenerationRun,
@@ -763,6 +764,150 @@ def test_guest_run_snapshot_is_saved_per_generation(guest_db):
     assert restored["state"] == guest_handlers.STATE_CARTOON_SCENE_DONE
     assert restored["generation_run_id"] == str(run_id)
     assert restored["guest_data"]["approved_scenes"][0]["scene"] == 1
+
+
+def test_guest_session_save_preserves_exact_uuid_map_when_generic_plan_is_stale(guest_db):
+    session, _project_id = _guest_session_with_project(guest_db)
+    run_id, _ = guest_handlers._new_run(session, "cartoon", title="Мультфильм")
+    for _ in range(3):
+        guest_handlers._append_cartoon_scene(session)
+    expected_map = dict(session["scene_db_ids_by_index"])
+    stale_plan = [
+        {"video_prompt_by_lang": {"ru": f"Устаревший промпт {index + 1}"}}
+        for index in range(3)
+    ]
+    session["production"] = {"json_plan": stale_plan}
+    session["scenes_plan"] = list(stale_plan)
+    session["guest_data"]["approved_scenes"] = [
+        {"scene": index + 1, "video_uri": f"file:///scene-{index + 1}.mp4"}
+        for index in range(4)
+    ]
+
+    session_store.save_session(606, session)
+
+    history = session_store.load_guest_run_snapshot(run_id)
+    assert history is not None
+    with guest_db() as db:
+        active = db.execute(select(ChatSession).where(ChatSession.chat_id == 606)).scalar_one()
+        active_map = {
+            int(index): str(scene_id)
+            for index, scene_id in (active.session_json or {}).get("scene_db_ids_by_index", {}).items()
+        }
+    history_map = {
+        int(index): str(scene_id)
+        for index, scene_id in history["scene_db_ids_by_index"].items()
+    }
+    assert active_map == expected_map
+    assert history_map == expected_map
+
+
+def test_next_cartoon_scene_repairs_approved_uuid_map_and_reuses_empty_placeholder(
+    guest_db, monkeypatch, tmp_path
+):
+    session, project_id = _guest_session_with_project(guest_db)
+    monkeypatch.setenv("SCENE_MEDIA_ARTIFACTS_DIR", str(tmp_path / "artifacts"))
+    guest_handlers._new_run(session, "cartoon", title="Мультфильм")
+    first_scene_id = session["scene_db_ids_by_index"][0]
+    guest_handlers._persist_video_candidate(session, b"first", prompt="Первая сцена")
+    guest_handlers._approve_video_candidate(session)
+    first_payload = guest_handlers._finish_scene_payload(session)
+
+    second_scene_id = str(guest_handlers._append_cartoon_scene(session))
+    guest_handlers._persist_video_candidate(session, b"second", prompt="Вторая сцена")
+    guest_handlers._approve_video_candidate(session)
+    second_payload = guest_handlers._finish_scene_payload(session)
+    with guest_db() as db:
+        placeholder = Scene(
+            run_id=uuid.UUID(session["generation_run_id"]),
+            scene_order=3,
+            text="",
+            duration_sec=8.0,
+        )
+        db.add(placeholder)
+        db.commit()
+        placeholder_id = str(placeholder.id)
+
+    session["scene_db_ids_by_index"] = {0: first_scene_id}
+    session["guest_data"]["approved_scenes"] = [first_payload, second_payload]
+    session["state"] = guest_handlers.STATE_CARTOON_SCENE_DONE
+    chat_id = 922
+    dict.__setitem__(guest_handlers.SESSIONS, chat_id, session)
+    identity = guest_access.BotIdentity(
+        user_id=uuid.UUID(session["bot_user_id"]),
+        telegram_id=chat_id,
+        normalized_username="guest606",
+        display_name="Гость",
+        role="guest",
+        is_active=True,
+        project_id=project_id,
+    )
+    monkeypatch.setattr(guest_handlers, "save_loaded_session_if_possible", lambda _chat_id: None)
+    message = _Message()
+    message.text = "Следующая сцена"
+    update = SimpleNamespace(message=message, effective_chat=SimpleNamespace(id=chat_id))
+
+    asyncio.run(guest_handlers.guest_on_text(update, SimpleNamespace(), identity))
+
+    assert session["state"] == guest_handlers.STATE_CARTOON_CHARACTERS
+    assert session["scene_db_ids_by_index"] == {
+        0: first_scene_id,
+        1: second_scene_id,
+        2: placeholder_id,
+    }
+    assert session["guest_data"]["scene_id"] == placeholder_id
+    assert session["guest_data"]["scene_index"] == 2
+    assert all("Произошла ошибка" not in item[1] for item in message.sent if item[0] == "text")
+    with guest_db() as db:
+        assert db.execute(
+            select(func.count()).select_from(Scene).where(
+                Scene.run_id == uuid.UUID(session["generation_run_id"])
+            )
+        ).scalar_one() == 3
+    dict.pop(guest_handlers.SESSIONS, chat_id, None)
+
+
+def test_cartoon_scene_repair_prunes_only_empty_unmapped_rows(guest_db, monkeypatch, tmp_path):
+    session, _project_id = _guest_session_with_project(guest_db)
+    monkeypatch.setenv("SCENE_MEDIA_ARTIFACTS_DIR", str(tmp_path / "artifacts"))
+    guest_handlers._new_run(session, "cartoon", title="Мультфильм")
+    first_scene_id = session["scene_db_ids_by_index"][0]
+    guest_handlers._persist_video_candidate(session, b"first", prompt="Первая сцена")
+    guest_handlers._approve_video_candidate(session)
+    first_payload = guest_handlers._finish_scene_payload(session)
+    second_scene_id = str(guest_handlers._append_cartoon_scene(session))
+    guest_handlers._persist_video_candidate(session, b"second", prompt="Вторая сцена")
+    guest_handlers._approve_video_candidate(session)
+    second_payload = guest_handlers._finish_scene_payload(session)
+    with guest_db() as db:
+        empty = Scene(
+            run_id=uuid.UUID(session["generation_run_id"]),
+            scene_order=3,
+            text="",
+            duration_sec=8.0,
+        )
+        db.add(empty)
+        db.commit()
+        empty_id = str(empty.id)
+
+    session["scene_db_ids_by_index"] = {0: first_scene_id}
+    session["guest_data"]["approved_scenes"] = [first_payload, second_payload]
+
+    removed = guest_handlers._repair_cartoon_scene_state(session, prune_empty_unmapped=True)
+
+    assert removed == [empty_id]
+    assert session["scene_db_ids_by_index"] == {0: first_scene_id, 1: second_scene_id}
+    assert session["guest_data"]["scene_index"] == 1
+    assert session["guest_data"]["scene_id"] == second_scene_id
+    with guest_db() as db:
+        rows = db.execute(
+            select(Scene).where(
+                Scene.run_id == uuid.UUID(session["generation_run_id"])
+            ).order_by(Scene.scene_order)
+        ).scalars().all()
+        assert [(str(row.id), row.scene_order) for row in rows] == [
+            (first_scene_id, 1),
+            (second_scene_id, 2),
+        ]
 
 
 def test_character_creation_replaces_stale_run_without_scene(guest_db):

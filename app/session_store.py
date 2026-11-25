@@ -485,8 +485,9 @@ def save_session(chat_id: int, session: dict[str, Any]) -> None:
         return
     run_id_str = str(session.get("generation_run_id") or "").strip() or None
     try:
-        has_scene_snapshot = isinstance(session.get("production"), dict) or (
-            isinstance(session.get("scenes_plan"), list) and bool(session.get("scenes_plan"))
+        has_scene_snapshot = session.get("guest_mode") is not True and (
+            isinstance(session.get("production"), dict)
+            or (isinstance(session.get("scenes_plan"), list) and bool(session.get("scenes_plan")))
         )
         if has_scene_snapshot:
             run_id_str, scene_map = ensure_generation_run_for_session(session)
@@ -495,7 +496,11 @@ def save_session(chat_id: int, session: dict[str, Any]) -> None:
     except Exception:
         logger.exception("session_store.ensure_generation_run_failed chat_id=%s", chat_id)
     production = session.get("production") if isinstance(session.get("production"), dict) else {}
-    scenes = production.get("json_plan") if isinstance(production.get("json_plan"), list) else []
+    scenes = (
+        production.get("json_plan")
+        if session.get("guest_mode") is not True and isinstance(production.get("json_plan"), list)
+        else []
+    )
     for scene_idx, scene in enumerate(scenes):
         if not isinstance(scene, dict):
             continue

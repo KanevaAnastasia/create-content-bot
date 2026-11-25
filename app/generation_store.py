@@ -711,7 +711,11 @@ def ensure_generation_run_for_session(session: dict[str, Any]) -> tuple[str | No
                         run.project_id = resolve_project_id(session.get("selected_project_key"))
                         changed = run.project_id is not None or changed
                     changed = _apply_run_cursor(run, session) or changed
-                    scene_map = _update_scene_prompt_rows(db, run.id, scenes_plan, session) if scenes_plan else {}
+                    scene_map = (
+                        _update_scene_prompt_rows(db, run.id, scenes_plan, session)
+                        if scenes_plan and session.get("guest_mode") is not True
+                        else {}
+                    )
                     if scene_map:
                         session["scene_db_ids_by_index"] = scene_map
                         raw_map = scene_map
