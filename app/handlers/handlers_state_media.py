@@ -3759,9 +3759,6 @@ async def _complete_reference_music_choice(
     session.pop(REFERENCE_MUSIC_SOURCE_PATH_SESSION_KEY, None)
     session.pop(REFERENCE_MUSIC_RESULT_PATH_SESSION_KEY, None)
     keep_original_audio = session.get(REFERENCE_ORIGINAL_AUDIO_CHOICE_SESSION_KEY) != "remove"
-    if choice == "none" and keep_original_audio:
-        await update.message.reply_text("Выбран вариант без дополнительной музыки. Утверждённое Veo-видео остаётся без изменений.")
-        return await _start_reference_description_approval(update, session)
 
     try:
         if choice == "none":
@@ -3822,15 +3819,20 @@ async def _complete_reference_music_choice(
         return True
     if music_path:
         session[REFERENCE_MUSIC_SOURCE_PATH_SESSION_KEY] = str(music_path)
-    if choice == "none":
-        progress_text = "Убираю оригинальное аудио из уже готового Veo-видео."
-        caption = "Финальный ролик без оригинального аудио и без музыки."
+    if choice == "none" and keep_original_audio:
+        progress_text = "Сохраняю оригинальное аудио и делаю обязательный апскейл Veo-видео."
+        caption = "Финальный ролик с оригинальным аудио, без добавленной музыки, после апскейла до 4K."
+    elif choice == "none":
+        progress_text = "Убираю оригинальное аудио и делаю обязательный апскейл Veo-видео."
+        caption = "Финальный ролик без оригинального аудио и без музыки, после апскейла до 4K."
     elif keep_original_audio:
-        progress_text = f"Добавляю {label} к уже готовому Veo-видео и сохраняю оригинальное аудио."
-        caption = f"Финальный ролик с оригинальным аудио и {label}."
+        progress_text = (
+            f"Добавляю {label}, сохраняю оригинальное аудио и делаю обязательный апскейл Veo-видео."
+        )
+        caption = f"Финальный ролик с оригинальным аудио и {label}, после апскейла до 4K."
     else:
-        progress_text = f"Убираю оригинальное аудио и добавляю {label} к уже готовому Veo-видео."
-        caption = f"Финальный ролик только с {label}."
+        progress_text = f"Убираю оригинальное аудио, добавляю {label} и делаю обязательный апскейл Veo-видео."
+        caption = f"Финальный ролик только с {label}, после апскейла до 4K."
     await reply_text_without_keyboard(update.message, progress_text)
     try:
         result_path = await asyncio.to_thread(

@@ -307,22 +307,41 @@ def test_existing_music_step_without_audio_choice_is_migrated():
     assert reference.REFERENCE_MUSIC_CHOICE_SESSION_KEY not in session
 
 
-def test_reference_no_music_proceeds_to_description_without_render(monkeypatch):
+def test_reference_no_music_is_still_upscaled_before_description(monkeypatch, tmp_path):
     from app.handlers import handlers_state_media as media
 
     session = _reference_session_with_approved_video()
+    result_path = tmp_path / "upscaled.mp4"
+    result_path.write_bytes(b"upscaled-video")
+    seen = {}
+
+    def fake_render(video_bytes, **kwargs):
+        seen["render"] = (video_bytes, kwargs)
+        return str(result_path)
+
     description = AsyncMock(return_value=True)
-    render = AsyncMock()
+    sent_video = AsyncMock()
     monkeypatch.setattr(media, "_start_reference_description_approval", description)
-    monkeypatch.setattr(media, "render_reference_music_variant", render)
+    monkeypatch.setattr(media, "render_reference_music_variant", fake_render)
+    monkeypatch.setattr(media, "_safe_reply_video", sent_video)
     update = SimpleNamespace(message=SimpleNamespace(reply_text=AsyncMock()))
 
     result = asyncio.run(media.handle_reference_music_choice_state(update, session, "Без музыки"))
 
     assert result is True
     assert session[reference.REFERENCE_MUSIC_CHOICE_SESSION_KEY] == "none"
+    assert seen["render"] == (
+        b"approved-veo",
+        {
+            "music_path": None,
+            "music_volume": 0.0,
+            "keep_original_audio": True,
+            "run_id": "",
+            "choice": "none",
+        },
+    )
+    assert "апскейла до 4K" in sent_video.await_args.kwargs["caption"]
     description.assert_awaited_once_with(update, session)
-    render.assert_not_called()
 
 
 def test_reference_remove_original_audio_without_music_renders_silent_video(monkeypatch, tmp_path):
@@ -520,16 +539,24 @@ def test_render_reference_music_variant_mixes_source_audio_after_video(monkeypat
     music_path = tmp_path / "music.mp3"
     music_path.write_bytes(b"music")
     commands = []
+    upscale_calls = []
 
     def fake_run(command, **_kwargs):
         commands.append(command)
         Path(command[-1]).write_bytes(b"mixed")
+
+    def fake_upscale(**kwargs):
+        upscale_calls.append(kwargs)
+        kwargs["dest_path"].write_bytes(b"upscaled")
 
     monkeypatch.setattr(ai_approval_service, "_resolve_ffmpeg", lambda: "ffmpeg")
     monkeypatch.setattr(post_production, "_has_audio_stream", lambda _path: True)
     monkeypatch.setattr(post_production, "_media_duration", lambda _path: 8.0)
     monkeypatch.setattr(post_production, "_run_ffmpeg", fake_run)
     monkeypatch.setattr(post_production, "_apply_db_attenuation", lambda volume, _db: volume)
+    monkeypatch.setattr(post_production, "_video_dimensions", lambda _path: (720, 1280))
+    monkeypatch.setattr(post_production, "_upscaled_dimensions_for_render", lambda _w, _h: (2160, 3840))
+    monkeypatch.setattr(post_production, "_upscale_master_to_4k", fake_upscale)
     monkeypatch.setattr(series_theme, "holiday_music_filter", lambda _path: "")
 
     result = reference.render_reference_music_variant(
@@ -540,23 +567,33 @@ def test_render_reference_music_variant_mixes_source_audio_after_video(monkeypat
         output_root=tmp_path / "renders",
     )
 
-    assert Path(result).read_bytes() == b"mixed"
-    assert Path(result).name == "approved_veo_default.mp4"
+    assert Path(result).read_bytes() == b"upscaled"
+    assert Path(result).name == "approved_veo_default_upscaled_4k.mp4"
     assert "amix=inputs=2:duration=first" in commands[0][commands[0].index("-filter_complex") + 1]
     assert commands[0][commands[0].index("-map") + 1] == "0:v:0"
+    assert upscale_calls[0]["target_width"] == 2160
+    assert upscale_calls[0]["target_height"] == 3840
 
 
 def test_render_reference_music_variant_can_remove_all_original_audio(monkeypatch, tmp_path):
     from app import ai_approval_service, post_production
 
     commands = []
+    upscale_calls = []
 
     def fake_run(command, **_kwargs):
         commands.append(command)
         Path(command[-1]).write_bytes(b"silent")
 
+    def fake_upscale(**kwargs):
+        upscale_calls.append(kwargs)
+        kwargs["dest_path"].write_bytes(b"silent-upscaled")
+
     monkeypatch.setattr(ai_approval_service, "_resolve_ffmpeg", lambda: "ffmpeg")
     monkeypatch.setattr(post_production, "_run_ffmpeg", fake_run)
+    monkeypatch.setattr(post_production, "_video_dimensions", lambda _path: (720, 1280))
+    monkeypatch.setattr(post_production, "_upscaled_dimensions_for_render", lambda _w, _h: (2160, 3840))
+    monkeypatch.setattr(post_production, "_upscale_master_to_4k", fake_upscale)
 
     result = reference.render_reference_music_variant(
         b"approved-video",
@@ -566,10 +603,81 @@ def test_render_reference_music_variant_can_remove_all_original_audio(monkeypatc
         output_root=tmp_path / "renders",
     )
 
-    assert Path(result).read_bytes() == b"silent"
+    assert Path(result).read_bytes() == b"silent-upscaled"
     assert "-an" in commands[0]
     assert "-c:v" in commands[0]
     assert "copy" in commands[0]
+    assert upscale_calls
+
+
+def test_reference_no_music_with_original_audio_still_runs_upscale(monkeypatch, tmp_path):
+    from app import ai_approval_service, post_production
+
+    upscale_calls = []
+
+    def fake_upscale(**kwargs):
+        upscale_calls.append(kwargs)
+        kwargs["dest_path"].write_bytes(b"upscaled-with-original-audio")
+
+    monkeypatch.setattr(ai_approval_service, "_resolve_ffmpeg", lambda: "ffmpeg")
+    monkeypatch.setattr(post_production, "_has_audio_stream", lambda _path: True)
+    monkeypatch.setattr(post_production, "_video_dimensions", lambda _path: (720, 1280))
+    monkeypatch.setattr(post_production, "_upscaled_dimensions_for_render", lambda _w, _h: (2160, 3840))
+    monkeypatch.setattr(post_production, "_upscale_master_to_4k", fake_upscale)
+
+    result = reference.render_reference_music_variant(
+        b"approved-video-with-audio",
+        music_path=None,
+        keep_original_audio=True,
+        choice="none",
+        output_root=tmp_path / "renders",
+    )
+
+    assert Path(result).read_bytes() == b"upscaled-with-original-audio"
+    assert upscale_calls[0]["src_path"].name == "approved_veo.mp4"
+    assert upscale_calls[0]["target_width"] == 2160
+    assert upscale_calls[0]["target_height"] == 3840
+
+
+def test_reference_music_is_louder_when_original_audio_is_absent(monkeypatch, tmp_path):
+    from app import ai_approval_service, post_production, series_theme
+
+    music_path = tmp_path / "music.mp3"
+    music_path.write_bytes(b"music")
+    commands = []
+
+    def fake_run(command, **_kwargs):
+        commands.append(command)
+        Path(command[-1]).write_bytes(b"music-only")
+
+    def fake_upscale(**kwargs):
+        kwargs["dest_path"].write_bytes(b"upscaled")
+
+    monkeypatch.setattr(ai_approval_service, "_resolve_ffmpeg", lambda: "ffmpeg")
+    monkeypatch.setattr(post_production, "_has_audio_stream", lambda _path: False)
+    monkeypatch.setattr(
+        post_production,
+        "_apply_db_attenuation",
+        lambda *_args: (_ for _ in ()).throw(AssertionError("music-only volume must not be attenuated")),
+    )
+    monkeypatch.setattr(post_production, "_run_ffmpeg", fake_run)
+    monkeypatch.setattr(post_production, "_video_dimensions", lambda _path: (720, 1280))
+    monkeypatch.setattr(post_production, "_upscaled_dimensions_for_render", lambda _w, _h: (2160, 3840))
+    monkeypatch.setattr(post_production, "_upscale_master_to_4k", fake_upscale)
+    monkeypatch.setattr(series_theme, "holiday_music_filter", lambda _path: "")
+
+    reference.render_reference_music_variant(
+        b"approved-video-without-audio",
+        music_path=str(music_path),
+        music_volume=0.2,
+        keep_original_audio=True,
+        choice="default",
+        output_root=tmp_path / "renders",
+    )
+
+    audio_filter = commands[0][commands[0].index("-filter_complex") + 1]
+    assert "volume=0.2000" in audio_filter
+    assert "amix=" not in audio_filter
 
 
 def test_reference_custom_music_audio_is_routed_from_audio_handler(monkeypatch):

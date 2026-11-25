@@ -384,11 +384,16 @@ def render_reference_music_variant(
     from .post_production import (
         BACKGROUND_MUSIC_ATTENUATION_DB,
         FFMPEG_UPSCALE_TIMEOUT_SEC,
+        TARGET_HEIGHT,
+        TARGET_WIDTH,
         SOURCE_AUDIO_VOLUME,
         _apply_db_attenuation,
         _has_audio_stream,
         _media_duration,
         _run_ffmpeg,
+        _upscale_master_to_4k,
+        _upscaled_dimensions_for_render,
+        _video_dimensions,
     )
     from .series_theme import holiday_music_filter
 
@@ -407,11 +412,17 @@ def render_reference_music_variant(
     clean_path = root / "approved_veo.mp4"
     clean_path.write_bytes(video_bytes)
     safe_choice = re.sub(r"[^a-z0-9_-]+", "_", str(choice or "music").casefold()).strip("_") or "music"
-    destination = root / f"approved_veo_{safe_choice}.mp4"
+    processed_path = clean_path
+    audio_path = root / f"approved_veo_{safe_choice}_audio.mp4"
+    destination = root / f"approved_veo_{safe_choice}_upscaled_4k.mp4"
     ffmpeg = _resolve_ffmpeg()
-    effective_volume = _apply_db_attenuation(float(music_volume), BACKGROUND_MUSIC_ATTENUATION_DB)
     music_filter = holiday_music_filter(str(source_music)) if source_music is not None else ""
     has_source_audio = bool(keep_original_audio and _has_audio_stream(clean_path))
+    effective_volume = (
+        _apply_db_attenuation(float(music_volume), BACKGROUND_MUSIC_ATTENUATION_DB)
+        if has_source_audio
+        else float(music_volume)
+    )
 
     if source_music is not None and has_source_audio:
         duration = max(0.0, float(_media_duration(clean_path) or 0.0))
@@ -427,19 +438,20 @@ def render_reference_music_variant(
         command = [
             ffmpeg, "-y", "-i", str(clean_path), "-stream_loop", "-1", "-i", str(source_music),
             "-filter_complex", filter_complex, "-map", "0:v:0", "-map", "[a]", "-shortest",
-            "-c:v", "copy", "-c:a", "aac", "-movflags", "+faststart", str(destination),
+            "-c:v", "copy", "-c:a", "aac", "-movflags", "+faststart", str(audio_path),
         ]
+        _run_ffmpeg(command, timeout=FFMPEG_UPSCALE_TIMEOUT_SEC, stage="reference_music_mix")
+        processed_path = audio_path
     elif source_music is not None:
         filter_complex = f"[1:a]{music_filter}volume={effective_volume:.4f}[music]"
         command = [
             ffmpeg, "-y", "-i", str(clean_path), "-stream_loop", "-1", "-i", str(source_music),
             "-filter_complex", filter_complex, "-map", "0:v:0", "-map", "[music]", "-shortest",
-            "-c:v", "copy", "-c:a", "aac", "-movflags", "+faststart", str(destination),
+            "-c:v", "copy", "-c:a", "aac", "-movflags", "+faststart", str(audio_path),
         ]
-    elif has_source_audio:
-        destination.write_bytes(video_bytes)
-        return str(destination)
-    else:
+        _run_ffmpeg(command, timeout=FFMPEG_UPSCALE_TIMEOUT_SEC, stage="reference_music_only")
+        processed_path = audio_path
+    elif not keep_original_audio:
         command = [
             ffmpeg,
             "-y",
@@ -452,9 +464,25 @@ def render_reference_music_variant(
             "-an",
             "-movflags",
             "+faststart",
-            str(destination),
+            str(audio_path),
         ]
-    _run_ffmpeg(command, timeout=FFMPEG_UPSCALE_TIMEOUT_SEC, stage="reference_music_mix")
+        _run_ffmpeg(command, timeout=FFMPEG_UPSCALE_TIMEOUT_SEC, stage="reference_audio_remove")
+        processed_path = audio_path
+
+    if not processed_path.is_file() or processed_path.stat().st_size <= 0:
+        raise RuntimeError("Финальная аудиодорожка не создана")
+    source_width, source_height = _video_dimensions(processed_path)
+    target_width, target_height = _upscaled_dimensions_for_render(
+        source_width or TARGET_WIDTH,
+        source_height or TARGET_HEIGHT,
+    )
+    _upscale_master_to_4k(
+        ffmpeg=ffmpeg,
+        src_path=processed_path,
+        dest_path=destination,
+        target_width=target_width,
+        target_height=target_height,
+    )
     if not destination.is_file() or destination.stat().st_size <= 0:
-        raise RuntimeError("Финальный ролик не создан")
+        raise RuntimeError("Финальный ролик после апскейла не создан")
     return str(destination)
