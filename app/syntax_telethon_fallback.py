@@ -3188,8 +3188,12 @@ async def _run_batch_fallback_async(
             for request, reply_anchor, sent_ids, last_info in request_runtime
         }
 
+        consumed_video_ids: set[int] = set()
+
         async def _consume_for_batch_message(message: Any) -> None:
             if message is None or getattr(message, "out", False):
+                return
+            if int(getattr(message, "id", 0) or 0) in consumed_video_ids:
                 return
             candidate_keys = _batch_message_candidate_keys(message, pending_states)
             if not candidate_keys and _message_looks_like_video(message):
@@ -3246,6 +3250,7 @@ async def _run_batch_fallback_async(
                     pending_states.pop(key, None)
                     return
                 if vbytes or vuri:
+                    consumed_video_ids.add(mid)
                     state["processed"].add(mid)
                     state["pending_refetch"].discard(mid)
                     msg_out = " ".join(x for x in (pmsg, state["last_holder"][0]) if x).strip()
