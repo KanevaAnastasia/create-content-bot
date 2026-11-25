@@ -2182,6 +2182,8 @@ def _build_silence_scenes_plan_prompt(
     generation_comment: str,
     previous_scenes: list[dict[str, Any]] | None = None,
 ) -> str:
+    from .grandma_editorial import GRANDMA_CAT_STORY_RULES
+
     payload = {
         "concept": concept,
         "full_recipe_text": full_recipe_text,
@@ -2217,14 +2219,15 @@ def _build_silence_scenes_plan_prompt(
         "If user_feedback says the first scene / scene 1 / first frame must look a certain way, scene 1 MUST be that visual hook even if it shows a later recipe payoff. Continue the recipe progression after that hook.\n"
         "If structured_silence_feedback.scenario_beats is non-empty, use those beats as the scene actions in order after the hook. If structured_silence_feedback.asmr is non-empty, include those exact sound cues in sound_design. If structured_silence_feedback.loop is non-empty, make the final scene that loop/payoff.\n"
         "Even when using user-provided beats, every action must visibly involve grandma's hands. "
-        "Use exactly one orange cartoon cat in every ordinary scene, reacting nearby without touching food, knives, or hot cookware.\n"
+        "Use exactly one orange cartoon cat in every ordinary scene.\n"
+        f"{GRANDMA_CAT_STORY_RULES}"
         "When previous_scenes are present, edit them according to user_feedback instead of starting from scratch.\n"
         "Do not return generic repeated atmosphere/cat-only beats; the recipe step must be the main content of every scene.\n"
         "Each scene is a juicy visual cooking beat lasting 3-4 seconds. Several compatible actions may happen in one scene.\n"
         "Each object must contain: scene, duration_sec, shot_type, characters, action, recipe_step, visual_description, sound_design.\n"
         "characters must always include 'grandma' and 'cat'. No other cats, no other animals, no other people.\n"
         "Use nostalgic rustic grandma kitchen atmosphere, Pixar-like non-realistic cartoon style, extreme close-up food-first framing.\n"
-        "Grandma's hands may dominate the frame; if the orange cat appears, it may react nearby, but it must not touch food, raw fish, hot cookware, or knives.\n"
+        "Grandma's hands may dominate the frame while the orange cat's action remains readable.\n"
         "Include dynamic visible actions and rich natural cooking sounds in sound_design: pouring sauce, bubbling, sizzling, spoon on ceramic, cloth movement, plus cat purrs or tiny paw taps only when the cat is visible.\n"
         "Never include background music.\n\n"
         + json.dumps(payload, ensure_ascii=False, indent=2)
@@ -2485,8 +2488,7 @@ async def generate_scenes_plan(
         ) + (
             "SILENCE MODE: no dialogue, no voiceover, no subtitles. Split the recipe into 5-8 dynamic 3-4 second Kling shots. "
             "Several compatible cooking actions may happen in one shot. Every shot must work as a silent visual beat: "
-            "nostalgic rustic grandma kitchen, extreme close-up food-first framing, orange cartoon cat near the dish; "
-            "sometimes the cat plays with a toy or a beam of sunlight. Keep the grandma atmosphere and very close food/cat shots. "
+            "nostalgic rustic grandma kitchen, extreme close-up food-first framing, with the orange cartoon cat visibly active in the background. "
             "No other cats, animals, or people except grandmother and exactly one orange cat."
         )
     elif mode == GENERATION_MODE_LONG:
@@ -3267,7 +3269,7 @@ async def generate_full_production(
     }
     viral_brief = viral_concept_brief if isinstance(viral_concept_brief, dict) else {}
     from .directorial_notes import RULE
-    from .grandma_editorial import GRANDMA_PRODUCTION_RULES
+    from .grandma_editorial import GRANDMA_CAT_PRODUCTION_RULES, GRANDMA_PRODUCTION_RULES
     comment = RULE + (generation_comment or "").strip()
     dish_brief = str(dish_visual_brief or "").strip()
     mode = normalize_generation_mode(generation_mode)
@@ -3289,12 +3291,12 @@ async def generate_full_production(
         silence_prompt_rule = (
             "SILENCE MODE FOR KLING 3.0: no dialogue, no voiceover, no subtitles, no text overlays. "
             "Every scene is a 3-4 second image-to-video shot. Use extreme close-up food-first framing, "
-            "nostalgic rustic grandma kitchen atmosphere, Pixar-like non-realistic cartoon style, orange cartoon cat close to the dish; "
-            "sometimes the cat plays with a tiny toy or a beam of sunlight. Video prompt must explicitly include: "
+            "nostalgic rustic grandma kitchen atmosphere, Pixar-like non-realistic cartoon style. "
+            "Video prompt must explicitly include: "
             "Audio enabled; natural cooking sounds only: sauce pouring, bubbling cream sauce, sizzling chicken, spoon against ceramic, "
             "soft kitchen cloth movement, cat purrs or tiny paw taps when visible. No background music. "
             "No other cats, animals, or people except grandmother and exactly one orange cat."
-        )
+        ) + GRANDMA_CAT_PRODUCTION_RULES
         comment = (comment + "\n\n" if comment else "") + silence_prompt_rule
         return await _generate_silence_full_production(
             scenes,
