@@ -60,7 +60,7 @@ from .handlers_generation_utils import (
 from .handlers_keyboards import DRAFT_BUTTON_SAVE, reply_text_without_keyboard, safe_reply_text
 from .handlers_state_media import send_social_descriptions_for_recipe
 from ..project_modes import PENDING_MODE_KEY, project_mode_rows, project_mode_labels
-from ..discipline_modes import LABELS, MODE_KEY, SHORT_FORMATS, active_mode, mode_from_label
+from ..discipline_modes import BOSS, BOSS_PILOT, LABELS, MODE_KEY, SHORT_FORMATS, active_mode, mode_from_label
 from ..directorial_notes import direction_for_session
 from ..dish_visuals import build_dish_visual_brief
 from ..llm_utils import TEXT_MODEL_PROFILE_SHORT
@@ -1695,6 +1695,8 @@ async def _handle_waiting_generation_mode_state(
             or session.get("user_input")
             or ""
         ).strip()
+        if requested_format == BOSS and (not source_story or source_story.casefold() in {"пилот", "внутренний босс"}):
+            source_story = BOSS_PILOT
         if not source_story:
             session["state"] = ""
             SESSIONS[chat_id] = session
@@ -1703,6 +1705,10 @@ async def _handle_waiting_generation_mode_state(
         session[STORY_SOURCE_SESSION_KEY] = source_story
         session["user_input"] = source_story
         session["recipe_full_text"] = source_story
+        if requested_format == BOSS:
+            session[STORY_ENGLISH_REQUESTED_SESSION_KEY] = True
+            session[STORY_VISUAL_STYLE_SESSION_KEY] = SHORT_FORMATS[BOSS].style_key
+            return await _start_initial_story_voiceover(update, context, chat_id=chat_id, session=session)
         session["state"] = STATE_WAITING_STORY_ENGLISH_CHOICE
         SESSIONS[chat_id] = session
         await _reply_text_with_optional_markup(

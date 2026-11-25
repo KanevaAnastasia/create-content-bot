@@ -16,7 +16,7 @@ from pathlib import Path
 from typing import Any
 
 from .discipline_modes import (
-    ARCHIVE, TWO_LIVES, FLOW, LABELS, MODE_KEY, REFRAME, SHORT_FORMATS, opening_sentence, script_direction, visual_direction,
+    ARCHIVE, BOSS, TWO_LIVES, FLOW, LABELS, MODE_KEY, REFRAME, SHORT_FORMATS, opening_sentence, script_direction, visual_direction,
 )
 from .llm_utils import GEMINI_MODEL_PROFILE_CREATIVE, extract_json_object, gemini_generate_sync
 from .story_visual_text import STORY_VISUAL_TEXT_RULES
@@ -331,6 +331,11 @@ STORY_VISUAL_STYLES: dict[str, dict[str, str]] = {
 
 from .history_visual_styles import HISTORY_STYLES
 STORY_VISUAL_STYLES.update(HISTORY_STYLES)
+STORY_VISUAL_STYLES["inner_boss_2d"] = {
+    "label": "Геометрический 2D",
+    "prompt": SHORT_FORMATS[BOSS].frame,
+    "reference_path": "",
+}
 
 
 def normalize_story_visual_style(value: Any) -> str:
@@ -431,6 +436,8 @@ def generate_story_voiceover(
         "user_feedback": str(user_feedback or "").strip(),
     }
     length_direction = (
+        "Целевая длительность ролика 55–65 секунд. Оставь место для пауз и действий. "
+        if discipline_mode == BOSS else
         "Целевая длительность 18–28 секунд спокойной речи, ориентир 38–60 русских слов. "
         if discipline_mode in SHORT_FORMATS and discipline_mode != ARCHIVE else
         "Озвучка должна занимать от 45 до 110 секунд естественной спокойной речи и точно укладываться в две минуты. "
@@ -441,8 +448,9 @@ def generate_story_voiceover(
         f"{length_direction}"
         "Выбирай длину по объёму исходной истории: не растягивай короткую тему, но и не выбрасывай важные мысли из большой. "
         f"Не более {STORY_VOICEOVER_MAX_WORDS} слов и {STORY_VOICEOVER_MAX_CHARS} знаков с пробелами. "
-        "Оба ограничения жёсткие. Один цельный голос, без реплик персонажей, ремарок, "
-        "таймкодов, списков, Markdown и служебных пометок.\n"
+        "Оба ограничения жёсткие. "
+        + ("Диалог двух голосов с метками говорящих. " if discipline_mode == BOSS else "Один цельный голос без реплик персонажей. ")
+        + "Без ремарок, таймкодов, списков, Markdown и служебных пометок.\n"
         "Структура: сильный хук в первой фразе; ясная причинно-следственная история; поворот или цена решения; "
         "финальная фраза-вывод, которая переосмысливает начало. Не выдумывай факты, которых нет в источнике.\n"
         "Текст должен быть удобен для ElevenLabs: короткие предложения, числа записаны так, как их нужно произнести, "
@@ -454,14 +462,23 @@ def generate_story_voiceover(
         prompt += "\nПриоритетная структура выбранного формата:\n" + direction
     from .directorial_notes import RULE
     prompt = RULE + prompt
-    raw = gemini_generate_sync(prompt, model_profile=GEMINI_MODEL_PROFILE_CREATIVE)
-    data = extract_json_object(raw)
-    title = _clean_title(data.get("title"))
-    voiceover = _clean_voiceover(data.get("voiceover_text"))
+    from .discipline_modes import BOSS_PILOT, BOSS_PILOT_DIALOGUE
+
+    if discipline_mode == BOSS and payload["source_story"] == BOSS_PILOT and not user_feedback and not previous_text:
+        raw = ""
+        title = "Я уже встал"
+        voiceover = BOSS_PILOT_DIALOGUE
+    else:
+        raw = gemini_generate_sync(prompt, model_profile=GEMINI_MODEL_PROFILE_CREATIVE)
+        data = extract_json_object(raw)
+        title = _clean_title(data.get("title"))
+        voiceover = _clean_voiceover(data.get("voiceover_text"))
     if not voiceover:
         raise ValueError("Gemini не вернул текст озвучки для истории.")
     if discipline_mode == REFRAME:
         title = opening_sentence(voiceover)
+    if discipline_mode == BOSS:
+        voiceover = re.sub(r"\s+(?=(?:вася|василий|босс):)", "\n", voiceover, flags=re.I)
     word_count = len(re.findall(r"[\wЁёА-Яа-я-]+", voiceover, flags=re.UNICODE))
     return {
         "title": title or "История",
@@ -513,6 +530,12 @@ def generate_story_english_voiceover(
         "timestamps, lists, Markdown or service notes.\n\n"
         + json.dumps(payload, ensure_ascii=False, indent=2)
     )
+    if re.match(r"(?i)(?:вася|василий|босс):", source_text):
+        prompt += (
+            "\nThis story is a two-voice dialogue. Override the one-narrator instruction above. "
+            "Preserve every turn and mark it Vasya: or Boss: in voiceover_text. "
+            "Do not merge adjacent turns or translate the labels into other forms."
+        )
     from .directorial_notes import RULE
     prompt = RULE + prompt
     raw = gemini_generate_sync(prompt, model_profile=GEMINI_MODEL_PROFILE_CREATIVE)
@@ -521,6 +544,8 @@ def generate_story_english_voiceover(
     voiceover = _clean_voiceover(data.get("voiceover_text"))
     if not voiceover:
         raise ValueError("Gemini не вернул английский текст озвучки для истории.")
+    if re.match(r"(?i)(?:вася|василий|босс):", source_text):
+        voiceover = re.sub(r"\s+(?=(?:vasya|vasily|boss):)", "\n", voiceover, flags=re.I)
     word_count = len(re.findall(r"[A-Za-z0-9'-]+", voiceover))
     return {
         "title": title or "Story",
@@ -718,6 +743,42 @@ def generate_story_dialogue_audio(
 ) -> StoryAudioResult:
     """Generate one seamless, timestamped multi-speaker dialogue track."""
     return _timed_dialogue_endpoint_result(turns, language=language)
+
+
+def prepend_inner_boss_alarm(result: StoryAudioResult) -> StoryAudioResult:
+    """Add the opening cue and shift the provider's subtitle timestamps with it."""
+    from dataclasses import replace
+
+    import imageio_ffmpeg
+
+    cue_duration = 0.85
+    cue_filter = (
+        "sine=frequency=880:sample_rate=44100:duration=0.85,"
+        "volume='if(lt(t,0.16)+between(t,0.31,0.47),0.7,0)':eval=frame"
+    )
+    with tempfile.TemporaryDirectory(prefix="inner_boss_audio_") as work:
+        source = Path(work) / "voice.mp3"
+        output = Path(work) / "voice_with_alarm.mp3"
+        source.write_bytes(result.audio_bytes)
+        try:
+            subprocess.run(
+                [imageio_ffmpeg.get_ffmpeg_exe(), "-nostdin", "-v", "error",
+                 "-f", "lavfi", "-i", cue_filter, "-i", str(source),
+                 "-filter_complex",
+                 "[1:a]aformat=sample_rates=44100:channel_layouts=mono[voice];"
+                 "[0:a][voice]concat=n=2:v=0:a=1",
+                 "-c:a", "libmp3lame", "-q:a", "3", str(output)],
+                check=True, capture_output=True, timeout=30,
+            )
+            audio = output.read_bytes()
+        except (OSError, RuntimeError, subprocess.SubprocessError):
+            # A local mixing failure must never trigger a second paid voice render.
+            return result
+    alignment = dict(result.alignment)
+    for key in ("character_start_times_seconds", "character_end_times_seconds"):
+        alignment[key] = [float(t) + cue_duration for t in alignment.get(key, [])]
+    return replace(result, audio_bytes=audio, duration_sec=result.duration_sec + cue_duration,
+                   alignment=alignment)
 
 
 def _duration_from_audio_bytes(audio_bytes: bytes) -> float:
@@ -1147,6 +1208,15 @@ def enforce_discipline_narrative_cast(scenes, project_characters):
         scenes = [scene for scene in scenes if scene.get(MODE_KEY) != ARCHIVE]
         if not scenes:
             return
+    if scenes and scenes[0].get(MODE_KEY) == BOSS:
+        hero = next((c for c in project_characters if _is_vasily_identity(c)), None)
+        if not hero:
+            raise ValueError("Для режима нужен утверждённый Василий в проекте.")
+        for scene in scenes:
+            scene["characters"] = [hero["id"]]
+            scene["story_character_descriptions"] = {hero["id"]: hero["description"]}
+            scene["story_character_labels"] = {hero["id"]: hero["display_name"]}
+        return
     anastasia = _discipline_anastasia_character_id(project_characters)
     vasily = next((_story_character_id(c.get("id")) for c in project_characters
                    if str(c.get("display_name") or "").casefold() in {"василий", "вася", "vasily", "vasiliy"}
@@ -1574,6 +1644,17 @@ def generate_story_scene_plan(
     fixed_project_characters = _normalize_story_character_bible(
         [] if narrative_format == ARCHIVE else (project_characters or [])
     )
+    if narrative_format == BOSS:
+        fixed_project_characters = [c for c in fixed_project_characters if _is_vasily_identity(c)]
+        for character in fixed_project_characters:
+            character["is_primary"] = True
+            details = (
+                "Тёмно-каштановые кудри, густые брови, округлый нос, лёгкая щетина точками, "
+                "горчичный свитер, тёмно-синие брюки, бордовые тапочки. "
+                "Сохрани эти черты в простых плоских формах; материал исходного изображения не переносить."
+            )
+            character["description"] = details
+            character["reference_prompt"] = details
     fixed_character_ids = {item["id"] for item in fixed_project_characters}
     requested_primary_id = _story_character_id(primary_character_id)
     primary_ids = [item["id"] for item in fixed_project_characters if item.get("is_primary")]
@@ -1586,11 +1667,11 @@ def generate_story_scene_plan(
     legacy_grandma_cast = not fixed_project_characters and not discipline_project and narrative_format != ARCHIVE
     grandma_story = legacy_grandma_cast or grandma_project
     semantic_beats = build_semantic_narration_beats(voiceover_text, duration_sec, alignment)
-    windows = (_history_beat_clips(semantic_beats) if narrative_format == ARCHIVE else
+    windows = (_history_beat_clips(semantic_beats) if narrative_format in {ARCHIVE, BOSS} else
                _expand_semantic_beats_to_clips(semantic_beats, continuous=bool(short_format)))
     if normalized_generation_mode == "visualization":
         windows = _apply_visualization_final_clip_policy(windows, visualization_output_policy)
-    clips_key = "semantic_clips" if narrative_format == ARCHIVE else "continuous_clips" if continuous else ("four_second_clips" if short_format else "three_second_clips")
+    clips_key = "semantic_clips" if narrative_format in {ARCHIVE, BOSS} else "continuous_clips" if continuous else ("four_second_clips" if short_format else "three_second_clips")
     payload = {
         "source_story": source_story,
         "approved_voiceover": voiceover_text,
@@ -1652,7 +1733,7 @@ def generate_story_scene_plan(
         )
     if narrative_format:
         project_character_direction = visual_direction(narrative_format)
-        project_character_direction += (" Показывай самих реальных людей из исходной истории, а не персонажей проекта в их ролях. Создай для каждого собственный id и полное настоящее имя в display_name. В description и reference_prompt укажи полное имя, возраст на момент событий, узнаваемые черты реального лица, волосы и одежду эпохи. Стилизуй внешность, сохраняя сходство; не делай фотореализм. В исторических событиях не используй Василия, Анастасию или Кнопку. Исключение: последний современный кадр вывода с Васей из modern_epilogue_character. Включи его в characters с точным id проекта, story_role=modern_epilogue, same_person_group равным id проекта; сохрани внешность, но перерисуй в выбранной стилистике. Последний clip_visual: time_period=present, location_transition=true, конкретная узнаваемая проблема зрителя и одно действие, связанное с выводом. Никакого выдуманного успеха за пять секунд. Каждый используемый образ сначала утверждает пользователь." if narrative_format == ARCHIVE else " Используй только точные id Василия и Кнопки из project_characters, не придумывай им новые id.")
+        project_character_direction += (" Показывай самих реальных людей из исходной истории, а не персонажей проекта в их ролях. Создай для каждого собственный id и полное настоящее имя в display_name. В description и reference_prompt укажи полное имя, возраст на момент событий, узнаваемые черты реального лица, волосы и одежду эпохи. Стилизуй внешность, сохраняя сходство; не делай фотореализм. В исторических событиях не используй Василия, Анастасию или Кнопку. Исключение: последний современный кадр вывода с Васей из modern_epilogue_character. Включи его в characters с точным id проекта, story_role=modern_epilogue, same_person_group равным id проекта; сохрани внешность, но перерисуй в выбранной стилистике. Последний clip_visual: time_period=present, location_transition=true, конкретная узнаваемая проблема зрителя и одно действие, связанное с выводом. Никакого выдуманного успеха за пять секунд. Каждый используемый образ сначала утверждает пользователь." if narrative_format == ARCHIVE else (" Используй точный id Василия, его тень описывай в действии." if narrative_format == BOSS else " Используй только точные id Василия и Кнопки из project_characters, не придумывай им новые id."))
     if short_format and narrative_format != ARCHIVE:
         project_character_direction += " В этих выпусках весь актёрский состав ограничен project_characters."
     if continuous:
@@ -1676,7 +1757,7 @@ def generate_story_scene_plan(
         "over-the-shoulder shot, gentle orbit shot и другие подходящие кинематографичные варианты. "
         "Не повторяй одно и то же движение камеры в соседних клипах и не выбирай приём, который противоречит действию сцены."
     )
-    if short_format and not continuous and narrative_format != ARCHIVE:
+    if short_format and not continuous and narrative_format not in {ARCHIVE, BOSS}:
         camera_instruction = (
             "Выбери крупность по действию и ремаркам, внутри клипа camera_direction=locked-off camera. "
             "Не чередуй случайные движения камеры. Смена плана между клипами только по смыслу. "
@@ -2101,7 +2182,7 @@ def generate_story_scene_plan(
         # A one-scene identity uses its source asset directly in the selected medium.
         group_usage = sum(character_usage.get(member, 0) for member in group_members.get(group, {character_id}))
         character["requires_reference"] = bool(
-            group_usage >= 2 and (narrative_format == ARCHIVE or not str(character.get("asset_uri") or "").strip())
+            group_usage >= 2 and (narrative_format in {ARCHIVE, BOSS} or not str(character.get("asset_uri") or "").strip())
         )
     if narrative_format == ARCHIVE:
         from .historical_people import validate_story_people
@@ -2209,7 +2290,7 @@ def _fallback_start_prompt(scene: dict[str, Any]) -> str:
 def _fallback_video_prompt(scene: dict[str, Any]) -> str:
     camera_direction = str(scene.get("camera_direction") or "subtle cinematic camera motion").strip()
     duration = int(round(float(scene.get("generation_duration_sec") or scene.get("duration_sec") or 3.0)))
-    duration = max(3, min(15, duration)) if scene.get(MODE_KEY) == ARCHIVE else (4 if duration >= 4 else 3)
+    duration = max(3, min(15, duration)) if scene.get(MODE_KEY) in {ARCHIVE, BOSS} else (4 if duration >= 4 else 3)
     return (
         f"{duration}-second Kling 3.0 image-to-video shot. No audio. No dialogue, no speech, no lip sync, no music, "
         "no ambient sound, no on-screen text, no subtitles, no logos, no watermark. "
@@ -2317,7 +2398,7 @@ def generate_story_production(
     enriched: list[dict[str, Any]] = []
     for index, scene in enumerate(safe_scenes_plan):
         generation_duration = float(scene.get("generation_duration_sec") or scene.get("duration_sec") or STORY_CLIP_DURATION_SEC)
-        generation_duration = (float(max(3, min(15, math.ceil(generation_duration)))) if scene.get(MODE_KEY) == ARCHIVE
+        generation_duration = (float(max(3, min(15, math.ceil(generation_duration)))) if scene.get(MODE_KEY) in {ARCHIVE, BOSS}
                                else (4.0 if int(round(generation_duration)) >= 4 else 3.0))
         required_prefix = f"{int(generation_duration)}-second Kling 3.0 image-to-video shot. No audio."
         candidate = prompts[index] if index < len(prompts) and isinstance(prompts[index], dict) else {}

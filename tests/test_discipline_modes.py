@@ -303,3 +303,31 @@ def test_short_plans_preserve_four_second_clips_and_no_forced_camera(monkeypatch
         assert 'Время сверху и снизу может расходиться' in captured[0]
         assert plan[0]['location_transition'] is True
         assert 'по явно заданным действиям сценария' in captured[0]
+
+
+def test_inner_boss_pilot_preserves_two_speakers_and_project_menu(monkeypatch):
+    from app import discipline_modes as modes, project_modes, story_generation
+
+    def unexpected_generation(*args, **kwargs):
+        raise AssertionError("The default pilot should use the reviewed script.")
+
+    monkeypatch.setattr(story_generation, "gemini_generate_sync", unexpected_generation)
+    result = story_generation.generate_story_voiceover(modes.BOSS_PILOT, discipline_mode=modes.BOSS)
+    turns = modes.boss_dialogue_turns(result["voiceover_text"], "vasya-voice", "boss-voice")
+    assert turns[0] == {"text": "Спи. Завтра начнёшь. Ты же устал.", "voice_id": "boss-voice"}
+    assert turns[-1] == {"text": "Я уже встал.", "voice_id": "vasya-voice"}
+    assert modes.mode_from_label("Внутренний босс") == modes.BOSS
+    assert "Внутренний босс" in project_modes.project_mode_labels("discipline")
+    assert "Внутренний босс" not in project_modes.project_mode_labels("grandma_kitchen")
+
+
+def test_inner_boss_english_turns_and_cast_preserve_identity():
+    from app import discipline_modes as modes, story_generation
+
+    turns = modes.boss_dialogue_turns("Boss: Nobody noticed. Vasya: I did.", "hero", "shadow")
+    assert turns == [{"text": "Nobody noticed.", "voice_id": "shadow"},
+                     {"text": "I did.", "voice_id": "hero"}]
+    scenes = [{modes.MODE_KEY: modes.BOSS, "characters": ["shadow", "discipline_knopka"]}]
+    hero = {"id": "existing_id", "display_name": "Василий", "description": "Approved character"}
+    story_generation.enforce_discipline_narrative_cast(scenes, [hero])
+    assert scenes[0]["characters"] == ["existing_id"]

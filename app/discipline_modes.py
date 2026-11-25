@@ -11,6 +11,8 @@ FORK = 'two_outcomes'
 EXPERIMENT = 'small_experiment'
 TWO_LIVES = 'two_lives'
 ARCHIVE = 'lives_archive'
+BOSS = 'inner_boss'
+BOSS_VOICE_ID = 'pNInz6obpgDQGcFmaJgB'
 LEARNING = 'learning_lab'
 MALE_VOICE_ID = '6Pm064JKx8KhPSIAdbHd'
 
@@ -124,6 +126,67 @@ SHORT_FORMATS[LEARNING] = ShortFormat(
     'Hand-painted 2D gouache. Locked-off camera within each shot. One readable learning experiment, '
     'controlled hand movement and visible verification. Preserve the exact diagram and character models.',
 )
+SHORT_FORMATS[BOSS] = ShortFormat(
+    'Внутренний босс', 'inner_boss_2d',
+    'Минутная 2D-история, где Вася слышит собственные отговорки голосом босса и отвечает поступками.',
+    'Напиши диалог на 95–115 слов, по одной реплике за раз с метками «Вася:» и «Босс:». '
+    'Открой конфликт с первой реплики: Босс знает привычную отговорку Васи. '
+    'Дальше покажи цену повторения, момент узнавания и первую попытку. '
+    'Босс должен вернуться после начала, когда становится трудно и никто не замечает усилий. '
+    'Каждый ответ Васи показывается конкретным действием. Финал возвращает исходную ситуацию '
+    'с другим решением. Не подменяй конфликт перечислением советов. Реплики пиши своими словами.',
+    'Василий в плоской геометрической 2D-рисовке по утверждённой внешности. Босс — тень '
+    'Василия с тем же силуэтом волос, шире и темнее, с красным краем. Тень проявляется '
+    'в отражении или на фоне, это часть композиции, а не новый персонаж проекта. '
+    'В начале повторяй композицию будильника. Переходи от темной комнаты к отражению, '
+    'монтажу повторений и видимому результату. Один акцент за раз. Надписи добавь при монтаже.',
+    'Minimal flat 2D motion graphics, simple rounded shapes, sparse ink outline, dark navy and mustard, '
+    'a subdued red edge only for the shadow. Match approved Vasily identity and outfit. No 3D or grain.',
+    'Keep flat 2D shapes and the exact silhouette, proportions and outfit. Animate gaze, brows and '
+    'one readable gesture at a time. The shadow shares Vasily’s outline; keep background geometry stable.',
+)
+
+BOSS_PILOT = (
+    'Будильник в 05:00 и голос внутреннего босса. После повторяющихся утр Вася встречает собственную '
+    'тень в зеркале, впервые встаёт, тренируется день за днём. Тень возвращается, когда никто '
+    'не замечает его усилий. Вася продолжает подъём. Финал повторяет будильник, но Вася уже на ногах.'
+)
+
+
+BOSS_PILOT_DIALOGUE = (
+    'Босс: Спи. Завтра начнёшь. Ты же устал.\n'
+    'Вася: Вчера я тоже устал. И позавчера. Я уже не помню, когда впервые сказал себе «завтра».\n'
+    'Босс: Посмотри на себя. Сколько раз ты уже начинал? На третий день опять всё бросишь.\n'
+    'Вася: В то утро я просто встал. Пробежал до угла и обратно. На следующий день повторил.\n'
+    'Босс: И что? Тебя кто-нибудь заметил? Всем всё равно, дошёл ты до конца или повернул назад.\n'
+    'Вася: Никто и не заметил. Но я помнил, как вчера остановился у фонаря. Сегодня я пробежал мимо.\n'
+    'Босс: Ну что, ещё пять минут?\n'
+    'Вася: Я уже встал.'
+)
+
+
+def boss_dialogue_turns(text, hero_voice_id, boss_voice_id):
+    """Separate approved lines from speaker labels before sending them to TTS."""
+    from .directorial_notes import spoken_text
+
+    clean = spoken_text(text)
+    marker = re.compile(r'(?<!\w)(вася|василий|vasya|vasily|босс|boss)\s*:', re.I)
+    matches = list(marker.finditer(clean))
+    if not matches or clean[:matches[0].start()].strip():
+        raise ValueError('Начните каждую реплику с «Вася:» или «Босс:» (EN: Vasya: / Boss:).')
+    turns = []
+    for index, match in enumerate(matches):
+        end = matches[index + 1].start() if index + 1 < len(matches) else len(clean)
+        line = clean[match.end():end].strip()
+        if not line:
+            raise ValueError('После имени героя нужна реплика.')
+        boss = match.group(1).casefold() in {'босс', 'boss'}
+        turns.append({'text': line, 'voice_id': boss_voice_id if boss else hero_voice_id})
+    if {turn['voice_id'] for turn in turns} != {hero_voice_id, boss_voice_id} or hero_voice_id == boss_voice_id:
+        raise ValueError('Для режима нужны реплики Васи и отдельным голосом реплики Босса.')
+    return turns
+
+
 LABELS = {VASYA: 'О Васе', REFRAME: 'А что если…', **{k: f.label for k, f in SHORT_FORMATS.items()}}
 
 
@@ -140,6 +203,8 @@ def active_mode(session):
 
 
 def script_direction(mode):
+    if mode == BOSS:
+        return SHORT_FORMATS[BOSS].script
     if mode in SHORT_FORMATS:
         return (
             'Сохрани тему и факты пользователя. Начни с поступка, затруднения или реплики, которую произносят '
@@ -177,7 +242,7 @@ def script_direction(mode):
 def visual_direction(mode):
     if mode not in LABELS:
         return ''
-    if mode == ARCHIVE:
+    if mode in {ARCHIVE, BOSS}:
         return SHORT_FORMATS[mode].visual
     if mode in SHORT_FORMATS:
         return (

@@ -2448,6 +2448,17 @@ async def _refine_story_voiceover(
     return True
 
 
+async def _generate_inner_boss_audio(voiceover: str, voice_id: str, *, language: str):
+    import os
+    from ..discipline_modes import BOSS_VOICE_ID, boss_dialogue_turns
+    from ..story_generation import generate_story_dialogue_audio, prepend_inner_boss_alarm
+
+    boss_voice = os.getenv("DISCIPLINE_BOSS_VOICE_ID") or BOSS_VOICE_ID
+    turns = boss_dialogue_turns(voiceover, voice_id, boss_voice)
+    result = await asyncio.to_thread(generate_story_dialogue_audio, turns, language=language)
+    return await asyncio.to_thread(prepend_inner_boss_alarm, result)
+
+
 async def _generate_and_send_story_audio(
     update: Update,
     context: ContextTypes.DEFAULT_TYPE,
@@ -2469,7 +2480,11 @@ async def _generate_and_send_story_audio(
         project_voice_id = resolve_story_voice_id(session)
         if project_voice_id:
             session["project_voice_id"] = project_voice_id
-        if project_voice_id:
+        from ..discipline_modes import BOSS, active_mode
+
+        if active_mode(session) == BOSS:
+            result = await _generate_inner_boss_audio(voiceover, project_voice_id, language="ru")
+        elif project_voice_id:
             result = await asyncio.to_thread(
                 generate_story_audio,
                 voiceover,
@@ -2894,7 +2909,11 @@ async def _generate_and_send_story_english_audio(
         project_voice_id = resolve_story_voice_id(session)
         if project_voice_id:
             session["project_voice_id"] = project_voice_id
-        if project_voice_id:
+        from ..discipline_modes import BOSS, active_mode
+
+        if active_mode(session) == BOSS:
+            result = await _generate_inner_boss_audio(voiceover, project_voice_id, language="en")
+        elif project_voice_id:
             result = await asyncio.to_thread(
                 generate_story_audio,
                 voiceover,
