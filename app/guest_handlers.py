@@ -2053,6 +2053,7 @@ async def guest_start(update: Update, context: ContextTypes.DEFAULT_TYPE, identi
 
 
 async def _start_workspace_format(update, context, chat_id, session, label):
+    from .discipline_modes import BOSS, LABELS
     from .handlers.handlers_state_start import _handle_waiting_generation_mode_state, _session_for_new_generation
 
     fresh_session = _session_for_new_generation(session)
@@ -2064,7 +2065,7 @@ async def _start_workspace_format(update, context, chat_id, session, label):
     session.pop("discipline_narrative_mode", None)
     session.pop(PENDING_MODE_KEY, None)
     SESSIONS[chat_id] = session
-    if label in {"Визуализация", "Копия"}:
+    if label in {"Визуализация", "Копия", LABELS[BOSS]}:
         await _handle_waiting_generation_mode_state(
             update, context, chat_id=chat_id, session=session, text=label,
         )

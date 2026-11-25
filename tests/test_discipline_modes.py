@@ -25,6 +25,14 @@ def test_mode_selection_survives_resume_and_disables_dialogue(monkeypatch,label,
     assert session['discipline_intro_enabled'] is False
     if mode == modes.BOSS:
         assert session[start.STORY_ENGLISH_REQUESTED_SESSION_KEY] is True
+        assert session['state'] == story_generation.STATE_WAITING_INNER_BOSS_IDEA
+        launch.assert_not_awaited()
+        asyncio.run(start._handle_waiting_inner_boss_idea_state(
+            SimpleNamespace(message=message), None, chat_id=1, session=session,
+            text="Боюсь открыть тест после недели подготовки.",
+        ))
+        assert session[start.STORY_SOURCE_SESSION_KEY] == "Боюсь открыть тест после недели подготовки."
+        assert start.SERIES_PENDING_RECIPE_SESSION_KEY not in session
         launch.assert_awaited_once()
     else:
         assert session['state'] == start.STATE_WAITING_STORY_ENGLISH_CHOICE
@@ -325,8 +333,8 @@ def test_inner_boss_pilot_preserves_two_speakers_and_project_menu(monkeypatch):
     monkeypatch.setattr(story_generation, "gemini_generate_sync", unexpected_generation)
     result = story_generation.generate_story_voiceover(modes.BOSS_PILOT, discipline_mode=modes.BOSS)
     turns = modes.boss_dialogue_turns(result["voiceover_text"], "vasya-voice", "boss-voice")
-    assert turns[0] == {"text": "Спи. Завтра начнёшь. Ты же устал.", "voice_id": "boss-voice"}
-    assert turns[-1] == {"text": "Я уже встал.", "voice_id": "vasya-voice"}
+    assert turns[0] == {"text": "Спи. Пять минут ничего не изменят.", "voice_id": "boss-voice"}
+    assert turns[-1] == {"text": "Сейчас. Ещё одну ступеньку. … И ещё одну.", "voice_id": "vasya-voice"}
     assert modes.mode_from_label("Внутренний босс") == modes.BOSS
     assert "Внутренний босс" in project_modes.project_mode_labels("discipline")
     assert "Внутренний босс" not in project_modes.project_mode_labels("grandma_kitchen")
@@ -348,3 +356,23 @@ def test_alarm_is_pilot_only_unless_episode_explicitly_requests_it():
     assert modes.boss_opening_has_alarm(modes.BOSS_PILOT)
     assert modes.boss_opening_has_alarm('Вася встал. [Звук в начале: будильник]')
     assert not modes.boss_opening_has_alarm('Вася боится открыть тест.')
+
+
+def test_workspace_boss_menu_opens_idea_step_without_an_extra_prompt(monkeypatch):
+    from app import guest_handlers
+
+    saved = {}
+    monkeypatch.setattr(start, 'SESSIONS', saved)
+    monkeypatch.setattr(guest_handlers, 'SESSIONS', saved)
+    writer = AsyncMock(return_value=True)
+    monkeypatch.setattr(start, '_start_initial_story_voiceover', writer)
+    session = {'selected_project_key': 'discipline', 'project_workspace_mode': True}
+    update = SimpleNamespace(message=SimpleNamespace(reply_text=AsyncMock()))
+    asyncio.run(guest_handlers._start_workspace_format(update, None, 1, session, modes.LABELS[modes.BOSS]))
+    assert session['state'] == story_generation.STATE_WAITING_INNER_BOSS_IDEA
+    writer.assert_not_awaited()
+    asyncio.run(start._handle_waiting_inner_boss_idea_state(
+        update, None, chat_id=1, session=session, text='Вася взялся за курс и бросает после ошибки.',
+    ))
+    writer.assert_awaited_once()
+    assert writer.await_args.kwargs['session'][start.STORY_SOURCE_SESSION_KEY].endswith('после ошибки.')

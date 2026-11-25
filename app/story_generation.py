@@ -25,6 +25,7 @@ from .story_visual_text import STORY_VISUAL_TEXT_RULES
 STATE_WAITING_STORY_SCRIPT_APPROVAL = "waiting_story_script_approval"
 STATE_REFINING_STORY_SCRIPT = "refining_story_script"
 STATE_WAITING_STORY_AUDIO_APPROVAL = "waiting_story_audio_approval"
+STATE_WAITING_INNER_BOSS_IDEA = "waiting_inner_boss_idea"
 STATE_WAITING_STORY_ENGLISH_CHOICE = "waiting_story_english_choice"
 STATE_WAITING_STORY_STYLE_CHOICE = "waiting_story_style_choice"
 STATE_WAITING_STORY_ENGLISH_SCRIPT_APPROVAL = "waiting_story_english_script_approval"

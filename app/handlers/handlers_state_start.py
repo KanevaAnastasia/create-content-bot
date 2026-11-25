@@ -127,6 +127,7 @@ from ..generation_modes import (
 )
 from ..generation_store import ensure_generation_run_for_session
 from ..story_generation import (
+    STATE_WAITING_INNER_BOSS_IDEA,
     STATE_WAITING_STORY_ENGLISH_CHOICE,
     STATE_WAITING_STORY_STYLE_CHOICE,
     STATE_WAITING_STORY_SCRIPT_APPROVAL,
@@ -1369,6 +1370,27 @@ async def _start_discipline_intro_dialogue(
     return True
 
 
+async def _handle_waiting_inner_boss_idea_state(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+    *,
+    chat_id: int,
+    session: dict,
+    text: str,
+) -> bool:
+    idea = str(text or "").strip()
+    if not idea:
+        await update.message.reply_text("Напиши идею ролика обычным сообщением.")
+        return True
+    source = BOSS_PILOT if idea.casefold() == "пилот" else idea
+    session.pop(SERIES_PENDING_RECIPE_SESSION_KEY, None)
+    session[STORY_SOURCE_SESSION_KEY] = source
+    session["user_input"] = source
+    from ..directorial_notes import remember_notes
+    remember_notes(session, source)
+    return await _start_initial_story_voiceover(update, context, chat_id=chat_id, session=session)
+
+
 async def _handle_waiting_story_english_choice_state(
     update: Update,
     context: ContextTypes.DEFAULT_TYPE,
@@ -1619,10 +1641,18 @@ async def _handle_waiting_generation_mode_state(
         message = "Ок, запускаю обычный режим."
     if requested_format in SHORT_FORMATS:
         message = f"«{LABELS[requested_format]}». {SHORT_FORMATS[requested_format].description} Сначала согласуем текст."
+        if requested_format == BOSS:
+            message = (
+                "Напиши идею для «Внутреннего босса». Что Вася хочет сделать и какой голос в голове его останавливает? "
+                "Можно одной фразой. Сначала пришлю сценарий на согласование."
+            )
     elif requested_format:
         message = (f"Режим «{LABELS[requested_format]}»: раскладываем вашу тему на проблему, поворот и решение. "
                    "Сначала согласуем сценарий, затем озвучку и наглядный видеоряд. Оформление заголовка выберете по карточкам.")
-    await update.message.reply_text(message)
+    if requested_format == BOSS:
+        await reply_text_without_keyboard(update.message, message)
+    else:
+        await update.message.reply_text(message)
     if mode == GENERATION_MODE_VISUALIZATION:
         session["state"] = STATE_WAITING_VISUALIZATION_MEDIA
         session[STORY_ENGLISH_REQUESTED_SESSION_KEY] = False
@@ -1681,6 +1711,14 @@ async def _handle_waiting_generation_mode_state(
             "или важными деталями. Без фото товара рекламный сценарий не запускается.",
         )
         return True
+    if requested_format == BOSS:
+        session[STORY_ENGLISH_REQUESTED_SESSION_KEY] = True
+        session[STORY_VISUAL_STYLE_SESSION_KEY] = SHORT_FORMATS[BOSS].style_key
+        session["state"] = STATE_WAITING_INNER_BOSS_IDEA
+        SESSIONS[chat_id] = session
+        return True
+    if retry_story and active_mode(session) == BOSS:
+        return await _start_initial_story_voiceover(update, context, chat_id=chat_id, session=session)
     if (mode == GENERATION_MODE_STORY and session.get("discipline_queue_idea_id")
             and session.get(STORY_VOICEOVER_SESSION_KEY)):
         session[STORY_ENGLISH_REQUESTED_SESSION_KEY] = True
@@ -1695,8 +1733,6 @@ async def _handle_waiting_generation_mode_state(
             or session.get("user_input")
             or ""
         ).strip()
-        if requested_format == BOSS and (not source_story or source_story.casefold() in {"пилот", "внутренний босс"}):
-            source_story = BOSS_PILOT
         if not source_story:
             session["state"] = ""
             SESSIONS[chat_id] = session
@@ -1705,10 +1741,6 @@ async def _handle_waiting_generation_mode_state(
         session[STORY_SOURCE_SESSION_KEY] = source_story
         session["user_input"] = source_story
         session["recipe_full_text"] = source_story
-        if requested_format == BOSS:
-            session[STORY_ENGLISH_REQUESTED_SESSION_KEY] = True
-            session[STORY_VISUAL_STYLE_SESSION_KEY] = SHORT_FORMATS[BOSS].style_key
-            return await _start_initial_story_voiceover(update, context, chat_id=chat_id, session=session)
         session["state"] = STATE_WAITING_STORY_ENGLISH_CHOICE
         SESSIONS[chat_id] = session
         await _reply_text_with_optional_markup(

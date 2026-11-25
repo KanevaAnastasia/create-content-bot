@@ -198,6 +198,7 @@ from .handlers_state_start import (
     _concept_choice_markup,
     _discipline_intro_dialogue_approval_markup,
     _handle_waiting_generation_mode_state,
+    _handle_waiting_inner_boss_idea_state,
     _handle_waiting_story_english_choice_state,
     _handle_waiting_story_style_choice_state,
     _handle_waiting_series_choice_state,
@@ -325,6 +326,7 @@ from ..story_generation import (
     STATE_WAITING_STORY_CHARACTER_APPROVAL,
     STATE_WAITING_STORY_AUDIO_APPROVAL,
     STATE_WAITING_STORY_ENGLISH_AUDIO_APPROVAL,
+    STATE_WAITING_INNER_BOSS_IDEA,
     STATE_WAITING_STORY_ENGLISH_CHOICE,
     STATE_WAITING_STORY_STYLE_CHOICE,
     STATE_WAITING_STORY_ENGLISH_SCRIPT_APPROVAL,
@@ -1372,6 +1374,8 @@ def keyboard_for_session_state(session: dict):
         return project_image_character_markup(_project_image_selected_characters(session or {}))
     if state == STATE_WAITING_GENERATION_MODE:
         return _generation_mode_markup(session)
+    if state == STATE_WAITING_INNER_BOSS_IDEA:
+        return remove_keyboard_markup()
     if state == STATE_WAITING_STORY_ENGLISH_CHOICE:
         return _story_english_choice_markup()
     if state == STATE_WAITING_STORY_STYLE_CHOICE:
@@ -4805,6 +4809,10 @@ async def _handle_navigation_buttons(
         return True
     if state in {STATE_WAITING_CONCEPT, STATE_REFINING_CONCEPT}:
         await update.message.reply_text("Это первый шаг сценарного пайплайна. Выберите «В начало» для полного сброса.")
+        return True
+    if state == STATE_WAITING_INNER_BOSS_IDEA:
+        session["state"] = STATE_WAITING_GENERATION_MODE
+        await _ask_generation_mode(update, session)
         return True
     if state in {
         STATE_WAITING_STORY_ENGLISH_CHOICE,
@@ -9455,6 +9463,9 @@ async def _on_text_impl(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
             session=session,
             text=text,
         )
+        return
+    if state == STATE_WAITING_INNER_BOSS_IDEA:
+        await _handle_waiting_inner_boss_idea_state(update, context, chat_id=chat_id, session=session, text=text)
         return
     if state == STATE_WAITING_STORY_ENGLISH_CHOICE:
         await _handle_waiting_story_english_choice_state(
