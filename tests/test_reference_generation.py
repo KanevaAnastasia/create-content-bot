@@ -494,12 +494,14 @@ def test_reference_final_variant_is_registered_for_admin_publication(monkeypatch
         reference_variant="4k",
     )
 
-    assert calls[0][0] is session
-    assert calls[0][1]["artifact_type"] == "final_upscaled_4k"
-    assert calls[0][1]["language"] == "ru"
-    assert calls[0][1]["uri"] == f"file://{path.resolve()}"
-    assert calls[0][1]["payload"]["reference_mode"] is True
-    assert calls[0][1]["payload"]["reference_variant"] == "4k"
+    assert [item[1]["language"] for item in calls] == ["ru", "en"]
+    for saved_session, kwargs in calls:
+        assert saved_session is session
+        assert kwargs["artifact_type"] == "final_upscaled_4k"
+        assert kwargs["uri"] == f"file://{path.resolve()}"
+        assert kwargs["payload"]["reference_mode"] is True
+        assert kwargs["payload"]["reference_variant"] == "4k"
+        assert kwargs["payload"]["shared_reference_video"] is True
 
 
 def test_reference_description_approval_marks_run_ready(monkeypatch):

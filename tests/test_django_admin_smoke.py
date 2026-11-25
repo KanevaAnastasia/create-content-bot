@@ -2641,6 +2641,24 @@ def test_django_reference_final_artifacts_have_simple_4k_labels(monkeypatch):
             uri="file:///tmp/reference-4k-music.mp4",
             payload_json={"reference_mode": True, "reference_variant": "4k_music"},
         ),
+        SimpleNamespace(
+            id=uuid.uuid4(),
+            language="en",
+            artifact_type="final_upscaled_4k",
+            label="4K",
+            created_at=now,
+            uri="file:///tmp/reference-4k.mp4",
+            payload_json={"reference_mode": True, "reference_variant": "4k"},
+        ),
+        SimpleNamespace(
+            id=uuid.uuid4(),
+            language="en",
+            artifact_type="final_subtitled_music",
+            label="4K + музыка",
+            created_at=now,
+            uri="file:///tmp/reference-4k-music.mp4",
+            payload_json={"reference_mode": True, "reference_variant": "4k_music"},
+        ),
     ]
     monkeypatch.setattr(admin_module, "_publication_all_final_artifacts", lambda _run: artifacts)
     monkeypatch.setattr(
@@ -2656,6 +2674,7 @@ def test_django_reference_final_artifacts_have_simple_4k_labels(monkeypatch):
         "2026-11-25 18:30:00 · 4K",
         "2026-11-25 18:30:00 · 4K + музыка",
     ]
+    assert [label for _value, label in choices["en"]] == labels
 
 
 def test_django_publication_queue_form_renders_rich_preflight(monkeypatch):

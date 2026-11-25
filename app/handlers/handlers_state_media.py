@@ -3744,23 +3744,25 @@ def _persist_reference_final_variant(
     reference_variant: str,
 ) -> None:
     video_path = Path(path).resolve()
-    artifact_id = persist_generation_artifact(
-        session,
-        artifact_type=artifact_type,
-        label=label,
-        uri=file_uri(video_path),
-        language="ru",
-        mime_type="video/mp4",
-        payload={
-            "video_path": str(video_path),
-            "width": 2160,
-            "height": 3840,
-            "reference_mode": True,
-            "reference_variant": reference_variant,
-        },
-    )
-    if not artifact_id:
-        raise RuntimeError(f"Не удалось зарегистрировать финальный артефакт {label}")
+    for language in ("ru", "en"):
+        artifact_id = persist_generation_artifact(
+            session,
+            artifact_type=artifact_type,
+            label=label,
+            uri=file_uri(video_path),
+            language=language,
+            mime_type="video/mp4",
+            payload={
+                "video_path": str(video_path),
+                "width": 2160,
+                "height": 3840,
+                "reference_mode": True,
+                "reference_variant": reference_variant,
+                "shared_reference_video": True,
+            },
+        )
+        if not artifact_id:
+            raise RuntimeError(f"Не удалось зарегистрировать финальный артефакт {label} ({language})")
 
 
 async def _complete_reference_music_choice(
