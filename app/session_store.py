@@ -84,6 +84,7 @@ _CHAT_SESSION_CACHE_KEYS = {
     "reference_short_description",
     "reference_description_approved",
     "reference_description_feedback_pending",
+    "reference_original_audio_choice",
     "reference_music_choice",
     "reference_music_source_path",
     "reference_music_result_path",

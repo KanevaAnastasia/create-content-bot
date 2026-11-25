@@ -214,7 +214,7 @@ def test_start_image_approval_generates_reference_video_prompt_after_frame_appro
     assert session["scene_media_substep"] == "video_prompt"
 
 
-def test_reference_finish_stops_before_final_build_and_requests_music_choice(monkeypatch):
+def test_reference_finish_stops_before_final_build_and_requests_original_audio_choice(monkeypatch):
     from app.handlers import handlers_state_media as media
 
     session = {
@@ -235,7 +235,7 @@ def test_reference_finish_stops_before_final_build_and_requests_music_choice(mon
     result = asyncio.run(media._finish_scene_media_production(update, session))
 
     assert result is True
-    assert session["state"] == reference.STATE_WAITING_REFERENCE_MUSIC_CHOICE
+    assert session["state"] == reference.STATE_WAITING_REFERENCE_ORIGINAL_AUDIO_CHOICE
     assert "reference_short_description" not in session
     queued.assert_not_called()
 
@@ -257,6 +257,7 @@ def _reference_session_with_approved_video(video_bytes: bytes = b"approved-veo")
     return {
         "generation_mode": "reference",
         "selected_project_key": "grandma_kitchen",
+        reference.REFERENCE_ORIGINAL_AUDIO_CHOICE_SESSION_KEY: "keep",
         "production": {"json_plan": [scene]},
     }
 
@@ -266,6 +267,44 @@ def test_reference_music_choice_parses_all_four_buttons():
     assert reference.reference_music_choice("Дефолтная") == "default"
     assert reference.reference_music_choice("Новогодняя") == "holiday"
     assert reference.reference_music_choice("Своя") == "custom"
+
+
+def test_reference_original_audio_choice_parses_both_buttons():
+    assert reference.reference_original_audio_choice("Сохранить оригинальное аудио") == "keep"
+    assert reference.reference_original_audio_choice("Убрать оригинальное аудио") == "remove"
+
+
+def test_reference_original_audio_choice_opens_music_step():
+    from app.handlers import handlers_state_media as media
+
+    session = _reference_session_with_approved_video()
+    update = SimpleNamespace(message=SimpleNamespace(reply_text=AsyncMock()))
+
+    result = asyncio.run(
+        media.handle_reference_original_audio_choice_state(
+            update,
+            session,
+            "Убрать оригинальное аудио",
+        )
+    )
+
+    assert result is True
+    assert session[reference.REFERENCE_ORIGINAL_AUDIO_CHOICE_SESSION_KEY] == "remove"
+    assert session["state"] == reference.STATE_WAITING_REFERENCE_MUSIC_CHOICE
+
+
+def test_existing_music_step_without_audio_choice_is_migrated():
+    from app.handlers import handlers_state_media as media
+
+    session = _reference_session_with_approved_video()
+    session.pop(reference.REFERENCE_ORIGINAL_AUDIO_CHOICE_SESSION_KEY)
+    update = SimpleNamespace(message=SimpleNamespace(reply_text=AsyncMock()))
+
+    result = asyncio.run(media.handle_reference_music_choice_state(update, session, "Дефолтная"))
+
+    assert result is True
+    assert session["state"] == reference.STATE_WAITING_REFERENCE_ORIGINAL_AUDIO_CHOICE
+    assert reference.REFERENCE_MUSIC_CHOICE_SESSION_KEY not in session
 
 
 def test_reference_no_music_proceeds_to_description_without_render(monkeypatch):
@@ -284,6 +323,43 @@ def test_reference_no_music_proceeds_to_description_without_render(monkeypatch):
     assert session[reference.REFERENCE_MUSIC_CHOICE_SESSION_KEY] == "none"
     description.assert_awaited_once_with(update, session)
     render.assert_not_called()
+
+
+def test_reference_remove_original_audio_without_music_renders_silent_video(monkeypatch, tmp_path):
+    from app.handlers import handlers_state_media as media
+
+    session = _reference_session_with_approved_video(b"approved-video-with-audio")
+    session[reference.REFERENCE_ORIGINAL_AUDIO_CHOICE_SESSION_KEY] = "remove"
+    result_path = tmp_path / "silent.mp4"
+    result_path.write_bytes(b"silent-video")
+    seen = {}
+
+    def fake_render(video_bytes, **kwargs):
+        seen["render"] = (video_bytes, kwargs)
+        return str(result_path)
+
+    sent_video = AsyncMock()
+    description = AsyncMock(return_value=True)
+    monkeypatch.setattr(media, "render_reference_music_variant", fake_render)
+    monkeypatch.setattr(media, "_safe_reply_video", sent_video)
+    monkeypatch.setattr(media, "_start_reference_description_approval", description)
+    update = SimpleNamespace(message=SimpleNamespace(reply_text=AsyncMock()))
+
+    result = asyncio.run(media.handle_reference_music_choice_state(update, session, "Без музыки"))
+
+    assert result is True
+    assert seen["render"] == (
+        b"approved-video-with-audio",
+        {
+            "music_path": None,
+            "music_volume": 0.0,
+            "keep_original_audio": False,
+            "run_id": "",
+            "choice": "none",
+        },
+    )
+    assert "без оригинального аудио и без музыки" in sent_video.await_args.kwargs["caption"]
+    description.assert_awaited_once_with(update, session)
 
 
 def test_reference_custom_music_choice_waits_for_audio_upload(monkeypatch):
@@ -333,6 +409,7 @@ def test_reference_default_music_renders_only_the_approved_video(monkeypatch, tm
             {
                 "music_path": str(music_path),
                 "music_volume": 0.25,
+                "keep_original_audio": True,
                 "run_id": "",
                 "choice": "default",
             },
@@ -372,6 +449,7 @@ def test_reference_holiday_music_uses_christmas_series_track(monkeypatch, tmp_pa
     assert seen["style"] == {media.THEME_KEY: media.HOLIDAY_THEME}
     assert seen["render"]["music_path"] == str(music_path)
     assert seen["render"]["music_volume"] == 0.5
+    assert seen["render"]["keep_original_audio"] is True
     assert seen["render"]["choice"] == "holiday"
 
 
@@ -419,6 +497,7 @@ def test_reference_custom_music_upload_is_stored_and_mixed(monkeypatch, tmp_path
     )
     assert seen["render"][0] == b"approved-veo"
     assert seen["render"][1]["music_path"] == str(music_path)
+    assert seen["render"][1]["keep_original_audio"] is True
     assert seen["render"][1]["choice"] == "custom"
 
 
@@ -426,6 +505,7 @@ def test_reference_music_result_survives_minimal_session_cache():
     from app.session_store import _chat_session_cache_payload
 
     session = {
+        reference.REFERENCE_ORIGINAL_AUDIO_CHOICE_SESSION_KEY: "remove",
         reference.REFERENCE_MUSIC_CHOICE_SESSION_KEY: "holiday",
         reference.REFERENCE_MUSIC_SOURCE_PATH_SESSION_KEY: "/tmp/holiday.mp3",
         reference.REFERENCE_MUSIC_RESULT_PATH_SESSION_KEY: "/tmp/final.mp4",
@@ -464,6 +544,32 @@ def test_render_reference_music_variant_mixes_source_audio_after_video(monkeypat
     assert Path(result).name == "approved_veo_default.mp4"
     assert "amix=inputs=2:duration=first" in commands[0][commands[0].index("-filter_complex") + 1]
     assert commands[0][commands[0].index("-map") + 1] == "0:v:0"
+
+
+def test_render_reference_music_variant_can_remove_all_original_audio(monkeypatch, tmp_path):
+    from app import ai_approval_service, post_production
+
+    commands = []
+
+    def fake_run(command, **_kwargs):
+        commands.append(command)
+        Path(command[-1]).write_bytes(b"silent")
+
+    monkeypatch.setattr(ai_approval_service, "_resolve_ffmpeg", lambda: "ffmpeg")
+    monkeypatch.setattr(post_production, "_run_ffmpeg", fake_run)
+
+    result = reference.render_reference_music_variant(
+        b"approved-video",
+        music_path=None,
+        keep_original_audio=False,
+        choice="none",
+        output_root=tmp_path / "renders",
+    )
+
+    assert Path(result).read_bytes() == b"silent"
+    assert "-an" in commands[0]
+    assert "-c:v" in commands[0]
+    assert "copy" in commands[0]
 
 
 def test_reference_custom_music_audio_is_routed_from_audio_handler(monkeypatch):

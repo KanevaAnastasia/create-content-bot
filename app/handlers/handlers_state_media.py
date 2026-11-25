@@ -41,13 +41,18 @@ from ..reference_generation import (
     REFERENCE_MUSIC_NONE,
     REFERENCE_MUSIC_RESULT_PATH_SESSION_KEY,
     REFERENCE_MUSIC_SOURCE_PATH_SESSION_KEY,
+    REFERENCE_ORIGINAL_AUDIO_CHOICE_SESSION_KEY,
+    REFERENCE_ORIGINAL_AUDIO_KEEP,
+    REFERENCE_ORIGINAL_AUDIO_REMOVE,
     STATE_WAITING_REFERENCE_CUSTOM_MUSIC,
     STATE_WAITING_REFERENCE_DESCRIPTION_APPROVAL,
     STATE_WAITING_REFERENCE_MUSIC_CHOICE,
+    STATE_WAITING_REFERENCE_ORIGINAL_AUDIO_CHOICE,
     generate_reference_description,
     generate_reference_video_prompt,
     is_reference_generation,
     reference_music_choice,
+    reference_original_audio_choice,
     render_reference_music_variant,
     store_reference_custom_music,
 )
@@ -3671,6 +3676,18 @@ def _reference_music_choice_markup() -> ReplyKeyboardMarkup:
     )
 
 
+def _reference_original_audio_choice_markup() -> ReplyKeyboardMarkup:
+    return ReplyKeyboardMarkup(
+        [
+            [REFERENCE_ORIGINAL_AUDIO_KEEP],
+            [REFERENCE_ORIGINAL_AUDIO_REMOVE],
+            [NAV_BUTTON_START_OVER],
+        ],
+        resize_keyboard=True,
+        one_time_keyboard=False,
+    )
+
+
 async def _start_reference_description_approval(update: Update, session: dict) -> bool:
     production = session.get("production") or {}
     scenes = production.get("json_plan") if isinstance(production, dict) else None
@@ -3741,12 +3758,16 @@ async def _complete_reference_music_choice(
     session[REFERENCE_MUSIC_CHOICE_SESSION_KEY] = choice
     session.pop(REFERENCE_MUSIC_SOURCE_PATH_SESSION_KEY, None)
     session.pop(REFERENCE_MUSIC_RESULT_PATH_SESSION_KEY, None)
-    if choice == "none":
+    keep_original_audio = session.get(REFERENCE_ORIGINAL_AUDIO_CHOICE_SESSION_KEY) != "remove"
+    if choice == "none" and keep_original_audio:
         await update.message.reply_text("Выбран вариант без дополнительной музыки. Утверждённое Veo-видео остаётся без изменений.")
         return await _start_reference_description_approval(update, session)
 
     try:
-        if choice == "default":
+        if choice == "none":
+            music_path, music_volume = None, 0.0
+            label = "без оригинального аудио и без музыки"
+        elif choice == "default":
             music_path, music_volume = _resolve_music_path(
                 str(session.get("selected_project_key") or "grandma_kitchen")
             )
@@ -3791,7 +3812,7 @@ async def _complete_reference_music_choice(
         )
         return True
 
-    if not music_path:
+    if choice != "none" and not music_path:
         await _reply_text_with_optional_markup(
             update,
             "Музыкальный файл для выбранного варианта не найден. Выберите другой вариант.",
@@ -3799,14 +3820,25 @@ async def _complete_reference_music_choice(
         )
         session["state"] = STATE_WAITING_REFERENCE_MUSIC_CHOICE
         return True
-    session[REFERENCE_MUSIC_SOURCE_PATH_SESSION_KEY] = str(music_path)
-    await reply_text_without_keyboard(update.message, f"Добавляю {label} к уже готовому Veo-видео.")
+    if music_path:
+        session[REFERENCE_MUSIC_SOURCE_PATH_SESSION_KEY] = str(music_path)
+    if choice == "none":
+        progress_text = "Убираю оригинальное аудио из уже готового Veo-видео."
+        caption = "Финальный ролик без оригинального аудио и без музыки."
+    elif keep_original_audio:
+        progress_text = f"Добавляю {label} к уже готовому Veo-видео и сохраняю оригинальное аудио."
+        caption = f"Финальный ролик с оригинальным аудио и {label}."
+    else:
+        progress_text = f"Убираю оригинальное аудио и добавляю {label} к уже готовому Veo-видео."
+        caption = f"Финальный ролик только с {label}."
+    await reply_text_without_keyboard(update.message, progress_text)
     try:
         result_path = await asyncio.to_thread(
             render_reference_music_variant,
             video_bytes,
-            music_path=str(music_path),
+            music_path=str(music_path) if music_path else None,
             music_volume=float(music_volume),
+            keep_original_audio=keep_original_audio,
             run_id=str(session.get("generation_run_id") or ""),
             choice=choice,
         )
@@ -3826,13 +3858,21 @@ async def _complete_reference_music_choice(
     await _safe_reply_video(
         update.message,
         video=stream,
-        caption=f"Финальный ролик с {label}.",
+        caption=caption,
         label="reference_music_video",
     )
     return await _start_reference_description_approval(update, session)
 
 
 async def handle_reference_music_choice_state(update: Update, session: dict, text: str) -> bool:
+    if REFERENCE_ORIGINAL_AUDIO_CHOICE_SESSION_KEY not in session:
+        session["state"] = STATE_WAITING_REFERENCE_ORIGINAL_AUDIO_CHOICE
+        await _reply_text_with_optional_markup(
+            update,
+            "Сначала выберите, сохранить оригинальное аудио Veo или убрать его.",
+            reply_markup=_reference_original_audio_choice_markup(),
+        )
+        return True
     choice = reference_music_choice(text)
     if choice is None:
         await _reply_text_with_optional_markup(
@@ -3842,6 +3882,30 @@ async def handle_reference_music_choice_state(update: Update, session: dict, tex
         )
         return True
     return await _complete_reference_music_choice(update, session, choice=choice)
+
+
+async def handle_reference_original_audio_choice_state(update: Update, session: dict, text: str) -> bool:
+    choice = reference_original_audio_choice(text)
+    if choice is None:
+        await _reply_text_with_optional_markup(
+            update,
+            "Выберите, сохранить оригинальное аудио Veo или убрать его.",
+            reply_markup=_reference_original_audio_choice_markup(),
+        )
+        return True
+    session[REFERENCE_ORIGINAL_AUDIO_CHOICE_SESSION_KEY] = choice
+    session["state"] = STATE_WAITING_REFERENCE_MUSIC_CHOICE
+    choice_text = (
+        "Оригинальное аудио будет сохранено."
+        if choice == "keep"
+        else "Оригинальное аудио будет убрано."
+    )
+    await _reply_text_with_optional_markup(
+        update,
+        choice_text + " Теперь выберите музыку для финального варианта.",
+        reply_markup=_reference_music_choice_markup(),
+    )
+    return True
 
 
 async def handle_reference_custom_music_upload(
@@ -3868,12 +3932,16 @@ async def handle_reference_custom_music_upload(
 async def _finish_scene_media_production(update: Update, session: dict, *, message: str = "Все сцены обработаны. Production завершён.") -> bool:
     session.pop(SCENE_MEDIA_AUTO_APPROVE_SESSION_KEY, None)
     if is_reference_generation(session):
-        session["state"] = STATE_WAITING_REFERENCE_MUSIC_CHOICE
+        session.pop(REFERENCE_ORIGINAL_AUDIO_CHOICE_SESSION_KEY, None)
+        session.pop(REFERENCE_MUSIC_CHOICE_SESSION_KEY, None)
+        session.pop(REFERENCE_MUSIC_SOURCE_PATH_SESSION_KEY, None)
+        session.pop(REFERENCE_MUSIC_RESULT_PATH_SESSION_KEY, None)
+        session["state"] = STATE_WAITING_REFERENCE_ORIGINAL_AUDIO_CHOICE
         await _reply_text_with_optional_markup(
             update,
-            "Veo-видео утверждено. Теперь выберите музыку для финального варианта. "
-            "Она будет добавлена только к готовому видео.",
-            reply_markup=_reference_music_choice_markup(),
+            "Veo-видео утверждено. Сохранить его оригинальное аудио или убрать? "
+            "Музыку выберем следующим шагом и добавим только к готовому видео.",
+            reply_markup=_reference_original_audio_choice_markup(),
         )
         return True
     total_media_cost = estimated_session_total_media_cost(session)

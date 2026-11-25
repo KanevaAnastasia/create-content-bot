@@ -18,6 +18,7 @@ STATE_WAITING_REFERENCE_IMAGE = "waiting_reference_image"
 STATE_WAITING_REFERENCE_CHARACTERS = "waiting_reference_characters"
 STATE_WAITING_REFERENCE_COMMENT = "waiting_reference_comment"
 STATE_WAITING_REFERENCE_DESCRIPTION_APPROVAL = "waiting_reference_description_approval"
+STATE_WAITING_REFERENCE_ORIGINAL_AUDIO_CHOICE = "waiting_reference_original_audio_choice"
 STATE_WAITING_REFERENCE_MUSIC_CHOICE = "waiting_reference_music_choice"
 STATE_WAITING_REFERENCE_CUSTOM_MUSIC = "waiting_reference_custom_music"
 
@@ -26,6 +27,7 @@ REFERENCE_COMMENT_SESSION_KEY = "reference_comment"
 REFERENCE_CHARACTERS_SESSION_KEY = "reference_characters"
 REFERENCE_DESCRIPTION_SESSION_KEY = "reference_short_description"
 REFERENCE_DESCRIPTION_FEEDBACK_PENDING_KEY = "reference_description_feedback_pending"
+REFERENCE_ORIGINAL_AUDIO_CHOICE_SESSION_KEY = "reference_original_audio_choice"
 REFERENCE_MUSIC_CHOICE_SESSION_KEY = "reference_music_choice"
 REFERENCE_MUSIC_SOURCE_PATH_SESSION_KEY = "reference_music_source_path"
 REFERENCE_MUSIC_RESULT_PATH_SESSION_KEY = "reference_music_result_path"
@@ -34,6 +36,9 @@ REFERENCE_MUSIC_NONE = "Без музыки"
 REFERENCE_MUSIC_DEFAULT = "Дефолтная"
 REFERENCE_MUSIC_HOLIDAY = "Новогодняя"
 REFERENCE_MUSIC_CUSTOM = "Своя"
+
+REFERENCE_ORIGINAL_AUDIO_KEEP = "Сохранить оригинальное аудио"
+REFERENCE_ORIGINAL_AUDIO_REMOVE = "Убрать оригинальное аудио"
 
 REFERENCE_NO_EXTRA_CHARACTERS = "Без других"
 REFERENCE_NO_COMMENT = "Без комментария"
@@ -305,6 +310,25 @@ def reference_music_choice(value: str) -> str | None:
     return aliases.get(low)
 
 
+def reference_original_audio_choice(value: str) -> str | None:
+    low = " ".join(str(value or "").strip().casefold().split())
+    aliases = {
+        REFERENCE_ORIGINAL_AUDIO_KEEP.casefold(): "keep",
+        "сохранить": "keep",
+        "оставить": "keep",
+        "оставить звук": "keep",
+        "сохранить оригинальный звук": "keep",
+        "keep": "keep",
+        REFERENCE_ORIGINAL_AUDIO_REMOVE.casefold(): "remove",
+        "убрать": "remove",
+        "убрать звук": "remove",
+        "убрать оригинальный звук": "remove",
+        "без оригинального звука": "remove",
+        "remove": "remove",
+    }
+    return aliases.get(low)
+
+
 def _safe_media_suffix(file_name: str, mime_type: str) -> str:
     suffix = Path(str(file_name or "")).suffix.lower()
     if suffix in {".mp3", ".m4a", ".aac", ".wav", ".ogg", ".opus", ".flac"}:
@@ -343,16 +367,17 @@ def store_reference_custom_music(
 def render_reference_music_variant(
     video_bytes: bytes,
     *,
-    music_path: str,
-    music_volume: float,
+    music_path: str | None,
+    music_volume: float = 0.0,
+    keep_original_audio: bool = True,
     run_id: str = "",
     choice: str = "music",
     output_root: str | Path | None = None,
 ) -> str:
     if not video_bytes:
         raise ValueError("Нет утверждённого видео для добавления музыки")
-    source_music = Path(str(music_path or ""))
-    if not source_music.is_file():
+    source_music = Path(str(music_path)) if music_path else None
+    if source_music is not None and not source_music.is_file():
         raise FileNotFoundError(f"Музыкальный файл не найден: {source_music}")
 
     from .ai_approval_service import _resolve_ffmpeg
@@ -385,10 +410,10 @@ def render_reference_music_variant(
     destination = root / f"approved_veo_{safe_choice}.mp4"
     ffmpeg = _resolve_ffmpeg()
     effective_volume = _apply_db_attenuation(float(music_volume), BACKGROUND_MUSIC_ATTENUATION_DB)
-    music_filter = holiday_music_filter(str(source_music))
-    has_source_audio = _has_audio_stream(clean_path)
+    music_filter = holiday_music_filter(str(source_music)) if source_music is not None else ""
+    has_source_audio = bool(keep_original_audio and _has_audio_stream(clean_path))
 
-    if has_source_audio:
+    if source_music is not None and has_source_audio:
         duration = max(0.0, float(_media_duration(clean_path) or 0.0))
         duration_filter = ""
         if duration > 0:
@@ -404,14 +429,32 @@ def render_reference_music_variant(
             "-filter_complex", filter_complex, "-map", "0:v:0", "-map", "[a]", "-shortest",
             "-c:v", "copy", "-c:a", "aac", "-movflags", "+faststart", str(destination),
         ]
-    else:
+    elif source_music is not None:
         filter_complex = f"[1:a]{music_filter}volume={effective_volume:.4f}[music]"
         command = [
             ffmpeg, "-y", "-i", str(clean_path), "-stream_loop", "-1", "-i", str(source_music),
             "-filter_complex", filter_complex, "-map", "0:v:0", "-map", "[music]", "-shortest",
             "-c:v", "copy", "-c:a", "aac", "-movflags", "+faststart", str(destination),
         ]
+    elif has_source_audio:
+        destination.write_bytes(video_bytes)
+        return str(destination)
+    else:
+        command = [
+            ffmpeg,
+            "-y",
+            "-i",
+            str(clean_path),
+            "-map",
+            "0:v:0",
+            "-c:v",
+            "copy",
+            "-an",
+            "-movflags",
+            "+faststart",
+            str(destination),
+        ]
     _run_ffmpeg(command, timeout=FFMPEG_UPSCALE_TIMEOUT_SEC, stage="reference_music_mix")
     if not destination.is_file() or destination.stat().st_size <= 0:
-        raise RuntimeError("Финальный ролик с музыкой не создан")
+        raise RuntimeError("Финальный ролик не создан")
     return str(destination)

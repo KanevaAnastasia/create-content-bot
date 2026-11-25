@@ -244,6 +244,7 @@ from .handlers_state_media import (
     _handle_waiting_social_descriptions_approval_state,
     handle_reference_custom_music_upload,
     handle_reference_music_choice_state,
+    handle_reference_original_audio_choice_state,
     scene_media_keyboard_snapshot,
     scene_media_reference_images_pending,
 )
@@ -281,6 +282,7 @@ from ..reference_generation import (
     STATE_WAITING_REFERENCE_IMAGE,
     STATE_WAITING_REFERENCE_CUSTOM_MUSIC,
     STATE_WAITING_REFERENCE_MUSIC_CHOICE,
+    STATE_WAITING_REFERENCE_ORIGINAL_AUDIO_CHOICE,
     build_reference_scene,
     generate_reference_description,
     generate_reference_image_prompt,
@@ -6452,8 +6454,8 @@ async def _handle_reference_description_state(
         SESSIONS[chat_id] = session
         await _reply_text_with_optional_markup(
             update,
-            "Режим «По референсу» завершён. Кадр, Veo-видео, выбранный вариант музыки "
-            "и короткое описание утверждены. Ничего не опубликовано.",
+            "Режим «По референсу» завершён. Кадр, Veo-видео, вариант оригинального аудио, "
+            "выбранный вариант музыки и короткое описание утверждены. Ничего не опубликовано.",
             reply_markup=first_step_menu_markup(),
         )
         return True
@@ -8710,6 +8712,11 @@ async def _on_text_impl(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         return
     if state == STATE_WAITING_REFERENCE_MUSIC_CHOICE:
         await handle_reference_music_choice_state(update, session, text)
+        SESSIONS[chat_id] = session
+        save_session_if_possible(chat_id, session)
+        return
+    if state == STATE_WAITING_REFERENCE_ORIGINAL_AUDIO_CHOICE:
+        await handle_reference_original_audio_choice_state(update, session, text)
         SESSIONS[chat_id] = session
         save_session_if_possible(chat_id, session)
         return
