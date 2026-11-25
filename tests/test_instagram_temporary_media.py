@@ -49,6 +49,46 @@ def test_upload_is_expiring_scoped_and_verified_then_reused(media):
     assert post.call_count == get.call_count == 1
 
 
+def test_current_share_url_resolves_signed_exact_download(media):
+    path, post, get, download, snapshots, checkpoint = media
+    share_url = "https://tmpfiles.org/waA9a4thvg5x/private-video.mp4"
+    direct_url = (
+        "https://tmpfiles.org/dl/1795599986.3460cd31cce7d4b8/"
+        "waA9a4thvg5x/private-video.mp4"
+    )
+    post.return_value.json.return_value["data"]["url"] = share_url
+    page = Mock(
+        status_code=200,
+        content=(f'<p><a class="download" href="{direct_url}">Download</a></p>').encode(),
+    )
+    download_context = get.return_value
+    get.side_effect = lambda url, **kwargs: page if url == share_url else download_context
+
+    assert temporary_instagram_video(path, None, checkpoint) == direct_url
+    assert [call.args[0] for call in get.call_args_list] == [share_url, direct_url]
+    assert snapshots[-1]["url"] == direct_url
+    assert snapshots[-1]["verified"] is True
+    assert download.iter_content.call_count == 1
+
+
+def test_current_share_url_rejects_download_for_other_file(media):
+    path, post, get, _, snapshots, checkpoint = media
+    share_url = "https://tmpfiles.org/waA9a4thvg5x/private-video.mp4"
+    post.return_value.json.return_value["data"]["url"] = share_url
+    get.return_value = Mock(
+        status_code=200,
+        content=(
+            '<a class="download" href="https://tmpfiles.org/dl/'
+            '1795599986.3460cd31cce7d4b8/other-id/private-video.mp4">Download</a>'
+        ).encode(),
+    )
+
+    with pytest.raises(ValueError, match="expected file link"):
+        temporary_instagram_video(path, None, checkpoint)
+    assert get.call_count == 1
+    assert snapshots == []
+
+
 def test_failed_verification_resumes_same_uploaded_file(media):
     path, post, get, _, snapshots, checkpoint = media
     original = get.return_value
