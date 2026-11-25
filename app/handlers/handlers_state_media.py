@@ -34,10 +34,22 @@ from ..pipeline_llm_steps import FINAL_SCENE_SUBSCRIBE_CTA
 from ..reference_generation import (
     REFERENCE_COMMENT_SESSION_KEY,
     REFERENCE_DESCRIPTION_SESSION_KEY,
+    REFERENCE_MUSIC_CHOICE_SESSION_KEY,
+    REFERENCE_MUSIC_CUSTOM,
+    REFERENCE_MUSIC_DEFAULT,
+    REFERENCE_MUSIC_HOLIDAY,
+    REFERENCE_MUSIC_NONE,
+    REFERENCE_MUSIC_RESULT_PATH_SESSION_KEY,
+    REFERENCE_MUSIC_SOURCE_PATH_SESSION_KEY,
+    STATE_WAITING_REFERENCE_CUSTOM_MUSIC,
     STATE_WAITING_REFERENCE_DESCRIPTION_APPROVAL,
+    STATE_WAITING_REFERENCE_MUSIC_CHOICE,
     generate_reference_description,
     generate_reference_video_prompt,
     is_reference_generation,
+    reference_music_choice,
+    render_reference_music_variant,
+    store_reference_custom_music,
 )
 from ..pipeline_history import restore_scene_prompt_fields_from_history
 from ..story_image_postprocess import finish_story_historical_frame
@@ -154,10 +166,13 @@ from .handlers_keyboards import first_step_menu_markup, reply_text_without_keybo
 from ..llm_utils import extract_json_object
 from ..multilingual import normalize_language_code
 from ..post_production import (
+    DEFAULT_BACKGROUND_MUSIC_VOLUME,
+    _resolve_music_path,
     build_post_production,
     build_word_synced_subtitle_cues,
     probe_video_bytes_dimensions,
 )
+from ..series_theme import HOLIDAY_THEME, THEME_KEY, holiday_music
 from ..project_profiles import (
     DISCIPLINE_HASHTAGS_FIXED_EN,
     DISCIPLINE_HASHTAGS_FIXED_RU,
@@ -3644,51 +3659,221 @@ def _mirror_story_visual_track_for_english(session: dict, scenes: list[dict]) ->
     return mirrored
 
 
-async def _finish_scene_media_production(update: Update, session: dict, *, message: str = "Все сцены обработаны. Production завершён.") -> bool:
-    session.pop(SCENE_MEDIA_AUTO_APPROVE_SESSION_KEY, None)
-    if is_reference_generation(session):
-        production = session.get("production") or {}
-        scenes = production.get("json_plan") if isinstance(production, dict) else None
-        scene = scenes[0] if isinstance(scenes, list) and scenes and isinstance(scenes[0], dict) else {}
-        try:
-            await reply_text_without_keyboard(
-                update.message,
-                "Veo-видео утверждено. Готовлю короткое описание в одно предложение.",
-            )
-            description = await asyncio.to_thread(
-                generate_reference_description,
-                image_prompt=str(scene.get("start_frame_prompt") or ""),
-                video_prompt=str(scene.get("video_prompt") or ""),
-                comment=str(session.get(REFERENCE_COMMENT_SESSION_KEY) or ""),
-            )
-            if not str(description or "").strip():
-                raise RuntimeError("модель вернула пустое описание")
-        except Exception as exc:
-            logger.exception("reference description generation after video approval failed")
-            session[REFERENCE_DESCRIPTION_SESSION_KEY] = ""
-            session["state"] = STATE_WAITING_REFERENCE_DESCRIPTION_APPROVAL
-            await _reply_text_with_optional_markup(
-                update,
-                f"Видео сохранено, но описание пока не сгенерировалось: {_user_error_message(exc)}. "
-                "Нажмите «ПЕРЕГЕНЕРИРОВАТЬ».",
-                reply_markup=ReplyKeyboardMarkup(
-                    [["ПЕРЕГЕНЕРИРОВАТЬ"], [NAV_BUTTON_START_OVER]],
-                    resize_keyboard=True,
-                    one_time_keyboard=False,
-                ),
-            )
-            return True
-        session[REFERENCE_DESCRIPTION_SESSION_KEY] = str(description).strip()
-        session["reference_description_approved"] = False
+def _reference_music_choice_markup() -> ReplyKeyboardMarkup:
+    return ReplyKeyboardMarkup(
+        [
+            [REFERENCE_MUSIC_NONE, REFERENCE_MUSIC_DEFAULT],
+            [REFERENCE_MUSIC_HOLIDAY, REFERENCE_MUSIC_CUSTOM],
+            [NAV_BUTTON_START_OVER],
+        ],
+        resize_keyboard=True,
+        one_time_keyboard=False,
+    )
+
+
+async def _start_reference_description_approval(update: Update, session: dict) -> bool:
+    production = session.get("production") or {}
+    scenes = production.get("json_plan") if isinstance(production, dict) else None
+    scene = scenes[0] if isinstance(scenes, list) and scenes and isinstance(scenes[0], dict) else {}
+    try:
+        await reply_text_without_keyboard(
+            update.message,
+            "Готовлю короткое описание в одно предложение.",
+        )
+        description = await asyncio.to_thread(
+            generate_reference_description,
+            image_prompt=str(scene.get("start_frame_prompt") or ""),
+            video_prompt=str(scene.get("video_prompt") or ""),
+            comment=str(session.get(REFERENCE_COMMENT_SESSION_KEY) or ""),
+        )
+        if not str(description or "").strip():
+            raise RuntimeError("модель вернула пустое описание")
+    except Exception as exc:
+        logger.exception("reference description generation after music choice failed")
+        session[REFERENCE_DESCRIPTION_SESSION_KEY] = ""
         session["state"] = STATE_WAITING_REFERENCE_DESCRIPTION_APPROVAL
         await _reply_text_with_optional_markup(
             update,
-            "Короткое описание на апрув:\n\n" + str(description).strip(),
+            f"Музыка выбрана, но описание пока не сгенерировалось: {_user_error_message(exc)}. "
+            "Нажмите «ПЕРЕГЕНЕРИРОВАТЬ».",
             reply_markup=ReplyKeyboardMarkup(
-                [["ОК"], ["ФИДБЕК"], ["ПЕРЕГЕНЕРИРОВАТЬ"], [NAV_BUTTON_START_OVER]],
+                [["ПЕРЕГЕНЕРИРОВАТЬ"], [NAV_BUTTON_START_OVER]],
                 resize_keyboard=True,
                 one_time_keyboard=False,
             ),
+        )
+        return True
+    session[REFERENCE_DESCRIPTION_SESSION_KEY] = str(description).strip()
+    session["reference_description_approved"] = False
+    session["state"] = STATE_WAITING_REFERENCE_DESCRIPTION_APPROVAL
+    await _reply_text_with_optional_markup(
+        update,
+        "Короткое описание на апрув:\n\n" + str(description).strip(),
+        reply_markup=ReplyKeyboardMarkup(
+            [["ОК"], ["ФИДБЕК"], ["ПЕРЕГЕНЕРИРОВАТЬ"], [NAV_BUTTON_START_OVER]],
+            resize_keyboard=True,
+            one_time_keyboard=False,
+        ),
+    )
+    return True
+
+
+async def _complete_reference_music_choice(
+    update: Update,
+    session: dict,
+    *,
+    choice: str,
+    custom_music_bytes: bytes | None = None,
+    custom_file_name: str = "",
+    custom_mime_type: str = "",
+) -> bool:
+    production = session.get("production") or {}
+    scenes = production.get("json_plan") if isinstance(production, dict) else None
+    scene = scenes[0] if isinstance(scenes, list) and scenes and isinstance(scenes[0], dict) else None
+    if not isinstance(scene, dict):
+        await update.message.reply_text("Не вижу сцену текущего ролика. Начните режим заново.")
+        return True
+    video_bytes = selected_video_bytes_for_production(scene, "ru")
+    if not video_bytes:
+        await update.message.reply_text("Не вижу утверждённое Veo-видео. Сначала завершите апрув видео.")
+        return True
+
+    session[REFERENCE_MUSIC_CHOICE_SESSION_KEY] = choice
+    session.pop(REFERENCE_MUSIC_SOURCE_PATH_SESSION_KEY, None)
+    session.pop(REFERENCE_MUSIC_RESULT_PATH_SESSION_KEY, None)
+    if choice == "none":
+        await update.message.reply_text("Выбран вариант без дополнительной музыки. Утверждённое Veo-видео остаётся без изменений.")
+        return await _start_reference_description_approval(update, session)
+
+    try:
+        if choice == "default":
+            music_path, music_volume = _resolve_music_path(
+                str(session.get("selected_project_key") or "grandma_kitchen")
+            )
+            label = "дефолтной музыкой"
+        elif choice == "holiday":
+            resolved = holiday_music({THEME_KEY: HOLIDAY_THEME})
+            music_path, music_volume = resolved if resolved else (None, 0.0)
+            label = "новогодней музыкой"
+        elif choice == "custom":
+            if not custom_music_bytes:
+                session["state"] = STATE_WAITING_REFERENCE_CUSTOM_MUSIC
+                await _reply_text_with_optional_markup(
+                    update,
+                    "Пришлите аудиофайл своей музыки. Подойдут MP3, M4A, WAV, OGG или FLAC.",
+                    reply_markup=ReplyKeyboardMarkup([[NAV_BUTTON_START_OVER]], resize_keyboard=True),
+                )
+                return True
+            music_path = await asyncio.to_thread(
+                store_reference_custom_music,
+                custom_music_bytes,
+                run_id=str(session.get("generation_run_id") or ""),
+                file_name=custom_file_name,
+                mime_type=custom_mime_type,
+            )
+            music_volume = DEFAULT_BACKGROUND_MUSIC_VOLUME
+            label = "вашей музыкой"
+        else:
+            await _reply_text_with_optional_markup(
+                update,
+                "Выберите один из четырёх вариантов музыки.",
+                reply_markup=_reference_music_choice_markup(),
+            )
+            return True
+    except Exception as exc:
+        logger.exception("reference music source preparation failed choice=%s", choice)
+        session["state"] = STATE_WAITING_REFERENCE_MUSIC_CHOICE
+        await _reply_text_with_optional_markup(
+            update,
+            f"Не удалось подготовить музыку: {_user_error_message(exc, domain='video')}. "
+            "Выберите вариант ещё раз.",
+            reply_markup=_reference_music_choice_markup(),
+        )
+        return True
+
+    if not music_path:
+        await _reply_text_with_optional_markup(
+            update,
+            "Музыкальный файл для выбранного варианта не найден. Выберите другой вариант.",
+            reply_markup=_reference_music_choice_markup(),
+        )
+        session["state"] = STATE_WAITING_REFERENCE_MUSIC_CHOICE
+        return True
+    session[REFERENCE_MUSIC_SOURCE_PATH_SESSION_KEY] = str(music_path)
+    await reply_text_without_keyboard(update.message, f"Добавляю {label} к уже готовому Veo-видео.")
+    try:
+        result_path = await asyncio.to_thread(
+            render_reference_music_variant,
+            video_bytes,
+            music_path=str(music_path),
+            music_volume=float(music_volume),
+            run_id=str(session.get("generation_run_id") or ""),
+            choice=choice,
+        )
+    except Exception as exc:
+        logger.exception("reference music mix failed choice=%s", choice)
+        session["state"] = STATE_WAITING_REFERENCE_MUSIC_CHOICE
+        await _reply_text_with_optional_markup(
+            update,
+            f"Не удалось добавить музыку: {_user_error_message(exc, domain='video')}. Выберите вариант ещё раз.",
+            reply_markup=_reference_music_choice_markup(),
+        )
+        return True
+    session[REFERENCE_MUSIC_RESULT_PATH_SESSION_KEY] = str(result_path)
+    result_file = Path(result_path)
+    stream = io.BytesIO(result_file.read_bytes())
+    stream.name = result_file.name
+    await _safe_reply_video(
+        update.message,
+        video=stream,
+        caption=f"Финальный ролик с {label}.",
+        label="reference_music_video",
+    )
+    return await _start_reference_description_approval(update, session)
+
+
+async def handle_reference_music_choice_state(update: Update, session: dict, text: str) -> bool:
+    choice = reference_music_choice(text)
+    if choice is None:
+        await _reply_text_with_optional_markup(
+            update,
+            "Выберите: без музыки, дефолтная, новогодняя или своя.",
+            reply_markup=_reference_music_choice_markup(),
+        )
+        return True
+    return await _complete_reference_music_choice(update, session, choice=choice)
+
+
+async def handle_reference_custom_music_upload(
+    update: Update,
+    session: dict,
+    *,
+    music_bytes: bytes,
+    file_name: str = "",
+    mime_type: str = "",
+) -> bool:
+    if not music_bytes:
+        await update.message.reply_text("Не удалось прочитать аудиофайл. Пришлите его ещё раз.")
+        return True
+    return await _complete_reference_music_choice(
+        update,
+        session,
+        choice="custom",
+        custom_music_bytes=music_bytes,
+        custom_file_name=file_name,
+        custom_mime_type=mime_type,
+    )
+
+
+async def _finish_scene_media_production(update: Update, session: dict, *, message: str = "Все сцены обработаны. Production завершён.") -> bool:
+    session.pop(SCENE_MEDIA_AUTO_APPROVE_SESSION_KEY, None)
+    if is_reference_generation(session):
+        session["state"] = STATE_WAITING_REFERENCE_MUSIC_CHOICE
+        await _reply_text_with_optional_markup(
+            update,
+            "Veo-видео утверждено. Теперь выберите музыку для финального варианта. "
+            "Она будет добавлена только к готовому видео.",
+            reply_markup=_reference_music_choice_markup(),
         )
         return True
     total_media_cost = estimated_session_total_media_cost(session)

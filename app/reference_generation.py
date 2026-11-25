@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import re
+import uuid
+from pathlib import Path
 from typing import Any
 
 from .character_catalog import CHARACTER_CATALOG, character_prompt_catalog
@@ -16,12 +18,22 @@ STATE_WAITING_REFERENCE_IMAGE = "waiting_reference_image"
 STATE_WAITING_REFERENCE_CHARACTERS = "waiting_reference_characters"
 STATE_WAITING_REFERENCE_COMMENT = "waiting_reference_comment"
 STATE_WAITING_REFERENCE_DESCRIPTION_APPROVAL = "waiting_reference_description_approval"
+STATE_WAITING_REFERENCE_MUSIC_CHOICE = "waiting_reference_music_choice"
+STATE_WAITING_REFERENCE_CUSTOM_MUSIC = "waiting_reference_custom_music"
 
 REFERENCE_SOURCE_IMAGE_SESSION_KEY = "reference_source_image"
 REFERENCE_COMMENT_SESSION_KEY = "reference_comment"
 REFERENCE_CHARACTERS_SESSION_KEY = "reference_characters"
 REFERENCE_DESCRIPTION_SESSION_KEY = "reference_short_description"
 REFERENCE_DESCRIPTION_FEEDBACK_PENDING_KEY = "reference_description_feedback_pending"
+REFERENCE_MUSIC_CHOICE_SESSION_KEY = "reference_music_choice"
+REFERENCE_MUSIC_SOURCE_PATH_SESSION_KEY = "reference_music_source_path"
+REFERENCE_MUSIC_RESULT_PATH_SESSION_KEY = "reference_music_result_path"
+
+REFERENCE_MUSIC_NONE = "Без музыки"
+REFERENCE_MUSIC_DEFAULT = "Дефолтная"
+REFERENCE_MUSIC_HOLIDAY = "Новогодняя"
+REFERENCE_MUSIC_CUSTOM = "Своя"
 
 REFERENCE_NO_EXTRA_CHARACTERS = "Без других"
 REFERENCE_NO_COMMENT = "Без комментария"
@@ -268,3 +280,138 @@ def build_reference_scene(
             "start": [base64.b64encode(source_image).decode("ascii")]
         },
     }
+
+
+def reference_music_choice(value: str) -> str | None:
+    low = " ".join(str(value or "").strip().casefold().split())
+    aliases = {
+        REFERENCE_MUSIC_NONE.casefold(): "none",
+        "без": "none",
+        "нет": "none",
+        "none": "none",
+        REFERENCE_MUSIC_DEFAULT.casefold(): "default",
+        "обычная": "default",
+        "стандартная": "default",
+        "default": "default",
+        REFERENCE_MUSIC_HOLIDAY.casefold(): "holiday",
+        "новый год": "holiday",
+        "праздничная": "holiday",
+        "christmas": "holiday",
+        REFERENCE_MUSIC_CUSTOM.casefold(): "custom",
+        "моя": "custom",
+        "загрузить": "custom",
+        "custom": "custom",
+    }
+    return aliases.get(low)
+
+
+def _safe_media_suffix(file_name: str, mime_type: str) -> str:
+    suffix = Path(str(file_name or "")).suffix.lower()
+    if suffix in {".mp3", ".m4a", ".aac", ".wav", ".ogg", ".opus", ".flac"}:
+        return suffix
+    mime = str(mime_type or "").casefold()
+    if "wav" in mime:
+        return ".wav"
+    if "ogg" in mime or "opus" in mime:
+        return ".ogg"
+    if "mp4" in mime or "m4a" in mime:
+        return ".m4a"
+    return ".mp3"
+
+
+def store_reference_custom_music(
+    music_bytes: bytes,
+    *,
+    run_id: str = "",
+    file_name: str = "",
+    mime_type: str = "",
+) -> str:
+    if not music_bytes:
+        raise ValueError("Пустой музыкальный файл")
+    safe_run_id = str(run_id or "").strip()
+    try:
+        safe_run_id = str(uuid.UUID(safe_run_id))
+    except (TypeError, ValueError, AttributeError):
+        safe_run_id = f"draft-{uuid.uuid4()}"
+    root = Path(__file__).resolve().parents[1] / "artifacts/reference_generation" / safe_run_id
+    root.mkdir(parents=True, exist_ok=True)
+    destination = root / f"custom_music{_safe_media_suffix(file_name, mime_type)}"
+    destination.write_bytes(music_bytes)
+    return str(destination)
+
+
+def render_reference_music_variant(
+    video_bytes: bytes,
+    *,
+    music_path: str,
+    music_volume: float,
+    run_id: str = "",
+    choice: str = "music",
+    output_root: str | Path | None = None,
+) -> str:
+    if not video_bytes:
+        raise ValueError("Нет утверждённого видео для добавления музыки")
+    source_music = Path(str(music_path or ""))
+    if not source_music.is_file():
+        raise FileNotFoundError(f"Музыкальный файл не найден: {source_music}")
+
+    from .ai_approval_service import _resolve_ffmpeg
+    from .post_production import (
+        BACKGROUND_MUSIC_ATTENUATION_DB,
+        FFMPEG_UPSCALE_TIMEOUT_SEC,
+        SOURCE_AUDIO_VOLUME,
+        _apply_db_attenuation,
+        _has_audio_stream,
+        _media_duration,
+        _run_ffmpeg,
+    )
+    from .series_theme import holiday_music_filter
+
+    safe_run_id = str(run_id or "").strip()
+    try:
+        safe_run_id = str(uuid.UUID(safe_run_id))
+    except (TypeError, ValueError, AttributeError):
+        safe_run_id = f"draft-{uuid.uuid4()}"
+    root_base = (
+        Path(output_root)
+        if output_root is not None
+        else Path(__file__).resolve().parents[1] / "artifacts/reference_generation"
+    )
+    root = root_base / safe_run_id
+    root.mkdir(parents=True, exist_ok=True)
+    clean_path = root / "approved_veo.mp4"
+    clean_path.write_bytes(video_bytes)
+    safe_choice = re.sub(r"[^a-z0-9_-]+", "_", str(choice or "music").casefold()).strip("_") or "music"
+    destination = root / f"approved_veo_{safe_choice}.mp4"
+    ffmpeg = _resolve_ffmpeg()
+    effective_volume = _apply_db_attenuation(float(music_volume), BACKGROUND_MUSIC_ATTENUATION_DB)
+    music_filter = holiday_music_filter(str(source_music))
+    has_source_audio = _has_audio_stream(clean_path)
+
+    if has_source_audio:
+        duration = max(0.0, float(_media_duration(clean_path) or 0.0))
+        duration_filter = ""
+        if duration > 0:
+            duration_arg = f"{duration:.3f}"
+            duration_filter = f",apad=whole_dur={duration_arg},atrim=duration={duration_arg},asetpts=N/SR/TB"
+        filter_complex = (
+            f"[0:a]volume={SOURCE_AUDIO_VOLUME:.4f}{duration_filter}[voice];"
+            f"[1:a]{music_filter}volume={effective_volume:.4f}[music];"
+            "[voice][music]amix=inputs=2:duration=first:dropout_transition=0:normalize=0[a]"
+        )
+        command = [
+            ffmpeg, "-y", "-i", str(clean_path), "-stream_loop", "-1", "-i", str(source_music),
+            "-filter_complex", filter_complex, "-map", "0:v:0", "-map", "[a]", "-shortest",
+            "-c:v", "copy", "-c:a", "aac", "-movflags", "+faststart", str(destination),
+        ]
+    else:
+        filter_complex = f"[1:a]{music_filter}volume={effective_volume:.4f}[music]"
+        command = [
+            ffmpeg, "-y", "-i", str(clean_path), "-stream_loop", "-1", "-i", str(source_music),
+            "-filter_complex", filter_complex, "-map", "0:v:0", "-map", "[music]", "-shortest",
+            "-c:v", "copy", "-c:a", "aac", "-movflags", "+faststart", str(destination),
+        ]
+    _run_ffmpeg(command, timeout=FFMPEG_UPSCALE_TIMEOUT_SEC, stage="reference_music_mix")
+    if not destination.is_file() or destination.stat().st_size <= 0:
+        raise RuntimeError("Финальный ролик с музыкой не создан")
+    return str(destination)

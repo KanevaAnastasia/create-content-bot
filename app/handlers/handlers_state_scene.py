@@ -242,6 +242,8 @@ from .handlers_state_media import (
     _social_descriptions_approval_markup,
     _handle_waiting_scene_media_state,
     _handle_waiting_social_descriptions_approval_state,
+    handle_reference_custom_music_upload,
+    handle_reference_music_choice_state,
     scene_media_keyboard_snapshot,
     scene_media_reference_images_pending,
 )
@@ -277,6 +279,8 @@ from ..reference_generation import (
     STATE_WAITING_REFERENCE_COMMENT,
     STATE_WAITING_REFERENCE_DESCRIPTION_APPROVAL,
     STATE_WAITING_REFERENCE_IMAGE,
+    STATE_WAITING_REFERENCE_CUSTOM_MUSIC,
+    STATE_WAITING_REFERENCE_MUSIC_CHOICE,
     build_reference_scene,
     generate_reference_description,
     generate_reference_image_prompt,
@@ -6448,7 +6452,8 @@ async def _handle_reference_description_state(
         SESSIONS[chat_id] = session
         await _reply_text_with_optional_markup(
             update,
-            "Режим «По референсу» завершён. Кадр, Veo-видео и короткое описание утверждены. Ничего не опубликовано.",
+            "Режим «По референсу» завершён. Кадр, Veo-видео, выбранный вариант музыки "
+            "и короткое описание утверждены. Ничего не опубликовано.",
             reply_markup=first_step_menu_markup(),
         )
         return True
@@ -7815,12 +7820,25 @@ async def _handle_visualization_media_upload(
 
 
 async def on_audio(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Handles audio, voice notes, and audio documents for visualization mode."""
+    """Handles audio, voice notes, and audio documents for supported workflows."""
     if update.message is None or update.effective_chat is None:
         return
     chat_id = int(update.effective_chat.id)
     session = SESSIONS.get(chat_id) or {}
-    if str(session.get("state") or "") != STATE_WAITING_VISUALIZATION_MEDIA:
+    state = str(session.get("state") or "")
+    if state == STATE_WAITING_REFERENCE_CUSTOM_MUSIC:
+        media_bytes, media_meta = await _extract_visualization_audio_bytes(update, context)
+        await handle_reference_custom_music_upload(
+            update,
+            session,
+            music_bytes=media_bytes,
+            file_name=str(media_meta.get("file_name") or ""),
+            mime_type=str(media_meta.get("mime_type") or ""),
+        )
+        SESSIONS[chat_id] = session
+        save_session_if_possible(chat_id, session)
+        return
+    if state != STATE_WAITING_VISUALIZATION_MEDIA:
         return
     media_bytes, media_meta = await _extract_visualization_audio_bytes(update, context)
     await _handle_visualization_media_upload(
@@ -8689,6 +8707,14 @@ async def _on_text_impl(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
             session=session,
             text=text,
         )
+        return
+    if state == STATE_WAITING_REFERENCE_MUSIC_CHOICE:
+        await handle_reference_music_choice_state(update, session, text)
+        SESSIONS[chat_id] = session
+        save_session_if_possible(chat_id, session)
+        return
+    if state == STATE_WAITING_REFERENCE_CUSTOM_MUSIC:
+        await update.message.reply_text("Жду аудиофайл вашей музыки. Пришлите его как аудио или файл.")
         return
     if state == STATE_WAITING_REFERENCE_DESCRIPTION_APPROVAL:
         await _handle_reference_description_state(

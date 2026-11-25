@@ -1,4 +1,5 @@
 import asyncio
+from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
@@ -213,7 +214,7 @@ def test_start_image_approval_generates_reference_video_prompt_after_frame_appro
     assert session["scene_media_substep"] == "video_prompt"
 
 
-def test_reference_finish_stops_before_final_build_and_requests_description_approval(monkeypatch):
+def test_reference_finish_stops_before_final_build_and_requests_music_choice(monkeypatch):
     from app.handlers import handlers_state_media as media
 
     session = {
@@ -227,7 +228,6 @@ def test_reference_finish_stops_before_final_build_and_requests_description_appr
             ]
         },
     }
-    monkeypatch.setattr(media, "generate_reference_description", lambda **kwargs: "Бабушка и Тимоша оживляют сцену с корзиной.")
     queued = AsyncMock()
     monkeypatch.setattr(media, "queue_final_builds_for_session", queued)
     update = SimpleNamespace(message=SimpleNamespace(reply_text=AsyncMock()))
@@ -235,6 +235,263 @@ def test_reference_finish_stops_before_final_build_and_requests_description_appr
     result = asyncio.run(media._finish_scene_media_production(update, session))
 
     assert result is True
-    assert session["state"] == reference.STATE_WAITING_REFERENCE_DESCRIPTION_APPROVAL
-    assert session["reference_short_description"] == "Бабушка и Тимоша оживляют сцену с корзиной."
+    assert session["state"] == reference.STATE_WAITING_REFERENCE_MUSIC_CHOICE
+    assert "reference_short_description" not in session
     queued.assert_not_called()
+
+
+def _reference_session_with_approved_video(video_bytes: bytes = b"approved-veo"):
+    from app.scene_media_candidates import mark_video_candidate_approved, register_video_candidate
+
+    scene = {
+        "start_frame_prompt": "Кадр по референсу",
+        "video_prompt": "Veo prompt",
+    }
+    candidate = register_video_candidate(
+        scene,
+        language="ru",
+        video_bytes=video_bytes,
+        source_image_candidate_id=None,
+    )
+    mark_video_candidate_approved(scene, "ru", candidate["candidate_id"])
+    return {
+        "generation_mode": "reference",
+        "selected_project_key": "grandma_kitchen",
+        "production": {"json_plan": [scene]},
+    }
+
+
+def test_reference_music_choice_parses_all_four_buttons():
+    assert reference.reference_music_choice("Без музыки") == "none"
+    assert reference.reference_music_choice("Дефолтная") == "default"
+    assert reference.reference_music_choice("Новогодняя") == "holiday"
+    assert reference.reference_music_choice("Своя") == "custom"
+
+
+def test_reference_no_music_proceeds_to_description_without_render(monkeypatch):
+    from app.handlers import handlers_state_media as media
+
+    session = _reference_session_with_approved_video()
+    description = AsyncMock(return_value=True)
+    render = AsyncMock()
+    monkeypatch.setattr(media, "_start_reference_description_approval", description)
+    monkeypatch.setattr(media, "render_reference_music_variant", render)
+    update = SimpleNamespace(message=SimpleNamespace(reply_text=AsyncMock()))
+
+    result = asyncio.run(media.handle_reference_music_choice_state(update, session, "Без музыки"))
+
+    assert result is True
+    assert session[reference.REFERENCE_MUSIC_CHOICE_SESSION_KEY] == "none"
+    description.assert_awaited_once_with(update, session)
+    render.assert_not_called()
+
+
+def test_reference_custom_music_choice_waits_for_audio_upload(monkeypatch):
+    from app.handlers import handlers_state_media as media
+
+    session = _reference_session_with_approved_video()
+    description = AsyncMock(return_value=True)
+    monkeypatch.setattr(media, "_start_reference_description_approval", description)
+    update = SimpleNamespace(message=SimpleNamespace(reply_text=AsyncMock()))
+
+    result = asyncio.run(media.handle_reference_music_choice_state(update, session, "Своя"))
+
+    assert result is True
+    assert session["state"] == reference.STATE_WAITING_REFERENCE_CUSTOM_MUSIC
+    assert session[reference.REFERENCE_MUSIC_CHOICE_SESSION_KEY] == "custom"
+    description.assert_not_awaited()
+
+
+def test_reference_default_music_renders_only_the_approved_video(monkeypatch, tmp_path):
+    from app.handlers import handlers_state_media as media
+
+    session = _reference_session_with_approved_video(b"approved-video-bytes")
+    music_path = tmp_path / "default.mp3"
+    music_path.write_bytes(b"music")
+    result_path = tmp_path / "final.mp4"
+    result_path.write_bytes(b"mixed-video")
+    render_calls = []
+
+    def fake_render(video_bytes, **kwargs):
+        render_calls.append((video_bytes, kwargs))
+        return str(result_path)
+
+    monkeypatch.setattr(media, "_resolve_music_path", lambda _project: (str(music_path), 0.25))
+    monkeypatch.setattr(media, "render_reference_music_variant", fake_render)
+    sent_video = AsyncMock()
+    description = AsyncMock(return_value=True)
+    monkeypatch.setattr(media, "_safe_reply_video", sent_video)
+    monkeypatch.setattr(media, "_start_reference_description_approval", description)
+    update = SimpleNamespace(message=SimpleNamespace(reply_text=AsyncMock()))
+
+    result = asyncio.run(media.handle_reference_music_choice_state(update, session, "Дефолтная"))
+
+    assert result is True
+    assert render_calls == [
+        (
+            b"approved-video-bytes",
+            {
+                "music_path": str(music_path),
+                "music_volume": 0.25,
+                "run_id": "",
+                "choice": "default",
+            },
+        )
+    ]
+    assert session[reference.REFERENCE_MUSIC_RESULT_PATH_SESSION_KEY] == str(result_path)
+    assert sent_video.await_args.kwargs["video"].read() == b"mixed-video"
+    description.assert_awaited_once_with(update, session)
+
+
+def test_reference_holiday_music_uses_christmas_series_track(monkeypatch, tmp_path):
+    from app.handlers import handlers_state_media as media
+
+    session = _reference_session_with_approved_video()
+    music_path = tmp_path / "holiday.mp3"
+    music_path.write_bytes(b"holiday")
+    result_path = tmp_path / "holiday-final.mp4"
+    result_path.write_bytes(b"holiday-video")
+    seen = {}
+
+    def fake_holiday_music(style):
+        seen["style"] = style
+        return str(music_path), 0.5
+
+    def fake_render(_video_bytes, **kwargs):
+        seen["render"] = kwargs
+        return str(result_path)
+
+    monkeypatch.setattr(media, "holiday_music", fake_holiday_music)
+    monkeypatch.setattr(media, "render_reference_music_variant", fake_render)
+    monkeypatch.setattr(media, "_safe_reply_video", AsyncMock())
+    monkeypatch.setattr(media, "_start_reference_description_approval", AsyncMock(return_value=True))
+    update = SimpleNamespace(message=SimpleNamespace(reply_text=AsyncMock()))
+
+    asyncio.run(media.handle_reference_music_choice_state(update, session, "Новогодняя"))
+
+    assert seen["style"] == {media.THEME_KEY: media.HOLIDAY_THEME}
+    assert seen["render"]["music_path"] == str(music_path)
+    assert seen["render"]["music_volume"] == 0.5
+    assert seen["render"]["choice"] == "holiday"
+
+
+def test_reference_custom_music_upload_is_stored_and_mixed(monkeypatch, tmp_path):
+    from app.handlers import handlers_state_media as media
+
+    session = _reference_session_with_approved_video()
+    session["generation_run_id"] = "26eec660-ec72-41f1-ac65-d5c162491413"
+    music_path = tmp_path / "custom.wav"
+    result_path = tmp_path / "custom-final.mp4"
+    result_path.write_bytes(b"custom-video")
+    seen = {}
+
+    def fake_store(music_bytes, **kwargs):
+        seen["store"] = (music_bytes, kwargs)
+        return str(music_path)
+
+    def fake_render(video_bytes, **kwargs):
+        seen["render"] = (video_bytes, kwargs)
+        return str(result_path)
+
+    monkeypatch.setattr(media, "store_reference_custom_music", fake_store)
+    monkeypatch.setattr(media, "render_reference_music_variant", fake_render)
+    monkeypatch.setattr(media, "_safe_reply_video", AsyncMock())
+    monkeypatch.setattr(media, "_start_reference_description_approval", AsyncMock(return_value=True))
+    update = SimpleNamespace(message=SimpleNamespace(reply_text=AsyncMock()))
+
+    asyncio.run(
+        media.handle_reference_custom_music_upload(
+            update,
+            session,
+            music_bytes=b"uploaded-track",
+            file_name="mine.wav",
+            mime_type="audio/wav",
+        )
+    )
+
+    assert seen["store"] == (
+        b"uploaded-track",
+        {
+            "run_id": session["generation_run_id"],
+            "file_name": "mine.wav",
+            "mime_type": "audio/wav",
+        },
+    )
+    assert seen["render"][0] == b"approved-veo"
+    assert seen["render"][1]["music_path"] == str(music_path)
+    assert seen["render"][1]["choice"] == "custom"
+
+
+def test_reference_music_result_survives_minimal_session_cache():
+    from app.session_store import _chat_session_cache_payload
+
+    session = {
+        reference.REFERENCE_MUSIC_CHOICE_SESSION_KEY: "holiday",
+        reference.REFERENCE_MUSIC_SOURCE_PATH_SESSION_KEY: "/tmp/holiday.mp3",
+        reference.REFERENCE_MUSIC_RESULT_PATH_SESSION_KEY: "/tmp/final.mp4",
+    }
+
+    assert _chat_session_cache_payload(session) == session
+
+
+def test_render_reference_music_variant_mixes_source_audio_after_video(monkeypatch, tmp_path):
+    from app import ai_approval_service, post_production, series_theme
+
+    music_path = tmp_path / "music.mp3"
+    music_path.write_bytes(b"music")
+    commands = []
+
+    def fake_run(command, **_kwargs):
+        commands.append(command)
+        Path(command[-1]).write_bytes(b"mixed")
+
+    monkeypatch.setattr(ai_approval_service, "_resolve_ffmpeg", lambda: "ffmpeg")
+    monkeypatch.setattr(post_production, "_has_audio_stream", lambda _path: True)
+    monkeypatch.setattr(post_production, "_media_duration", lambda _path: 8.0)
+    monkeypatch.setattr(post_production, "_run_ffmpeg", fake_run)
+    monkeypatch.setattr(post_production, "_apply_db_attenuation", lambda volume, _db: volume)
+    monkeypatch.setattr(series_theme, "holiday_music_filter", lambda _path: "")
+
+    result = reference.render_reference_music_variant(
+        b"approved-video",
+        music_path=str(music_path),
+        music_volume=0.2,
+        choice="default",
+        output_root=tmp_path / "renders",
+    )
+
+    assert Path(result).read_bytes() == b"mixed"
+    assert Path(result).name == "approved_veo_default.mp4"
+    assert "amix=inputs=2:duration=first" in commands[0][commands[0].index("-filter_complex") + 1]
+    assert commands[0][commands[0].index("-map") + 1] == "0:v:0"
+
+
+def test_reference_custom_music_audio_is_routed_from_audio_handler(monkeypatch):
+    from app.handlers import handlers_state_scene as scene_handler
+
+    chat_id = 817263
+    session = {"state": reference.STATE_WAITING_REFERENCE_CUSTOM_MUSIC}
+    scene_handler.SESSIONS[chat_id] = session
+    monkeypatch.setattr(
+        scene_handler,
+        "_extract_visualization_audio_bytes",
+        AsyncMock(return_value=(b"custom-music", {"file_name": "track.wav", "mime_type": "audio/wav"})),
+    )
+    routed = AsyncMock(return_value=True)
+    monkeypatch.setattr(scene_handler, "handle_reference_custom_music_upload", routed)
+    monkeypatch.setattr(scene_handler, "save_session_if_possible", lambda *_args, **_kwargs: None)
+    update = SimpleNamespace(
+        message=SimpleNamespace(),
+        effective_chat=SimpleNamespace(id=chat_id),
+    )
+
+    asyncio.run(scene_handler.on_audio(update, SimpleNamespace()))
+
+    routed.assert_awaited_once_with(
+        update,
+        session,
+        music_bytes=b"custom-music",
+        file_name="track.wav",
+        mime_type="audio/wav",
+    )
+    scene_handler.SESSIONS.pop(chat_id, None)
