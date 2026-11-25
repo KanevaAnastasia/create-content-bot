@@ -1,9 +1,9 @@
-"""Cross-process serialization for paid image and video generation.
+"""Cross-process serialization for paid media generation.
 
-Every provider entrypoint uses the same advisory file lock.  This keeps media
-generation global rather than per chat, and the waiter files let service
-management wait for both the active request and already queued requests before
-terminating a worker.
+Image and video providers use independent advisory locks, so a long-running
+video request cannot delay image generation. Requests in the same media lane
+remain serialized across chats. Waiter files let service management wait for
+all active and queued media work before terminating a worker.
 """
 
 from __future__ import annotations
@@ -33,12 +33,25 @@ def _runtime_root() -> Path:
     return root
 
 
-def _lock_path() -> Path:
-    return _runtime_root() / "generation.lock"
+def _lane_for_kind(kind: str) -> str:
+    normalized = str(kind or "media").strip().lower() or "media"
+    if normalized.startswith("image"):
+        return "image"
+    if normalized.startswith("video"):
+        return "video"
+    return "media"
 
 
-def _state_path() -> Path:
-    return _runtime_root() / "state.json"
+def _lock_path(lane: str | None = None) -> Path:
+    if lane is None:
+        return _runtime_root() / "generation.lock"
+    return _runtime_root() / f"generation.{lane}.lock"
+
+
+def _state_path(lane: str | None = None) -> Path:
+    if lane is None:
+        return _runtime_root() / "state.json"
+    return _runtime_root() / f"state.{lane}.json"
 
 
 def _waiters_root() -> Path:
@@ -85,11 +98,15 @@ def _pid_alive(pid: object) -> bool:
     return True
 
 
-def _live_waiters() -> list[dict]:
+def _live_waiters(*, lane: str | None = None) -> list[dict]:
     live: list[dict] = []
     for path in _waiters_root().glob("*.json"):
         value = _read_json(path)
+        value_lane = str(value.get("lane") or _lane_for_kind(value.get("kind") or "media"))
         if _pid_alive(value.get("pid")):
+            if lane is not None and value_lane != lane:
+                continue
+            value["lane"] = value_lane
             live.append(value)
             continue
         try:
@@ -102,6 +119,19 @@ def _live_waiters() -> list[dict]:
     )
 
 
+def _known_lanes() -> list[str | None]:
+    """Return provider lanes plus the legacy global lane during migration."""
+    lanes = {"image", "video", "media"}
+    for path in _runtime_root().glob("generation.*.lock"):
+        lanes.add(path.name.removeprefix("generation.").removesuffix(".lock"))
+    for path in _runtime_root().glob("state.*.json"):
+        lanes.add(path.name.removeprefix("state.").removesuffix(".json"))
+    lanes.update(str(item["lane"]) for item in _live_waiters())
+    # The old global file may still be locked by a bot started before this
+    # change. Keep observing it until every running process uses lane locks.
+    return [None, *sorted(lanes)]
+
+
 def _try_lock(stream) -> bool:
     try:
         fcntl.flock(stream.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
@@ -112,14 +142,16 @@ def _try_lock(stream) -> bool:
 
 @contextmanager
 def media_generation_slot(kind: str, *, request_id: str | None = None) -> Iterator[None]:
-    """Wait for the single global media slot and hold it through provider work."""
+    """Wait for the matching media lane and hold it through provider work."""
     normalized_kind = str(kind or "media").strip().lower() or "media"
+    lane = _lane_for_kind(normalized_kind)
     token = uuid.uuid4().hex
     waiter_path = _waiters_root() / f"{token}.json"
     waiter = {
         "token": token,
         "pid": os.getpid(),
         "kind": normalized_kind,
+        "lane": lane,
         "request_id": str(request_id or ""),
         "queued_at": time.time(),
     }
@@ -129,7 +161,7 @@ def media_generation_slot(kind: str, *, request_id: str | None = None) -> Iterat
     logged_wait = False
     try:
         while True:
-            waiters = _live_waiters()
+            waiters = _live_waiters(lane=lane)
             if waiters and waiters[0].get("token") != token:
                 if not logged_wait:
                     logger.info(
@@ -141,7 +173,7 @@ def media_generation_slot(kind: str, *, request_id: str | None = None) -> Iterat
                     logged_wait = True
                 time.sleep(DEFAULT_POLL_SEC)
                 continue
-            candidate = _lock_path().open("a+")
+            candidate = _lock_path(lane).open("a+")
             if _try_lock(candidate):
                 lock_stream = candidate
                 break
@@ -162,12 +194,13 @@ def media_generation_slot(kind: str, *, request_id: str | None = None) -> Iterat
             pass
         waited_sec = time.monotonic() - started_waiting
         _write_json(
-            _state_path(),
+            _state_path(lane),
             {
                 "active": True,
                 "token": token,
                 "pid": os.getpid(),
                 "kind": normalized_kind,
+                "lane": lane,
                 "request_id": str(request_id or ""),
                 "started_at": time.time(),
             },
@@ -183,12 +216,13 @@ def media_generation_slot(kind: str, *, request_id: str | None = None) -> Iterat
             yield
         finally:
             _write_json(
-                _state_path(),
+                _state_path(lane),
                 {
                     "active": False,
                     "token": token,
                     "pid": os.getpid(),
                     "kind": normalized_kind,
+                    "lane": lane,
                     "request_id": str(request_id or ""),
                     "finished_at": time.time(),
                 },
@@ -215,10 +249,20 @@ def wait_until_media_idle(*, quiet_sec: float = DEFAULT_QUIET_SEC, poll_sec: flo
     poll_sec = max(0.05, float(poll_sec))
     announced = False
     while True:
-        stream = _lock_path().open("a+")
-        acquired = _try_lock(stream)
-        if not acquired:
-            stream.close()
+        streams = []
+        blocked = False
+        lanes = _known_lanes()
+        for lane in lanes:
+            stream = _lock_path(lane).open("a+")
+            if not _try_lock(stream):
+                stream.close()
+                blocked = True
+                break
+            streams.append(stream)
+        if blocked:
+            for stream in streams:
+                fcntl.flock(stream.fileno(), fcntl.LOCK_UN)
+                stream.close()
             if not announced:
                 print("Waiting for active media generation to finish...", flush=True)
                 announced = True
@@ -226,8 +270,10 @@ def wait_until_media_idle(*, quiet_sec: float = DEFAULT_QUIET_SEC, poll_sec: flo
             continue
         try:
             waiters = _live_waiters()
-            state = _read_json(_state_path())
-            finished_at = float(state.get("finished_at") or 0.0)
+            finished_at = max(
+                (float(_read_json(_state_path(lane)).get("finished_at") or 0.0) for lane in lanes),
+                default=0.0,
+            )
             quiet_remaining = max(0.0, quiet_sec - max(0.0, time.time() - finished_at)) if finished_at else 0.0
             if not waiters and quiet_remaining <= 0:
                 return
@@ -235,26 +281,46 @@ def wait_until_media_idle(*, quiet_sec: float = DEFAULT_QUIET_SEC, poll_sec: flo
                 print("Waiting for queued media generation to finish...", flush=True)
                 announced = True
         finally:
-            fcntl.flock(stream.fileno(), fcntl.LOCK_UN)
-            stream.close()
+            for stream in streams:
+                fcntl.flock(stream.fileno(), fcntl.LOCK_UN)
+                stream.close()
         time.sleep(min(poll_sec, quiet_remaining) if quiet_remaining > 0 else poll_sec)
 
 
 def media_generation_status() -> dict:
-    stream = _lock_path().open("a+")
-    idle = _try_lock(stream)
-    if idle:
-        fcntl.flock(stream.fileno(), fcntl.LOCK_UN)
-    stream.close()
+    active_states = []
+    latest_state = {}
+    for lane in _known_lanes():
+        stream = _lock_path(lane).open("a+")
+        idle = _try_lock(stream)
+        if idle:
+            fcntl.flock(stream.fileno(), fcntl.LOCK_UN)
+        else:
+            state = _read_json(_state_path(lane))
+            active_states.append(
+                state
+                or {
+                    "active": True,
+                    "lane": lane or "legacy",
+                    "kind": "legacy" if lane is None else lane,
+                }
+            )
+        stream.close()
+        state = _read_json(_state_path(lane))
+        if float(state.get("started_at") or state.get("finished_at") or 0.0) > float(
+            latest_state.get("started_at") or latest_state.get("finished_at") or 0.0
+        ):
+            latest_state = state
     return {
-        "active": not idle,
+        "active": bool(active_states),
         "waiters": len(_live_waiters()),
-        "state": _read_json(_state_path()),
+        "state": active_states[0] if active_states else latest_state,
+        "active_states": active_states,
     }
 
 
 def _main() -> int:
-    parser = argparse.ArgumentParser(description="Inspect or wait for the global media generation gate.")
+    parser = argparse.ArgumentParser(description="Inspect or wait for the media generation lanes.")
     subparsers = parser.add_subparsers(dest="command", required=True)
     subparsers.add_parser("status")
     wait_parser = subparsers.add_parser("wait-idle")
@@ -269,13 +335,12 @@ def _main() -> int:
         print("Media generation gate is idle.")
         return 0
     status = media_generation_status()
-    state = status["state"]
     if status["active"]:
-        print(
-            "Media generation: active "
-            f"kind={state.get('kind') or '?'} pid={state.get('pid') or '?'} "
-            f"waiters={status['waiters']}"
+        active = ", ".join(
+            f"kind={item.get('kind') or '?'} pid={item.get('pid') or '?'}"
+            for item in status["active_states"]
         )
+        print(f"Media generation: active {active} waiters={status['waiters']}")
     else:
         print(f"Media generation: idle waiters={status['waiters']}")
     return 0

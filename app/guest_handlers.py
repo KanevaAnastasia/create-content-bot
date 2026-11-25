@@ -61,12 +61,12 @@ _GUEST_SYNTAX_TASKS: dict[str, asyncio.Task[Any]] = {}
 GUEST_VIDEO_SEND_TIMEOUT_SEC = 600.0
 GUEST_SYNTAX_TIMEOUT_SEC_DEFAULT = 2 * 60 * 60
 
-GUEST_IMAGE_DAILY_LIMIT = 4
+GUEST_IMAGE_DAILY_LIMIT = 0
 GUEST_IMAGE_QUOTA_TIMEZONE = ZoneInfo("Europe/Moscow")
 GUEST_IMAGE_QUOTA_ARTIFACT_TYPE = "guest_ai_image_generation"
 GUEST_IMAGE_QUOTA_EXHAUSTED_MESSAGE = (
-    "Дневной лимит генерации изображений исчерпан. "
-    "До обновления лимита можно создавать видео только из собственных изображений — "
+    "Генерация изображений недоступна в гостевом режиме. "
+    "Можно создавать видео только из собственных изображений — "
     "загрузите готовый стартовый кадр."
 )
 

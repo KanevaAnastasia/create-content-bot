@@ -529,7 +529,7 @@ def generate_image_vertex_result(
     model_candidates: list[str] | None = None,
     aspect_ratio: str = "9:16",
 ) -> ImageGenerationResult:
-    """Generate one image while holding the global cross-chat media slot."""
+    """Generate one image while holding the cross-chat image slot."""
     rid = request_id or uuid.uuid4().hex[:12]
     with media_generation_slot("image", request_id=rid):
         return _generate_image_vertex_result_unlocked(

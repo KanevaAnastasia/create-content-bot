@@ -812,6 +812,7 @@ def test_vertex_receives_only_selected_character_references(guest_db, monkeypatc
         captured.update(kwargs)
         return b"generated-image"
 
+    monkeypatch.setattr(guest_handlers, "_guest_image_limit_reached", lambda _session: False)
     monkeypatch.setattr(guest_handlers, "generate_image_vertex", fake_vertex)
     monkeypatch.setenv("SCENE_MEDIA_ARTIFACTS_DIR", str(tmp_path / "artifacts"))
     message = _Message()
@@ -826,7 +827,7 @@ def test_vertex_receives_only_selected_character_references(guest_db, monkeypatc
     assert session["state"] == guest_handlers.STATE_IMAGE_APPROVAL
 
 
-def test_guest_image_generation_is_limited_to_four_successes_per_moscow_day(guest_db, monkeypatch, tmp_path):
+def test_guest_image_generation_is_disabled_when_daily_limit_is_zero(guest_db, monkeypatch, tmp_path):
     session, _project_id = _guest_session_with_project(guest_db)
     session["guest_data"] = {"image_description": "Портрет в саду"}
     guest_handlers._new_run(session, "image", title="Изображение")
@@ -842,18 +843,14 @@ def test_guest_image_generation_is_limited_to_four_successes_per_moscow_day(gues
     message = _Message()
     update = SimpleNamespace(message=message)
 
-    for _ in range(guest_handlers.GUEST_IMAGE_DAILY_LIMIT):
-        asyncio.run(guest_handlers._generate_image(update, session, target="image"))
-
-    assert calls == 4
-    assert guest_handlers._guest_generated_images_today(session) == 4
-
     asyncio.run(guest_handlers._generate_image(update, session, target="image"))
 
-    assert calls == 4
+    assert guest_handlers.GUEST_IMAGE_DAILY_LIMIT == 0
+    assert calls == 0
+    assert guest_handlers._guest_generated_images_today(session) == 0
     assert message.sent[-1][0] == "text"
     assert message.sent[-1][1] == guest_handlers.GUEST_IMAGE_QUOTA_EXHAUSTED_MESSAGE
-    assert "только из собственных изображений" in message.sent[-1][1]
+    assert "недоступна в гостевом режиме" in message.sent[-1][1]
 
 
 def test_guest_image_statistics_count_only_guest_ai_images(guest_db, monkeypatch, tmp_path):
@@ -961,6 +958,7 @@ def test_cartoon_frame_recovers_previous_character_references_before_vertex(gues
         captured.update(kwargs)
         return b"generated-image"
 
+    monkeypatch.setattr(guest_handlers, "_guest_image_limit_reached", lambda _session: False)
     monkeypatch.setattr(guest_handlers, "generate_image_vertex", fake_vertex)
     monkeypatch.setenv("SCENE_MEDIA_ARTIFACTS_DIR", str(tmp_path / "artifacts"))
     update = SimpleNamespace(message=_Message())
@@ -1011,6 +1009,7 @@ def test_new_character_generation_uses_first_primary_character_as_style_only_ref
         captured.update(kwargs)
         return b"generated-character"
 
+    monkeypatch.setattr(guest_handlers, "_guest_image_limit_reached", lambda _session: False)
     monkeypatch.setattr(guest_handlers, "generate_image_vertex", fake_vertex)
     monkeypatch.setenv("SCENE_MEDIA_ARTIFACTS_DIR", str(tmp_path / "artifacts"))
 
@@ -1043,6 +1042,7 @@ def test_cartoon_frame_preserves_explicit_empty_character_choice(guest_db, monke
         captured.update(kwargs)
         return b"generated-image"
 
+    monkeypatch.setattr(guest_handlers, "_guest_image_limit_reached", lambda _session: False)
     monkeypatch.setattr(guest_handlers, "generate_image_vertex", fake_vertex)
     monkeypatch.setenv("SCENE_MEDIA_ARTIFACTS_DIR", str(tmp_path / "artifacts"))
     update = SimpleNamespace(message=_Message())
@@ -1319,6 +1319,7 @@ def test_horizontal_cartoon_uses_selected_ratio_for_frames_video_and_storage(gue
         captured_video.update(kwargs)
         return SimpleNamespace(success=True, provider_message="ok")
 
+    monkeypatch.setattr(guest_handlers, "_guest_image_limit_reached", lambda _session: False)
     monkeypatch.setattr(guest_handlers, "generate_image_vertex", fake_vertex)
     monkeypatch.setattr(guest_handlers, "try_generate_via_syntax", fake_syntax)
     monkeypatch.setattr(guest_handlers, "video_bytes_from_fallback_result", lambda _result: b"horizontal-video")
