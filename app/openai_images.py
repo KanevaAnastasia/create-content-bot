@@ -16,7 +16,7 @@ from PIL import Image
 from .media_file_store import image_file_extension, image_mime_type
 
 logger = logging.getLogger("bot.image")
-OPENAI_IMAGE_MODEL = "gpt-image-2"
+OPENAI_IMAGE_MODEL = "gpt-image-2.6-sunburst"
 
 
 def _output_size(aspect_ratio: str) -> str:
@@ -52,7 +52,7 @@ def generate_openai_image(
     if not key:
         raise RuntimeError("Missing environment variable: OPENAI_API_KEY")
     size = _output_size(aspect_ratio)
-    fields = {"model": model, "prompt": prompt, "size": size, "quality": "medium", "output_format": "png", "n": 1}
+    fields = {"model": model, "prompt": prompt, "size": size, "quality": "high", "output_format": "png", "n": 1}
     endpoint = "edits" if references else "generations"
     payload = {"data": fields, "files": _reference_files(references)} if references else {"json": fields}
     logger.info("image.openai.request request_id=%s model=%s endpoint=%s size=%s refs=%d",

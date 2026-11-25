@@ -51,7 +51,7 @@ def estimate_gemini_text_cost_usd(*, model: str, prompt_text: str, response_text
 def estimate_image_generation_cost_usd(model: str, usage: dict | None = None) -> dict[str, Any]:
     """Use reported token counts for OpenAI and the model tier for Vertex."""
     model_id = (model or "").strip()
-    if model_id == "gpt-image-2":
+    if model_id in {"gpt-image-2", "gpt-image-2.6-sunburst"}:
         event = {"kind": "openai_image", "model": model_id, "cost_usd": None}
         counts = (usage or {}).get("input_tokens_details") or {}
         if "text_tokens" in counts and "image_tokens" in counts and "output_tokens" in usage:

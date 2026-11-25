@@ -44,7 +44,8 @@ def test_image_provider_preserves_scene_references_and_format(monkeypatch, ratio
         assert url == "https://api.openai.com/v1/images/generations"
         fields = params["json"]
     assert fields["prompt"].startswith(prompt)
-    assert fields["model"] == result.model == vertex_images.primary_image_generation_model() == "gpt-image-2"
+    assert fields["model"] == result.model == vertex_images.primary_image_generation_model() == "gpt-image-2.6-sunburst"
+    assert fields["quality"] == "high"
     assert fields["size"] == f"{size[0]}x{size[1]}"
     assert result.data == output.getvalue() and result.usage == usage
     assert estimate_image_generation_cost_usd(result.model, result.usage)["cost_usd"] == 0.0484
