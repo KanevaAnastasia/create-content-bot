@@ -2,6 +2,12 @@
 
 Text requests keep the complete `app/writing_style.py` policy in a separate developer message. GPT-6 and GPT-5.6 use an explicit cache boundary after the policy, with 30-minute retention. Changing task input is not written to that cache. Output verbosity is low; required content, approved wording and JSON fields must remain complete. Only `short` tasks use low reasoning and an 8,192-token output ceiling. Incomplete answers are rejected rather than accepted as truncated results. Large scene plans retain their output capacity.
 
+The V5 policy consolidates repeated guidance; saved V1–V4 prefixes upgrade without rewriting the task or approved text. Semantic editorial rules still reach the model: appending them after generation cannot fix meaning.
+
+Validation on 2026-11-26: the policy shrank from 7,964 to 4,088 characters. Two accepted live Luna speech edits (RU/EN) reused a 1,274-token cached prefix, compared with the previous envelope's 2,298-token prefix. Their prompt-plus-policy character counts fell 46–49%; visible JSON was 76–79% shorter than serializing the same result with the full video prompt. This is a small example comparison, not a measured reduction of the total bill. One earlier probe was rejected by local validation; the accepted probes used 145/206 reasoning tokens in addition to 42/31 visible output tokens. Format compliance does not guarantee semantic quality or first-attempt success.
+
+Speech shortening sends only the spoken line, language, character budget and applicable constraints. OpenAI uses a strict one-field JSON schema (`text`) and a 2,048-token ceiling including reasoning. Gemini retains prompt-based JSON with local validation. Code replaces the exact speech after a single `CHARACTERS SPEAKS:` marker and preserves every other byte of the video prompt, including camera and voice rules. Ambiguous/mismatched markers fail before a paid call. Empty, overlong, incomplete English or missing required closing text is rejected, not truncated. No global scene-output cap is introduced. This optimization does not yet replace full scene rewrites with field-level edits.
+
 Scene-plan and production context excludes known transport/accounting fields (base64 media, generated-video result/candidate maps, local paths, delivery IDs and cost records) via `app/llm_payload.py`. Unknown creative fields, language variants, references, timing and speech remain unchanged. Payload JSON has no indentation. This does not alter stored scene state or guest-facing menu text.
 
 ## Local ledger
@@ -28,3 +34,4 @@ Sources:
 - https://developers.openai.com/api/docs/pricing
 - https://developers.openai.com/api/docs/guides/prompt-caching
 - https://developers.openai.com/api/docs/guides/reasoning
+- https://developers.openai.com/api/docs/guides/structured-outputs

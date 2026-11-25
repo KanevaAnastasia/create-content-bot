@@ -753,6 +753,8 @@ def openai_generate_sync(
     images: list[bytes] | None = None,
     rate_limit_max_attempts: int | None = None,
     model_profile: str | None = None,
+    response_schema: dict[str, Any] | None = None,
+    max_output_tokens: int | None = None,
 ) -> str:
     """Generate text through Responses API and the shared bounded retry queue."""
     api_key = (os.getenv("OPENAI_API_KEY") or "").strip()
@@ -768,7 +770,8 @@ def openai_generate_sync(
         encoded = base64.b64encode(payload).decode("ascii")
         content.append({"type": "input_image", "image_url": f"data:{mime};base64,{encoded}"})
 
-    payload = text_request(prompt, model=model, profile=model_profile, images=content)
+    payload = text_request(prompt, model=model, profile=model_profile, images=content,
+                           response_schema=response_schema, max_output_tokens=max_output_tokens)
 
     def _call() -> str:
         logger.info("OpenAI text generation model=%s profile=%s", model, model_profile)
@@ -818,6 +821,8 @@ def gemini_generate_sync(
     rate_limit_max_attempts: int | None = None,
     model_profile: str | None = None,
     editorial_plain_text: bool = False,
+    response_schema: dict[str, Any] | None = None,
+    max_output_tokens: int | None = None,
 ) -> str:
     """Compatibility entry point for all text generation, routed by TEXT_LLM_PROVIDER.
 
@@ -826,8 +831,15 @@ def gemini_generate_sync(
     editorial_plain_text is retained for callers; it no longer starts a second
     model call that rewrites the generated result.
     """
-    generate = openai_generate_sync if text_llm_provider() == "openai" else _gemini_generate_sync
-    return generate(prompt, images=images, rate_limit_max_attempts=rate_limit_max_attempts, model_profile=model_profile)
+    kwargs = dict(images=images, rate_limit_max_attempts=rate_limit_max_attempts, model_profile=model_profile)
+    if text_llm_provider() == "openai":
+        if response_schema is not None:
+            kwargs['response_schema'] = response_schema
+        if max_output_tokens is not None:
+            kwargs['max_output_tokens'] = max_output_tokens
+        return openai_generate_sync(prompt, **kwargs)
+    # Gemini keeps its existing request format; callers still validate the JSON.
+    return _gemini_generate_sync(prompt, **kwargs)
 
 
 def _gemini_generate_sync(

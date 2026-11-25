@@ -46,8 +46,8 @@ def test_shorten_preserves_final_subscribe_cta(monkeypatch) -> None:
             "это невероятно нежное мороженое прямо как облачко [пауза] "
             f"{FINAL_SCENE_SUBSCRIBE_CTA_VEO3}"
         ),
-        "video_prompt": "shot CHARACTERS SPEAKS: old",
     }
+    scene["video_prompt"] = "shot CHARACTERS SPEAKS: " + scene["text"]
     out = shorten_scene_speech_and_sync_video_prompt_sync(scene, duration_sec=6)
 
     assert out is not None
@@ -69,10 +69,10 @@ def test_english_shortening_rejects_dangling_sentence_and_retries(monkeypatch):
         return json.dumps({"text": text, "video_prompt": "CHARACTERS SPEAKS: " + text})
     monkeypatch.setattr("app.scene_speech_shorten.gemini_generate_sync", generate)
     result = shorten_scene_speech_and_sync_video_prompt_sync(
-        {}, 8, language="en", current_text=original, current_video_prompt="Original",
+        {}, 8, language="en", current_text=original, current_video_prompt="CHARACTERS SPEAKS: " + original,
     )
     assert result["text"] == complete
-    assert result["video_prompt"] == "CHARACTERS SPEAKS: " + complete
+    assert result["video_prompt"] == "CHARACTERS SPEAKS: " + complete + " "
 
 
 def test_english_shortening_returns_none_instead_of_truncation(monkeypatch):
@@ -82,5 +82,43 @@ def test_english_shortening_returns_none_instead_of_truncation(monkeypatch):
         monkeypatch.setattr("app.scene_speech_shorten.gemini_generate_sync",
             lambda *args, **kwargs: json.dumps({"text": invalid, "video_prompt": "CHARACTERS SPEAKS: " + invalid}))
         assert shorten_scene_speech_and_sync_video_prompt_sync(
-            {}, 8, language="en", current_text=original, current_video_prompt="Original",
+            {}, 8, language="en", current_text=original, current_video_prompt="CHARACTERS SPEAKS: " + original,
+        ) is None
+
+
+def test_only_speech_sent_and_returned_technical_edits_ignored(monkeypatch):
+    import json
+    from copy import deepcopy
+    original = "Boil the potatoes, beets and carrots, then grate them. " * 4
+    original = original.strip()
+    shortened = "Boil potatoes, beets and carrots, then grate them."
+    prefix = "  Show handwritten recipe: " + original + "\nCamera: fixed. CHARACTERS SPEAKS: "
+    suffix = "\nVOICE_LOCK: exact approved voice.\nNo subtitles.  "
+    scene = {"text": original, "video_prompt": prefix + original + suffix,
+             "speech_by_lang": {"ru": "Точная утверждённая реплика."}}
+    snapshot = deepcopy(scene)
+    def generate(prompt, **kwargs):
+        assert "Camera:" not in prompt
+        assert "VOICE_LOCK" not in prompt
+        assert "current_video_prompt" not in prompt
+        assert kwargs["response_schema"]["additionalProperties"] is False
+        # Even a noncompliant backend cannot alter camera or another language.
+        return json.dumps({"text": shortened, "video_prompt": "Changed camera and voice"})
+    monkeypatch.setattr("app.scene_speech_shorten.gemini_generate_sync", generate)
+    result = shorten_scene_speech_and_sync_video_prompt_sync(scene, 8, language="en")
+    assert result["video_prompt"] == prefix + shortened + suffix
+    assert result["text"] == shortened
+    assert scene == snapshot
+
+
+def test_ambiguous_or_missing_speech_does_not_spend_tokens(monkeypatch):
+    original = "Cook the vegetables carefully and follow the recipe. " * 4
+    def unexpected(*args, **kwargs):
+        raise AssertionError("Cannot merge locally: no paid request expected")
+    monkeypatch.setattr("app.scene_speech_shorten.gemini_generate_sync", unexpected)
+    for vp in ("Only visuals: " + original,
+               "CHARACTERS SPEAKS: another line",
+               ("CHARACTERS SPEAKS: " + original) * 2):
+        assert shorten_scene_speech_and_sync_video_prompt_sync(
+            {"text": original, "video_prompt": vp}, 8, language="en",
         ) is None

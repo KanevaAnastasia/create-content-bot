@@ -18,7 +18,7 @@ def test_previous_rules_upgrade_once_without_touching_payload():
     payload = 'Preserve approved: Это — цитата. image_prompt: 3D style.'
     updated = with_writing_style(PREVIOUS_HUMAN_WRITING_RULES + '\n\n' + payload)
     assert updated == HUMAN_WRITING_RULES + '\n\n' + payload
-    assert 'WRITING_STYLE_V4' in updated
+    assert 'WRITING_STYLE_V5' in updated
     assert with_writing_style(updated) == updated
 
 
@@ -27,5 +27,11 @@ def test_v3_saved_prompt_upgrades_without_rewriting_user_script():
     payload = 'Approved voice: Сначала путался. Это — точная цитата. {"duration": 8}'
     updated = with_writing_style(V3_HUMAN_WRITING_RULES + '\n\n' + payload)
     assert updated == HUMAN_WRITING_RULES + '\n\n' + payload
-    assert updated.count('[CONTENT_FABRIC_WRITING_STYLE_V4]') == 1
+    assert updated.count('[CONTENT_FABRIC_WRITING_STYLE_V5]') == 1
     assert with_writing_style(updated) == updated
+
+
+def test_v4_saved_prompt_upgrades_without_touching_approved_words():
+    from app.writing_style import V4_HUMAN_WRITING_RULES
+    payload = 'Approved: "Это — точная цитата."\n{"video_prompt":"keep  spaces"}'
+    assert with_writing_style(V4_HUMAN_WRITING_RULES + '\n\n' + payload) == HUMAN_WRITING_RULES + '\n\n' + payload

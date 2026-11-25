@@ -12,7 +12,7 @@ OUTPUT_CONTRACT = (
 )
 
 
-def text_request(prompt, *, model, profile, images):
+def text_request(prompt, *, model, profile, images, response_schema=None, max_output_tokens=None):
     task = with_writing_style(prompt)[len(HUMAN_WRITING_RULES) + 2:]
     rules = {'type': 'input_text', 'text': HUMAN_WRITING_RULES + '\n\n' + OUTPUT_CONTRACT}
     payload = {'model': model, 'store': False, 'input': [
@@ -27,4 +27,11 @@ def text_request(prompt, *, model, profile, images):
         if profile == 'short':
             payload['reasoning'] = {'effort': 'low'}
             payload['max_output_tokens'] = 8192
+    if response_schema is not None:
+        payload.setdefault('text', {})['format'] = {
+            'type': 'json_schema', 'name': 'task_result', 'strict': True,
+            'schema': response_schema,
+        }
+    if max_output_tokens is not None:
+        payload['max_output_tokens'] = max_output_tokens
     return payload

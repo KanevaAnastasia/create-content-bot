@@ -73,6 +73,20 @@ def test_explicit_gemini_preserves_arguments(monkeypatch):
     assert captured['rate_limit_max_attempts'] == 1
 
 
+def test_narrow_response_contract_reaches_responses_api(monkeypatch):
+    from app.scene_speech_shorten import SPEECH_RESPONSE_SCHEMA
+    calls = response(monkeypatch, completed('{"text":"Boil the potatoes."}'))
+    result = llm.gemini_generate_sync('Shorten speech', model_profile='short',
+                                    response_schema=SPEECH_RESPONSE_SCHEMA, max_output_tokens=2048)
+    assert result == '{"text":"Boil the potatoes."}'
+    payload = calls[0][1]['json']
+    assert payload['text']['format'] == {
+        'type': 'json_schema', 'name': 'task_result', 'strict': True, 'schema': SPEECH_RESPONSE_SCHEMA,
+    }
+    assert payload['text']['verbosity'] == 'low'
+    assert payload['max_output_tokens'] == 2048
+
+
 def test_default_provider_and_invalid_config(monkeypatch):
     monkeypatch.delenv('TEXT_LLM_PROVIDER')
     assert llm.text_llm_provider() == 'openai'
