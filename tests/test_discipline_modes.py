@@ -71,7 +71,7 @@ def test_short_format_selects_its_illustration_and_script(monkeypatch, mode):
         return '{"title":"Книга","voiceover_text":"Вася открыл книгу."}'
     monkeypatch.setattr(story_generation, 'gemini_generate_sync', writer)
     story_generation.generate_story_voiceover('Книга', discipline_mode=mode)
-    assert ('55–65' if mode == modes.BOSS else '18–28') in prompts[0]
+    assert ('90 секунд' if mode == modes.BOSS else '18–28') in prompts[0]
     assert '45 до 110' not in prompts[0]
     assert modes.SHORT_FORMATS[mode].script in prompts[0]
     assert modes.LABELS[mode] not in start.project_mode_labels('grandma_kitchen')
@@ -334,7 +334,7 @@ def test_inner_boss_pilot_preserves_two_speakers_and_project_menu(monkeypatch):
     result = story_generation.generate_story_voiceover(modes.BOSS_PILOT, discipline_mode=modes.BOSS)
     turns = modes.boss_dialogue_turns(result["voiceover_text"], "vasya-voice", "boss-voice")
     assert turns[0] == {"text": "Спи. Пять минут ничего не изменят.", "voice_id": "boss-voice"}
-    assert turns[-1] == {"text": "Сейчас. Ещё одну ступеньку. … И ещё одну.", "voice_id": "vasya-voice"}
+    assert turns[-1] == {"text": "Я увижу. В первый день я вышел, потому что загорелся. Сегодня я вообще не хотел вставать. Мотивация помогает начать. Дисциплина помогает продолжать.", "voice_id": "vasya-voice"}
     assert modes.mode_from_label("Внутренний босс") == modes.BOSS
     assert "Внутренний босс" in project_modes.project_mode_labels("discipline")
     assert "Внутренний босс" not in project_modes.project_mode_labels("grandma_kitchen")

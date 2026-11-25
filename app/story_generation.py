@@ -437,7 +437,7 @@ def generate_story_voiceover(
         "user_feedback": str(user_feedback or "").strip(),
     }
     length_direction = (
-        "Целевая длительность ролика 55–65 секунд. Оставь место для пауз и действий. "
+        "Целевая длительность ролика около 90 секунд. Оставь место для пауз и действий. "
         if discipline_mode == BOSS else
         "Целевая длительность 18–28 секунд спокойной речи, ориентир 38–60 русских слов. "
         if discipline_mode in SHORT_FORMATS and discipline_mode != ARCHIVE else
