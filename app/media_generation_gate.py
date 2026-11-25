@@ -1,9 +1,9 @@
 """Cross-process serialization for paid media generation.
 
-Image and video providers use independent advisory locks, so a long-running
-video request cannot delay image generation. Requests in the same media lane
-remain serialized across chats. Waiter files let service management wait for
-all active and queued media work before terminating a worker.
+Image requests run concurrently. Video requests remain serialized across chats
+because the Syntx fallback uses one shared Telegram/WebView session. Active and
+waiter files let service management wait for every media request before
+terminating a worker.
 """
 
 from __future__ import annotations
@@ -56,6 +56,12 @@ def _state_path(lane: str | None = None) -> Path:
 
 def _waiters_root() -> Path:
     root = _runtime_root() / "waiters"
+    root.mkdir(parents=True, exist_ok=True, mode=0o700)
+    return root
+
+
+def _active_root() -> Path:
+    root = _runtime_root() / "active"
     root.mkdir(parents=True, exist_ok=True, mode=0o700)
     return root
 
@@ -119,6 +125,23 @@ def _live_waiters(*, lane: str | None = None) -> list[dict]:
     )
 
 
+def _live_active_jobs() -> list[dict]:
+    live: list[dict] = []
+    for path in _active_root().glob("*.json"):
+        value = _read_json(path)
+        if _pid_alive(value.get("pid")):
+            live.append(value)
+            continue
+        try:
+            path.unlink()
+        except FileNotFoundError:
+            pass
+    return sorted(
+        live,
+        key=lambda item: (float(item.get("started_at") or 0.0), str(item.get("token") or "")),
+    )
+
+
 def _known_lanes() -> list[str | None]:
     """Return provider lanes plus the legacy global lane during migration."""
     lanes = {"image", "video", "media"}
@@ -142,11 +165,12 @@ def _try_lock(stream) -> bool:
 
 @contextmanager
 def media_generation_slot(kind: str, *, request_id: str | None = None) -> Iterator[None]:
-    """Wait for the matching media lane and hold it through provider work."""
+    """Track provider work and serialize only providers that require it."""
     normalized_kind = str(kind or "media").strip().lower() or "media"
     lane = _lane_for_kind(normalized_kind)
     token = uuid.uuid4().hex
     waiter_path = _waiters_root() / f"{token}.json"
+    active_path = _active_root() / f"{token}.json"
     waiter = {
         "token": token,
         "pid": os.getpid(),
@@ -160,9 +184,25 @@ def media_generation_slot(kind: str, *, request_id: str | None = None) -> Iterat
     started_waiting = time.monotonic()
     logged_wait = False
     try:
-        while True:
-            waiters = _live_waiters(lane=lane)
-            if waiters and waiters[0].get("token") != token:
+        if lane != "image":
+            while True:
+                waiters = _live_waiters(lane=lane)
+                if waiters and waiters[0].get("token") != token:
+                    if not logged_wait:
+                        logger.info(
+                            "media_gate.wait kind=%s request_id=%s pid=%s",
+                            normalized_kind,
+                            request_id or "-",
+                            os.getpid(),
+                        )
+                        logged_wait = True
+                    time.sleep(DEFAULT_POLL_SEC)
+                    continue
+                candidate = _lock_path(lane).open("a+")
+                if _try_lock(candidate):
+                    lock_stream = candidate
+                    break
+                candidate.close()
                 if not logged_wait:
                     logger.info(
                         "media_gate.wait kind=%s request_id=%s pid=%s",
@@ -172,22 +212,18 @@ def media_generation_slot(kind: str, *, request_id: str | None = None) -> Iterat
                     )
                     logged_wait = True
                 time.sleep(DEFAULT_POLL_SEC)
-                continue
-            candidate = _lock_path(lane).open("a+")
-            if _try_lock(candidate):
-                lock_stream = candidate
-                break
-            candidate.close()
-            if not logged_wait:
-                logger.info(
-                    "media_gate.wait kind=%s request_id=%s pid=%s",
-                    normalized_kind,
-                    request_id or "-",
-                    os.getpid(),
-                )
-                logged_wait = True
-            time.sleep(DEFAULT_POLL_SEC)
 
+        started_at = time.time()
+        active_state = {
+            "active": True,
+            "token": token,
+            "pid": os.getpid(),
+            "kind": normalized_kind,
+            "lane": lane,
+            "request_id": str(request_id or ""),
+            "started_at": started_at,
+        }
+        _write_json(active_path, active_state)
         try:
             waiter_path.unlink()
         except FileNotFoundError:
@@ -195,15 +231,7 @@ def media_generation_slot(kind: str, *, request_id: str | None = None) -> Iterat
         waited_sec = time.monotonic() - started_waiting
         _write_json(
             _state_path(lane),
-            {
-                "active": True,
-                "token": token,
-                "pid": os.getpid(),
-                "kind": normalized_kind,
-                "lane": lane,
-                "request_id": str(request_id or ""),
-                "started_at": time.time(),
-            },
+            active_state,
         )
         logger.info(
             "media_gate.acquired kind=%s request_id=%s pid=%s waited_sec=%.3f",
@@ -215,18 +243,20 @@ def media_generation_slot(kind: str, *, request_id: str | None = None) -> Iterat
         try:
             yield
         finally:
-            _write_json(
-                _state_path(lane),
-                {
-                    "active": False,
-                    "token": token,
-                    "pid": os.getpid(),
-                    "kind": normalized_kind,
-                    "lane": lane,
-                    "request_id": str(request_id or ""),
-                    "finished_at": time.time(),
-                },
-            )
+            finished_state = {
+                "active": False,
+                "token": token,
+                "pid": os.getpid(),
+                "kind": normalized_kind,
+                "lane": lane,
+                "request_id": str(request_id or ""),
+                "finished_at": time.time(),
+            }
+            _write_json(_state_path(lane), finished_state)
+            try:
+                active_path.unlink()
+            except FileNotFoundError:
+                pass
             logger.info(
                 "media_gate.released kind=%s request_id=%s pid=%s",
                 normalized_kind,
@@ -270,15 +300,16 @@ def wait_until_media_idle(*, quiet_sec: float = DEFAULT_QUIET_SEC, poll_sec: flo
             continue
         try:
             waiters = _live_waiters()
+            active_jobs = _live_active_jobs()
             finished_at = max(
                 (float(_read_json(_state_path(lane)).get("finished_at") or 0.0) for lane in lanes),
                 default=0.0,
             )
             quiet_remaining = max(0.0, quiet_sec - max(0.0, time.time() - finished_at)) if finished_at else 0.0
-            if not waiters and quiet_remaining <= 0:
+            if not waiters and not active_jobs and quiet_remaining <= 0:
                 return
             if not announced:
-                print("Waiting for queued media generation to finish...", flush=True)
+                print("Waiting for active or queued media generation to finish...", flush=True)
                 announced = True
         finally:
             for stream in streams:
@@ -288,7 +319,8 @@ def wait_until_media_idle(*, quiet_sec: float = DEFAULT_QUIET_SEC, poll_sec: flo
 
 
 def media_generation_status() -> dict:
-    active_states = []
+    active_states = _live_active_jobs()
+    active_tokens = {str(item.get("token") or "") for item in active_states}
     latest_state = {}
     for lane in _known_lanes():
         stream = _lock_path(lane).open("a+")
@@ -297,14 +329,15 @@ def media_generation_status() -> dict:
             fcntl.flock(stream.fileno(), fcntl.LOCK_UN)
         else:
             state = _read_json(_state_path(lane))
-            active_states.append(
-                state
-                or {
-                    "active": True,
-                    "lane": lane or "legacy",
-                    "kind": "legacy" if lane is None else lane,
-                }
-            )
+            if str(state.get("token") or "") not in active_tokens:
+                active_states.append(
+                    state
+                    or {
+                        "active": True,
+                        "lane": lane or "legacy",
+                        "kind": "legacy" if lane is None else lane,
+                    }
+                )
         stream.close()
         state = _read_json(_state_path(lane))
         if float(state.get("started_at") or state.get("finished_at") or 0.0) > float(

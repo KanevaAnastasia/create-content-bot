@@ -58,12 +58,12 @@ def test_media_generation_slot_serializes_requests_in_the_same_lane(monkeypatch,
     idle_returned = threading.Event()
 
     def first() -> None:
-        with gate.media_generation_slot("image", request_id="first"):
+        with gate.media_generation_slot("video", request_id="first"):
             first_started.set()
             assert release_first.wait(timeout=3)
 
     def second() -> None:
-        with gate.media_generation_slot("image", request_id="second"):
+        with gate.media_generation_slot("video", request_id="second"):
             second_started.set()
             assert release_second.wait(timeout=3)
 
@@ -90,6 +90,42 @@ def test_media_generation_slot_serializes_requests_in_the_same_lane(monkeypatch,
     second_thread.join(timeout=3)
     waiter.join(timeout=3)
     assert idle_returned.is_set()
+
+
+def test_image_requests_run_concurrently(monkeypatch, tmp_path):
+    monkeypatch.setenv("MEDIA_GENERATION_GATE_DIR", str(tmp_path / "gate"))
+    release_first = threading.Event()
+    release_second = threading.Event()
+    first_started = threading.Event()
+    second_started = threading.Event()
+    idle_returned = threading.Event()
+
+    def run(started: threading.Event, release: threading.Event) -> None:
+        with gate.media_generation_slot("image"):
+            started.set()
+            assert release.wait(timeout=3)
+
+    first = threading.Thread(target=run, args=(first_started, release_first))
+    second = threading.Thread(target=run, args=(second_started, release_second))
+    first.start()
+    assert first_started.wait(timeout=3)
+    second.start()
+    assert second_started.wait(timeout=3)
+    status = gate.media_generation_status()
+    assert len(status["active_states"]) == 2
+    assert status["waiters"] == 0
+    waiter = threading.Thread(
+        target=lambda: (gate.wait_until_media_idle(quiet_sec=0, poll_sec=0.01), idle_returned.set())
+    )
+    waiter.start()
+    release_first.set()
+    first.join(timeout=3)
+    assert not idle_returned.is_set()
+    release_second.set()
+    second.join(timeout=3)
+    waiter.join(timeout=3)
+    assert idle_returned.is_set()
+    assert gate.media_generation_status()["active"] is False
 
 
 def test_wait_until_idle_waits_for_concurrent_image_and_video(monkeypatch, tmp_path):
