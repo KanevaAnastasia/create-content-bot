@@ -1,7 +1,7 @@
 import asyncio
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, Mock
 
 from app.project_modes import project_mode_rows
 from app import reference_generation as reference
@@ -323,6 +323,7 @@ def test_reference_no_music_is_still_upscaled_before_description(monkeypatch, tm
     sent_video = AsyncMock()
     monkeypatch.setattr(media, "_start_reference_description_approval", description)
     monkeypatch.setattr(media, "render_reference_music_variant", fake_render)
+    monkeypatch.setattr(media, "_persist_reference_final_variant", lambda *_args, **_kwargs: None)
     monkeypatch.setattr(media, "_safe_reply_video", sent_video)
     update = SimpleNamespace(message=SimpleNamespace(reply_text=AsyncMock()))
 
@@ -337,7 +338,7 @@ def test_reference_no_music_is_still_upscaled_before_description(monkeypatch, tm
             "music_volume": 0.0,
             "keep_original_audio": True,
             "run_id": "",
-            "choice": "none",
+            "choice": "clean",
         },
     )
     assert "апскейла до 4K" in sent_video.await_args.kwargs["caption"]
@@ -360,6 +361,7 @@ def test_reference_remove_original_audio_without_music_renders_silent_video(monk
     sent_video = AsyncMock()
     description = AsyncMock(return_value=True)
     monkeypatch.setattr(media, "render_reference_music_variant", fake_render)
+    monkeypatch.setattr(media, "_persist_reference_final_variant", lambda *_args, **_kwargs: None)
     monkeypatch.setattr(media, "_safe_reply_video", sent_video)
     monkeypatch.setattr(media, "_start_reference_description_approval", description)
     update = SimpleNamespace(message=SimpleNamespace(reply_text=AsyncMock()))
@@ -374,7 +376,7 @@ def test_reference_remove_original_audio_without_music_renders_silent_video(monk
             "music_volume": 0.0,
             "keep_original_audio": False,
             "run_id": "",
-            "choice": "none",
+            "choice": "clean",
         },
     )
     assert "без оригинального аудио и без музыки" in sent_video.await_args.kwargs["caption"]
@@ -403,16 +405,24 @@ def test_reference_default_music_renders_only_the_approved_video(monkeypatch, tm
     session = _reference_session_with_approved_video(b"approved-video-bytes")
     music_path = tmp_path / "default.mp3"
     music_path.write_bytes(b"music")
-    result_path = tmp_path / "final.mp4"
-    result_path.write_bytes(b"mixed-video")
+    clean_path = tmp_path / "clean.mp4"
+    clean_path.write_bytes(b"clean-video")
+    music_result_path = tmp_path / "music.mp4"
+    music_result_path.write_bytes(b"mixed-video")
     render_calls = []
+    artifact_calls = []
 
     def fake_render(video_bytes, **kwargs):
         render_calls.append((video_bytes, kwargs))
-        return str(result_path)
+        return str(music_result_path if kwargs.get("music_path") else clean_path)
 
     monkeypatch.setattr(media, "_resolve_music_path", lambda _project: (str(music_path), 0.25))
     monkeypatch.setattr(media, "render_reference_music_variant", fake_render)
+    monkeypatch.setattr(
+        media,
+        "_persist_reference_final_variant",
+        lambda *_args, **kwargs: artifact_calls.append(kwargs),
+    )
     sent_video = AsyncMock()
     description = AsyncMock(return_value=True)
     monkeypatch.setattr(media, "_safe_reply_video", sent_video)
@@ -426,6 +436,16 @@ def test_reference_default_music_renders_only_the_approved_video(monkeypatch, tm
         (
             b"approved-video-bytes",
             {
+                "music_path": None,
+                "music_volume": 0.0,
+                "keep_original_audio": True,
+                "run_id": "",
+                "choice": "clean",
+            },
+        ),
+        (
+            b"approved-video-bytes",
+            {
                 "music_path": str(music_path),
                 "music_volume": 0.25,
                 "keep_original_audio": True,
@@ -434,9 +454,86 @@ def test_reference_default_music_renders_only_the_approved_video(monkeypatch, tm
             },
         )
     ]
-    assert session[reference.REFERENCE_MUSIC_RESULT_PATH_SESSION_KEY] == str(result_path)
+    assert artifact_calls == [
+        {
+            "path": str(clean_path),
+            "artifact_type": "final_upscaled_4k",
+            "label": "4K",
+            "reference_variant": "4k",
+        },
+        {
+            "path": str(music_result_path),
+            "artifact_type": "final_subtitled_music",
+            "label": "4K + музыка",
+            "reference_variant": "4k_music",
+        },
+    ]
+    assert session[reference.REFERENCE_MUSIC_RESULT_PATH_SESSION_KEY] == str(music_result_path)
     assert sent_video.await_args.kwargs["video"].read() == b"mixed-video"
     description.assert_awaited_once_with(update, session)
+
+
+def test_reference_final_variant_is_registered_for_admin_publication(monkeypatch, tmp_path):
+    from app.handlers import handlers_state_media as media
+
+    path = tmp_path / "final-4k.mp4"
+    path.write_bytes(b"video")
+    calls = []
+    monkeypatch.setattr(
+        media,
+        "persist_generation_artifact",
+        lambda session, **kwargs: calls.append((session, kwargs)) or "artifact-id",
+    )
+    session = {"generation_run_id": "26eec660-ec72-41f1-ac65-d5c162491413"}
+
+    media._persist_reference_final_variant(
+        session,
+        path=path,
+        artifact_type="final_upscaled_4k",
+        label="4K",
+        reference_variant="4k",
+    )
+
+    assert calls[0][0] is session
+    assert calls[0][1]["artifact_type"] == "final_upscaled_4k"
+    assert calls[0][1]["language"] == "ru"
+    assert calls[0][1]["uri"] == f"file://{path.resolve()}"
+    assert calls[0][1]["payload"]["reference_mode"] is True
+    assert calls[0][1]["payload"]["reference_variant"] == "4k"
+
+
+def test_reference_description_approval_marks_run_ready(monkeypatch):
+    from app.handlers import handlers_state_scene as scene_handler
+
+    chat_id = 918275
+    session = {
+        "generation_mode": "reference",
+        "reference_short_description": "Бабушка и дедушка танцуют, пока Тимоша смотрит на них.",
+        "state": reference.STATE_WAITING_REFERENCE_DESCRIPTION_APPROVAL,
+    }
+    scene_handler.SESSIONS[chat_id] = session
+    mark_ready = Mock()
+    monkeypatch.setattr(scene_handler, "mark_generation_run_ready", mark_ready)
+    update = SimpleNamespace(
+        message=SimpleNamespace(reply_text=AsyncMock()),
+        effective_chat=SimpleNamespace(id=chat_id),
+    )
+
+    result = asyncio.run(
+        scene_handler._handle_reference_description_state(
+            update,
+            None,
+            chat_id=chat_id,
+            session=session,
+            text="ОК",
+        )
+    )
+
+    assert result is True
+    assert session["reference_description_approved"] is True
+    assert session["state"] == scene_handler.STATE_READY_FOR_PRODUCTION
+    mark_ready.assert_called_once_with(session)
+    scene_handler.SESSIONS.pop(chat_id, None)
 
 
 def test_reference_holiday_music_uses_christmas_series_track(monkeypatch, tmp_path):
@@ -459,6 +556,7 @@ def test_reference_holiday_music_uses_christmas_series_track(monkeypatch, tmp_pa
 
     monkeypatch.setattr(media, "holiday_music", fake_holiday_music)
     monkeypatch.setattr(media, "render_reference_music_variant", fake_render)
+    monkeypatch.setattr(media, "_persist_reference_final_variant", lambda *_args, **_kwargs: None)
     monkeypatch.setattr(media, "_safe_reply_video", AsyncMock())
     monkeypatch.setattr(media, "_start_reference_description_approval", AsyncMock(return_value=True))
     update = SimpleNamespace(message=SimpleNamespace(reply_text=AsyncMock()))
@@ -492,6 +590,7 @@ def test_reference_custom_music_upload_is_stored_and_mixed(monkeypatch, tmp_path
 
     monkeypatch.setattr(media, "store_reference_custom_music", fake_store)
     monkeypatch.setattr(media, "render_reference_music_variant", fake_render)
+    monkeypatch.setattr(media, "_persist_reference_final_variant", lambda *_args, **_kwargs: None)
     monkeypatch.setattr(media, "_safe_reply_video", AsyncMock())
     monkeypatch.setattr(media, "_start_reference_description_approval", AsyncMock(return_value=True))
     update = SimpleNamespace(message=SimpleNamespace(reply_text=AsyncMock()))

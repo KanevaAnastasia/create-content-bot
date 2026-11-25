@@ -2572,6 +2572,92 @@ def test_django_generation_admin_shows_publication_prep_panel(monkeypatch):
     assert "Instagram EN" in html
 
 
+def test_django_reference_run_uses_approved_short_description_for_ru_publication(monkeypatch):
+    admin_dir = Path(__file__).resolve().parents[1] / "admin_panel"
+    sys.path.insert(0, str(admin_dir))
+    os.environ.setdefault("DJANGO_SETTINGS_MODULE", "cf_admin.settings")
+
+    import django
+
+    django.setup()
+
+    import pipeline_admin.admin as admin_module
+
+    description = "Бабушка и дедушка танцуют, пока Тимоша наблюдает за ними."
+    monkeypatch.setattr(
+        admin_module,
+        "_latest_chat_session_for_run",
+        lambda _run: (
+            None,
+            {
+                "generation_mode": "reference",
+                "reference_description_approved": True,
+                "reference_short_description": description,
+            },
+        ),
+    )
+    monkeypatch.setattr(admin_module, "_publication_copy_from_draft", lambda _run: {})
+    monkeypatch.setattr(admin_module, "_publication_copy_from_latest_jobs", lambda _run: {})
+    run = SimpleNamespace(human_title="Бабушка и дедушка танцуют")
+
+    copy = admin_module._publication_copy_from_run(run)
+
+    assert copy["youtube_ru_title"] == "Бабушка и дедушка танцуют"
+    assert copy["youtube_ru_description"] == description
+    assert copy["instagram_ru"] == description
+    assert copy["vk_ru"] == description
+    assert copy["tiktok_ru"] == description
+    assert copy["instagram_en"] == ""
+
+
+def test_django_reference_final_artifacts_have_simple_4k_labels(monkeypatch):
+    admin_dir = Path(__file__).resolve().parents[1] / "admin_panel"
+    sys.path.insert(0, str(admin_dir))
+    os.environ.setdefault("DJANGO_SETTINGS_MODULE", "cf_admin.settings")
+
+    import django
+
+    django.setup()
+
+    import pipeline_admin.admin as admin_module
+
+    now = SimpleNamespace(strftime=lambda _format: "2026-11-25 18:30:00")
+    artifacts = [
+        SimpleNamespace(
+            id=uuid.uuid4(),
+            language="ru",
+            artifact_type="final_upscaled_4k",
+            label="4K",
+            created_at=now,
+            uri="file:///tmp/reference-4k.mp4",
+            payload_json={"reference_mode": True, "reference_variant": "4k"},
+        ),
+        SimpleNamespace(
+            id=uuid.uuid4(),
+            language="ru",
+            artifact_type="final_subtitled_music",
+            label="4K + музыка",
+            created_at=now,
+            uri="file:///tmp/reference-4k-music.mp4",
+            payload_json={"reference_mode": True, "reference_variant": "4k_music"},
+        ),
+    ]
+    monkeypatch.setattr(admin_module, "_publication_all_final_artifacts", lambda _run: artifacts)
+    monkeypatch.setattr(
+        admin_module,
+        "_publication_artifact_video_payload",
+        lambda artifact: {"video_path": artifact.uri.removeprefix("file://")},
+    )
+
+    choices = admin_module._publication_video_source_choices(SimpleNamespace())
+
+    labels = [label for _value, label in choices["ru"]]
+    assert labels == [
+        "2026-11-25 18:30:00 · 4K",
+        "2026-11-25 18:30:00 · 4K + музыка",
+    ]
+
+
 def test_django_publication_queue_form_renders_rich_preflight(monkeypatch):
     admin_dir = Path(__file__).resolve().parents[1] / "admin_panel"
     sys.path.insert(0, str(admin_dir))

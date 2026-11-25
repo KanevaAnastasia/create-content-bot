@@ -2926,10 +2926,15 @@ def _publication_video_source_choices(run: GenerationRun) -> dict[str, tuple[tup
         language = str(artifact.language or "").strip().lower()
         if language not in choices or not _publication_artifact_video_payload(artifact):
             continue
-        variant = str(artifact.artifact_type or "").removeprefix("final_")
-        label = PUBLICATION_VIDEO_VARIANT_LABELS.get(variant, variant)
         created = artifact.created_at.strftime("%Y-%m-%d %H:%M:%S") if artifact.created_at else "unknown time"
-        choices[language].append((f"artifact:{artifact.id}", f"{created} · {label} · {artifact.label}"))
+        payload = artifact.payload_json if isinstance(artifact.payload_json, dict) else {}
+        if payload.get("reference_mode") is True:
+            label = str(artifact.label or "4K")
+        else:
+            variant = str(artifact.artifact_type or "").removeprefix("final_")
+            variant_label = PUBLICATION_VIDEO_VARIANT_LABELS.get(variant, variant)
+            label = f"{variant_label} · {artifact.label}"
+        choices[language].append((f"artifact:{artifact.id}", f"{created} · {label}"))
     return {language: tuple(rows) for language, rows in choices.items()}
 
 
@@ -3119,6 +3124,23 @@ def _publication_copy_from_run(run: GenerationRun) -> dict[str, str]:
     latest_job_copy = _publication_copy_from_latest_jobs(run)
     if latest_job_copy:
         return latest_job_copy
+    if (
+        str(session.get("generation_mode") or "").strip().lower() == "reference"
+        and session.get("reference_description_approved") is True
+    ):
+        description = str(session.get("reference_short_description") or "").strip()
+        if description:
+            title = str(run.human_title or "").strip() or description
+            return {
+                "youtube_ru_title": title,
+                "youtube_ru_description": description,
+                "instagram_ru": description,
+                "vk_ru": description,
+                "tiktok_ru": description,
+                "instagram_en": "",
+                "youtube_en_title": "",
+                "youtube_en_description": "",
+            }
     # A source script is not platform copy (and may be in a different language).
     # Missing copy must remain visibly missing, never silently publish the script.
     return {key: "" for key, _label in SOCIAL_COPY_FIELD_LABELS}
@@ -3136,7 +3158,13 @@ def _publication_recipe_candidates_for_run(run: GenerationRun) -> list[str]:
     except Exception:
         session = {}
     if isinstance(session, dict):
-        for key in ("recipe_full_text", "approved_recipe_text", "user_input"):
+        for key in (
+            "recipe_full_text",
+            "approved_recipe_text",
+            "user_input",
+            "reference_short_description",
+            "reference_comment",
+        ):
             value = str(session.get(key) or "").strip()
             if value:
                 candidates.append(value)

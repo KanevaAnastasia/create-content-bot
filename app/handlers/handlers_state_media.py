@@ -161,7 +161,7 @@ from ..ai_approval_service import (
     format_ai_approval_summary,
     get_ai_approval_config,
 )
-from ..artifact_store import persist_post_production_artifacts
+from ..artifact_store import file_uri, persist_generation_artifact, persist_post_production_artifacts
 from ..final_build_queue import queue_final_builds_for_session
 from ..final_video_delivery import all_final_artifacts_delivered
 from ..generation_store import mark_generation_run_ready
@@ -3735,6 +3735,34 @@ async def _start_reference_description_approval(update: Update, session: dict) -
     return True
 
 
+def _persist_reference_final_variant(
+    session: dict,
+    *,
+    path: str | Path,
+    artifact_type: str,
+    label: str,
+    reference_variant: str,
+) -> None:
+    video_path = Path(path).resolve()
+    artifact_id = persist_generation_artifact(
+        session,
+        artifact_type=artifact_type,
+        label=label,
+        uri=file_uri(video_path),
+        language="ru",
+        mime_type="video/mp4",
+        payload={
+            "video_path": str(video_path),
+            "width": 2160,
+            "height": 3840,
+            "reference_mode": True,
+            "reference_variant": reference_variant,
+        },
+    )
+    if not artifact_id:
+        raise RuntimeError(f"Не удалось зарегистрировать финальный артефакт {label}")
+
+
 async def _complete_reference_music_choice(
     update: Update,
     session: dict,
@@ -3833,23 +3861,52 @@ async def _complete_reference_music_choice(
     else:
         progress_text = f"Убираю оригинальное аудио, добавляю {label} и делаю обязательный апскейл Veo-видео."
         caption = f"Финальный ролик только с {label}, после апскейла до 4K."
+    if choice != "none":
+        progress_text += " Сначала подготовлю отдельную версию 4K без добавленной музыки."
     await reply_text_without_keyboard(update.message, progress_text)
     try:
-        result_path = await asyncio.to_thread(
+        clean_4k_path = await asyncio.to_thread(
             render_reference_music_variant,
             video_bytes,
-            music_path=str(music_path) if music_path else None,
-            music_volume=float(music_volume),
+            music_path=None,
+            music_volume=0.0,
             keep_original_audio=keep_original_audio,
             run_id=str(session.get("generation_run_id") or ""),
-            choice=choice,
+            choice="clean",
         )
+        _persist_reference_final_variant(
+            session,
+            path=clean_4k_path,
+            artifact_type="final_upscaled_4k",
+            label="4K",
+            reference_variant="4k",
+        )
+        if choice == "none":
+            result_path = clean_4k_path
+        else:
+            result_path = await asyncio.to_thread(
+                render_reference_music_variant,
+                video_bytes,
+                music_path=str(music_path),
+                music_volume=float(music_volume),
+                keep_original_audio=keep_original_audio,
+                run_id=str(session.get("generation_run_id") or ""),
+                choice=choice,
+            )
+            _persist_reference_final_variant(
+                session,
+                path=result_path,
+                artifact_type="final_subtitled_music",
+                label="4K + музыка",
+                reference_variant="4k_music",
+            )
     except Exception as exc:
-        logger.exception("reference music mix failed choice=%s", choice)
+        logger.exception("reference final variants failed choice=%s", choice)
         session["state"] = STATE_WAITING_REFERENCE_MUSIC_CHOICE
         await _reply_text_with_optional_markup(
             update,
-            f"Не удалось добавить музыку: {_user_error_message(exc, domain='video')}. Выберите вариант ещё раз.",
+            f"Не удалось подготовить финальные версии: {_user_error_message(exc, domain='video')}. "
+            "Выберите вариант ещё раз.",
             reply_markup=_reference_music_choice_markup(),
         )
         return True

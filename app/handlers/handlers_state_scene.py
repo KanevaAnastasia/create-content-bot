@@ -290,7 +290,7 @@ from ..reference_generation import (
     reference_character_choices_text,
     reference_character_summary,
 )
-from ..generation_store import ensure_generation_run_for_session
+from ..generation_store import ensure_generation_run_for_session, mark_generation_run_ready
 from ..models import SceneVideoCandidate as SceneVideoCandidateRow
 from ..ai_approval_service import _resolve_ffmpeg
 from ..pipeline_history import record_checkpoint, restore_previous_checkpoint, session_step_signature
@@ -6452,6 +6452,7 @@ async def _handle_reference_description_state(
         session[REFERENCE_DESCRIPTION_FEEDBACK_PENDING_KEY] = False
         session["state"] = STATE_READY_FOR_PRODUCTION
         SESSIONS[chat_id] = session
+        mark_generation_run_ready(session)
         await _reply_text_with_optional_markup(
             update,
             "Режим «По референсу» завершён. Кадр, Veo-видео, вариант оригинального аудио, "
