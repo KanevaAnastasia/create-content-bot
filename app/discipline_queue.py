@@ -164,6 +164,7 @@ async def deliver(bot, chat_id, *, force=False, locked=False):
         async with chat_lock(chat_id):
             return await deliver(bot, chat_id, force=force, locked=True)
     from .article_store import blocks_advertising
+    from .discipline_modes import BOSS
     session = _session(chat_id)
     reconcile(chat_id)
     if session.get('state') == STATE and session.get(KEY):
@@ -180,6 +181,7 @@ async def deliver(bot, chat_id, *, force=False, locked=False):
     with SessionLocal() as db:
         row = db.get(DisciplineIdea, uuid.UUID(idea_id))
         status, cursor = row.status, row.delivery_index
+        allow_detached = row.mode == BOSS
         chunks = card_messages(row)
     if status in {'in_progress', 'paused'}:
         if force:
@@ -197,13 +199,15 @@ async def deliver(bot, chat_id, *, force=False, locked=False):
         force and session.get('state') == 'state_waiting_first_step_generate_text'
         and not session.get('generation_run_id') and not session.get('production')
     )
-    if (session_is_busy(session) and not owns_offer and not empty_start_menu) or blocks_advertising(chat_id):
+    busy = ((session_is_busy(session) and not owns_offer and not empty_start_menu)
+            or blocks_advertising(chat_id))
+    if busy and (force or not allow_detached):
         if force:
             await bot.send_message(chat_id, 'Идея сохранена. Сначала завершите текущую работу или отмените её.')
         return
-    if status == 'offered' and owns_offer and not force:
+    if status == 'offered' and (owns_offer or allow_detached) and not force:
         return
-    if not owns_offer:
+    if not owns_offer and not busy:
         _persist(chat_id, {'selected_project_key': 'discipline', 'state': STATE, KEY: idea_id})
     if force:
         cursor = 0
@@ -215,8 +219,9 @@ async def deliver(bot, chat_id, *, force=False, locked=False):
                 return
             row.delivery_index = index + 1
             db.commit()
-    await bot.send_message(chat_id, 'Разберём эту идею? После выбора отдельно согласуем текст, озвучку и кадры.',
-                           reply_markup=markup(idea_id))
+    invitation = ('Карточка сохранена. Когда освободится текущий проект, здесь можно открыть сценарий.'
+                  if busy else 'Разберём эту идею? После выбора отдельно согласуем текст, озвучку и кадры.')
+    await bot.send_message(chat_id, invitation, reply_markup=markup(idea_id))
     with SessionLocal() as db:
         row = db.get(DisciplineIdea, uuid.UUID(idea_id), with_for_update=True)
         if row is None or row.status not in {'ready', 'offered'}:

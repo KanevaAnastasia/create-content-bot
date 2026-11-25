@@ -12,7 +12,7 @@ EXPERIMENT = 'small_experiment'
 TWO_LIVES = 'two_lives'
 ARCHIVE = 'lives_archive'
 BOSS = 'inner_boss'
-BOSS_VOICE_ID = 'pNInz6obpgDQGcFmaJgB'
+BOSS_VOICE_ID = 'vfaqCOvlrKi4Zp7C2IAm'
 LEARNING = 'learning_lab'
 MALE_VOICE_ID = '6Pm064JKx8KhPSIAdbHd'
 
@@ -132,14 +132,16 @@ SHORT_FORMATS[BOSS] = ShortFormat(
     'Напиши диалог на 95–115 слов, по одной реплике за раз с метками «Вася:» и «Босс:». '
     'Открой конфликт с первой реплики: Босс знает привычную отговорку Васи. '
     'Дальше покажи цену повторения, момент узнавания и первую попытку. '
-    'Босс должен вернуться после начала, когда становится трудно и никто не замечает усилий. '
+    'Босс возвращается в момент нового препятствия и меняет довод. Подбирай доводы к теме пользователя: '
+    'перфекционизм, стыд после пропуска, страх ошибки, сравнение или привычка откладывать. '
     'Каждый ответ Васи показывается конкретным действием. Финал возвращает исходную ситуацию '
     'с другим решением. Не подменяй конфликт перечислением советов. Реплики пиши своими словами.',
     'Василий в плоской геометрической 2D-рисовке по утверждённой внешности. Босс — тень '
     'Василия с тем же силуэтом волос, шире и темнее, с красным краем. Тень проявляется '
     'в отражении или на фоне, это часть композиции, а не новый персонаж проекта. '
-    'В начале повторяй композицию будильника. Переходи от темной комнаты к отражению, '
-    'монтажу повторений и видимому результату. Один акцент за раз. Надписи добавь при монтаже.',
+    'Для каждой темы выбери свой предмет или действие, которое можно повторить в начале и в финале. '
+    'Будильник, зеркало и пробежка относятся к пилоту. В других историях место, предмет и появление тени '
+    'следуют из сюжета. Один акцент за раз. Надписи добавь при монтаже.',
     'Minimal flat 2D motion graphics, simple rounded shapes, sparse ink outline, dark navy and mustard, '
     'a subdued red edge only for the shadow. Match approved Vasily identity and outfit. No 3D or grain.',
     'Keep flat 2D shapes and the exact silhouette, proportions and outfit. Animate gaze, brows and '
@@ -163,6 +165,12 @@ BOSS_PILOT_DIALOGUE = (
     'Босс: Ну что, ещё пять минут?\n'
     'Вася: Я уже встал.'
 )
+
+
+def boss_opening_has_alarm(source: str) -> bool:
+    """The pilot has an alarm; subsequent episodes can opt in with a sound cue."""
+    text = str(source or "").strip()
+    return text == BOSS_PILOT or "[звук в начале: будильник]" in text.casefold()
 
 
 def boss_dialogue_turns(text, hero_voice_id, boss_voice_id):

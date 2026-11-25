@@ -342,3 +342,9 @@ def test_inner_boss_english_turns_and_cast_preserve_identity():
     hero = {"id": "existing_id", "display_name": "Василий", "description": "Approved character"}
     story_generation.enforce_discipline_narrative_cast(scenes, [hero])
     assert scenes[0]["characters"] == ["existing_id"]
+
+
+def test_alarm_is_pilot_only_unless_episode_explicitly_requests_it():
+    assert modes.boss_opening_has_alarm(modes.BOSS_PILOT)
+    assert modes.boss_opening_has_alarm('Вася встал. [Звук в начале: будильник]')
+    assert not modes.boss_opening_has_alarm('Вася боится открыть тест.')

@@ -335,3 +335,26 @@ def test_series_rename_overrides_stale_live_title_metadata(db):
     assert style['editorial_hierarchy_by_lang']['ru'][0] == 'Учимся учиться'
     assert style['editorial_hierarchy_by_lang']['en'][0] == 'Learning to Learn'
     assert style['editorial_style_id'] == '9'
+
+
+def test_boss_morning_card_does_not_replace_an_active_project(db):
+    idea = add(db)
+    with db() as s:
+        s.get(DisciplineIdea, idea).mode = 'inner_boss'
+        s.commit()
+    original = {'state': 'waiting_scene_media', 'generation_run_id': 'existing'}
+    state.SESSIONS[123] = dict(original)
+    bot = SimpleNamespace(send_message=AsyncMock())
+    asyncio.run(q.deliver(bot, 123))
+    count = bot.send_message.await_count
+    assert count > 1
+    assert bot.send_message.await_args.kwargs['reply_markup'] == q.markup(str(idea))
+    assert state.SESSIONS[123] == original
+    asyncio.run(q.deliver(bot, 123))
+    assert bot.send_message.await_count == count
+
+    asyncio.run(q.callback(click('a', idea), SimpleNamespace(bot=bot)))
+    assert state.SESSIONS[123] == original
+    state.SESSIONS[123] = {}
+    asyncio.run(q.callback(click('a', idea), SimpleNamespace(bot=bot)))
+    assert state.SESSIONS[123]['discipline_narrative_mode'] == 'inner_boss'
