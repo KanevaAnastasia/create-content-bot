@@ -613,13 +613,18 @@ def _scene_syntax_prompt_for_language(scene: dict, language: str, prompt: str) -
     source = str(prompt or "").strip()
     if not source:
         return source
+    source = _prefix_video_prompt_with_language(source, lang)
     source_hash = _syntax_prompt_hash(source)
     cache = scene.get(SYNTAX_PROMPT_BY_LANG_KEY)
     if not isinstance(cache, dict):
         cache = {}
     entry = cache.get(lang)
     if isinstance(entry, dict) and entry.get("source_hash") == source_hash and str(entry.get("prompt") or "").strip():
-        return str(entry["prompt"]).strip()
+        cached = _prefix_video_prompt_with_language(str(entry["prompt"]), lang)
+        prepared = _prepare_prompt_for_syntax(cached)
+        if prepared is not None:
+            entry["prompt"] = prepared[0]
+            return prepared[0]
     prepared = _prepare_prompt_for_syntax(source)
     compact = prepared[0] if prepared is not None else source
     shortened = bool(prepared[1]) if prepared is not None else False

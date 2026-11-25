@@ -2111,17 +2111,27 @@ def _prepare_prompt_for_syntax(prompt: str, *, max_len: int | None = None) -> tu
     original = (prompt or "").strip()
     if not original:
         return None
+    token = _expected_lang_token_from_prompt(original)
+    if token:
+        body = re.sub(r"^\s*lang\s*[:=]\s*[a-z]{2,8}\b\s*", "", original, flags=re.IGNORECASE)
+        original = f"{token} {body}".strip()
     if len(original) <= limit:
         return original, False
-    shortened = _shorten_prompt_for_syntax_with_gemini_sync(original, max_len=limit)
+    body_limit = limit - len(token) - 1 if token else limit
+    if body_limit <= 0:
+        return None
+    shortened = _shorten_prompt_for_syntax_with_gemini_sync(original, max_len=body_limit)
     if shortened is None:
-        shortened = _shorten_prompt_for_syntax_locally(original, max_len=limit)
+        shortened = _shorten_prompt_for_syntax_locally(original, max_len=body_limit)
         logger.warning(
             "syntax_prompt_shorten.local_fallback original_chars=%s shortened_chars=%s limit=%s",
             len(original),
             len(shortened),
             limit,
         )
+    if shortened and token:
+        shortened = re.sub(r"^\s*lang\s*[:=]\s*[a-z]{2,8}\b\s*", "", shortened, flags=re.IGNORECASE)
+        shortened = f"{token} {shortened}".strip()
     if not shortened or len(shortened) > limit:
         return None
     return shortened, True
@@ -2271,6 +2281,9 @@ async def _process_bot_message(
     if message is None:
         return None
     if getattr(message, "out", False):
+        return None
+    response_token = _expected_lang_token_from_prompt(_extract_text(message))
+    if expected_lang_token and response_token and response_token != expected_lang_token:
         return None
     mid = int(getattr(message, "id", 0) or 0)
     reply_id = getattr(getattr(message, "reply_to", None), "reply_to_msg_id", None)
@@ -2434,6 +2447,11 @@ def _batch_message_candidate_keys(message: Any, pending_states: dict[str, dict[s
     mid = int(getattr(message, "id", 0) or 0)
     reply_id = getattr(getattr(message, "reply_to", None), "reply_to_msg_id", None)
     text = _extract_text(message).lower()
+
+    explicit_token = _expected_lang_token_from_prompt(text)
+    if explicit_token:
+        return [key for key, state in pending_states.items()
+                if state["request"].expected_lang_token == explicit_token]
 
     if reply_id:
         matched = [
