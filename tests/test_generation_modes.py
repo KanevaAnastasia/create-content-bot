@@ -3,6 +3,7 @@ from app.generation_modes import (
     GENERATION_MODE_COPY,
     GENERATION_MODE_LONG,
     GENERATION_MODE_NORMAL,
+    GENERATION_MODE_REFERENCE,
     GENERATION_MODE_SESSION_KEY,
     GENERATION_MODE_SILENCE,
     GENERATION_MODE_STORY,
@@ -12,6 +13,7 @@ from app.generation_modes import (
     aspect_ratio_for_generation_mode,
     is_copy_generation,
     is_long_generation,
+    is_reference_generation,
     is_story_generation,
     is_visualization_generation,
     is_advertising_generation,
@@ -31,6 +33,7 @@ def test_long_generation_mode_helpers():
     assert normalize_generation_mode("история") == GENERATION_MODE_STORY
     assert normalize_generation_mode("визуализация") == GENERATION_MODE_VISUALIZATION
     assert normalize_generation_mode("реклама") == GENERATION_MODE_ADVERTISING
+    assert normalize_generation_mode("По референсу") == GENERATION_MODE_REFERENCE
 
     session = {GENERATION_MODE_SESSION_KEY: GENERATION_MODE_LONG}
     assert is_long_generation(session) is True
@@ -57,6 +60,12 @@ def test_long_generation_mode_helpers():
     assert is_advertising_generation(advertising_session) is True
     assert target_languages_for_generation_mode(advertising_session, ["ru", "en"]) == ["ru"]
     assert syntax_provider_for_scene_generation({}, advertising_session) == SYNTAX_PROVIDER_VEO
+
+    reference_session = {GENERATION_MODE_SESSION_KEY: GENERATION_MODE_REFERENCE}
+    assert is_reference_generation(reference_session) is True
+    assert target_languages_for_generation_mode(reference_session, ["ru", "en"]) == ["ru"]
+    assert aspect_ratio_for_generation_mode(reference_session) == "9:16"
+    assert syntax_provider_for_scene_generation({}, reference_session) == SYNTAX_PROVIDER_VEO
 
 
 def test_scene_level_syntax_provider_overrides_mode_default():

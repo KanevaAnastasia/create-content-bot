@@ -255,6 +255,7 @@ from ..generation_modes import (
     GENERATION_MODE_ADVERTISING,
     GENERATION_MODE_COPY,
     GENERATION_MODE_NORMAL,
+    GENERATION_MODE_REFERENCE,
     GENERATION_MODE_SESSION_KEY,
     GENERATION_MODE_SILENCE,
     GENERATION_MODE_STORY,
@@ -263,6 +264,25 @@ from ..generation_modes import (
     is_story_generation,
     is_visualization_generation,
     normalize_generation_mode,
+)
+from ..reference_generation import (
+    REFERENCE_CHARACTERS_SESSION_KEY,
+    REFERENCE_COMMENT_SESSION_KEY,
+    REFERENCE_DESCRIPTION_FEEDBACK_PENDING_KEY,
+    REFERENCE_DESCRIPTION_SESSION_KEY,
+    REFERENCE_NO_COMMENT,
+    REFERENCE_NO_EXTRA_CHARACTERS,
+    REFERENCE_SOURCE_IMAGE_SESSION_KEY,
+    STATE_WAITING_REFERENCE_CHARACTERS,
+    STATE_WAITING_REFERENCE_COMMENT,
+    STATE_WAITING_REFERENCE_DESCRIPTION_APPROVAL,
+    STATE_WAITING_REFERENCE_IMAGE,
+    build_reference_scene,
+    generate_reference_description,
+    generate_reference_image_prompt,
+    parse_reference_extra_characters,
+    reference_character_choices_text,
+    reference_character_summary,
 )
 from ..generation_store import ensure_generation_run_for_session
 from ..models import SceneVideoCandidate as SceneVideoCandidateRow
@@ -6206,6 +6226,260 @@ async def _extract_any_image_from_update(update: Update, context: ContextTypes.D
     return bytes(data)
 
 
+def _reference_characters_markup() -> object | None:
+    try:
+        from telegram import ReplyKeyboardMarkup
+    except Exception:
+        return None
+    return ReplyKeyboardMarkup(
+        [[REFERENCE_NO_EXTRA_CHARACTERS], [NAV_BUTTON_START_OVER]],
+        resize_keyboard=True,
+        one_time_keyboard=False,
+    )
+
+
+def _reference_comment_markup() -> object | None:
+    try:
+        from telegram import ReplyKeyboardMarkup
+    except Exception:
+        return None
+    return ReplyKeyboardMarkup(
+        [[REFERENCE_NO_COMMENT], [NAV_BUTTON_START_OVER]],
+        resize_keyboard=True,
+        one_time_keyboard=False,
+    )
+
+
+def _reference_description_markup() -> object | None:
+    try:
+        from telegram import ReplyKeyboardMarkup
+    except Exception:
+        return None
+    return ReplyKeyboardMarkup(
+        [["ОК"], ["ФИДБЕК"], ["ПЕРЕГЕНЕРИРОВАТЬ"], [NAV_BUTTON_START_OVER]],
+        resize_keyboard=True,
+        one_time_keyboard=False,
+    )
+
+
+async def _start_reference_prompt_approval(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+    *,
+    chat_id: int,
+    session: dict,
+    comment: str,
+) -> bool:
+    source_image = session.get(REFERENCE_SOURCE_IMAGE_SESSION_KEY)
+    if not isinstance(source_image, bytes) or not source_image:
+        session["state"] = STATE_WAITING_REFERENCE_IMAGE
+        SESSIONS[chat_id] = session
+        await reply_text_without_keyboard(update.message, "Не вижу референс. Пришлите изображение ещё раз.")
+        return True
+    extras = [str(key) for key in session.get(REFERENCE_CHARACTERS_SESSION_KEY) or []]
+    session[REFERENCE_COMMENT_SESSION_KEY] = str(comment or "").strip()
+    try:
+        await reply_text_without_keyboard(update.message, "Генерирую промпт кадра по референсу, ждите.")
+        image_prompt = await _call_with_503_retries(
+            update,
+            context,
+            chat_id,
+            "generate_reference_image_prompt",
+            lambda: asyncio.to_thread(
+                generate_reference_image_prompt,
+                source_image,
+                comment=session[REFERENCE_COMMENT_SESSION_KEY],
+                extra_characters=extras,
+            ),
+        )
+        if not str(image_prompt or "").strip():
+            raise RuntimeError("модель вернула пустой промпт кадра")
+    except ServiceUnavailableRetriesExhaustedError as exc:
+        await update.message.reply_text(str(exc))
+        return True
+    except Exception as exc:
+        logger.exception("reference image prompt generation failed")
+        await update.message.reply_text(f"Ошибка генерации промпта кадра: {_user_error_message(exc)}")
+        return True
+    scene = build_reference_scene(
+        source_image=source_image,
+        image_prompt=str(image_prompt).strip(),
+        comment=session[REFERENCE_COMMENT_SESSION_KEY],
+        extra_characters=extras,
+    )
+    session.pop(REFERENCE_SOURCE_IMAGE_SESSION_KEY, None)
+    session[GENERATION_MODE_SESSION_KEY] = GENERATION_MODE_REFERENCE
+    session["target_languages"] = ["ru"]
+    session["production"] = {"json_plan": [scene]}
+    session["scenes_plan"] = [dict(scene)]
+    session["recipe_full_text"] = session[REFERENCE_COMMENT_SESSION_KEY] or "Ролик по референсу"
+    session["image_scene_index"] = 0
+    session["scene_media_language_index"] = 0
+    session["scene_media_substep"] = SCENE_MEDIA_SUBSTEP_START
+    session["state"] = STATE_WAITING_SCENE_MEDIA
+    SESSIONS[chat_id] = session
+    ensure_generation_run_for_session(session)
+    await update.message.reply_text(
+        "Промпт кадра готов. Сначала проверьте его, затем по «ОК» сгенерируется изображение."
+    )
+    await _send_next_scene_media_step(update, session)
+    return True
+
+
+async def _handle_reference_characters_state(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+    *,
+    chat_id: int,
+    session: dict,
+    text: str,
+) -> bool:
+    extras, unknown = parse_reference_extra_characters(text)
+    if unknown:
+        await _reply_text_with_optional_markup(
+            update,
+            "Не узнала персонажей: " + ", ".join(unknown) + ".\n"
+            "Можно выбрать: " + reference_character_choices_text() + ".",
+            reply_markup=_reference_characters_markup(),
+        )
+        return True
+    session[REFERENCE_CHARACTERS_SESSION_KEY] = extras
+    SESSIONS[chat_id] = session
+    caption_comment = str(session.get(REFERENCE_COMMENT_SESSION_KEY) or "").strip()
+    await update.message.reply_text(
+        "Состав кадра: " + reference_character_summary(["grandma", "cat", *extras]) + "."
+    )
+    if caption_comment:
+        return await _start_reference_prompt_approval(
+            update,
+            context,
+            chat_id=chat_id,
+            session=session,
+            comment=caption_comment,
+        )
+    session["state"] = STATE_WAITING_REFERENCE_COMMENT
+    SESSIONS[chat_id] = session
+    await _reply_text_with_optional_markup(
+        update,
+        "Теперь пришлите комментарий к будущему кадру и действию. Если уточнений нет, нажмите «Без комментария».",
+        reply_markup=_reference_comment_markup(),
+    )
+    return True
+
+
+async def _handle_reference_comment_state(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+    *,
+    chat_id: int,
+    session: dict,
+    text: str,
+) -> bool:
+    comment = "" if str(text or "").strip().casefold() == REFERENCE_NO_COMMENT.casefold() else str(text or "").strip()
+    return await _start_reference_prompt_approval(
+        update,
+        context,
+        chat_id=chat_id,
+        session=session,
+        comment=comment,
+    )
+
+
+async def _regenerate_reference_description(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+    *,
+    chat_id: int,
+    session: dict,
+    feedback: str = "",
+) -> bool:
+    scenes = (session.get("production") or {}).get("json_plan") or []
+    scene = scenes[0] if scenes and isinstance(scenes[0], dict) else {}
+    try:
+        await reply_text_without_keyboard(update.message, "Готовлю новое короткое описание.")
+        description = await _call_with_503_retries(
+            update,
+            context,
+            chat_id,
+            "generate_reference_description",
+            lambda: asyncio.to_thread(
+                generate_reference_description,
+                image_prompt=str(scene.get("start_frame_prompt") or ""),
+                video_prompt=str(scene.get("video_prompt") or ""),
+                comment=str(session.get(REFERENCE_COMMENT_SESSION_KEY) or ""),
+                current=str(session.get(REFERENCE_DESCRIPTION_SESSION_KEY) or ""),
+                feedback=feedback,
+            ),
+        )
+        if not str(description or "").strip():
+            raise RuntimeError("модель вернула пустое описание")
+    except ServiceUnavailableRetriesExhaustedError as exc:
+        await update.message.reply_text(str(exc))
+        return True
+    except Exception as exc:
+        logger.exception("reference description generation failed")
+        await update.message.reply_text(f"Ошибка генерации описания: {_user_error_message(exc)}")
+        return True
+    session[REFERENCE_DESCRIPTION_SESSION_KEY] = str(description).strip()
+    session[REFERENCE_DESCRIPTION_FEEDBACK_PENDING_KEY] = False
+    session["state"] = STATE_WAITING_REFERENCE_DESCRIPTION_APPROVAL
+    SESSIONS[chat_id] = session
+    await _reply_text_with_optional_markup(
+        update,
+        "Короткое описание на апрув:\n\n" + str(description).strip(),
+        reply_markup=_reference_description_markup(),
+    )
+    return True
+
+
+async def _handle_reference_description_state(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+    *,
+    chat_id: int,
+    session: dict,
+    text: str,
+) -> bool:
+    low = str(text or "").strip().casefold()
+    if low in {"ок", "ok", "approve", "утвердить"}:
+        session["reference_description_approved"] = True
+        session[REFERENCE_DESCRIPTION_FEEDBACK_PENDING_KEY] = False
+        session["state"] = STATE_READY_FOR_PRODUCTION
+        SESSIONS[chat_id] = session
+        await _reply_text_with_optional_markup(
+            update,
+            "Режим «По референсу» завершён. Кадр, Veo-видео и короткое описание утверждены. Ничего не опубликовано.",
+            reply_markup=first_step_menu_markup(),
+        )
+        return True
+    if low in {"фидбек", "feedback"}:
+        session[REFERENCE_DESCRIPTION_FEEDBACK_PENDING_KEY] = True
+        SESSIONS[chat_id] = session
+        await update.message.reply_text("Пришлите правку к описанию одним сообщением.")
+        return True
+    if low in {"перегенерировать", "regenerate", "regen"}:
+        return await _regenerate_reference_description(
+            update,
+            context,
+            chat_id=chat_id,
+            session=session,
+        )
+    if session.pop(REFERENCE_DESCRIPTION_FEEDBACK_PENDING_KEY, False):
+        return await _regenerate_reference_description(
+            update,
+            context,
+            chat_id=chat_id,
+            session=session,
+            feedback=str(text or "").strip(),
+        )
+    await _reply_text_with_optional_markup(
+        update,
+        "Нажмите «ОК», «ПЕРЕГЕНЕРИРОВАТЬ» или «ФИДБЕК».",
+        reply_markup=_reference_description_markup(),
+    )
+    return True
+
+
 async def _generation_source_from_image(image_bytes: bytes, caption: str = "") -> str:
     """Преобразует фото блюда/рецепта в текстовый источник для обычного generate-пайплайна."""
     prompt = (
@@ -8118,6 +8392,23 @@ async def on_photo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     session = SESSIONS.get(chat_id) or {}
     try:
         state = str(session.get("state") or "")
+        if state == STATE_WAITING_REFERENCE_IMAGE:
+            image_bytes = await _extract_any_image_from_update(update, context)
+            if not image_bytes:
+                await update.message.reply_text("Не удалось прочитать референс. Пришлите фото или image-файл ещё раз.")
+                return
+            session[REFERENCE_SOURCE_IMAGE_SESSION_KEY] = image_bytes
+            session[REFERENCE_COMMENT_SESSION_KEY] = str(getattr(update.message, "caption", "") or "").strip()
+            session["state"] = STATE_WAITING_REFERENCE_CHARACTERS
+            SESSIONS[chat_id] = session
+            await _reply_text_with_optional_markup(
+                update,
+                "Референс принят. Бабушка и Тимоша добавлены обязательно. "
+                "Напишите через запятую, кто ещё будет в кадре, или нажмите «Без других».\n"
+                "Доступны: " + reference_character_choices_text() + ".",
+                reply_markup=_reference_characters_markup(),
+            )
+            return
         if state == STATE_WAITING_ADVERTISING_PRODUCT_IMAGE:
             await _handle_advertising_product_photo(
                 update,
@@ -8375,6 +8666,39 @@ async def _on_text_impl(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
             session = persisted
     state = str(session.get("state") or "")
     low = text.lower().strip()
+    if state == STATE_WAITING_REFERENCE_IMAGE:
+        await reply_text_without_keyboard(
+            update.message,
+            "Жду изображение-референс. Можно прислать фото или image-файл, а комментарий добавить подписью.",
+        )
+        return
+    if state == STATE_WAITING_REFERENCE_CHARACTERS:
+        await _handle_reference_characters_state(
+            update,
+            context,
+            chat_id=chat_id,
+            session=session,
+            text=text,
+        )
+        return
+    if state == STATE_WAITING_REFERENCE_COMMENT:
+        await _handle_reference_comment_state(
+            update,
+            context,
+            chat_id=chat_id,
+            session=session,
+            text=text,
+        )
+        return
+    if state == STATE_WAITING_REFERENCE_DESCRIPTION_APPROVAL:
+        await _handle_reference_description_state(
+            update,
+            context,
+            chat_id=chat_id,
+            session=session,
+            text=text,
+        )
+        return
     if low == "выбрать публикацию" and state == STATE_READY_FOR_PRODUCTION:
         from .handlers_state_media import SOCIAL_DESCRIPTIONS_APPROVED_KEY, _send_social_copy_for_approval
         approved = session.get(SOCIAL_DESCRIPTIONS_APPROVED_KEY) or {}

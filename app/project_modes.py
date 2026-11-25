@@ -11,7 +11,7 @@ def project_mode_rows(project_key=None):
                 [LABELS[FLOW]], [LABELS[TWO_LIVES], LABELS[ARCHIVE]], [LABELS[LEARNING]],
                 [LABELS[FORK], LABELS[EXPERIMENT]], ["Очередь Дисциплины"],
                 ["Визуализация"], ["Копия"], ["Реклама"]]
-    rows = [["Обычный", "Совет"]] if project == "grandma_kitchen" else [["Обычный"]]
+    rows = [["Обычный", "Совет"], ["По референсу"]] if project == "grandma_kitchen" else [["Обычный"]]
     return rows + [["Silence"], ["Длинный"], ["Копия"], ["История"], ["Визуализация"], ["Реклама"]]
 
 

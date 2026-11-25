@@ -116,6 +116,7 @@ from ..generation_modes import (
     GENERATION_MODE_COPY,
     GENERATION_MODE_LONG,
     GENERATION_MODE_NORMAL,
+    GENERATION_MODE_REFERENCE,
     GENERATION_MODE_SESSION_KEY,
     GENERATION_MODE_SILENCE,
     GENERATION_MODE_STORY,
@@ -193,6 +194,7 @@ _GENERATION_MODE_BUTTON_COPY = "Копия"
 _GENERATION_MODE_BUTTON_STORY = "История"
 _GENERATION_MODE_BUTTON_VISUALIZATION = "Визуализация"
 _GENERATION_MODE_BUTTON_ADVERTISING = "Реклама"
+_GENERATION_MODE_BUTTON_REFERENCE = "По референсу"
 _ADVERTISING_CAMPAIGN_OTHER_BUTTON = "Другие варианты"
 _ADVERTISING_CAMPAIGN_STRENGTHEN_BUTTON = "Усилить варианты"
 _ADVERTISING_CAMPAIGN_CUSTOM_BUTTON = "Свой вариант"
@@ -227,6 +229,12 @@ _NEW_GENERATION_STALE_KEYS = (
     "story_character_references",
     "story_character_bible",
     "discipline_narrative_mode",
+    "reference_source_image",
+    "reference_comment",
+    "reference_characters",
+    "reference_short_description",
+    "reference_description_approved",
+    "reference_description_feedback_pending",
     "generation_run_id",
     "scene_db_ids_by_index",
     "production",
@@ -1547,6 +1555,13 @@ async def _handle_waiting_generation_mode_state(
         "ad",
     }:
         mode = GENERATION_MODE_ADVERTISING
+    elif low in {
+        _GENERATION_MODE_BUTTON_REFERENCE.lower(),
+        GENERATION_MODE_REFERENCE,
+        "референс",
+        "by reference",
+    }:
+        mode = GENERATION_MODE_REFERENCE
     else:
         await _reply_text_with_optional_markup(
             update,
@@ -1556,6 +1571,9 @@ async def _handle_waiting_generation_mode_state(
         return True
     if mode == GENERATION_MODE_ADVICE and str(session.get(_PROJECT_KEY_SESSION) or "grandma_kitchen") != "grandma_kitchen":
         await update.message.reply_text("Формат «Совет» доступен для проекта бабушки. Выберите проект бабушки и начните снова.")
+        return True
+    if mode == GENERATION_MODE_REFERENCE and str(session.get(_PROJECT_KEY_SESSION) or "grandma_kitchen") != "grandma_kitchen":
+        await update.message.reply_text("Режим «По референсу» доступен только в проекте бабушки.")
         return True
     if not requested_format and not retry_story:
         session.pop(MODE_KEY, None)
@@ -1588,6 +1606,11 @@ async def _handle_waiting_generation_mode_state(
             "Ок, режим «Реклама»: после фото товара предложу 5 рекламных кампаний и дам выбрать формат «Клип» или «Пост». "
             "По умолчанию — клип из 3–6 русскоязычных сцен Veo; можно выбрать пост с одним изображением и готовым текстом."
         )
+    elif mode == GENERATION_MODE_REFERENCE:
+        message = (
+            "Ок, режим «По референсу»: один вертикальный кадр и один Veo-ролик. "
+            "Сначала пришлите изображение-референс."
+        )
     else:
         message = "Ок, запускаю обычный режим."
     if requested_format in SHORT_FORMATS:
@@ -1605,6 +1628,31 @@ async def _handle_waiting_generation_mode_state(
         await reply_text_without_keyboard(
             update.message,
             "Жду аудиофайл, голосовое сообщение или видео. Для видео звук будет отделён автоматически.",
+        )
+        return True
+    if mode == GENERATION_MODE_REFERENCE:
+        from ..reference_generation import (
+            STATE_WAITING_REFERENCE_IMAGE,
+            REFERENCE_CHARACTERS_SESSION_KEY,
+            REFERENCE_COMMENT_SESSION_KEY,
+            REFERENCE_SOURCE_IMAGE_SESSION_KEY,
+        )
+
+        session["state"] = STATE_WAITING_REFERENCE_IMAGE
+        session["target_languages"] = ["ru"]
+        session.pop(REFERENCE_SOURCE_IMAGE_SESSION_KEY, None)
+        session.pop(REFERENCE_COMMENT_SESSION_KEY, None)
+        session.pop(REFERENCE_CHARACTERS_SESSION_KEY, None)
+        session.pop("scene_media_auto_approve", None)
+        session.pop("scene_media_approve_mode", None)
+        session.pop("scene_media_ai_human_review", None)
+        session.pop("scene_media_unattended_ai", None)
+        session.pop(SERIES_PENDING_RECIPE_SESSION_KEY, None)
+        session.pop(SERIES_PENDING_PREFER_VERTEX_SESSION_KEY, None)
+        SESSIONS[chat_id] = session
+        await reply_text_without_keyboard(
+            update.message,
+            "Пришлите одно изображение-референс. Комментарий к будущему кадру можно добавить подписью к фото.",
         )
         return True
     if mode == GENERATION_MODE_COPY:

@@ -31,6 +31,14 @@ from ..generation_modes import (
 from ..llm_utils import TEXT_MODEL_PROFILE_SHORT
 from ..llm_utils import GEMINI_MODEL_PROFILE_CREATIVE, GEMINI_MODEL_PROFILE_EDIT
 from ..pipeline_llm_steps import FINAL_SCENE_SUBSCRIBE_CTA
+from ..reference_generation import (
+    REFERENCE_COMMENT_SESSION_KEY,
+    REFERENCE_DESCRIPTION_SESSION_KEY,
+    STATE_WAITING_REFERENCE_DESCRIPTION_APPROVAL,
+    generate_reference_description,
+    generate_reference_video_prompt,
+    is_reference_generation,
+)
 from ..pipeline_history import restore_scene_prompt_fields_from_history
 from ..story_image_postprocess import finish_story_historical_frame
 from ..story_generation import ensure_story_video_camera_safety
@@ -1703,6 +1711,8 @@ def _reset_video_prompt_policy_failure_count(scene: dict) -> None:
 
 def _scene_media_mode_rows_for_tail(session: dict | None = None) -> list[list[str]]:
     """Mode buttons live at the bottom so they are not tapped instead of approval choices."""
+    if is_reference_generation(session or {}):
+        return []
     if isinstance(session, dict) and (
         _is_scene_media_auto_approve_enabled(session) or _is_scene_media_ai_approve_enabled(session)
     ):
@@ -2178,7 +2188,7 @@ async def _regenerate_start_prompt_from_ai_feedback(
     if "start_frame_prompt_ru" in scene:
         scene["start_frame_prompt_ru"] = new_prompt
     _invalidate_scene_video_prompts_after_start_prompt_change(scene, _scene_target_languages(session, scene))
-    scene[START_PROMPT_RAW_MODE_KEY] = False
+    scene[START_PROMPT_RAW_MODE_KEY] = bool(is_reference_generation(session))
     scene["last_ai_image_feedback"] = feedback
     session["scene_media_substep"] = SCENE_MEDIA_SUBSTEP_START
     await _safe_reply_text(
@@ -3636,6 +3646,51 @@ def _mirror_story_visual_track_for_english(session: dict, scenes: list[dict]) ->
 
 async def _finish_scene_media_production(update: Update, session: dict, *, message: str = "Все сцены обработаны. Production завершён.") -> bool:
     session.pop(SCENE_MEDIA_AUTO_APPROVE_SESSION_KEY, None)
+    if is_reference_generation(session):
+        production = session.get("production") or {}
+        scenes = production.get("json_plan") if isinstance(production, dict) else None
+        scene = scenes[0] if isinstance(scenes, list) and scenes and isinstance(scenes[0], dict) else {}
+        try:
+            await reply_text_without_keyboard(
+                update.message,
+                "Veo-видео утверждено. Готовлю короткое описание в одно предложение.",
+            )
+            description = await asyncio.to_thread(
+                generate_reference_description,
+                image_prompt=str(scene.get("start_frame_prompt") or ""),
+                video_prompt=str(scene.get("video_prompt") or ""),
+                comment=str(session.get(REFERENCE_COMMENT_SESSION_KEY) or ""),
+            )
+            if not str(description or "").strip():
+                raise RuntimeError("модель вернула пустое описание")
+        except Exception as exc:
+            logger.exception("reference description generation after video approval failed")
+            session[REFERENCE_DESCRIPTION_SESSION_KEY] = ""
+            session["state"] = STATE_WAITING_REFERENCE_DESCRIPTION_APPROVAL
+            await _reply_text_with_optional_markup(
+                update,
+                f"Видео сохранено, но описание пока не сгенерировалось: {_user_error_message(exc)}. "
+                "Нажмите «ПЕРЕГЕНЕРИРОВАТЬ».",
+                reply_markup=ReplyKeyboardMarkup(
+                    [["ПЕРЕГЕНЕРИРОВАТЬ"], [NAV_BUTTON_START_OVER]],
+                    resize_keyboard=True,
+                    one_time_keyboard=False,
+                ),
+            )
+            return True
+        session[REFERENCE_DESCRIPTION_SESSION_KEY] = str(description).strip()
+        session["reference_description_approved"] = False
+        session["state"] = STATE_WAITING_REFERENCE_DESCRIPTION_APPROVAL
+        await _reply_text_with_optional_markup(
+            update,
+            "Короткое описание на апрув:\n\n" + str(description).strip(),
+            reply_markup=ReplyKeyboardMarkup(
+                [["ОК"], ["ФИДБЕК"], ["ПЕРЕГЕНЕРИРОВАТЬ"], [NAV_BUTTON_START_OVER]],
+                resize_keyboard=True,
+                one_time_keyboard=False,
+            ),
+        )
+        return True
     total_media_cost = estimated_session_total_media_cost(session)
     production = session.get("production") or {}
     scenes = production.get("json_plan") if isinstance(production, dict) else None
@@ -6296,7 +6351,7 @@ async def _scene_media_start_not_ok(
     if "start_frame_prompt_ru" in scene:
         scene["start_frame_prompt_ru"] = new_prompt
     _invalidate_scene_video_prompts_after_start_prompt_change(scene, _scene_target_languages(session, scene))
-    scene[START_PROMPT_RAW_MODE_KEY] = False
+    scene[START_PROMPT_RAW_MODE_KEY] = bool(is_reference_generation(session))
     await _safe_reply_text(update.message, "Готово. Проверь обновлённый стартовый промпт.")
     await _send_next_scene_media_step(update, session)
     return True
@@ -6338,13 +6393,16 @@ async def _scene_media_start_ok(
     )
     user_reference_images = _scene_user_reference_images(scene, "start")
     advertising_reference_images = advertising_product_reference_bytes(session)
-    scene_refs = _dedupe_image_reference_bytes(
-        [
-            *scene_reference_images,
-            *user_reference_images,
-            *advertising_reference_images,
-        ]
-    )
+    if is_reference_generation(session):
+        # The first attachment is intentionally the user's composition/action
+        # reference. Project character sheets follow and lock identities.
+        scene_refs = _dedupe_image_reference_bytes(
+            [*user_reference_images, *scene_reference_images, *advertising_reference_images]
+        )
+    else:
+        scene_refs = _dedupe_image_reference_bytes(
+            [*scene_reference_images, *user_reference_images, *advertising_reference_images]
+        )
     raw_mode = bool(scene.get(START_PROMPT_RAW_MODE_KEY))
     silence_mode = str(session.get("generation_mode") or "").strip().lower() == "silence"
     if raw_mode:
@@ -7023,6 +7081,41 @@ async def _scene_media_start_image_approval_step(
         if selected is not None:
             approved = mark_image_candidate_approved(scene, str(selected.get("candidate_id") or ""))
             _persist_image_state_best_effort(approved)
+        if is_reference_generation(session):
+            frame_bytes = selected_image_bytes_for_video(scene, kind="start")
+            if not frame_bytes:
+                await update.message.reply_text("Не вижу утверждённый кадр для video prompt. Сначала утвердите изображение.")
+                return True
+            try:
+                await reply_text_without_keyboard(
+                    update.message,
+                    "Кадр утверждён. Генерирую video prompt по готовому изображению.",
+                )
+                video_prompt = await _call_with_503_retries(
+                    update,
+                    context,
+                    chat_id,
+                    "generate_reference_video_prompt",
+                    lambda: asyncio.to_thread(
+                        generate_reference_video_prompt,
+                        frame_bytes,
+                        image_prompt=str(scene.get("start_frame_prompt") or ""),
+                        comment=str(session.get(REFERENCE_COMMENT_SESSION_KEY) or ""),
+                        characters=[str(key) for key in scene.get("characters") or []],
+                    ),
+                )
+                if not str(video_prompt or "").strip():
+                    raise RuntimeError("модель вернула пустой video prompt")
+            except ServiceUnavailableRetriesExhaustedError as exc:
+                await update.message.reply_text(str(exc))
+                return True
+            except Exception as exc:
+                logger.exception("reference video prompt generation failed")
+                await update.message.reply_text(f"Ошибка генерации video prompt: {_user_error_message(exc)}")
+                return True
+            scene["video_prompt"] = str(video_prompt).strip()
+            scene["video_prompt_by_lang"] = {"ru": str(video_prompt).strip()}
+            scene["video_prompt_current_language"] = "ru"
         next_substep = (
             SCENE_MEDIA_SUBSTEP_END if _scene_needs_end_frame_step(scene) else SCENE_MEDIA_SUBSTEP_VIDEO
         )
@@ -9349,6 +9442,14 @@ async def _handle_waiting_scene_media_state(
         await update.message.reply_text(
             "Начинаем сначала. Выберите действие на первом шаге.",
             reply_markup=first_step_menu_markup(),
+        )
+        return True
+    if is_reference_generation(session) and (
+        _is_scene_media_ai_approve_command(text) or _is_scene_media_auto_approve_command(text)
+    ):
+        _set_scene_media_manual_approval(session)
+        await update.message.reply_text(
+            "В режиме «По референсу» кадр и видео утверждаются вручную на каждом шаге."
         )
         return True
     if _is_scene_media_stop_command(text):

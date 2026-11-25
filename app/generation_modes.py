@@ -13,6 +13,7 @@ GENERATION_MODE_COPY = "copy"
 GENERATION_MODE_STORY = "story"
 GENERATION_MODE_VISUALIZATION = "visualization"
 GENERATION_MODE_ADVERTISING = "advertising"
+GENERATION_MODE_REFERENCE = "reference"
 
 SYNTAX_PROVIDER_VEO = "veo"
 SYNTAX_PROVIDER_KLING = "kling"
@@ -43,6 +44,8 @@ def normalize_generation_mode(value: Any) -> str:
         return GENERATION_MODE_VISUALIZATION
     if raw in {GENERATION_MODE_ADVERTISING, "реклама", "рекламный", "advert", "advertising", "ad"}:
         return GENERATION_MODE_ADVERTISING
+    if raw in {GENERATION_MODE_REFERENCE, "по референсу", "референс", "by reference"}:
+        return GENERATION_MODE_REFERENCE
     if raw in {GENERATION_MODE_ADVICE, "совет"}:
         return GENERATION_MODE_ADVICE
     return GENERATION_MODE_NORMAL
@@ -84,6 +87,12 @@ def is_advertising_generation(value: Any) -> bool:
     return normalize_generation_mode(value) == GENERATION_MODE_ADVERTISING
 
 
+def is_reference_generation(value: Any) -> bool:
+    if isinstance(value, dict):
+        value = value.get(GENERATION_MODE_SESSION_KEY)
+    return normalize_generation_mode(value) == GENERATION_MODE_REFERENCE
+
+
 def target_languages_for_generation_mode(value: Any, default: list[str]) -> list[str]:
     if (
         is_silence_generation(value)
@@ -91,6 +100,7 @@ def target_languages_for_generation_mode(value: Any, default: list[str]) -> list
         or is_copy_generation(value)
         or is_story_generation(value)
         or is_advertising_generation(value)
+        or is_reference_generation(value)
     ):
         return ["ru"]
     return list(default or ["ru"])
