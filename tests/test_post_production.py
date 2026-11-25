@@ -2055,3 +2055,77 @@ def test_story_narration_timings_ignore_candidate_snapshots_and_visual_speed():
     assert entries[0]["text"] == "Да"
     assert entries[0]["start_sec"] == pytest.approx(4.2)
     assert entries[0]["end_sec"] == pytest.approx(5.0)
+
+
+def test_inner_boss_final_edit_renders_local_music_and_word_timed_accents(tmp_path, monkeypatch):
+    import wave
+
+    from app import inner_boss_mix
+
+    ffmpeg = post_production._resolve_ffmpeg()
+    if not ffmpeg:
+        pytest.skip("ffmpeg is unavailable")
+
+    def make_media(path, *args):
+        subprocess.run([ffmpeg, "-nostdin", "-v", "error", "-f", "lavfi", "-i", *args, str(path)], check=True)
+
+    clip = tmp_path / "silent.mp4"
+    make_media(clip, "color=blue:s=216x384:r=30:d=4", "-c:v", "libx264")
+    scripts = {
+        "ru": ("Лень не определяет, кто ты. Дисциплина помогает продолжать.", 3.5, 0.04),
+        "en": ("Laziness does not define who you are. Discipline helps you keep going.", 4.0, 0.05),
+    }
+    scenes = [{
+        "scene": 1, "duration_sec": 4, "generation_mode": "story",
+        "sound_design": "inner_boss:alarm_click:opening",
+        inner_boss_mix.MODE_KEY: inner_boss_mix.BOSS,
+    }]
+    narration = {}
+    for lang, (_, duration, _) in scripts.items():
+        audio = tmp_path / f"{lang}.wav"
+        make_media(audio, f"sine=frequency=440:duration={duration}")
+        narration[lang] = audio
+        candidate = register_video_candidate(scenes[0], language=lang, video_bytes=clip.read_bytes())
+        candidate.update(approved_for_production=True, speed_coef=1.0)
+
+    post_production.apply_story_word_synced_subtitles(
+        scenes, project_slug="discipline",
+        voiceover_by_lang={lang: story for lang, (story, _, _) in scripts.items()},
+        alignment_by_lang={lang: _character_alignment(story, step=step) for lang, (story, _, step) in scripts.items()},
+        duration_by_lang={lang: duration for lang, (_, duration, _) in scripts.items()},
+    )
+    monkeypatch.setattr(post_production, "_render_dimensions_for_scenes", lambda scenes: (216, 384))
+    monkeypatch.setattr(post_production, "_upscaled_dimensions_for_render", lambda *_: (216, 384))
+    monkeypatch.setattr(post_production, "post_production_artifacts_dir", lambda: tmp_path / "outputs")
+    ass_texts = {}
+    render = post_production._render_subtitled_music_master
+
+    def capture_ass(**kwargs):
+        ass_texts[kwargs["dest_path"].stem] = kwargs["subtitles_path"].read_text()
+        return render(**kwargs)
+
+    monkeypatch.setattr(post_production, "_render_subtitled_music_master", capture_ass)
+    output = post_production.build_post_production(
+        scenes, project_slug="discipline", narration_audio_path_by_lang=narration,
+        target_languages=["ru", "en"], target_variants=["subtitled_music"],
+        include_background_music=False,
+    )
+
+    for lang, (script, duration, step) in scripts.items():
+        final = output["renders_by_language"][lang]["subtitled_music"]
+        assert final["background_music_included"]
+        assert final["source_audio_preserved"]
+        assert post_production._media_duration(final["video_path"]) == pytest.approx(duration, abs=0.06)
+        assert Path(final["music_asset_uri"]).name.startswith(f"inner_boss_{lang}_")
+        with wave.open(final["music_asset_uri"]) as stem:
+            assert stem.getnframes() / stem.getframerate() == pytest.approx(duration, abs=0.06)
+            stem.setpos(round(0.55 * stem.getframerate()))
+            assert max(abs(v) for v in memoryview(stem.readframes(120)).cast("h")) > 3200
+        ass = ass_texts[f"final_subtitled_music_master_{lang}"]
+        assert ass.count("Dialogue: 4,") == 10
+        phrase = {"ru": r"Дисциплина помогает\Nпродолжать", "en": r"Discipline helps you\Nkeep going"}[lang]
+        assert phrase in ass
+        start = next(line for line in ass.splitlines() if line.startswith("Dialogue: 4,") and phrase in line)
+        word = {"ru": "Дисциплина", "en": "Discipline"}[lang]
+        second = script.index(word) * step
+        assert start.startswith(f"Dialogue: 4,0:00:{second:05.2f},")

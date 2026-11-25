@@ -21,6 +21,7 @@ from typing import Any
 from PIL import Image, ImageDraw, ImageFont
 from sqlalchemy import select
 
+from . import inner_boss_mix
 from .discipline_modes import FLOW, MODE_KEY
 from .ai_approval_service import _resolve_ffmpeg
 from .db import SessionLocal
@@ -1893,6 +1894,7 @@ def _write_burned_subtitle_ass(
     *,
     title_cues: list[dict[str, Any]] | None = None,
     title_style: dict[str, Any] | None = None,
+    accent_cues: list[dict[str, Any]] | None = None,
     video_width: int | None = None,
     video_height: int | None = None,
 ) -> None:
@@ -2350,6 +2352,29 @@ def _write_burned_subtitle_ass(
                     margin_v=0,
                     text=text,
                 )
+            )
+
+    for cue in accent_cues or []:
+        start, end = float(cue["start_sec"]), float(cue["end_sec"])
+        accent_lines = str(cue["text"]).splitlines()
+        text = r"\N".join(_escape_ass_text(line) for line in accent_lines)
+        size = round(min(layout.font_size * 1.28, layout.height * 0.062))
+        font_path = _story_subtitle_font_path()
+        if font_path:
+            font = ImageFont.truetype(str(font_path), size=size)
+            line_width = max(font.getlength(line) for line in accent_lines)
+            size = max(1, min(size, round(size * layout.width * 0.80 / max(1.0, line_width))))
+        x, y = layout.width // 2, round(layout.height * 0.28)
+        shift = max(2, round(layout.width * 0.005))
+        for index, (dx, dy) in enumerate(((-1, 0), (1, 1), (-1, -1), (1, 0), (0, 0))):
+            frame_start = start + index * 0.055
+            frame_end = end if index == 4 else min(end, frame_start + 0.055)
+            if frame_end <= frame_start:
+                break
+            at = f"{{\\an8\\pos({x + dx * shift},{y + dy * shift})\\fn{STORY_WORD_SYNC_FONT_NAME}\\fs{size}\\b1\\c&HAAE8FF&}}"
+            lines.append(
+                f"Dialogue: 4,{_ass_timestamp(frame_start)},{_ass_timestamp(frame_end)},"
+                f"{SUBTITLE_STYLE_NAME},,0,0,0,,{at}{text}"
             )
     path.write_text("\n".join(lines).rstrip() + "\n", encoding="utf-8")
 
@@ -3737,6 +3762,31 @@ def production_languages_for_scenes(
     return ready
 
 
+def _prepare_inner_boss_edit(
+    tmp_path: Path,
+    master: Path,
+    scene_timeline: list[tuple[dict[str, Any], float]],
+    subtitle_entries: list[dict[str, Any]],
+    language: str,
+    *,
+    intro_duration: float,
+    artifact_bundle_key: str,
+) -> tuple[str, list[dict[str, Any]]]:
+    duration = _media_duration(master) or (intro_duration + sum(length for _, length in scene_timeline))
+    accent_scenes = inner_boss_mix.accent_scene_numbers([scene for scene, _ in scene_timeline])
+    accents, silence = inner_boss_mix.anchors(subtitle_entries, language, duration, accent_scenes)
+    stem = tmp_path / f"inner_boss_{language}.wav"
+    inner_boss_mix.score(
+        stem, scene_timeline, duration=duration, intro_duration=intro_duration,
+        silence=silence,
+    )
+    fingerprint = hashlib.sha256(stem.read_bytes()).hexdigest()[:16]
+    asset = _persist_render_artifact(
+        stem, bundle_key=artifact_bundle_key, filename=f"inner_boss_{language}_{fingerprint}.wav",
+    )
+    return asset, accents
+
+
 def build_post_production(
     scenes: list[dict[str, Any]],
     *,
@@ -3783,9 +3833,13 @@ def build_post_production(
         except Exception:
             logger.exception("post_production.progress_callback_failed language=%s stage=%s", language, stage)
 
-    music_path, music_volume = (
-        (holiday_music(overlay_title_style) or _resolve_music_path(project_slug)) if include_background_music else (None, 0.0)
+    # Inner Boss has a format-specific soundtrack. Story assembly disables the generic music library.
+    boss_mix = inner_boss_mix.enabled(scenes, project_slug)
+    base_music_path, base_music_volume = (
+        (holiday_music(overlay_title_style) or _resolve_music_path(project_slug))
+        if include_background_music and not boss_mix else (None, 0.0)
     )
+    music_assets_by_language: dict[str, str | None] = {}
     renders_by_language: dict[str, dict[str, Any]] = {}
     subtitle_entries_by_language: dict[str, list[dict[str, Any]]] = {}
     subtitle_fingerprint_by_language: dict[str, str] = {}
@@ -3823,6 +3877,7 @@ def build_post_production(
     upscaled_target_width, upscaled_target_height = _upscaled_dimensions_for_render(target_width, target_height)
 
     for language in languages:
+        music_path, music_volume = base_music_path, base_music_volume
         scene_video_fingerprint = selected_scene_video_fingerprint_for_language(scenes, language)
         selected_segments: list[dict[str, Any]] = []
         for scene_index, scene in enumerate(scenes):
@@ -3891,7 +3946,7 @@ def build_post_production(
         narration_path = narration_paths.get(language)
         narration_volume = (
             DISCIPLINE_ANASTASIA_NARRATION_VOLUME
-            if str(project_slug or "").strip().lower() == "discipline" and language == "ru"
+            if not boss_mix and str(project_slug or "").strip().lower() == "discipline" and language == "ru"
             else 1.0
         )
         narration_duration = float(_media_duration(narration_path) or 0.0) if narration_path is not None else 0.0
@@ -4106,6 +4161,7 @@ def build_post_production(
 
             subtitle_entries: list[dict[str, Any]] = []
             needs_subtitled = bool(requested_variants & {"subtitled_music", "titled_subtitled_music"})
+            accent_options: dict[str, Any] = {}
             if needs_subtitled:
                 current_start = intro_duration
                 for item in selected_segments:
@@ -4133,6 +4189,19 @@ def build_post_production(
                         entry["timing_scale"] = timing_scale
                     subtitle_entries.extend(scene_entries)
                     current_start += actual_duration
+                if boss_mix:
+                    scene_timeline = [
+                        (item["scene"], float(item.get("actual_duration") or item["planned_final_duration"]))
+                        for item in selected_segments
+                    ]
+                    music_path, accents = _prepare_inner_boss_edit(
+                        tmp_path, render_base_path, scene_timeline, subtitle_entries, language,
+                        intro_duration=intro_duration,
+                        artifact_bundle_key=artifact_bundle_key,
+                    )
+                    music_volume = inner_boss_mix.MIX_VOLUME
+                    if accents:
+                        accent_options["accent_cues"] = accents
                 subtitle_entries_by_language[language] = subtitle_entries
                 subtitle_fingerprint_by_language[language] = subtitle_entries_fingerprint(subtitle_entries)
 
@@ -4188,6 +4257,7 @@ def build_post_production(
                     title_style=overlay_title_style,
                     video_width=render_base_w,
                     video_height=render_base_h,
+                    **accent_options,
                 )
 
                 subtitled_path = tmp_path / f"final_subtitled_music_master_{language}.mp4"
@@ -4222,6 +4292,7 @@ def build_post_production(
                         title_style=overlay_title_style,
                         video_width=render_base_w,
                         video_height=render_base_h,
+                        **accent_options,
                     )
                     subtitled_path = tmp_path / f"final_subtitled_music_master_{language}.mp4"
                     emit_progress(
@@ -4251,6 +4322,7 @@ def build_post_production(
                     title_style=overlay_title_style,
                     video_width=render_base_w,
                     video_height=render_base_h,
+                    **(accent_options if (overlay_title_style or {}).get("replace_subtitle_phrases") else {}),
                 )
                 titled_subtitled_path = tmp_path / f"final_titled_subtitled_music_master_{language}.mp4"
                 emit_progress(language, "title_building", "Burning title overlay")
@@ -4264,6 +4336,7 @@ def build_post_production(
                 )
                 emit_progress(language, "title_ready", "Title overlay master ready")
 
+            music_assets_by_language[language] = music_path
             renders_by_language[language] = {}
             emit_progress(language, "persisting", "Saving final artifacts")
             if "clean" in requested_variants:
@@ -4367,6 +4440,7 @@ def build_post_production(
         raise RuntimeError("No final renders were produced for any language.")
 
     first_lang = next(iter(renders_by_language))
+    music_path = music_assets_by_language[first_lang]
     speech_budget_by_language: dict[str, list[dict[str, Any]]] = {}
     for language in renders_by_language:
         speech_budget_by_language[language] = []
@@ -4487,6 +4561,7 @@ def _subtitle_entries_for_language_from_plan(
     language: str,
     *,
     use_candidate_subtitle_snapshot: bool = True,
+    scene_intervals: list[tuple[float, float]] | None = None,
 ) -> list[dict[str, Any]]:
     current_start = 0.0
     subtitle_entries: list[dict[str, Any]] = []
@@ -4500,6 +4575,9 @@ def _subtitle_entries_for_language_from_plan(
             except (TypeError, ValueError):
                 source_duration = 0.0
         planned_duration = source_duration / float(speed_coef or DEFAULT_SCENE_VIDEO_SPEED_COEF) if source_duration > 0 else 0.0
+        if scene_intervals:
+            current_start, scene_end = scene_intervals[scene_index]
+            planned_duration = scene_end - current_start
         scene_entries = _scene_subtitle_entries(
             _scene_with_candidate_subtitle_snapshot(
                 scene,
@@ -4561,6 +4639,12 @@ def subtitle_fingerprint_for_language(
     )
 
 
+def _inner_boss_reused_timeline(
+    scenes: list[dict[str, Any]], scene_intervals: list[tuple[float, float]] | None,
+) -> list[tuple[dict[str, Any], float]]:
+    return [(scene, end - start) for scene, (start, end) in zip(scenes, scene_intervals or [])]
+
+
 def build_subtitled_post_production_from_upscaled_master(
     scenes: list[dict[str, Any]],
     *,
@@ -4597,13 +4681,20 @@ def build_subtitled_post_production_from_upscaled_master(
             logger.exception("post_production.progress_callback_failed language=%s stage=%s", lang, stage)
 
     source_w, source_h = _video_dimensions(source_path)
+    boss_mix = inner_boss_mix.enabled(scenes, project_slug)
     music_path, music_volume = (
-        (holiday_music(overlay_title_style) or _resolve_music_path(project_slug)) if include_background_music else (None, 0.0)
+        (holiday_music(overlay_title_style) or _resolve_music_path(project_slug))
+        if include_background_music and not boss_mix else (None, 0.0)
+    )
+    scene_intervals = (
+        _story_scene_intervals(scenes, language=lang, narration_duration_sec=_media_duration(source_path) or 0.0)
+        if boss_mix else None
     )
     subtitle_entries = _subtitle_entries_for_language_from_plan(
         scenes,
         lang,
         use_candidate_subtitle_snapshot=use_candidate_subtitle_snapshot,
+        scene_intervals=scene_intervals,
     )
     scene_video_fingerprint = selected_scene_video_fingerprint_for_language(scenes, lang)
     subtitle_fingerprint = subtitle_entries_fingerprint(subtitle_entries)
@@ -4615,6 +4706,15 @@ def build_subtitled_post_production_from_upscaled_master(
     with tempfile.TemporaryDirectory(prefix=f"post_production_subtitles_{lang}_") as tmp:
         tmp_path = Path(tmp)
         emit_progress("reuse_upscaled", "Using existing 4K master")
+        accent_options: dict[str, Any] = {}
+        if boss_mix:
+            music_path, accents = _prepare_inner_boss_edit(
+                tmp_path, source_path, _inner_boss_reused_timeline(scenes, scene_intervals),
+                subtitle_entries, lang, intro_duration=0.0, artifact_bundle_key=artifact_bundle_key,
+            )
+            music_volume = inner_boss_mix.MIX_VOLUME
+            if accents:
+                accent_options["accent_cues"] = accents
         ass_path = tmp_path / f"subtitles_{lang}.ass"
         _write_burned_subtitle_ass(
             ass_path,
@@ -4622,6 +4722,7 @@ def build_subtitled_post_production_from_upscaled_master(
             title_style=overlay_title_style,
             video_width=source_w,
             video_height=source_h,
+            **accent_options,
         )
         subtitled_path = tmp_path / f"final_subtitled_music_master_{lang}.mp4"
         emit_progress(
@@ -4767,15 +4868,34 @@ def build_titled_post_production_from_subtitled_master(
     artifact_bundle_key = _make_artifact_bundle_key(scenes, project_slug=project_slug)
     caption_cues = []
     entries = []
+    rebuild_boss_mix = not source_has_subtitles and inner_boss_mix.enabled(scenes, project_slug)
+    scene_intervals = (
+        _story_scene_intervals(scenes, language=lang, narration_duration_sec=source_duration)
+        if rebuild_boss_mix else None
+    )
     if not source_has_subtitles:
         entries = _subtitle_entries_for_language_from_plan(
-            scenes, lang, use_candidate_subtitle_snapshot=use_candidate_subtitle_snapshot)
+            scenes, lang, use_candidate_subtitle_snapshot=use_candidate_subtitle_snapshot,
+            scene_intervals=scene_intervals,
+        )
+        if rebuild_boss_mix:
+            subtitle_fingerprint = subtitle_entries_fingerprint(entries)
         for entry in entries:
             caption_cues.extend(_build_burned_subtitle_cues(entry, video_width=source_w, video_height=source_h))
         caption_cues = _without_large_title_words(caption_cues, title_cues, overlay_title_style or {}, lang)
     with tempfile.TemporaryDirectory(prefix=f"post_production_title_{lang}_") as tmp:
         tmp_path = Path(tmp)
         emit_progress("reuse_subtitled", "Using existing subtitled/music master")
+        music_path, music_volume = None, 0.0
+        accent_options: dict[str, Any] = {}
+        if rebuild_boss_mix:
+            music_path, accents = _prepare_inner_boss_edit(
+                tmp_path, source_path, _inner_boss_reused_timeline(scenes, scene_intervals),
+                entries, lang, intro_duration=0.0, artifact_bundle_key=artifact_bundle_key,
+            )
+            music_volume = inner_boss_mix.MIX_VOLUME
+            if accents:
+                accent_options["accent_cues"] = accents
         titled_ass_path = tmp_path / f"title_overlay_{lang}.ass"
         _write_burned_subtitle_ass(
             titled_ass_path,
@@ -4784,6 +4904,7 @@ def build_titled_post_production_from_subtitled_master(
             title_style=overlay_title_style,
             video_width=source_w,
             video_height=source_h,
+            **accent_options,
         )
         titled_path = tmp_path / f"final_titled_subtitled_music_master_{lang}.mp4"
         emit_progress("title_building", "Burning title overlay")
@@ -4791,8 +4912,8 @@ def build_titled_post_production_from_subtitled_master(
             ffmpeg=ffmpeg,
             clean_path=source_path,
             subtitles_path=titled_ass_path,
-            music_path=None,
-            music_volume=0.0,
+            music_path=music_path,
+            music_volume=music_volume,
             dest_path=titled_path,
         )
         emit_progress("title_ready", "Title overlay master ready")
@@ -4812,8 +4933,8 @@ def build_titled_post_production_from_subtitled_master(
             "video_path": titled_artifact_path,
             "width": titled_w,
             "height": titled_h,
-            "music_asset_uri": None,
-            "music_volume": 0.0,
+            "music_asset_uri": music_path,
+            "music_volume": music_volume,
             "source_audio_preserved": bool(source_audio_preserved),
             "source_variant": "subtitled_music" if source_has_subtitles else "upscaled_4k",
             "source_video_path": str(source_path),
@@ -4855,7 +4976,7 @@ def build_titled_post_production_from_subtitled_master(
         "title_overlay_style": dict(overlay_title_style or {}),
         "speech_budget_by_language": {},
         "original_audio_preserved_by_language": {lang: bool(source_audio_preserved)},
-        "music_asset_uri": None,
+        "music_asset_uri": music_path,
         "languages": [lang],
         "artifact_bundle_key": artifact_bundle_key,
     }

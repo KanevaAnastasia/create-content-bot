@@ -15,8 +15,9 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from . import inner_boss_mix
 from .discipline_modes import (
-    ARCHIVE, BOSS, TWO_LIVES, FLOW, LABELS, MODE_KEY, REFRAME, SHORT_FORMATS, opening_sentence, script_direction, visual_direction,
+    ARCHIVE, BOSS, TWO_LIVES, FLOW, LABELS, MODE_KEY, REFRAME, SHORT_FORMATS, boss_opening_has_alarm, opening_sentence, script_direction, visual_direction,
 )
 from .llm_utils import GEMINI_MODEL_PROFILE_CREATIVE, extract_json_object, gemini_generate_sync
 from .story_visual_text import STORY_VISUAL_TEXT_RULES
@@ -1794,6 +1795,18 @@ def generate_story_scene_plan(
             "Время в панелях может расходиться. Смену дней, сезонов и лет показывай только согласно "
             "ремаркам, сохраняя стороны панелей и модели героев. "
         )
+    sound_instruction = ""
+    if narrative_format == BOSS:
+        sound_instruction = (
+            "Для каждого clip_visual укажи sound_cue: "
+            + ", ".join(inner_boss_mix.SOUND_TYPES)
+            + ". Выбери звук видимого действия или среды, иначе quiet. "
+            "alarm_click используй только когда видно нажатие на кнопку будильника. "
+            "Подготовь нажатие в начале кадра. Не добавляй действие только ради звука. "
+            "Поставь accent=true максимум в двух clip_visual на весь ролик, если в этом клипе начинается "
+            "короткая законченная ключевая реплика, заслуживающая отдельного экранного акцента. "
+            "Для остальных поставь accent=false. Надписи добавит монтаж. "
+        )
     prompt = (
         "Ты режиссёр короткой немой визуальной истории под уже утверждённую закадровую дорожку. "
         "Верни только JSON-объект с ключами characters, props, scenario_environment, historical_environment и beats. "
@@ -1819,7 +1832,7 @@ def generate_story_scene_plan(
         "location_transition (true/false), transition_note.\n"
         "Все clip_visuals одного beat подтверждают ПОЛНЫЙ смысл narration_excerpt, а не отдельные обрывки слов. "
         "Первый clip_visual сразу устанавливает весь смысловой тезис; следующие развивают его визуально. "
-        f"{camera_instruction}"
+        f"{camera_instruction}{sound_instruction}"
         "Выбери основную начальную физическую локацию современного слоя и верни её в scenario_environment с полями location, "
         "lighting и color_palette. Сохраняй архитектуру, ключевой реквизит, основу света и палитру. "
         f"{location_instruction}"
@@ -2024,7 +2037,13 @@ def generate_story_scene_plan(
                 },
                 "continuity_anchors": _normalize_story_continuity_anchors(candidate.get("continuity_anchors")),
                 "transition_note": str(candidate.get("transition_note") or "").strip(),
-                "sound_design": "Нет: Kling-клип генерируется полностью без звука.",
+                "sound_design": (
+                    inner_boss_mix.scene_sound(candidate)
+                    + (":opening" if not normalized and boss_opening_has_alarm(source_story) else "")
+                    + (":accent" if candidate.get("accent") is True else "")
+                    if narrative_format == BOSS
+                    else "Нет: Kling-клип генерируется полностью без звука."
+                ),
                 "silence_base_rules": (
                     f"{float(window.get('generation_duration_sec') or STORY_CLIP_DURATION_SEC):g}-second silent Kling clip; "
                     "the external approved ElevenLabs narration is added only in final assembly."
@@ -2421,6 +2440,8 @@ def generate_story_production(
             start_prompt = f"{start_prompt} {short_format.frame}"
             from .discipline_craft import MOTION_RULES
             video_prompt = f"{video_prompt} {short_format.motion} {MOTION_RULES}"
+            if scene.get(MODE_KEY) == BOSS and inner_boss_mix.cue_name(scene) == "alarm_click":
+                video_prompt += " Show the hero pressing the alarm button about 0.55 seconds after the clip begins. Generate silently."
         from .discipline_craft import shot_direction_text
         shot_direction = shot_direction_text(scene)
         if shot_direction:
