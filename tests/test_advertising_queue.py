@@ -384,7 +384,8 @@ def test_post_queue_prepares_and_delivers_post_copy_without_clip_speech(db, monk
     assert "Готовый рекламный пост" in bot.send_message.call_args_list[1].kwargs["text"]
 
 
-def test_excel_optional_type_column():
+@pytest.mark.parametrize("label,value", [("Пост", "post"), ("Клип — совет", "clip_advice")])
+def test_excel_optional_type_column(label, value):
     source = zipfile.ZipFile(io.BytesIO(workbook_bytes()))
     result = io.BytesIO()
     with zipfile.ZipFile(result, "w") as target:
@@ -393,10 +394,10 @@ def test_excel_optional_type_column():
             if name == "xl/worksheets/sheet1.xml":
                 data = data.decode().replace('</row>', '<c r="D1" t="inlineStr"><is><t>Тип</t></is></c></row>', 1)
                 pos = data.index('</row>', data.index('<row r="2">'))
-                data = data[:pos] + '<c r="D2" t="inlineStr"><is><t>Пост</t></is></c>' + data[pos:]
+                data = data[:pos] + f'<c r="D2" t="inlineStr"><is><t>{label}</t></is></c>' + data[pos:]
                 data = data.encode()
             target.writestr(name, data)
-    assert files.read_product_workbook(result.getvalue())[0]["format"] == "post"
+    assert files.read_product_workbook(result.getvalue())[0]["format"] == value
 
 
 def test_scene_plan_keeps_full_draft_over_130_characters(monkeypatch):
@@ -476,3 +477,31 @@ def test_reoffer_revised_concepts_without_stale_prepared_scripts(db, format):
     assert "Отличный подарок" in bot.send_message.call_args_list[1].kwargs["text"]
     with db() as session:
         assert session.get(AdvertisingProduct, product).status == "offered"
+
+
+@pytest.mark.parametrize("product_format,style", [("clip_advice", "advice"), ("clip", "story")])
+def test_queue_clip_style_reaches_generation_and_delivery(db, monkeypatch, tmp_path, product_format, style):
+    from app import advertising_generation as generation
+    from app.state import SESSIONS
+    payload = prepared()
+    for campaign in payload["campaigns"]:
+        campaign.pop("prepared_scene_plan")
+    product = add_product(db, status="preparing", format=product_format, prepared=payload)
+    photo = tmp_path / "photo.jpg"
+    photo.write_bytes(b"photo")
+    monkeypatch.setattr(queue, "photo_path", lambda _: photo)
+    calls = []
+    def scenes(**kwargs):
+        assert kwargs["product_brief"]["video_style"] == style
+        calls.append(kwargs)
+        return {"text_plan": "Готовый сценарий"}
+    monkeypatch.setattr(generation, "generate_advertising_scene_plan", scenes)
+    queue.prepare_product(product)
+    queue.prepare_product(product)
+    assert len(calls) == 5
+    bot = SimpleNamespace(send_message=AsyncMock())
+    asyncio.run(queue.deliver_ready_product(bot, 123))
+    assert SESSIONS[123]["advertising_format"] == "clip"
+    assert SESSIONS[123]["advertising_product_brief"]["video_style"] == style
+    if style == "advice":
+        assert "Клип — совет" in bot.send_message.call_args_list[0].kwargs["text"]

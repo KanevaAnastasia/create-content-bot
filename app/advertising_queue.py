@@ -114,6 +114,7 @@ def prepare_product(product_id):
         payload.update(brief=brief, source=source)
         _save_prepared(product_id, payload)
     # Apply current speech rules to resumed preparations too.
+    payload["brief"]["video_style"] = "advice" if product_format == "clip_advice" else "story"
     payload["brief"]["owner_comment"] = comment
     payload["brief"]["speech_min_chars"] = 101
     payload["brief"].pop("speech_max_chars", None)
@@ -231,7 +232,7 @@ async def deliver_ready_product(bot, chat_id):
                 "state": STATE_WAITING_ADVERTISING_CAMPAIGN_CHOICE,
                 "selected_project_key": "grandma_kitchen", "generation_mode": "advertising",
                 "target_languages": ["ru"], "sponsored_content": True,
-                "advertising_format": product_format,
+                "advertising_format": "post" if product_format == "post" else "clip",
                 "advertising_source_text": payload["source"], "user_input": payload["source"],
                 "advertising_product_brief": payload["brief"], "advertising_product_path": images[0],
                 PHOTOS_KEY: images, PRODUCT_KEY: product_id,
@@ -240,7 +241,7 @@ async def deliver_ready_product(bot, chat_id):
             save_session(chat_id, session)  # Fail before sending if persistence is unavailable.
             SESSIONS[chat_id] = session
         messages = [f"Реклама по очереди: {title}\nВсе {len(images)} фото товара уже добавлены в рекламный режим. "
-                    f"Тип: {'Пост' if product_format == 'post' else 'Клип'}. Подготовила пять вариантов; выберите подходящий."]
+                    f"Тип: {'Пост' if product_format == 'post' else ('Клип — совет' if product_format == 'clip_advice' else 'Клип')}. Подготовила пять вариантов; выберите подходящий."]
         description = str((payload.get("sales_analysis") or {}).get("selling_description") or "")
         if description:
             messages[0] += "\n\nОписание товара:\n" + description

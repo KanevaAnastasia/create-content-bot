@@ -46,7 +46,7 @@ class AdvertisingQueueSchedule(models.Model):
 
 
 class AdvertisingProduct(models.Model):
-    format = models.CharField("Тип", max_length=16, choices=[("clip", "Клип"), ("post", "Пост")], default="clip")
+    format = models.CharField("Тип", max_length=16, choices=[("clip", "Клип"), ("clip_advice", "Клип — совет"), ("post", "Пост")], default="clip")
     id = models.UUIDField(primary_key=True, default=uuid.uuid4)
     title = models.TextField("Название")
     images = LenientJSONField(default=list, blank=True)
