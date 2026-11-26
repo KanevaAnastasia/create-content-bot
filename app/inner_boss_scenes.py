@@ -174,16 +174,13 @@ def frame_actions(scene: dict) -> tuple[str, str]:
 
 def clock_overlays(scene: dict, duration: float, *, speech_end: float = 0.0) -> list[dict]:
     times = [match[0] for match in CLOCK.finditer(scene["visual"])]
-    if not times:
-        return []
     position = scene.get("clock_position")
-    style = (
-        {"anchor_x_ratio": float(position[0]), "anchor_ratio": float(position[1]), "clock_display": True}
-        if isinstance(position, (list, tuple)) and len(position) == 2 else {"anchor_ratio": 0.15}
-    )
+    if not times or not isinstance(position, (list, tuple)) or len(position) != 2:
+        return []
+    style = {"anchor_x_ratio": float(position[0]), "anchor_ratio": float(position[1]), "clock_display": True}
     change = max(1.7, duration - 1.15, speech_end + 0.18 if speech_end else 0.0)
     has_change = times[-1] != times[0]
-    first_end = (change if has_change else duration) if style.get("clock_display") else min(1.7, duration)
+    first_end = change if has_change else duration
     cues = [{"text": times[0], "start_sec": 0.0, "end_sec": first_end, "shake": False, **style}]
     if has_change:
         cues.append({"text": times[-1], "start_sec": change, "end_sec": duration, "shake": False, **style})
@@ -263,12 +260,16 @@ def render_scene(scene: dict, path: Path, *, language: str, duration: int) -> No
     lead = speech_lead(scene)
     speech_end = lead + audio["duration"] if audio else 0.0
     speech_cue = scene.get("speech_not_before_sec")
+    exact_start = scene.get("speech_start_sec")
     hold = 0.0
-    if audio and speech_cue is not None:
-        # End both dubs at the same action. The shorter language enters later.
-        speech_end = float(speech_cue) + max(a["duration"] for a in scene["audio"].values())
-        lead = speech_end - audio["duration"]
-        duration_with_tail = max(duration, round(speech_end + 0.65, 3))
+    if audio and (exact_start is not None or speech_cue is not None):
+        longest_end = float(exact_start if exact_start is not None else speech_cue) + max(
+            a["duration"] for a in scene["audio"].values()
+        )
+        # Older montage notes aligned the ends. A user-entered time pins the start.
+        lead = float(exact_start) if exact_start is not None else longest_end - audio["duration"]
+        speech_end = lead + audio["duration"]
+        duration_with_tail = max(duration, round(longest_end + 0.65, 3))
         hold = duration_with_tail - duration
         duration = duration_with_tail
     if speech_end > duration:
@@ -286,7 +287,7 @@ def render_scene(scene: dict, path: Path, *, language: str, duration: int) -> No
          "end_sec": 0.65 + (i + 1) * duration_per_title, "shake": i == len(titles) - 1}
         for i, title in enumerate(titles)
     ]
-    accents.extend(clock_overlays(scene, duration, speech_end=speech_end if speech_cue is not None else 0.0))
+    accents.extend(clock_overlays(scene, duration, speech_end=speech_end if speech_cue is not None or exact_start is not None else 0.0))
     width, height = _video_dimensions(raw)
     _write_burned_subtitle_ass(ass, captions, accent_cues=accents, video_width=width, video_height=height)
     ffmpeg = _resolve_ffmpeg()

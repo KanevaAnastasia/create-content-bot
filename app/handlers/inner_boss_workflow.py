@@ -23,6 +23,8 @@ KEY = "inner_boss_scene_workflow"
 LOGGER = logging.getLogger(__name__)
 FRAME_POLICY = 3
 IMAGE_STAGES = {"image", "boss_image"}
+SPEECH_TIMING_BUTTON = "Сдвинуть озвучку"
+SPEECH_TIMING_HINT = "Укажи, когда должна начаться речь от начала сцены. Например: 4,4 или 00:04.4."
 NO_TEXT = (
     "All artwork surfaces must be completely unmarked. No letters, numbers, digits, speech bubbles, "
     "captions, pictograms or watermarks. Clock screens and papers are solid blank shapes. "
@@ -56,6 +58,10 @@ def keyboard(session):
             rows.extend([["ИЗМЕНИТЬ"], ["ФИДБЕК"], ["ПЕРЕГЕНЕРИРОВАТЬ"]])
         elif stage in {"audio", "video", "edit"}:
             rows.append(["Перегенерировать"])
+            if stage == "edit" and data["scenes"][data["index"]].get("audio"):
+                rows.append([SPEECH_TIMING_BUTTON])
+                if data.get("speech_timing_input_scene") == data["index"]:
+                    rows.append(["Отмена"])
     return ReplyKeyboardMarkup(rows, resize_keyboard=True)
 
 
@@ -454,6 +460,53 @@ async def _edit(data, scene):
     scene["previews"] = previews
 
 
+def _speech_timestamp(text):
+    parts = text.strip().replace(",", ".").split(":")
+    if (len(parts) > 3 or not all(re.fullmatch(r"[0-9]{1,3}", part) for part in parts[:-1])
+            or not re.fullmatch(r"[0-9]{1,3}(?:\.[0-9]{1,3})?", parts[-1])):
+        raise ValueError(SPEECH_TIMING_HINT)
+    numbers = [float(part) for part in parts]
+    if any(number >= 60 for number in numbers[1:]):
+        raise ValueError(SPEECH_TIMING_HINT)
+    return sum(number * 60 ** index for index, number in enumerate(reversed(numbers)))
+
+
+async def _handle_speech_timing(update, session, text):
+    data = session[KEY]
+    if data["stage"] != "edit":
+        return False
+    low = text.strip().casefold()
+    command = re.fullmatch(r"(?:сдвинуть\s+)?озвучк[ау](?:\s*:\s*|\s+)(.+)", low)
+    awaiting = data.get("speech_timing_input_scene") == data["index"]
+    if not (low == SPEECH_TIMING_BUTTON.casefold() or command or awaiting):
+        return False
+    scene = data["scenes"][data["index"]]
+    if not scene.get("audio"):
+        raise ValueError("В этой сцене нет озвучки.")
+    if low == SPEECH_TIMING_BUTTON.casefold():
+        data["speech_timing_input_scene"] = data["index"]
+        _save(update, session)
+        await update.message.reply_text(SPEECH_TIMING_HINT, reply_markup=keyboard(session))
+        return True
+    if awaiting and low == "отмена":
+        data.pop("speech_timing_input_scene", None)
+    else:
+        start = _speech_timestamp(command[1] if command else low)
+        clip_duration = scene.get("video_duration") or _duration(scene)
+        if start >= clip_duration:
+            raise ValueError(f"Выбери время внутри исходного клипа, до {clip_duration:g} с.")
+        revised = dict(scene, speech_start_sec=start)
+        await update.message.reply_text("Пересвожу озвучку и субтитры этой сцены.")
+        await _edit(data, revised)
+        revised.pop("approved", None)
+        data["scenes"][data["index"]] = revised
+        data.pop("masters", None)
+        data.pop("speech_timing_input_scene", None)
+    _save(update, session)
+    await _show(update, session)
+    return True
+
+
 def _replace_scene(data, body):
     index = data["index"]
     previous = data["scenes"][index]
@@ -476,8 +529,9 @@ def _replace_scene(data, body):
                 and previous.get("video")):
             replacement["video"] = previous["video"]
             replacement["video_duration"] = previous.get("video_duration", _duration(previous))
-            if "speech_not_before_sec" in previous:
-                replacement["speech_not_before_sec"] = previous["speech_not_before_sec"]
+            for key in ("speech_not_before_sec", "speech_start_sec"):
+                if key in previous:
+                    replacement[key] = previous[key]
     data["scenes"][index] = replacement
     data.pop("masters", None)
     data["stage"] = "scene"
@@ -532,6 +586,11 @@ async def _show(update, session):
             with Path(preview).open("rb") as file:
                 await update.message.reply_video(video=file, caption=f"{scene['title']} · монтаж {lang.upper()}")
         note = "«ОК» закрепит монтаж и откроет следующую сцену. Для правки пришли новый текст сцены."
+        if scene.get("audio"):
+            note += "\n«Сдвинуть озвучку» задаёт время начала речи в этой сцене."
+            if scene.get("speech_start_sec") is not None:
+                start = f"{scene['speech_start_sec']:g}".replace(".", ",")
+                note += f" Сейчас речь начинается на {start} с."
     await update.message.reply_text(note, reply_markup=keyboard(session))
 
 
@@ -541,6 +600,8 @@ async def handle_text(update, session, text):
     low = text.strip().casefold()
     scene = data["scenes"][data["index"]]
     try:
+        if await _handle_speech_timing(update, session, text):
+            return
         if await _handle_frame_feedback(update, session, text):
             return
         if low == "сценарий":

@@ -110,11 +110,11 @@ def test_appearance_anchors_exclude_dialogue_and_clock_digits():
     assert "Босс" not in opening and "появляется Босс" in appearance
     assert "минуточек" not in opening + appearance
     assert "06:00" not in opening + appearance and "09:00" not in opening + appearance
-    cues = clock_overlays(scene, 8)
-    assert [cue["text"] for cue in cues] == ["06:00", "09:00"]
-    assert [cue["start_sec"] for cue in cues] == [0, 6.85]
+    assert clock_overlays(scene, 8) == []
     scene["clock_position"] = [0.091, 0.772]
     on_clock = clock_overlays(scene, 8)
+    assert [cue["text"] for cue in on_clock] == ["06:00", "09:00"]
+    assert [cue["start_sec"] for cue in on_clock] == [0, 6.85]
     assert on_clock[0]["end_sec"] == on_clock[1]["start_sec"]
     assert all(cue["clock_display"] and cue["anchor_x_ratio"] == 0.091 for cue in on_clock)
 
@@ -237,6 +237,31 @@ def test_frame_prompt_feedback_regenerates_without_editing_the_script(monkeypatc
     assert revised["body"] == original["body"] and revised["audio"] == original["audio"]
     assert revised["image"] == "new.png"
     workflow._revise_frame.assert_not_awaited()
+
+
+def test_speech_timing_can_be_changed_repeatedly_without_generating_media(monkeypatch):
+    session = {}
+    workflow.initialize(session, PILOT_SCRIPT)
+    data = session[workflow.KEY]
+    data["stage"] = "edit"
+    scene = data["scenes"][0]
+    scene.update(video="raw.mp4", video_duration=8, audio={"ru": {"path": "voice.mp3"}})
+    update = SimpleNamespace(message=SimpleNamespace(reply_text=AsyncMock()))
+    monkeypatch.setattr(workflow, "_save", lambda *_: None)
+    monkeypatch.setattr(workflow, "_show", AsyncMock())
+    monkeypatch.setattr(workflow, "_edit", AsyncMock())
+    monkeypatch.setattr(workflow, "_video", AsyncMock())
+    monkeypatch.setattr(workflow, "_audio", AsyncMock())
+    asyncio.run(workflow.handle_text(update, session, "Сдвинуть озвучку"))
+    asyncio.run(workflow.handle_text(update, session, "ОК"))
+    workflow._edit.assert_not_awaited()
+    asyncio.run(workflow.handle_text(update, session, "00:04,4"))
+    asyncio.run(workflow.handle_text(update, session, "Озвучка:3.2"))
+    assert [call.args[1]["speech_start_sec"] for call in workflow._edit.await_args_list] == [4.4, 3.2]
+    assert data["stage"] == "edit"
+    assert data["scenes"][0]["video"] == "raw.mp4" and data["scenes"][0]["audio"] == scene["audio"]
+    workflow._video.assert_not_awaited()
+    workflow._audio.assert_not_awaited()
 
 
 def test_boss_passes_both_images_only_for_the_appearance_scene(tmp_path, monkeypatch):
