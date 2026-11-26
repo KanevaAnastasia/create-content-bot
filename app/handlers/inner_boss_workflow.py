@@ -26,6 +26,8 @@ IMAGE_STAGES = {"image", "boss_image"}
 SPEECH_TIMING_BUTTON = "Сдвинуть озвучку"
 SPEECH_TIMING_HINT = "Укажи, когда должна начаться речь от начала сцены. Например: 4,4 или 00:04.4."
 VIDEO_PROMPT_BUTTON = "Видеопромпт"
+SCENE_EDIT_BUTTON = "Править сцену"
+SCENE_EDIT_STAGES = IMAGE_STAGES | {"scene", "translation", "audio", "video_prompt", "video", "edit"}
 SAVED_MUSIC_BUTTON = "Собрать с музыкой"
 NO_TEXT = (
     "All artwork surfaces must be completely unmarked. No letters, numbers, digits, speech bubbles, "
@@ -50,6 +52,8 @@ def initialize(session: dict, script: str) -> None:
 def keyboard(session):
     data = session[KEY]
     stage = data["stage"]
+    if stage in SCENE_EDIT_STAGES and data.get("scene_edit_index") == data["index"]:
+        return ReplyKeyboardMarkup([["Отмена"]], resize_keyboard=True)
     if stage == "music":
         rows = [["Без музыки"], ["Показать сцену"]]
         if data.get("music_plan"):
@@ -58,6 +62,8 @@ def keyboard(session):
         rows = [["Прислать ролик", "Добавить музыку"], ["Показать сцену"]]
     else:
         rows = [["ОК"], ["Показать сцену", "Сценарий"]]
+        if stage in SCENE_EDIT_STAGES:
+            rows.append([SCENE_EDIT_BUTTON])
         if stage in IMAGE_STAGES:
             rows.extend([["ИЗМЕНИТЬ"], ["ФИДБЕК"], ["ПЕРЕГЕНЕРИРОВАТЬ"]])
         elif stage == "video_prompt":
@@ -621,6 +627,28 @@ async def _handle_title_position(update, session, text):
     return True
 
 
+async def _handle_scene_edit(update, session, text):
+    data = session[KEY]
+    stage, index = data["stage"], data["index"]
+    if stage not in SCENE_EDIT_STAGES:
+        return False
+    command = text.strip().casefold()
+    if command == SCENE_EDIT_BUTTON.casefold():
+        data["scene_edit_index"] = index
+    elif data.get("scene_edit_index") != index:
+        return False
+    elif command == "отмена":
+        data.pop("scene_edit_index", None)
+    elif command not in {"ок", "ok", "показать сцену", "сценарий", "перегенерировать"}:
+        scene = data["scenes"][index]
+        revised = await asyncio.to_thread(revise_scene, scene, text)
+        _replace_scene(data, revised)
+        data.pop("scene_edit_index", None)
+    _save(update, session)
+    await _show(update, session)
+    return True
+
+
 async def _handle_video_prompt_review(update, session, text):
     from .handlers_media_scene import _extract_format_or_feedback, _extract_prompt_override
 
@@ -713,6 +741,13 @@ async def _show(update, session):
         await _send_masters(update, session)
         return
     scene = data["scenes"][data["index"]]
+    if data.get("scene_edit_index") == data["index"]:
+        await update.message.reply_text(f"{scene['title']}\n\n{scene['body']}")
+        await update.message.reply_text(
+            "Пришли новый сценарий этой сцены или напиши, что изменить. «Отмена» вернёт к прежнему шагу.",
+            reply_markup=keyboard(session),
+        )
+        return
     if stage == "scene":
         await update.message.reply_text(f"{scene['title']}\n\n{scene['body']}")
         note = ("«ОК» продолжит сцену. Для правки пришли её новый текст. "
@@ -772,6 +807,8 @@ async def handle_text(update, session, text):
     low = text.strip().casefold()
     scene = data["scenes"][data["index"]]
     try:
+        if await _handle_scene_edit(update, session, text):
+            return
         if stage == "end_image":
             data["stage"] = "image"
             _save(update, session)

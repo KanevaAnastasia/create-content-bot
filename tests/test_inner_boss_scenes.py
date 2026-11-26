@@ -110,6 +110,33 @@ def test_scene_workflow_advances_only_after_preview_approval(monkeypatch):
     assert workflow._image.await_count == workflow._video.await_count == workflow._edit.await_count == 1
 
 
+def test_scene_edit_button_works_from_translation_without_approving_audio(monkeypatch):
+    session = {}
+    workflow.initialize(session, PILOT_SCRIPT)
+    data = session[workflow.KEY]
+    data.update(index=7, stage="translation")
+    scene = data["scenes"][7]
+    scene["en_turns"] = ["Hear that? Rain again.", "I hear it."]
+    update = SimpleNamespace(message=SimpleNamespace(reply_text=AsyncMock()))
+    monkeypatch.setattr(workflow, "_save", lambda *_: None)
+    audio = AsyncMock()
+    monkeypatch.setattr(workflow, "_audio", audio)
+    assert any(row[0].text == workflow.SCENE_EDIT_BUTTON for row in workflow.keyboard(session).keyboard)
+
+    asyncio.run(workflow.handle_text(update, session, workflow.SCENE_EDIT_BUTTON))
+    asyncio.run(workflow.handle_text(update, session, "ОК"))
+    assert data["stage"] == "translation" and data["scenes"][7] is scene
+    asyncio.run(workflow.handle_text(update, session, "Отмена"))
+    assert "scene_edit_index" not in data and data["stage"] == "translation"
+
+    asyncio.run(workflow.handle_text(update, session, workflow.SCENE_EDIT_BUTTON))
+    asyncio.run(workflow.handle_text(update, session, "Сцена 8. День 48 · 6 секунд\nГерой открывает окно."))
+    assert data["stage"] == "scene" and data["index"] == 7 and "scene_edit_index" not in data
+    assert data["scenes"][7]["visual"] == "Герой открывает окно."
+    assert data["scenes"][7]["turns"] == [] and "en_turns" not in data["scenes"][7]
+    audio.assert_not_awaited()
+
+
 def test_silent_scene_and_music_render_real_video(tmp_path):
     import subprocess
 
