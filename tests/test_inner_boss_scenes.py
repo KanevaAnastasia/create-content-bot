@@ -1,4 +1,5 @@
 import asyncio
+from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
@@ -135,6 +136,58 @@ def test_scene_edit_button_works_from_translation_without_approving_audio(monkey
     assert data["scenes"][7]["visual"] == "Герой открывает окно."
     assert data["scenes"][7]["turns"] == [] and "en_turns" not in data["scenes"][7]
     audio.assert_not_awaited()
+
+
+def test_manual_frame_setup_for_future_scene_and_independent_prompt_edits(tmp_path, monkeypatch):
+    from io import BytesIO
+
+    from PIL import Image
+    from app.handlers import handlers_media_core
+
+    session = {}
+    workflow.initialize(session, PILOT_SCRIPT)
+    data = session[workflow.KEY]
+    data.update(index=7, stage="translation", scene_edit_index=7)
+    update = SimpleNamespace(message=SimpleNamespace(reply_text=AsyncMock(), reply_photo=AsyncMock()))
+    monkeypatch.setattr(workflow, "_save", lambda *_: None)
+    monkeypatch.setattr(workflow, "_target", lambda run, suffix: tmp_path / f'{run["index"] + 1}{suffix}')
+    generate = AsyncMock()
+    monkeypatch.setattr(workflow, "_image", generate)
+    monkeypatch.setattr(workflow, "_boss_image", generate)
+    frame = BytesIO()
+    Image.new("RGB", (180, 320), "#142141").save(frame, "JPEG")
+    for choice in ("Кадры сцены 9", "Загрузить последний кадр"):
+        asyncio.run(workflow.handle_text(update, session, choice))
+    asyncio.run(workflow.handle_frame_upload(update, session, frame.getvalue()))
+    asyncio.run(workflow.handle_text(update, session, "Загрузить первый кадр"))
+    asyncio.run(workflow.handle_frame_upload(update, session, frame.getvalue()))
+    scene = data["scenes"][8]
+    old_start = scene["image"]
+    assert Path(old_start).name == "9-uploaded-image.png" and Path(scene["boss_image"]).exists()
+    assert scene["end_frame_mode"] == "upload" and workflow._needs_boss_frame(scene)
+    for choice in ("Промпт первого кадра", "Крупный кадр, герой у фонаря.", "Готово"):
+        asyncio.run(workflow.handle_text(update, session, choice))
+    assert scene["frame_prompt_overrides"]["image"] == "Крупный кадр, герой у фонаря."
+    assert scene["image"] == old_start and "frame_setup" not in data
+    assert (data["index"], data["stage"], data["scene_edit_index"]) == (7, "translation", 7)
+    generate.assert_not_awaited()
+    kling = AsyncMock(return_value=b"video")
+    monkeypatch.setattr(handlers_media_core, "_generate_video_bytes_with_high_load_retry", kling)
+    stable = dict(data, index=8)
+    asyncio.run(workflow._video(update, stable, scene))
+    pair = kling.await_args.kwargs
+    assert pair["kling_keyframes"] and pair["end_image"] == Path(scene["boss_image"]).read_bytes()
+    asyncio.run(workflow._video(update, stable, dict(scene, end_frame_mode="none")))
+    single = kling.await_args.kwargs
+    assert single["end_image"] is None and "kling_keyframes" not in single
+
+
+def test_script_can_set_last_frame_requirement_independently_of_cast():
+    source = "Сцена 1\nГерой открывает глаза. Появляется Босс.\nПоследний кадр: не нужен"
+    single, = parse_script(source)
+    pair, = parse_script(source.replace("не нужен", "создать").replace(" Появляется Босс.", ""))
+    assert not workflow._needs_boss_frame(single) and workflow._needs_boss_frame(pair)
+    assert "Последний кадр" not in " ".join(frame_actions(single) + frame_actions(pair))
 
 
 def test_silent_scene_and_music_render_real_video(tmp_path):
@@ -370,6 +423,48 @@ def test_boss_passes_both_images_and_preserves_alarm_cues(tmp_path, monkeypatch)
     assert "At 0s: the alarm clock visibly vibrates" in second["prompt"]
     assert "At 2.3s: the alarm clock visibly vibrates" in second["prompt"]
     assert "At 0.75s: the Hero presses the clock button" in second["prompt"]
+
+
+def test_continuation_button_keeps_exact_last_frame_and_uses_single_image(tmp_path, monkeypatch):
+    from app import video_frame_extraction
+    from app.handlers import handlers_media_core
+
+    session = {}
+    workflow.initialize(session, PILOT_SCRIPT)
+    data = session[workflow.KEY]
+    data.update(stage="image", index=4)
+    previous, scene = data["scenes"][3:5]
+    previous_video = tmp_path / "previous.mp4"
+    previous_video.write_bytes(b"previous")
+    previous.update(approved=True, video=str(previous_video))
+    scene.update(image="old-start.png", boss_image="old-end.png", audio={"ru": {"duration": 1}})
+    # Even an explicit character entrance must not make a second reference in this mode.
+    scene["visual"] = "Герой держит коробку. В зеркале появляется Босс."
+    extract = AsyncMock()
+    monkeypatch.setattr(video_frame_extraction, "extract_last_video_frame", lambda **_: b"exact frame")
+    monkeypatch.setattr(workflow, "_target", lambda _, suffix: tmp_path / f"target{suffix}")
+    monkeypatch.setattr(workflow, "_save", lambda *_: None)
+    monkeypatch.setattr(workflow, "_show", AsyncMock())
+    monkeypatch.setattr(workflow, "_boss_image", extract)
+    generate = AsyncMock(return_value=b"video")
+    monkeypatch.setattr(handlers_media_core, "_generate_video_bytes_with_high_load_retry", generate)
+    update = SimpleNamespace(message=SimpleNamespace(reply_text=AsyncMock()))
+    assert any(row[0].text == workflow.CONTINUE_PREVIOUS for row in workflow.keyboard(session).keyboard)
+    asyncio.run(workflow.handle_text(update, session, workflow.CONTINUE_PREVIOUS))
+    assert data["stage"] == "image"
+    assert scene["continuation_source"] == str(previous_video)
+    assert scene["audio"] and "boss_image" not in scene
+    assert Path(scene["image"]).read_bytes() == b"exact frame"
+    assert workflow.CONTINUITY_DIRECTIVE in scene["body"]
+    generate.assert_not_awaited()
+    asyncio.run(workflow.handle_text(update, session, "ОК"))
+    assert data["stage"] == "video_prompt"
+    extract.assert_not_awaited()
+    generate.assert_not_awaited()
+    asyncio.run(workflow.handle_text(update, session, "ОК"))
+    request = generate.await_args.kwargs
+    assert request["start_image"] == b"exact frame" and request["end_image"] is None
+    assert "kling_keyframes" not in request and "Continue directly" in request["prompt"]
 
 
 def test_motion_feedback_after_video_keeps_scene_and_approved_start_frame(monkeypatch):

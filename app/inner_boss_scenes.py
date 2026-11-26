@@ -15,7 +15,10 @@ DAY_MARKER = re.compile(
 )
 SPEAKER = re.compile(r'(?i)(?<!\w)(босс|вася|василий|герой)\s*(?::\s*|(?=[«"“]))')
 QUOTED = re.compile(r'«([^»]+)»|"([^"]+)"|“([^”]+)”')
-DIRECTIVE = re.compile(r"(?im)^\s*(звук|титр|титр en|стиль титра|позиция титра|в кадре)\s*:\s*([^\n]+)")
+DIRECTIVE = re.compile(r"(?im)^\s*(звук|титр|титр en|стиль титра|позиция титра|в кадре|склейка|последний кадр)\s*:\s*([^\n]+)")
+CONTINUE_PREVIOUS = "Продолжить предыдущую сцену"
+CONTINUITY_DIRECTIVE = f"Склейка: {CONTINUE_PREVIOUS}"
+END_FRAME_OPTIONS = {"не нужен": "none", "создать": "generate", "загрузить": "upload"}
 TITLE_POSITION_LABEL = "позиция титра"
 TITLE_POSITION_HINT = "Укажи секунду появления, X и Y в процентах. Например, «Позиция титра: 3 50 6,3»."
 SOUNDS = (
@@ -98,6 +101,13 @@ def parse_script(text: str) -> list[dict]:
             position = labels.get(TITLE_POSITION_LABEL)
             if position:
                 scenes[-1]["title_position"] = title_position(position[-1], seconds)
+        if labels.get("склейка", [""])[-1].casefold() == CONTINUE_PREVIOUS.casefold():
+            scenes[-1]["continue_previous"] = True
+        if choices := labels.get("последний кадр"):
+            mode = END_FRAME_OPTIONS.get(choices[-1].casefold())
+            if not mode:
+                raise ValueError("Для последнего кадра укажи «не нужен», «создать» или «загрузить».")
+            scenes[-1]["end_frame_mode"] = mode
     return scenes
 
 

@@ -8476,6 +8476,11 @@ async def on_photo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     session = SESSIONS.get(chat_id) or {}
     try:
         state = str(session.get("state") or "")
+        from .inner_boss_workflow import STATE as BOSS_SCENE_STATE, handle_frame_upload
+        if state == BOSS_SCENE_STATE:
+            image_bytes = await _extract_any_image_from_update(update, context)
+            await handle_frame_upload(update, session, image_bytes)
+            return
         if state == STATE_WAITING_REFERENCE_IMAGE:
             image_bytes = await _extract_any_image_from_update(update, context)
             if not image_bytes:

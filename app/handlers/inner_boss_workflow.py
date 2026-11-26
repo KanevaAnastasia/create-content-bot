@@ -7,6 +7,7 @@ import logging
 import math
 import os
 import re
+from io import BytesIO
 from pathlib import Path
 from uuid import UUID, uuid4, uuid5
 
@@ -14,8 +15,9 @@ from telegram import ReplyKeyboardMarkup
 
 from ..discipline_modes import BOSS, BOSS_VOICE_ID, MALE_VOICE_ID, SHORT_FORMATS
 from ..inner_boss_scenes import (
-    DIRECTIVE, PILOT_SCRIPT, SCRIPT_HEADER, TITLE_POSITION_HINT, TITLE_POSITION_LABEL, effect_events, frame_actions,
-    parse_script, render_master, render_scene, speech_lead, title_position,
+    CONTINUE_PREVIOUS, CONTINUITY_DIRECTIVE, DIRECTIVE, PILOT_SCRIPT, SCRIPT_HEADER, TITLE_POSITION_HINT,
+    TITLE_POSITION_LABEL, effect_events, frame_actions, parse_script, render_master, render_scene, speech_lead,
+    title_position,
 )
 
 STATE = "waiting_inner_boss_scene_workflow"
@@ -23,11 +25,17 @@ KEY = "inner_boss_scene_workflow"
 LOGGER = logging.getLogger(__name__)
 FRAME_POLICY = 3
 IMAGE_STAGES = {"image", "boss_image"}
+CONTINUATION_STAGES = IMAGE_STAGES | {"scene", "audio", "video_prompt"}
 SPEECH_TIMING_BUTTON = "Сдвинуть озвучку"
 SPEECH_TIMING_HINT = "Укажи, когда должна начаться речь от начала сцены. Например: 4,4 или 00:04.4."
 VIDEO_PROMPT_BUTTON = "Видеопромпт"
 SCENE_EDIT_BUTTON = "Править сцену"
 SCENE_EDIT_STAGES = IMAGE_STAGES | {"scene", "translation", "audio", "video_prompt", "video", "edit"}
+FRAME_SETUP_BUTTON = "Кадры сцены"
+FRAME_SETUP_STAGES = SCENE_EDIT_STAGES | {"script"}
+FRAME_UPLOAD_BUTTONS = {"Загрузить первый кадр": "image", "Загрузить последний кадр": "boss_image"}
+FRAME_PROMPT_BUTTONS = {"Промпт первого кадра": "image", "Промпт последнего кадра": "boss_image"}
+FRAME_END_BUTTONS = {"Без последнего кадра": "none", "Создать последний кадр": "generate"}
 SAVED_MUSIC_BUTTON = "Собрать с музыкой"
 NO_TEXT = (
     "All artwork surfaces must be completely unmarked. No letters, numbers, digits, speech bubbles, "
@@ -52,8 +60,11 @@ def initialize(session: dict, script: str) -> None:
 def keyboard(session):
     data = session[KEY]
     stage = data["stage"]
+    if data.get("frame_setup") and stage in FRAME_SETUP_STAGES:
+        rows = [[label] for label in (*FRAME_UPLOAD_BUTTONS, *FRAME_END_BUTTONS, *FRAME_PROMPT_BUTTONS)]
+        return ReplyKeyboardMarkup([*rows, ["Готово", "Отмена"]], resize_keyboard=True)
     if stage in SCENE_EDIT_STAGES and data.get("scene_edit_index") == data["index"]:
-        return ReplyKeyboardMarkup([["Отмена"]], resize_keyboard=True)
+        return ReplyKeyboardMarkup([[FRAME_SETUP_BUTTON], ["Отмена"]], resize_keyboard=True)
     if stage == "music":
         rows = [["Без музыки"], ["Показать сцену"]]
         if data.get("music_plan"):
@@ -62,9 +73,11 @@ def keyboard(session):
         rows = [["Прислать ролик", "Добавить музыку"], ["Показать сцену"]]
     else:
         rows = [["ОК"], ["Показать сцену", "Сценарий"]]
+        if stage in FRAME_SETUP_STAGES:
+            rows.append([FRAME_SETUP_BUTTON])
         if stage in SCENE_EDIT_STAGES:
             rows.append([SCENE_EDIT_BUTTON])
-        if stage in IMAGE_STAGES:
+        if stage in IMAGE_STAGES and not data["scenes"][data["index"]].get("continue_previous"):
             rows.extend([["ИЗМЕНИТЬ"], ["ФИДБЕК"], ["ПЕРЕГЕНЕРИРОВАТЬ"]])
         elif stage == "video_prompt":
             rows.extend([["ПРОМПТ:", "ФИДБЕК"]])
@@ -79,6 +92,8 @@ def keyboard(session):
                 rows.append([SPEECH_TIMING_BUTTON])
                 if data.get("speech_timing_input_scene") == data["index"]:
                     rows.append(["Отмена"])
+        if stage in CONTINUATION_STAGES and _previous_approved_video(data):
+            rows.append([CONTINUE_PREVIOUS])
     return ReplyKeyboardMarkup(rows, resize_keyboard=True)
 
 
@@ -93,7 +108,8 @@ async def announce(message, session):
         chunk += block + "\n\n"
     await message.reply_text(chunk.rstrip())
     await message.reply_text(
-        "Проверь весь сценарий. «ОК» откроет первую сцену. Можно прислать новый сценарий целиком.",
+        "Проверь весь сценарий. «ОК» откроет первую сцену. Можно прислать новый сценарий целиком. "
+        "Чтобы заранее задать кадры для любой сцены, напиши, например, «Кадры сцены 9».",
         reply_markup=keyboard(session),
     )
 
@@ -109,6 +125,10 @@ def draft_script(idea: str) -> str:
             "Внутри сцены чередуй описания действия и отдельные реплики в порядке монтажа. "
             "Речь оформляй только Босс: «реплика» или Герой: «реплика». Не используй имена в диалоге. "
             "Звуковые эффекты пиши отдельной строкой «Звук:». Надписи без озвучки пиши строками «Титр:». "
+            "Если действие продолжается прямо с последнего кадра предыдущей сцены, "
+            f"пиши отдельной строкой «{CONTINUITY_DIRECTIVE}». Начни описание с той же позы и расстановки. "
+            "Учитывай явное требование к конечному кадру. Укажи отдельной строкой «Последний кадр: не нужен», "
+            "«Последний кадр: создать» или «Последний кадр: загрузить», если это указано в идее. "
             "Сохрани требования исходной идеи. Акцентируй конкретный поступок и его последствия. "
             "Не навязывай сюжет пилота или будильник. Музыки на этапе сцен нет.\nИдея: " + idea
         ), model_profile=GEMINI_MODEL_PROFILE_CREATIVE,
@@ -209,6 +229,59 @@ def _clean_opening(scene):
     return scene.get("image") and scene.get("frame_policy") == FRAME_POLICY
 
 
+def _previous_approved_video(data):
+    if data["index"] > 0:
+        previous = data["scenes"][data["index"] - 1]
+        if previous.get("approved") and previous.get("video") and Path(previous["video"]).is_file():
+            return previous["video"]
+    return None
+
+
+def _continuation_is_current(data, scene):
+    return (
+        bool(_clean_opening(scene))
+        and Path(scene["image"]).is_file()
+        and bool(scene.get("continuation_source"))
+        and scene["continuation_source"] == _previous_approved_video(data)
+    )
+
+
+def _needs_boss_frame(scene):
+    if scene.get("continue_previous") or scene.get("end_frame_mode") == "none":
+        return False
+    return scene.get("end_frame_mode") in {"generate", "upload"} or bool(frame_actions(scene)[1])
+
+
+async def _use_previous_frame(data, scene):
+    from .handlers_state_media import _pop_scene_image_edit_pending
+    from ..video_frame_extraction import extract_last_video_frame
+
+    source = _previous_approved_video(data)
+    if not source:
+        raise ValueError("Сначала утверди монтаж предыдущей сцены.")
+    if _continuation_is_current(data, scene):
+        return
+    frame = await asyncio.to_thread(extract_last_video_frame, video_path=source)
+    path = _target(data, "-continuation.png")
+    path.write_bytes(frame)
+    _invalidate_frame_dependants(data, scene, "image")
+    for field in ("clock_position", "frame_prompt_overrides", "manual_frame_prompt_roles", "video_prompt_override",
+                  "uploaded_start"):
+        scene.pop(field, None)
+    data.pop("video_prompt_review", None)
+    data.pop("awaiting_image_feedback", None)
+    _pop_scene_image_edit_pending(data, scene_idx=data["index"])
+    scene.update(image=str(path), continuation_source=source, continue_previous=True)
+    scene["body"] = revise_scene(scene, CONTINUITY_DIRECTIVE)
+
+
+async def _prepare_opening(data, scene):
+    if scene.get("continue_previous"):
+        await _use_previous_frame(data, scene)
+    elif not _clean_opening(scene):
+        await _image(data, scene)
+
+
 async def _audio(update, session, scene):
     from ..story_generation import generate_story_audio, generate_story_dialogue_audio, store_story_audio
     from ..story_alignment import valid_alignment
@@ -269,7 +342,9 @@ async def _image(data, scene):
     path = _target(data, ".png")
     path.write_bytes(result)
     scene["image"], scene["frame_policy"] = str(path), FRAME_POLICY
-    scene.pop("boss_image", None)
+    scene.pop("uploaded_start", None)
+    if scene.get("end_frame_mode") != "upload":
+        scene.pop("boss_image", None)
     scene.pop("end_image", None)
     scene.pop("clock_position", None)
 
@@ -279,14 +354,24 @@ async def _boss_image(data, scene):
 
     opening, appearance = frame_actions(scene)
     appearance_override = scene.get("frame_prompt_overrides", {}).get("boss_image")
-    prompt = (
-        "Edit the first reference as the exact same vertical 9:16 shot. Preserve lens, framing, perspective, "
-        "all props and their screen positions, the Hero's identity, and the flat nighttime 2D style. "
-        "Add the Boss wall shadow from the second reference. Keep him visibly separated from the Hero. "
-        "Depict only the instant Boss has just appeared. " + NO_TEXT + "\n"
-        + (appearance_override or re.split(r"(?<=[.!?])\s+", appearance, maxsplit=1)[0])
-        + "\nAction leading into this instant. Advance the Hero to the final scripted pose: " + opening
-    )
+    if scene.get("end_frame_mode") == "upload":
+        raise ValueError("Загрузи последний кадр через «Кадры сцены» или выбери «Создать последний кадр».")
+    if scene.get("end_frame_mode") == "generate":
+        action = appearance_override or " ".join(filter(None, (opening, appearance)))
+        prompt = (
+            "Create the final frame of this shot from the opening image. Match the original camera, "
+            "character design, composition and art style. Depict the final visible beat only. "
+            + NO_TEXT + "\n" + action
+        )
+    else:
+        prompt = (
+            "Edit the first reference as the exact same vertical 9:16 shot. Preserve lens, framing, perspective, "
+            "all props and their screen positions, the Hero's identity, and the flat nighttime 2D style. "
+            "Add the Boss wall shadow from the second reference. Keep him visibly separated from the Hero. "
+            "Depict only the instant Boss has just appeared. " + NO_TEXT + "\n"
+            + (appearance_override or re.split(r"(?<=[.!?])\s+", appearance, maxsplit=1)[0])
+            + "\nAction leading into this instant. Advance the Hero to the final scripted pose: " + opening
+        )
     result = await asyncio.to_thread(
         generate_image_vertex, prompt,
         reference_images=[Path(scene["image"]).read_bytes(), REFERENCE.read_bytes()], aspect_ratio="9:16",
@@ -320,11 +405,150 @@ async def _revise_frame(data, scene, stage, feedback):
 def _invalidate_frame_dependants(data, scene, stage):
     if stage == "image":
         scene["frame_policy"] = FRAME_POLICY
-        scene.pop("boss_image", None)
+        if scene.get("end_frame_mode") != "upload":
+            scene.pop("boss_image", None)
         scene.pop("end_image", None)
     for key in ("video", "video_duration", "previews", "approved"):
         scene.pop(key, None)
     data.pop("masters", None)
+
+
+def _frame_setup_change(data, index, scene):
+    _invalidate_frame_dependants(data, scene, "boss_image")
+    if index == data["index"] and data["stage"] in {"image", "boss_image", "video_prompt", "video", "edit"}:
+        data.pop("video_prompt_review", None)
+        data["stage"] = "image" if _clean_opening(scene) else "scene"
+
+
+def _set_end_frame_mode(data, index, scene, mode):
+    if mode == scene.get("end_frame_mode"):
+        return
+    scene["end_frame_mode"] = mode
+    directive = {"generate": "создать", "none": "не нужен", "upload": "загрузить"}[mode]
+    scene["body"] = revise_scene(scene, f"Последний кадр: {directive}")
+    scene.pop("boss_image", None)
+    _frame_setup_change(data, index, scene)
+
+
+async def _show_frame_setup(update, session):
+    data = session[KEY]
+    setup = data["frame_setup"]
+    index = setup["index"]
+    scene = data["scenes"][index]
+    if role := setup.get("upload"):
+        which = "первый" if role == "image" else "последний"
+        note = f"Сцена {index+1}. Пришли {which} кадр как фото или файл PNG/JPEG."
+    elif role := setup.get("prompt"):
+        opening, appearance = frame_actions(scene)
+        selected = scene.get("frame_prompt_overrides", {}).get(role)
+        prompt = selected or (opening if role == "image" else appearance or opening)
+        which = "первого" if role == "image" else "последнего"
+        note = f"Сцена {index+1}. Промпт {which} кадра\n\n{prompt}\n\nПришли новый текст промпта."
+    else:
+        mode = scene.get("end_frame_mode")
+        end = {
+            "none": "не нужен", "generate": "будет создан на этапе кадров",
+            "upload": "загружен" if scene.get("boss_image") else "ожидает загрузки",
+        }.get(mode, "по сценарию")
+        if scene.get("continue_previous"):
+            end = "не нужен при продолжении"
+        first = "загружен" if scene.get("uploaded_start") else "сохранён" if scene.get("image") else "ещё не задан"
+        note = (f"Сцена {index+1}\nПервый кадр {first}. Последний кадр {end}.\n\n"
+                "Чтобы заранее открыть другую сцену, напиши «Кадры сцены 9» с нужным номером.")
+    await update.message.reply_text(note, reply_markup=keyboard(session))
+
+
+async def _handle_frame_setup_input(update, session, text):
+    data = session[KEY]
+    if data["stage"] not in FRAME_SETUP_STAGES:
+        return False
+    command = text.strip().casefold()
+    choose = re.fullmatch(r"кадры сцены(?:\s+([0-9]+))?", command)
+    setup = data.get("frame_setup")
+    if choose:
+        index = int(choose[1]) - 1 if choose[1] else data["index"]
+        if not 0 <= index < len(data["scenes"]):
+            raise ValueError("Такой сцены нет в сценарии.")
+        data["frame_setup"] = {"index": index}
+    elif not setup:
+        return False
+    elif command == "отмена" and (setup.get("upload") or setup.get("prompt")):
+        data["frame_setup"] = {"index": setup["index"]}
+    elif command in {"готово", "отмена"}:
+        data.pop("frame_setup", None)
+    else:
+        index = setup["index"]
+        scene = data["scenes"][index]
+        upload = FRAME_UPLOAD_BUTTONS.get(text.strip())
+        prompt = FRAME_PROMPT_BUTTONS.get(text.strip())
+        mode = FRAME_END_BUTTONS.get(text.strip())
+        if (upload == "boss_image" or mode == "generate") and scene.get("continue_previous"):
+            raise ValueError("При продолжении предыдущей сцены используется один кадр. Сначала загрузи новый первый кадр.")
+        if upload or prompt:
+            data["frame_setup"] = {"index": index, **({"upload": upload} if upload else {"prompt": prompt})}
+        elif mode:
+            _set_end_frame_mode(data, index, scene, mode)
+            data["frame_setup"] = {"index": index}
+        elif setup.get("prompt") and command not in {"ок", "ok", "перегенерировать", "показать сцену"}:
+            role = setup["prompt"]
+            scene.setdefault("frame_prompt_overrides", {})[role] = text.strip()
+            manual_roles = scene.setdefault("manual_frame_prompt_roles", [])
+            if role not in manual_roles:
+                manual_roles.append(role)
+            data["frame_setup"] = {"index": index}
+    _save(update, session)
+    await _show(update, session)
+    return True
+
+
+def _frame_upload_png(blob):
+    from PIL import Image, ImageOps
+
+    output = BytesIO()
+    with Image.open(BytesIO(blob)) as image:
+        ImageOps.exif_transpose(image).convert("RGB").save(output, format="PNG")
+    return output.getvalue()
+
+
+async def handle_frame_upload(update, session, image_bytes):
+    data = session[KEY]
+    setup = data.get("frame_setup") or {}
+    role = setup.get("upload")
+    if role not in IMAGE_STAGES:
+        await update.message.reply_text(
+            "Нажми «Кадры сцены» и выбери, какой кадр загрузить.", reply_markup=keyboard(session),
+        )
+        return
+    try:
+        image = await asyncio.to_thread(_frame_upload_png, image_bytes or b"")
+    except (OSError, ValueError):
+        await update.message.reply_text("Не удалось прочитать кадр. Пришли его как PNG, JPEG или фото.")
+        return
+    index = setup["index"]
+    scene = data["scenes"][index]
+    if role == "boss_image" and scene.get("continue_previous"):
+        await update.message.reply_text("Сначала загрузи новый первый кадр вместо продолжения предыдущей сцены.")
+        return
+    frame = _target(dict(data, index=index), f"-uploaded-{role}.png")
+    frame.write_bytes(image)
+    if role == "boss_image":
+        _set_end_frame_mode(data, index, scene, "upload")
+    scene[role] = str(frame)
+    if role == "image":
+        scene.update(uploaded_start=True, frame_policy=FRAME_POLICY)
+        scene.pop("clock_position", None)
+        if scene.pop("continue_previous", None):
+            scene["body"] = revise_scene(scene, "Склейка: новый кадр")
+        scene.pop("continuation_source", None)
+        if scene.get("end_frame_mode") != "upload":
+            scene.pop("boss_image", None)
+    _frame_setup_change(data, index, scene)
+    data["frame_setup"] = {"index": index}
+    _save(update, session)
+    with frame.open("rb") as file:
+        caption = f"Сцена {index+1} · {'первый кадр' if role == 'image' else 'последний кадр'}"
+        await update.message.reply_photo(photo=file, caption=caption)
+    await _show(update, session)
 
 
 async def _rewrite_frame_prompt(data, scene, stage, feedback):
@@ -356,6 +580,8 @@ async def _handle_frame_feedback(update, session, text):
     data = session[KEY]
     stage, index = data["stage"], data["index"]
     if stage not in IMAGE_STAGES:
+        return False
+    if SCRIPT_HEADER.match(text) or data["scenes"][index].get("continue_previous"):
         return False
     from .handlers_media_scene import _extract_format_or_feedback
     from .handlers_state_media import (
@@ -444,10 +670,11 @@ def _video_dialogue_direction(scene):
 def _video_prompt(scene, duration, opening, appearance):
     override = str(scene.get("video_prompt_override") or "").strip()
     performance_cue = _video_dialogue_direction(scene)
+    continuation = ("Continue directly from the supplied last frame of the previous scene, matching the initial pose and composition."
+                    if scene.get("continue_previous") else "")
     if override:
-        if not scene["turns"] or performance_cue in override:
-            return override
-        return f"{override}\n{performance_cue}"
+        notes = [note for note in (continuation, performance_cue if scene["turns"] else "") if note and note not in override]
+        return "\n".join([override, *notes])
     visible_cues = {
         "alarm": "the alarm clock visibly vibrates",
         "click": "the Hero presses the clock button",
@@ -459,7 +686,7 @@ def _video_prompt(scene, duration, opening, appearance):
     cue_notes = "\n".join(f"At {at:g}s: {action}." for at, action in cues)
     entrance = "Boss enters at the scripted moment and is visible before his first line." if appearance else ""
     return "\n".join(filter(None, (
-        "Keep the framing and characters consistent with the supplied artwork. Do not add overlay text.",
+        "Keep the framing and characters consistent with the supplied artwork. Do not add overlay text.", continuation,
         " ".join(filter(None, (opening, appearance))), entrance, performance_cue, cue_notes,
     )))
 
@@ -504,16 +731,19 @@ async def _video(update, data, scene, *, approved_prompt=None):
 
     duration = _duration(scene)
     opening, appearance = frame_actions(scene)
+    if scene.get("continue_previous") and not _continuation_is_current(data, scene):
+        raise ValueError("Стартовый кадр устарел. Нажми «Продолжить предыдущую сцену» и проверь его ещё раз.")
+    needs_end = _needs_boss_frame(scene)
     start_image = Path(scene["image"]).read_bytes()
-    if appearance and not scene.get("boss_image"):
+    if needs_end and not scene.get("boss_image"):
         raise ValueError("Для Kling Keyframes нужны два опорных кадра. Сначала открой и утверди конечный кадр.")
-    end_image = Path(scene["boss_image"]).read_bytes() if appearance else None
+    end_image = Path(scene["boss_image"]).read_bytes() if needs_end else None
     prompt = approved_prompt if approved_prompt is not None else _video_prompt(scene, duration, opening, appearance)
     raw = await _generate_video_bytes_with_high_load_retry(
         update, prompt=prompt, model="kling_3_0", duration_sec=duration,
         start_image=start_image, end_image=end_image,
         quality="1080", aspect_ratio="9:16", audio_enabled=False, syntax_provider=SYNTAX_PROVIDER_KLING,
-        **({"kling_keyframes": True} if appearance else {}),
+        **({"kling_keyframes": True} if needs_end else {}),
     )
     path = _target(data, ".mp4")
     path.write_bytes(raw)
@@ -586,15 +816,34 @@ def _replace_scene(data, body):
         body = body[supplied.end():].strip()
     replacement, = parse_script(f"{header}\n{body}")
     replacement["title"] = re.sub(r"(?i)сцена\s+1\b", f"Сцена {index + 1}", replacement["title"], count=1)
+    if previous.get("end_frame_mode") and not replacement.get("end_frame_mode"):
+        replacement["end_frame_mode"] = previous["end_frame_mode"]
+    if manual_roles := previous.get("manual_frame_prompt_roles"):
+        replacement["manual_frame_prompt_roles"] = manual_roles
+        replacement["frame_prompt_overrides"] = {
+            role: prompt for role, prompt in previous.get("frame_prompt_overrides", {}).items() if role in manual_roles
+        }
     if replacement["turns"] == previous["turns"]:
         for key in ("audio", "en_turns"):
             if key in previous:
                 replacement[key] = previous[key]
-    if frame_actions(replacement) == frame_actions(previous) and previous.get("image"):
-        for key in ("image", "frame_policy", "boss_image", "clock_position", "frame_prompt_overrides"):
-            if key in previous:
+    same_actions = frame_actions(replacement) == frame_actions(previous)
+    same_link = replacement.get("continue_previous") == previous.get("continue_previous")
+    same_end_mode = replacement.get("end_frame_mode") == previous.get("end_frame_mode")
+    if previous.get("uploaded_start") and not replacement.get("continue_previous"):
+        for field in ("image", "frame_policy", "uploaded_start"):
+            replacement[field] = previous[field]
+    if same_end_mode and replacement.get("end_frame_mode") == "upload" and previous.get("boss_image"):
+        replacement["boss_image"] = previous["boss_image"]
+    if previous.get("image") and same_link and (same_actions or replacement.get("continue_previous")):
+        fields = ("image", "frame_policy", "continuation_source") if replacement.get("continue_previous") else (
+            "image", "frame_policy", "boss_image", "clock_position", "frame_prompt_overrides",
+        )
+        for key in fields:
+            if key in previous and (key != "boss_image" or same_end_mode):
                 replacement[key] = previous[key]
-        if (replacement["turns"] == previous["turns"] and _duration(replacement) == _duration(previous)
+        if (same_actions and same_end_mode and replacement["turns"] == previous["turns"]
+                and _duration(replacement) == _duration(previous)
                 and previous.get("video")):
             replacement["video"] = previous["video"]
             replacement["video_duration"] = previous.get("video_duration", _duration(previous))
@@ -728,6 +977,9 @@ async def _handle_video_prompt_review(update, session, text):
 async def _show(update, session):
     data = session[KEY]
     stage = data["stage"]
+    if data.get("frame_setup") and stage in FRAME_SETUP_STAGES:
+        await _show_frame_setup(update, session)
+        return
     if stage == "script":
         await announce(update.message, session)
         return
@@ -764,15 +1016,24 @@ async def _show(update, session):
     elif stage == "image":
         with Path(scene["image"]).open("rb") as file:
             await update.message.reply_photo(photo=file, caption=scene["title"])
-        if not _clean_opening(scene):
+        if scene.get("continue_previous"):
+            note = ("Стартовый кадр взят из конца предыдущей сцены. «ОК» покажет видеопромпт Kling "
+                    "Image to video или сохранённый клип.")
+        elif not _clean_opening(scene):
             note = "Этот кадр был создан по старому промту. Нажми «Перегенерировать», чтобы сделать чистый."
-        elif frame_actions(scene)[1]:
+        elif scene.get("end_frame_mode") == "upload" and not scene.get("boss_image"):
+            note = "Первый кадр готов. Загрузи последний через «Кадры сцены»."
+        elif _needs_boss_frame(scene) and scene.get("end_frame_mode"):
+            note = ("«ОК» покажет сохранённый последний кадр." if scene.get("boss_image")
+                    else "«ОК» создаст последний кадр по промпту.")
+        elif _needs_boss_frame(scene):
             note = "Кадр до появления Босса. «ОК» откроет отдельный кадр с Боссом."
         else:
             note = "Все персонажи уже в кадре. «ОК» покажет видеопромпт или сохранённый клип."
     elif stage == "boss_image":
         with Path(scene["boss_image"]).open("rb") as file:
-            await update.message.reply_photo(photo=file, caption=f"{scene['title']} · Босс появился")
+            label = "последний кадр" if scene.get("end_frame_mode") else "Босс появился"
+            await update.message.reply_photo(photo=file, caption=f"{scene['title']} · {label}")
         note = "«ОК» покажет видеопромпт или сохранённый клип. Оба кадра передадутся в Kling Keyframes."
     elif stage == "video_prompt":
         review = data.get("video_prompt_review") or {}
@@ -807,7 +1068,28 @@ async def handle_text(update, session, text):
     low = text.strip().casefold()
     scene = data["scenes"][data["index"]]
     try:
+        if await _handle_frame_setup_input(update, session, text):
+            return
         if await _handle_scene_edit(update, session, text):
+            return
+        if low == CONTINUE_PREVIOUS.casefold() and stage in CONTINUATION_STAGES:
+            await _use_previous_frame(data, scene)
+            if stage in IMAGE_STAGES or stage == "video_prompt":
+                data["stage"] = "image"
+                data.pop("video_prompt_review", None)
+            _save(update, session)
+            await _show(update, session)
+            return
+        if stage in IMAGE_STAGES and SCRIPT_HEADER.match(text):
+            candidate = dict(data, scenes=data["scenes"].copy())
+            _replace_scene(candidate, text)
+            revised = candidate["scenes"][candidate["index"]]
+            if revised.get("continue_previous") and revised["turns"] == scene["turns"]:
+                await _use_previous_frame(candidate, revised)
+                candidate["stage"] = "image"
+            session[KEY] = candidate
+            _save(update, session)
+            await _show(update, session)
             return
         if stage == "end_image":
             data["stage"] = "image"
@@ -864,8 +1146,11 @@ async def handle_text(update, session, text):
                     if _duration(scene) != scene.get("video_duration"):
                         scene.pop("video", None)
                 elif stage == "image":
-                    await _image(data, scene)
-                    scene.pop("video", None)
+                    if scene.get("continue_previous"):
+                        await _use_previous_frame(data, scene)
+                    else:
+                        await _image(data, scene)
+                        scene.pop("video", None)
                 elif stage == "boss_image":
                     await _boss_image(data, scene)
                     scene.pop("video", None)
@@ -894,21 +1179,25 @@ async def handle_text(update, session, text):
                         await _audio(update, session, scene)
                         data["stage"] = "audio"
                     else:
-                        if not _clean_opening(scene):
-                            await _image(data, scene)
+                        await _prepare_opening(data, scene)
                         data["stage"] = "image"
             elif stage == "translation":
                 await _audio(update, session, scene)
                 data["stage"] = "audio"
             elif stage == "audio":
                 _duration(scene)
-                if not _clean_opening(scene):
-                    await _image(data, scene)
+                await _prepare_opening(data, scene)
                 data["stage"] = "image"
             elif stage in IMAGE_STAGES:
+                if scene.get("continue_previous") and not _continuation_is_current(data, scene):
+                    await _use_previous_frame(data, scene)
+                    data["stage"] = "image"
+                    _save(update, session)
+                    await _show(update, session)
+                    return
                 if not _clean_opening(scene):
                     raise ValueError("Этот кадр был сделан по старому промту. Сначала нажми «Перегенерировать».")
-                if stage == "image" and frame_actions(scene)[1]:
+                if stage == "image" and _needs_boss_frame(scene):
                     if not scene.get("boss_image"):
                         await _boss_image(data, scene)
                     data["stage"] = "boss_image"
