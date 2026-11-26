@@ -14,7 +14,7 @@ from telegram import ReplyKeyboardMarkup
 
 from ..discipline_modes import BOSS, BOSS_VOICE_ID, MALE_VOICE_ID, SHORT_FORMATS
 from ..inner_boss_scenes import (
-    DIRECTIVE, PILOT_SCRIPT, SCRIPT_HEADER, frame_actions,
+    DIRECTIVE, PILOT_SCRIPT, SCRIPT_HEADER, effect_events, frame_actions,
     parse_script, render_master, render_scene, speech_lead,
 )
 
@@ -22,7 +22,7 @@ STATE = "waiting_inner_boss_scene_workflow"
 KEY = "inner_boss_scene_workflow"
 LOGGER = logging.getLogger(__name__)
 FRAME_POLICY = 3
-IMAGE_STAGES = {"image", "boss_image"}
+IMAGE_STAGES = {"image", "boss_image", "end_image"}
 SPEECH_TIMING_BUTTON = "Сдвинуть озвучку"
 SPEECH_TIMING_HINT = "Укажи, когда должна начаться речь от начала сцены. Например: 4,4 или 00:04.4."
 NO_TEXT = (
@@ -253,6 +253,7 @@ async def _image(data, scene):
     path.write_bytes(result)
     scene["image"], scene["frame_policy"] = str(path), FRAME_POLICY
     scene.pop("boss_image", None)
+    scene.pop("end_image", None)
     scene.pop("clock_position", None)
 
 
@@ -278,6 +279,25 @@ async def _boss_image(data, scene):
     scene["boss_image"] = str(path)
 
 
+async def _end_image(data, scene):
+    from ..vertex_images import generate_image_vertex
+
+    opening, _ = frame_actions(scene)
+    final_beat = scene.get("frame_prompt_overrides", {}).get("end_image", opening)
+    result = await asyncio.to_thread(
+        generate_image_vertex,
+        "Create the final keyframe by editing the first reference. Show only the last instant of the scripted action. "
+        "Preserve the vertical framing, shot geometry, art style and character identity. Reference 2 fixes the Hero model. "
+        "Any repeated actions or season changes happen in the animation between the two illustrated moments. "
+        + NO_TEXT + "\nScene action: " + final_beat,
+        reference_images=[Path(scene["image"]).read_bytes(), REFERENCE.read_bytes()],
+        aspect_ratio="9:16",
+    )
+    path = _target(data, "-end.png")
+    path.write_bytes(result)
+    scene["end_image"] = str(path)
+
+
 async def _revise_frame(data, scene, stage, feedback):
     from ..vertex_images import generate_image_vertex
 
@@ -286,14 +306,14 @@ async def _revise_frame(data, scene, stage, feedback):
         "Reference image 2 anchors the Hero and Boss designs. Preserve identities, the vertical framing, colors, "
         "lighting and prop positions except for changes explicitly requested below. "
         + ("Keep the Boss shadow present and visually separate from the Hero. " if stage == "boss_image"
-           else "If the opening image has no Boss, leave the shadow absent. ")
+           else "Preserve the characters already present in this still. ")
         + NO_TEXT + "\nRequested visual change: " + feedback
     )
     result = await asyncio.to_thread(
         generate_image_vertex, prompt,
         reference_images=[Path(scene[stage]).read_bytes(), REFERENCE.read_bytes()], aspect_ratio="9:16",
     )
-    path = _target(data, "-boss-fix.png" if stage == "boss_image" else "-opening-fix.png")
+    path = _target(data, {"image": "-opening-fix.png", "boss_image": "-boss-fix.png", "end_image": "-end-fix.png"}[stage])
     path.write_bytes(result)
     scene[stage] = str(path)
     _invalidate_frame_dependants(data, scene, stage, feedback)
@@ -304,6 +324,7 @@ def _invalidate_frame_dependants(data, scene, stage, feedback):
     if stage == "image":
         scene["frame_policy"] = FRAME_POLICY
         scene.pop("boss_image", None)
+        scene.pop("end_image", None)
     for key in ("video", "video_duration", "previews", "approved"):
         scene.pop(key, None)
     data.pop("masters", None)
@@ -313,7 +334,7 @@ async def _rewrite_frame_prompt(data, scene, stage, feedback):
     from ..llm_utils import GEMINI_MODEL_PROFILE_EDIT, gemini_generate_sync
 
     opening, appearance = frame_actions(scene)
-    current = scene.get("frame_prompt_overrides", {}).get(stage, opening if stage == "image" else appearance)
+    current = scene.get("frame_prompt_overrides", {}).get(stage, appearance if stage == "boss_image" else opening)
     rewritten = await asyncio.to_thread(
         gemini_generate_sync,
         "Перепиши промпт только для одного опорного кадра «Внутреннего босса» с учётом фидбэка. "
@@ -329,7 +350,7 @@ async def _rewrite_frame_prompt(data, scene, stage, feedback):
         },
         frame_feedback=dict(scene.get("frame_feedback", {})),
     )
-    generator = _image if stage == "image" else _boss_image
+    generator = {"image": _image, "boss_image": _boss_image, "end_image": _end_image}[stage]
     await generator(data, candidate)
     _invalidate_frame_dependants(data, candidate, stage, feedback)
     data["scenes"][data["index"]] = candidate
@@ -408,7 +429,10 @@ async def _video(update, data, scene):
     duration = _duration(scene)
     opening, appearance = frame_actions(scene)
     start_image = Path(scene["image"]).read_bytes()
-    end_image = Path(scene["boss_image"]).read_bytes() if appearance else None
+    end_key = "boss_image" if appearance else "end_image"
+    if not scene.get(end_key):
+        raise ValueError("Для Kling Keyframes нужны два опорных кадра. Сначала открой и утверди конечный кадр.")
+    end_image = Path(scene[end_key]).read_bytes()
     roles = {"boss": "Boss, the red-edged shadow", "hero": "Hero, the human character"}
     dialogue = "\n".join(
         f"{index}. {roles[turn['speaker']]} speaks: {turn['text']}"
@@ -425,26 +449,35 @@ async def _video(update, data, scene):
     )
     frame_notes = "\n".join(
         f"{label} correction (applies only to this frame): {scene['frame_feedback'][key]}"
-        for key, label in (("image", "Opening frame"), ("boss_image", "Boss keyframe"))
+        for key, label in (("image", "Opening frame"), (end_key, "Ending frame"))
         if key in scene.get("frame_feedback", {})
     )
+    visible_cues = {
+        "alarm": "the alarm clock visibly vibrates with its display blank",
+        "click": "the Hero presses the clock button",
+    }
+    cues = sorted(
+        (at, visible_cues[cue]) for cue, at, _ in effect_events(scene, duration, 0.0)
+        if cue == "alarm" or (cue == "click" and "alarm" in scene["fx"] and cue in scene.get("fx_times", {}))
+    )
+    cue_notes = "\n".join(f"At {at:g}s: {action}." for at, action in cues)
     prompt = (
-        f"{duration}-second Kling 3.0 {'Keyframes' if appearance else 'image-to-video'} shot. No audio. 9:16. "
+        f"{duration}-second Kling 3.0 Keyframes shot. No audio. 9:16. "
         "Animate the supplied artwork, matching all identities and materials. "
-        + ("Use the first image as the opening state and the second as the ending anchor. "
-           "Boss enters at the scripted moment and must be clearly visible before his first line. "
-           "Preserve the camera framing and the fixed scenery shared by the reference images. "
-           "If there is a clock in the shot, keep its display blank. "
-           if appearance else "")
+        "Use the first image as the opening state and the second as the ending anchor. "
+        "Preserve the camera framing and the fixed scenery shared by the reference images. "
+        "If there is a clock in the shot, keep its display blank. "
+        + ("Boss enters at the scripted moment and must be clearly visible before his first line. " if appearance else "")
         + NO_TEXT + " "
         + SHORT_FORMATS[BOSS].motion + "\n" + " ".join(filter(None, (opening, appearance))) + performance_cue
         + ("\nHonor these approved visual corrections at their specified moments:\n" + frame_notes if frame_notes else "")
+        + ("\nVisible actions on the editing timeline. Audio and clock digits are added separately:\n" + cue_notes if cue_notes else "")
     )
     raw = await _generate_video_bytes_with_high_load_retry(
         update, prompt=prompt, model="kling_3_0", duration_sec=duration,
         start_image=start_image, end_image=end_image,
         quality="1080", aspect_ratio="9:16", audio_enabled=False, syntax_provider=SYNTAX_PROVIDER_KLING,
-        **({"kling_keyframes": True} if end_image else {}),
+        kling_keyframes=True,
     )
     path = _target(data, ".mp4")
     path.write_bytes(raw)
@@ -522,7 +555,7 @@ def _replace_scene(data, body):
             if key in previous:
                 replacement[key] = previous[key]
     if frame_actions(replacement) == frame_actions(previous) and previous.get("image"):
-        for key in ("image", "frame_policy", "boss_image", "clock_position", "frame_feedback", "frame_prompt_overrides"):
+        for key in ("image", "frame_policy", "boss_image", "end_image", "clock_position", "frame_feedback", "frame_prompt_overrides"):
             if key in previous:
                 replacement[key] = previous[key]
         if (replacement["turns"] == previous["turns"] and _duration(replacement) == _duration(previous)
@@ -572,10 +605,11 @@ async def _show(update, session):
         elif frame_actions(scene)[1]:
             note = "Кадр до появления Босса. «ОК» откроет отдельный кадр с Боссом."
         else:
-            note = "«ОК» запустит немой клип Kling."
-    elif stage == "boss_image":
-        with Path(scene["boss_image"]).open("rb") as file:
-            await update.message.reply_photo(photo=file, caption=f"{scene['title']} · Босс появился")
+            note = "«ОК» подготовит конечный кадр для Keyframes."
+    elif stage in {"boss_image", "end_image"}:
+        label = "Босс появился" if stage == "boss_image" else "Конечный кадр"
+        with Path(scene[stage]).open("rb") as file:
+            await update.message.reply_photo(photo=file, caption=f"{scene['title']} · {label}")
         note = "«ОК» запустит немой Kling 3.0 в режиме Keyframes с обоими кадрами."
     elif stage == "video":
         with Path(scene["video"]).open("rb") as file:
@@ -647,6 +681,9 @@ async def handle_text(update, session, text):
                 elif stage == "boss_image":
                     await _boss_image(data, scene)
                     scene.pop("video", None)
+                elif stage == "end_image":
+                    await _end_image(data, scene)
+                    scene.pop("video", None)
                 elif stage == "video":
                     await _video(update, data, scene)
                 elif stage == "edit":
@@ -685,13 +722,16 @@ async def handle_text(update, session, text):
                 if not _clean_opening(scene):
                     await _image(data, scene)
                 data["stage"] = "image"
-            elif stage in {"image", "boss_image"}:
+            elif stage in IMAGE_STAGES:
                 if not _clean_opening(scene):
                     raise ValueError("Этот кадр был сделан по старому промту. Сначала нажми «Перегенерировать».")
-                if stage == "image" and frame_actions(scene)[1]:
-                    if not scene.get("boss_image"):
-                        await _boss_image(data, scene)
-                    data["stage"] = "boss_image"
+                if stage == "image":
+                    has_boss_entrance = bool(frame_actions(scene)[1])
+                    end_key = "boss_image" if has_boss_entrance else "end_image"
+                    if not scene.get(end_key):
+                        generator = _boss_image if has_boss_entrance else _end_image
+                        await generator(data, scene)
+                    data["stage"] = end_key
                 else:
                     if not scene.get("video"):
                         await _video(update, data, scene)
@@ -716,7 +756,7 @@ async def handle_text(update, session, text):
             if len(lines) != len(scene["turns"]) or not all(lines):
                 raise ValueError("Пришли столько же реплик, по одной на строку.")
             scene["en_turns"] = lines
-        elif stage in {"scene", "translation", "audio", "image", "boss_image", "video", "edit"}:
+        elif stage in {"scene", "translation", "audio", "image", "boss_image", "end_image", "video", "edit"}:
             _replace_scene(data, await asyncio.to_thread(revise_scene, scene, text))
         else:
             raise ValueError("На этом шаге пришли музыку файлом или открой сцену по номеру.")

@@ -1202,7 +1202,9 @@ def _upload_syntax_kling_start_frame_sync(page: Any, start_image: bytes, *, time
 _KEYFRAME_FILES_SELECTOR = 'input[type="file"][x-ref="fileInput"][multiple]'
 
 
-def _wait_for_syntax_keyframes_count_sync(page: Any, expected: int | None, *, timeout: int) -> int:
+def _wait_for_syntax_keyframes_count_sync(
+    page: Any, expected: int | None, *, timeout: int, capacity: int | None = 2,
+) -> int:
     deadline = time.monotonic() + timeout / 1000
     count = None
     while time.monotonic() < deadline:
@@ -1210,44 +1212,51 @@ def _wait_for_syntax_keyframes_count_sync(page: Any, expected: int | None, *, ti
             "selector => document.querySelector(selector)?.parentElement?.parentElement?.innerText",
             _KEYFRAME_FILES_SELECTOR,
         )
-        match = re.search(r"(?:Загружено|Uploaded)\s*\(\s*([012])\s*/\s*2\s*\)", text or "", re.I)
-        if match:
+        match = re.search(r"(?:Загружено|Uploaded)\s*\(\s*(\d+)\s*/\s*([1-9]\d*)\s*\)", text or "", re.I)
+        if match and (capacity is None or int(match.group(2)) == capacity):
             count = int(match.group(1))
             if expected is None or count == expected:
                 return count
         page.wait_for_timeout(250)
-    raise TimeoutError(f"Syntax Kling Keyframes frame count: expected={expected}, observed={count}.")
+    raise TimeoutError(f"Syntax Kling frame count: expected={expected}, observed={count}.")
 
 
 def _wait_for_syntax_kling_keyframes_sync(page: Any) -> None:
     _wait_for_syntax_keyframes_count_sync(page, 2, timeout=60_000)
 
 
-def _wait_for_syntax_keyframes_selection_sync(page: Any) -> None:
+def _wait_for_syntax_kling_mode_sync(page: Any, mode: str) -> None:
     page.wait_for_function(
-        """() => {
-            const isKeyframes = text => String(text || '').trim().toLowerCase() === 'keyframes';
+        """mode => {
+            const isSelected = text => String(text || '').trim().toLowerCase() === mode.toLowerCase();
             return [...document.querySelectorAll('select, button, [role=combobox], [role=button]')].some(control => {
                 if (!control.getClientRects().length || control.closest('[role=listbox], [role=menu]')) return false;
-                if (control instanceof HTMLSelectElement) return isKeyframes(control.selectedOptions[0]?.text);
-                return control.getAttribute('aria-expanded') !== 'true' && isKeyframes(control.innerText);
+                if (control instanceof HTMLSelectElement) return isSelected(control.selectedOptions[0]?.text);
+                return control.getAttribute('aria-expanded') !== 'true' && isSelected(control.innerText);
             });
         }""",
+        arg=mode,
         timeout=15_000,
     )
 
 
-def _upload_syntax_kling_keyframes_sync(page: Any, start_image: bytes, end_image: bytes) -> None:
-    """Transfer the ordered pair and verify accepted previews before submitting."""
+def _syntax_kling_has_mode_selector_sync(page: Any) -> bool:
+    with contextlib.suppress(Exception):
+        return bool(page.get_by_text(re.compile(r"^(?:Режим|Mode)$", re.I)).first.is_visible())
+    return False
+
+
+def _upload_syntax_kling_frames_sync(page: Any, frames: list[tuple[str, bytes]], *, capacity: int | None) -> None:
+    """Transfer ordered frames and verify their accepted previews before submitting."""
     # The other file input belongs to the hidden Telegram media picker.
     field = page.locator(_KEYFRAME_FILES_SELECTOR)
     uploader = field.locator("xpath=../..")
-    count = _wait_for_syntax_keyframes_count_sync(page, None, timeout=30_000)
+    count = _wait_for_syntax_keyframes_count_sync(page, None, timeout=30_000, capacity=capacity)
     while count:
         uploader.get_by_role("button", name=re.compile(r"^(Remove file|Удалить файл)$", re.I)).first.click(timeout=10_000)
         count -= 1
-        _wait_for_syntax_keyframes_count_sync(page, count, timeout=15_000)
-    for expected, (role, image) in enumerate((("start", start_image), ("end", end_image)), 1):
+        _wait_for_syntax_keyframes_count_sync(page, count, timeout=15_000, capacity=capacity)
+    for expected, (role, image) in enumerate(frames, 1):
         extension = _image_ext(image)
         file = {"name": f"{role}_frame.{extension}",
                 "mimeType": "image/png" if extension == "png" else "image/jpeg", "buffer": image}
@@ -1255,17 +1264,21 @@ def _upload_syntax_kling_keyframes_sync(page: Any, start_image: bytes, end_image
         # finish before adding the second through the same form input.
         field.set_input_files(file, timeout=30_000)
         try:
-            _wait_for_syntax_keyframes_count_sync(page, expected, timeout=30_000)
+            _wait_for_syntax_keyframes_count_sync(page, expected, timeout=30_000, capacity=capacity)
         except TimeoutError:
             page.wait_for_load_state("networkidle", timeout=15_000)
-            observed = _wait_for_syntax_keyframes_count_sync(page, None, timeout=5_000)
+            observed = _wait_for_syntax_keyframes_count_sync(page, None, timeout=5_000, capacity=capacity)
             if observed == expected - 1:
                 logger.warning("syntax.kling.keyframe_upload_retry role=%s confirmed=%s", role, observed)
                 field.set_input_files(file, timeout=30_000)
-                _wait_for_syntax_keyframes_count_sync(page, expected, timeout=30_000)
+                _wait_for_syntax_keyframes_count_sync(page, expected, timeout=30_000, capacity=capacity)
             elif observed != expected:
                 raise
         logger.info("syntax.kling.keyframe_upload_confirmed role=%s count=%s", role, expected)
+
+
+def _upload_syntax_kling_keyframes_sync(page: Any, start_image: bytes, end_image: bytes) -> None:
+    _upload_syntax_kling_frames_sync(page, [("start", start_image), ("end", end_image)], capacity=2)
     logger.info("syntax.kling.keyframes_upload_confirmed")
 
 
@@ -1334,12 +1347,17 @@ def _fill_syntax_kling_webapp_sync(
                 with contextlib.suppress(Exception):
                     page.wait_for_load_state("networkidle", timeout=min(timeout_ms, 30_000))
 
+                mode = ""
                 try:
-                    if keyframe_end_image:
+                    if keyframe_end_image or _syntax_kling_has_mode_selector_sync(page):
+                        mode = "Keyframes" if keyframe_end_image else "Image to video"
                         _click_syntax_option_sync(page, "Модель", "Kling 3.0")
-                        _click_syntax_option_sync(page, "Режим", "Keyframes")
-                        _wait_for_syntax_keyframes_selection_sync(page)
-                        _upload_syntax_kling_keyframes_sync(page, start_image, keyframe_end_image)
+                        _click_syntax_option_sync(page, "Режим", mode)
+                        _wait_for_syntax_kling_mode_sync(page, mode)
+                        if keyframe_end_image:
+                            _upload_syntax_kling_keyframes_sync(page, start_image, keyframe_end_image)
+                        else:
+                            _upload_syntax_kling_frames_sync(page, [("start", start_image)], capacity=None)
                     else:
                         _upload_syntax_kling_start_frame_sync(page, start_image)
                     _fill_and_commit_syntax_kling_prompt_sync(page, prompt)
@@ -1349,7 +1367,7 @@ def _fill_syntax_kling_webapp_sync(
                     reason = _sanitize_syntax_webview_error(exc)
                     raise RuntimeError(f"Syntax Kling form did not become ready: {reason}.{suffix}") from exc
 
-                if not keyframe_end_image:
+                if not mode:
                     _click_syntax_option_sync(page, "Версия", version)
                     page.wait_for_timeout(1200)
                 _click_syntax_option_sync(page, "Качество", quality)
@@ -1360,9 +1378,14 @@ def _fill_syntax_kling_webapp_sync(
                 else:
                     _disable_syntax_audio_sync(page)
 
-                if keyframe_end_image:
-                    _wait_for_syntax_keyframes_selection_sync(page)
-                    _wait_for_syntax_kling_keyframes_sync(page)
+                if mode:
+                    _wait_for_syntax_kling_mode_sync(page, mode)
+                    if keyframe_end_image:
+                        _wait_for_syntax_kling_keyframes_sync(page)
+                    else:
+                        _wait_for_syntax_keyframes_count_sync(page, 1, timeout=30_000, capacity=None)
+                elif _syntax_kling_has_mode_selector_sync(page):
+                    raise RuntimeError("Kling mode controls appeared late. Image upload and mode could not be verified.")
                 try:
                     _click_syntax_kling_generate_sync(page)
                 except Exception as exc:

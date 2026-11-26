@@ -60,13 +60,17 @@ def test_scene_workflow_advances_only_after_preview_approval(monkeypatch):
     async def video(update, data, scene):
         scene["video"] = "generated.mp4"
 
+    async def end_image(data, scene):
+        scene["end_image"] = "end.png"
+
     async def edit(data, scene):
         scene["previews"] = {"ru": "edited.mp4"}
 
     monkeypatch.setattr(workflow, "_image", AsyncMock(side_effect=image))
+    monkeypatch.setattr(workflow, "_end_image", AsyncMock(side_effect=end_image))
     monkeypatch.setattr(workflow, "_video", AsyncMock(side_effect=video))
     monkeypatch.setattr(workflow, "_edit", AsyncMock(side_effect=edit))
-    for stage in ("scene", "image", "video", "edit"):
+    for stage in ("scene", "image", "end_image", "video", "edit"):
         asyncio.run(workflow.handle_text(update, session, "OK"))
         assert session[workflow.KEY]["stage"] == stage
         assert session[workflow.KEY]["index"] == 0
@@ -277,7 +281,7 @@ def test_speech_timing_can_be_changed_repeatedly_without_generating_media(monkey
     workflow._audio.assert_not_awaited()
 
 
-def test_boss_passes_both_images_only_for_the_appearance_scene(tmp_path, monkeypatch):
+def test_boss_passes_both_images_and_preserves_alarm_cues(tmp_path, monkeypatch):
     from app.handlers import handlers_media_core
 
     run = AsyncMock(return_value=b"video")
@@ -286,10 +290,10 @@ def test_boss_passes_both_images_only_for_the_appearance_scene(tmp_path, monkeyp
     paths = [tmp_path / name for name in ("before.png", "after.png")]
     for index, path in enumerate(paths):
         path.write_bytes(bytes([index + 1]))
-    pair, single = parse_script(PILOT_SCRIPT)[:2]
-    single["visual"] = "Герой выключает будильник."
-    for scene in (pair, single):
-        scene.update(image=str(paths[0]), boss_image=str(paths[1]))
+    pair, _, montage = parse_script(PILOT_SCRIPT)[:3]
+    pair.update(image=str(paths[0]), boss_image=str(paths[1]))
+    montage.update(image=str(paths[0]), end_image=str(paths[1]))
+    for scene in (pair, montage):
         asyncio.run(workflow._video(None, {}, scene))
 
     first, second = [call.kwargs for call in run.await_args_list]
@@ -299,4 +303,7 @@ def test_boss_passes_both_images_only_for_the_appearance_scene(tmp_path, monkeyp
     assert "When Boss speaks, animate the shadow's mouth while Hero listens with his lips closed." in first["prompt"]
     assert "When Hero speaks, animate Hero's mouth while Boss stays quiet" in first["prompt"]
     assert first["prompt"].index("1. Boss, the red-edged shadow speaks:") < first["prompt"].index("2. Hero, the human character speaks:")
-    assert second["end_image"] is None and "kling_keyframes" not in second
+    assert second["end_image"] == b"\x02" and second["kling_keyframes"] is True
+    assert "At 0s: the alarm clock visibly vibrates" in second["prompt"]
+    assert "At 2.3s: the alarm clock visibly vibrates" in second["prompt"]
+    assert "At 0.75s: the Hero presses the clock button" in second["prompt"]

@@ -1120,11 +1120,12 @@ def test_set_syntax_aspect_ratio_reports_visible_controls(monkeypatch):
         raise AssertionError("RuntimeError was not raised")
 
 
-@pytest.mark.parametrize("keyframes", [False, True])
-def test_fill_syntax_kling_webapp_does_not_set_aspect_ratio(monkeypatch, keyframes):
+@pytest.mark.parametrize("mode", ["legacy", "Image to video", "Keyframes", "mode reset"])
+def test_fill_syntax_kling_webapp_selects_the_mode_before_submitting(monkeypatch, mode):
     import app.syntax_telethon_fallback as telethon_fallback
 
     calls: list[tuple[str, str]] = []
+    keyframes = mode == "Keyframes"
 
     class _Fillable:
         value = "stale prompt"
@@ -1201,8 +1202,16 @@ def test_fill_syntax_kling_webapp_does_not_set_aspect_ratio(monkeypatch, keyfram
     )
     monkeypatch.setattr(telethon_fallback, "_enable_syntax_audio_sync", lambda *_args, **_kwargs: calls.append(("audio", "on")))
     monkeypatch.setattr(telethon_fallback, "_disable_syntax_audio_sync", lambda *_args: calls.append(("audio", "off")))
-    monkeypatch.setattr(telethon_fallback, "_wait_for_syntax_keyframes_selection_sync", lambda *_args: calls.append(("verify", "mode")))
+    monkeypatch.setattr(telethon_fallback, "_syntax_kling_has_mode_selector_sync", lambda _page: mode != "legacy")
+    def verify_mode(_page, name):
+        if mode == "mode reset" and ("verify", name) in calls:
+            raise TimeoutError("Syntx reset the mode")
+        calls.append(("verify", name))
+
+    monkeypatch.setattr(telethon_fallback, "_wait_for_syntax_kling_mode_sync", verify_mode)
     monkeypatch.setattr(telethon_fallback, "_wait_for_syntax_kling_keyframes_sync", lambda *_args: calls.append(("verify", "frames")))
+    monkeypatch.setattr(telethon_fallback, "_upload_syntax_kling_frames_sync", lambda *_args, **_kwargs: calls.append(("upload", "modern")))
+    monkeypatch.setattr(telethon_fallback, "_wait_for_syntax_keyframes_count_sync", lambda _page, count, **_: calls.append(("verify", str(count))))
     monkeypatch.setattr(
         telethon_fallback, "_upload_syntax_kling_keyframes_sync",
         lambda _page, start, end: calls.append(("pair", f"{len(start)}, {len(end)}")),
@@ -1215,7 +1224,7 @@ def test_fill_syntax_kling_webapp_does_not_set_aspect_ratio(monkeypatch, keyfram
         lambda _page, image, **_kwargs: calls.append(("upload", str(len(image)))),
     )
 
-    telethon_fallback._fill_syntax_kling_webapp_sync(
+    fill_args = dict(
         url="https://example.invalid/kling",
         prompt="prompt",
         start_image=b"\x89PNG\r\n\x1a\nframe",
@@ -1227,14 +1236,26 @@ def test_fill_syntax_kling_webapp_does_not_set_aspect_ratio(monkeypatch, keyfram
         timeout_sec=5,
         keyframe_end_image=b"ending frame" if keyframes else None,
     )
+    if mode == "mode reset":
+        with pytest.raises(TimeoutError, match="reset the mode"):
+            telethon_fallback._fill_syntax_kling_webapp_sync(**fill_args)
+        assert ("generate", "") not in calls
+        return
+    telethon_fallback._fill_syntax_kling_webapp_sync(**fill_args)
 
     if keyframes:
-        expected = [("Модель", "Kling 3.0"), ("Режим", "Keyframes"), ("verify", "mode"), ("pair", "13, 12")]
+        expected = [("Модель", "Kling 3.0"), ("Режим", "Keyframes"), ("verify", "Keyframes"), ("pair", "13, 12")]
         assert calls[calls.index(expected[0]):][:len(expected)] == expected
         assert calls[calls.index(("audio", "off")):][:4] == [
-            ("audio", "off"), ("verify", "mode"), ("verify", "frames"), ("generate", ""),
+            ("audio", "off"), ("verify", "Keyframes"), ("verify", "frames"), ("generate", ""),
         ]
         assert ("Версия", "3.0") not in calls
+    elif mode == "Image to video":
+        assert ("Режим", "Image to video") in calls
+        assert ("upload", "modern") in calls
+        assert calls[calls.index(("generate", "")) - 2:][:3] == [
+            ("verify", mode), ("verify", "1"), ("generate", ""),
+        ]
     else:
         assert ("Версия", "3.0") in calls
         assert ("upload", "13") in calls
