@@ -784,7 +784,7 @@ async def _edit(data, scene):
     for language in data["languages"]:
         path = _target(data, f"-edit-{language}.mp4")
         await asyncio.to_thread(
-            render_scene, scene, path, language=language, duration=_duration(scene),
+            render_scene, scene, path, language=language, duration=scene.get("video_duration") or _duration(scene),
             opening_title_style=data.get("opening_title_style") if data["index"] == 0 else None,
         )
         previews[language] = str(path)
