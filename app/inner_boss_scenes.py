@@ -189,28 +189,6 @@ def clock_overlays(scene: dict, duration: float) -> list[dict]:
     return cues
 
 
-APPEARANCE_LEAD = 0.8
-
-
-def join_appearance(opening: Path, clip: Path, output: Path, duration: int) -> None:
-    """Cut from the approved opening artwork to the clip's Boss keyframe."""
-    from .post_production import _media_duration, _resolve_ffmpeg, _run_ffmpeg
-
-    movement = duration - APPEARANCE_LEAD
-    actual = _media_duration(clip)
-    if not actual or not movement - 0.08 <= actual <= movement + 1.05:
-        raise ValueError("Длина клипа с Боссом не соответствует утверждённому монтажу.")
-    filters = ("scale=1080:1920:force_original_aspect_ratio=decrease,"
-               "pad=1080:1920:(ow-iw)/2:(oh-ih)/2,setsar=1,fps=30,format=yuv420p")
-    _run_ffmpeg([
-        _resolve_ffmpeg(), "-y", "-loop", "1", "-framerate", "30", "-i", str(opening), "-i", str(clip),
-        "-filter_complex",
-        f"[0:v]{filters},trim=duration={APPEARANCE_LEAD},setpts=PTS-STARTPTS[a];"
-        f"[1:v]{filters},trim=duration={movement},setpts=PTS-STARTPTS[b];[a][b]concat=n=2:v=1:a=0[v]",
-        "-map", "[v]", "-an", "-c:v", "libx264", "-preset", "fast", "-movflags", "+faststart", str(output),
-    ], stage="inner_boss_appearance")
-
-
 def effect_events(scene: dict, duration: float, speech_end: float) -> list[tuple[str, float, float]]:
     events = []
     for cue in scene["fx"]:

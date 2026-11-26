@@ -1120,7 +1120,8 @@ def test_set_syntax_aspect_ratio_reports_visible_controls(monkeypatch):
         raise AssertionError("RuntimeError was not raised")
 
 
-def test_fill_syntax_kling_webapp_does_not_set_aspect_ratio(monkeypatch):
+@pytest.mark.parametrize("keyframes", [False, True])
+def test_fill_syntax_kling_webapp_does_not_set_aspect_ratio(monkeypatch, keyframes):
     import app.syntax_telethon_fallback as telethon_fallback
 
     calls: list[tuple[str, str]] = []
@@ -1199,6 +1200,13 @@ def test_fill_syntax_kling_webapp_does_not_set_aspect_ratio(monkeypatch):
         lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("Kling must not set aspect ratio")),
     )
     monkeypatch.setattr(telethon_fallback, "_enable_syntax_audio_sync", lambda *_args, **_kwargs: calls.append(("audio", "on")))
+    monkeypatch.setattr(telethon_fallback, "_disable_syntax_audio_sync", lambda *_args: calls.append(("audio", "off")))
+    monkeypatch.setattr(telethon_fallback, "_wait_for_syntax_keyframes_selection_sync", lambda *_args: calls.append(("verify", "mode")))
+    monkeypatch.setattr(telethon_fallback, "_wait_for_syntax_kling_keyframes_sync", lambda *_args: calls.append(("verify", "frames")))
+    monkeypatch.setattr(
+        telethon_fallback, "_upload_syntax_kling_keyframes_sync",
+        lambda _page, start, end: calls.append(("pair", f"{len(start)}, {len(end)}")),
+    )
     monkeypatch.setattr(telethon_fallback, "_click_syntax_kling_generate_sync", lambda *_args, **_kwargs: calls.append(("generate", "")))
     monkeypatch.setattr(telethon_fallback, "_wait_for_syntax_kling_form_ready_sync", lambda *_args, **_kwargs: None)
     monkeypatch.setattr(
@@ -1215,17 +1223,26 @@ def test_fill_syntax_kling_webapp_does_not_set_aspect_ratio(monkeypatch):
         quality="720",
         aspect_ratio="16:9",
         version="3.0",
-        audio_enabled=True,
+        audio_enabled=not keyframes,
         timeout_sec=5,
+        keyframe_end_image=b"ending frame" if keyframes else None,
     )
 
-    assert ("Версия", "3.0") in calls
-    assert ("upload", "13") in calls
+    if keyframes:
+        expected = [("Модель", "Kling 3.0"), ("Режим", "Keyframes"), ("verify", "mode"), ("pair", "13, 12")]
+        assert calls[calls.index(expected[0]):][:len(expected)] == expected
+        assert calls[calls.index(("audio", "off")):][:4] == [
+            ("audio", "off"), ("verify", "mode"), ("verify", "frames"), ("generate", ""),
+        ]
+        assert ("Версия", "3.0") not in calls
+    else:
+        assert ("Версия", "3.0") in calls
+        assert ("upload", "13") in calls
+        assert ("audio", "on") in calls
     assert ("fill", "prompt") in calls
     assert ("commit", "blur") in calls
     assert ("Качество", "720") in calls
     assert ("Длительность", "3 сек") in calls
-    assert ("audio", "on") in calls
     assert ("generate", "") in calls
 
 
@@ -2362,3 +2379,28 @@ def test_veo_retries_same_form_until_real_confirmation_or_three_failures(monkeyp
 def test_settings_and_button_processing_are_not_generation_confirmation(text):
     import app.syntax_telethon_fallback as adapter
     assert adapter._syntax_kling_submission_state_after_change("Настройки Veo", text) == ""
+
+
+@pytest.mark.parametrize("slot_count", [1, 2])
+def test_kling_keyframes_upload_in_order_and_require_confirmation(slot_count):
+    from unittest.mock import MagicMock
+
+    import app.syntax_telethon_fallback as telethon_fallback
+
+    page = MagicMock()
+    inputs = page.locator.return_value
+    inputs.count.return_value = slot_count
+    fields = [MagicMock(), MagicMock()]
+    inputs.nth.side_effect = fields.__getitem__
+    start = b"\x89PNG\r\n\x1a\nstart"
+    end = b"\x89PNG\r\n\x1a\nend"
+
+    telethon_fallback._upload_syntax_kling_keyframes_sync(page, start, end)
+    if slot_count == 1:
+        files = inputs.first.set_input_files.call_args.args[0]
+    else:
+        files = [field.set_input_files.call_args.args[0] for field in fields]
+    assert [file["buffer"] for file in files] == [start, end]
+    assert [file["name"] for file in files] == ["start_frame.png", "end_frame.png"]
+    assert page.wait_for_function.call_args.kwargs["arg"] == {"minimum": 2}
+    assert page.wait_for_function.call_count == slot_count + 1

@@ -48,6 +48,7 @@ def try_generate_via_syntax(
     syntax_provider: str | None = None,
     aspect_ratio: str = "9:16",
     audio_enabled: bool = True,
+    kling_keyframes: bool = False,
 ) -> FallbackResult:
     """Try generating video via Syntax Telegram fallback channel."""
     with media_generation_slot("video"):
@@ -62,6 +63,7 @@ def try_generate_via_syntax(
             syntax_provider=syntax_provider,
             aspect_ratio=aspect_ratio,
             audio_enabled=audio_enabled,
+            **({"kling_keyframes": True} if kling_keyframes else {}),
         )
 
 

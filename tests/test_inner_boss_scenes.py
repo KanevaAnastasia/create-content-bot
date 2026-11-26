@@ -5,7 +5,7 @@ from unittest.mock import AsyncMock
 import pytest
 
 from app.handlers import inner_boss_workflow as workflow
-from app.inner_boss_scenes import PILOT_SCRIPT, clock_overlays, effect_events, frame_actions, join_appearance, parse_script, render_master, render_scene
+from app.inner_boss_scenes import PILOT_SCRIPT, clock_overlays, effect_events, frame_actions, parse_script, render_master, render_scene
 from app.session_store import _chat_session_cache_payload
 
 
@@ -141,26 +141,23 @@ def test_appearance_frame_requires_its_own_approval(monkeypatch):
     workflow._video.assert_awaited_once()
 
 
-def test_join_appearance_uses_both_frames_without_overbuying(tmp_path):
-    import subprocess
+def test_boss_passes_both_images_only_for_the_appearance_scene(tmp_path, monkeypatch):
+    from app.handlers import handlers_media_core
 
-    from PIL import Image
-    from app.post_production import _media_duration, _resolve_ffmpeg
+    run = AsyncMock(return_value=b"video")
+    monkeypatch.setattr(handlers_media_core, "_generate_video_bytes_with_high_load_retry", run)
+    monkeypatch.setattr(workflow, "_target", lambda _, suffix: tmp_path / f"render{suffix}")
+    paths = [tmp_path / name for name in ("before.png", "after.png")]
+    for index, path in enumerate(paths):
+        path.write_bytes(bytes([index + 1]))
+    pair, single = parse_script(PILOT_SCRIPT)[:2]
+    single["visual"] = "Герой выключает будильник."
+    for scene in (pair, single):
+        scene.update(image=str(paths[0]), boss_image=str(paths[1]))
+        asyncio.run(workflow._video(None, {}, scene))
 
-    ffmpeg = _resolve_ffmpeg()
-    if not ffmpeg:
-        pytest.skip("ffmpeg is unavailable")
-    opening = tmp_path / "before.png"
-    Image.new("RGB", (180, 320), "blue").save(opening)
-    clip, output = tmp_path / "after.mp4", tmp_path / "joined.mp4"
-    subprocess.run([ffmpeg, "-v", "error", "-f", "lavfi", "-i", "color=red:s=180x320:d=3:r=30",
-                    "-c:v", "libx264", str(clip)], check=True)
-    join_appearance(opening, clip, output, 3)
-    assert _media_duration(output) == pytest.approx(3, abs=0.06)
-    for second, expected in ((0.2, "blue"), (1.2, "red")):
-        sample = subprocess.check_output([
-            ffmpeg, "-v", "error", "-ss", str(second), "-i", str(output), "-frames:v", "1",
-            "-vf", "scale=2:2", "-f", "rawvideo", "-pix_fmt", "rgb24", "-",
-        ])
-        r, _, b = sample[:3]
-        assert (b > r) == (expected == "blue")
+    first, second = [call.kwargs for call in run.await_args_list]
+    assert first["start_image"] == b"\x01" and first["end_image"] == b"\x02"
+    assert first["kling_keyframes"] is True and first["audio_enabled"] is False
+    assert first["duration_sec"] == 8 and "Keyframes" in first["prompt"]
+    assert second["end_image"] is None and "kling_keyframes" not in second

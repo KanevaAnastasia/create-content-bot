@@ -14,7 +14,7 @@ from telegram import ReplyKeyboardMarkup
 
 from ..discipline_modes import BOSS, BOSS_VOICE_ID, MALE_VOICE_ID, SHORT_FORMATS
 from ..inner_boss_scenes import (
-    APPEARANCE_LEAD, DIRECTIVE, PILOT_SCRIPT, SCRIPT_HEADER, frame_actions, join_appearance,
+    DIRECTIVE, PILOT_SCRIPT, SCRIPT_HEADER, frame_actions,
     parse_script, render_master, render_scene, speech_lead,
 )
 
@@ -269,8 +269,8 @@ async def _video(update, data, scene):
 
     duration = _duration(scene)
     opening, appearance = frame_actions(scene)
-    seconds = max(3, math.ceil(duration - APPEARANCE_LEAD)) if appearance else duration
-    source = scene["boss_image"] if appearance else scene["image"]
+    start_image = Path(scene["image"]).read_bytes()
+    end_image = Path(scene["boss_image"]).read_bytes() if appearance else None
     dialogue = "\n".join(f"{turn['speaker']}: {turn['text']}" for turn in scene["turns"])
     performance_cue = (
         "\nOff-screen dialogue for performance timing only. React with gaze and restrained expressions in sequence. "
@@ -278,23 +278,24 @@ async def _video(update, data, scene):
         if dialogue else ""
     )
     prompt = (
-        f"{seconds}-second Kling 3.0 image-to-video shot. No audio. 9:16. "
-        "Animate the supplied start image, matching all identities and materials. "
-        + ("Boss is already present in the first frame. Preserve his silhouette and framing. " if appearance else "")
+        f"{duration}-second Kling 3.0 {'Keyframes' if appearance else 'image-to-video'} shot. No audio. 9:16. "
+        "Animate the supplied artwork, matching all identities and materials. "
+        + ("Use the first image as the opening state and the second as the ending anchor. "
+           "At the first sound cue the hero's eyelids open halfway and Boss appears early. "
+           "Keep the fixed camera, bed, clock, window and all other geometry pinned to their screen positions. "
+           "Hold the final Boss silhouette while the Hero reacts and settles. Keep the clock display blank. "
+           if appearance else "")
         + "Use gaze and facial reactions, no lip sync or audio. " + NO_TEXT + " "
-        + SHORT_FORMATS[BOSS].motion + "\n" + (appearance or opening) + performance_cue
+        + SHORT_FORMATS[BOSS].motion + "\n" + " ".join(filter(None, (opening, appearance))) + performance_cue
     )
     raw = await _generate_video_bytes_with_high_load_retry(
-        update, prompt=prompt, model="kling_3_0", duration_sec=seconds,
-        start_image=Path(source).read_bytes(), end_image=None,
+        update, prompt=prompt, model="kling_3_0", duration_sec=duration,
+        start_image=start_image, end_image=end_image,
         quality="1080", aspect_ratio="9:16", audio_enabled=False, syntax_provider=SYNTAX_PROVIDER_KLING,
+        **({"kling_keyframes": True} if end_image else {}),
     )
     path = _target(data, ".mp4")
     path.write_bytes(raw)
-    if appearance:
-        joined = _target(data, "-appearance.mp4")
-        await asyncio.to_thread(join_appearance, Path(scene["image"]), path, joined, duration)
-        path = joined
     scene["video"] = str(path)
 
 
@@ -373,7 +374,7 @@ async def _show(update, session):
     elif stage == "boss_image":
         with Path(scene["boss_image"]).open("rb") as file:
             await update.message.reply_photo(photo=file, caption=f"{scene['title']} · Босс появился")
-        note = "«ОК» запустит немой Kling с этого кадра. Первый кадр бот добавит на монтаже."
+        note = "«ОК» запустит немой Kling 3.0 в режиме Keyframes с обоими кадрами."
     elif stage == "video":
         with Path(scene["video"]).open("rb") as file:
             await update.message.reply_video(video=file, caption=scene["title"])

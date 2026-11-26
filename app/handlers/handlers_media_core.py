@@ -1058,6 +1058,7 @@ async def _attempt_syntax_video_fallback_bytes(
     syntax_provider: str | None = None,
     aspect_ratio: str = "9:16",
     audio_enabled: bool = True,
+    kling_keyframes: bool = False,
 ) -> bytes | None:
     """Runs Syntax adapter in a worker thread; returns bytes or None."""
     if not _syntax_fallback_env_enabled():
@@ -1094,6 +1095,7 @@ async def _attempt_syntax_video_fallback_bytes(
                 syntax_provider=syntax_provider,
                 aspect_ratio=aspect_ratio,
                 audio_enabled=audio_enabled,
+                **({"kling_keyframes": True} if kling_keyframes else {}),
             ),
             timeout=lock_timeout_sec + timeout_sec + SYNTAX_FALLBACK_TIMEOUT_GRACE_SEC,
         )
@@ -1341,6 +1343,7 @@ async def _generate_video_bytes_with_high_load_retry(
     syntax_timeout_sec: int | None = None,
     syntax_acquire_timeout_sec: int | None = None,
     syntax_provider: str | None = None,
+    kling_keyframes: bool = False,
 ) -> bytes:
     """Generate video through the current policy: auto Syntax, manual Vertex fallback."""
 
@@ -1365,6 +1368,7 @@ async def _generate_video_bytes_with_high_load_retry(
             syntax_provider=syntax_provider or SYNTAX_PROVIDER_VEO,
             aspect_ratio=aspect_ratio,
             audio_enabled=audio_enabled,
+            **({"kling_keyframes": True} if kling_keyframes else {}),
         )
         if syntax_bytes is not None:
             _LAST_VIDEO_PROVIDER.set("telegram")

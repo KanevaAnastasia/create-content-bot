@@ -1199,6 +1199,65 @@ def _upload_syntax_kling_start_frame_sync(page: Any, start_image: bytes, *, time
     logger.info("syntax.kling.start_frame_transfer_completed bytes=%s extension=%s", len(start_image), extension)
 
 
+_KEYFRAME_UPLOAD_READY_JS = r"""({minimum}) => {
+    const match = /remove file|delete file|удалить|remove image|remove frame/i;
+    const visible = node => node && node.getClientRects().length > 0;
+    const inputs = [...document.querySelectorAll('input[type=file]')];
+    const scoped = inputs.map(input => input.closest('.syntx-field, .syntx-form-field') || input.parentElement);
+    const previews = new Set(scoped.flatMap(container =>
+        [...(container?.querySelectorAll('img') || [])].filter(img =>
+            visible(img) && img.naturalWidth > 32 && !/\.svg(?:$|\?)/i.test(img.getAttribute('src') || ''))
+    ));
+    const removes = [...document.querySelectorAll('button, [role=button]')].filter(node =>
+        visible(node) && match.test([node.textContent, node.title, node.getAttribute('aria-label')].join(' '))
+    );
+    return removes.length >= minimum || previews.size >= minimum;
+}"""
+
+
+def _wait_for_syntax_kling_keyframes_sync(page: Any, minimum: int = 2) -> None:
+    page.wait_for_function(_KEYFRAME_UPLOAD_READY_JS, arg={"minimum": minimum}, timeout=60_000)
+
+
+def _wait_for_syntax_keyframes_selection_sync(page: Any) -> None:
+    page.wait_for_function(
+        """() => {
+            const isKeyframes = text => String(text || '').trim().toLowerCase() === 'keyframes';
+            return [...document.querySelectorAll('select, button, [role=combobox], [role=button]')].some(control => {
+                if (!control.getClientRects().length || control.closest('[role=listbox], [role=menu]')) return false;
+                if (control instanceof HTMLSelectElement) return isKeyframes(control.selectedOptions[0]?.text);
+                return control.getAttribute('aria-expanded') !== 'true' && isKeyframes(control.innerText);
+            });
+        }""",
+        timeout=15_000,
+    )
+
+
+def _upload_syntax_kling_keyframes_sync(page: Any, start_image: bytes, end_image: bytes) -> None:
+    """Transfer the ordered pair and verify accepted previews before submitting."""
+    inputs = page.locator("input[type=file]")
+    page.wait_for_function(
+        """() => {
+            const fields = [...document.querySelectorAll('input[type=file]')];
+            return fields.length === 2 || (fields.length === 1 && fields[0].multiple);
+        }""",
+        timeout=15_000,
+    )
+    files = []
+    for role, image in (("start", start_image), ("end", end_image)):
+        extension = _image_ext(image)
+        files.append({"name": f"{role}_frame.{extension}",
+                      "mimeType": "image/png" if extension == "png" else "image/jpeg", "buffer": image})
+    if inputs.count() == 1:
+        inputs.first.set_input_files(files, timeout=30_000)
+        _wait_for_syntax_kling_keyframes_sync(page)
+    else:
+        for index, file in enumerate(files):
+            inputs.nth(index).set_input_files(file, timeout=30_000)
+            _wait_for_syntax_kling_keyframes_sync(page, index + 1)
+    logger.info("syntax.kling.keyframes_upload_confirmed")
+
+
 def _fill_syntax_kling_webapp_sync(
     *,
     url: str,
@@ -1210,6 +1269,7 @@ def _fill_syntax_kling_webapp_sync(
     version: str,
     audio_enabled: bool,
     timeout_sec: int,
+    keyframe_end_image: bytes | None = None,
 ) -> None:
     try:
         from playwright.sync_api import sync_playwright
@@ -1264,15 +1324,22 @@ def _fill_syntax_kling_webapp_sync(
                     page.wait_for_load_state("networkidle", timeout=min(timeout_ms, 30_000))
 
                 try:
-                    _upload_syntax_kling_start_frame_sync(page, start_image)
+                    if keyframe_end_image:
+                        _click_syntax_option_sync(page, "Модель", "Kling 3.0")
+                        _click_syntax_option_sync(page, "Режим", "Keyframes")
+                        _wait_for_syntax_keyframes_selection_sync(page)
+                        _upload_syntax_kling_keyframes_sync(page, start_image, keyframe_end_image)
+                    else:
+                        _upload_syntax_kling_start_frame_sync(page, start_image)
                     _fill_and_commit_syntax_kling_prompt_sync(page, prompt)
                 except Exception as exc:
                     controls = _syntax_visible_controls_snapshot_sync(page)
                     suffix = f" Visible controls: {controls}" if controls else ""
                     raise RuntimeError(f"Syntax Kling form did not become ready.{suffix}") from exc
 
-                _click_syntax_option_sync(page, "Версия", version)
-                page.wait_for_timeout(1200)
+                if not keyframe_end_image:
+                    _click_syntax_option_sync(page, "Версия", version)
+                    page.wait_for_timeout(1200)
                 _click_syntax_option_sync(page, "Качество", quality)
                 _set_syntax_kling_duration_sync(page, duration_sec)
 
@@ -1281,7 +1348,17 @@ def _fill_syntax_kling_webapp_sync(
                 else:
                     _disable_syntax_audio_sync(page)
 
-                _click_syntax_kling_generate_sync(page)
+                if keyframe_end_image:
+                    _wait_for_syntax_keyframes_selection_sync(page)
+                    _wait_for_syntax_kling_keyframes_sync(page)
+                try:
+                    _click_syntax_kling_generate_sync(page)
+                except Exception as exc:
+                    if keyframe_end_image and "ERR_SOCKET_NOT_CONNECTED" in str(exc):
+                        raise SyntaxSubmissionUnconfirmedError(
+                            "Connection to Syntx was lost during the Keyframes submission."
+                        ) from exc
+                    raise
                 return
             except Exception as exc:
                 last_error = exc
@@ -1727,6 +1804,7 @@ async def _run_syntax_kling_configure_flow(
     timeout: int,
     initial_last_info: str,
     audio_enabled: bool = True,
+    keyframe_end_image: bytes | None = None,
 ) -> Any:
     configure_message, configure_button = await _wait_for_syntax_configure_button(
         client,
@@ -1767,6 +1845,7 @@ async def _run_syntax_kling_configure_flow(
             version="3.0",
             audio_enabled=audio_enabled,
             timeout_sec=max(30, min(timeout, 180)),
+            **({"keyframe_end_image": keyframe_end_image} if keyframe_end_image else {}),
         )
     except SyntaxSubmissionUnconfirmedError as exc:
         # Generate may have reached Syntx even when the WebView never acknowledges it.
@@ -2624,8 +2703,11 @@ async def _run_fallback_async(
     syntax_provider: str | None,
     aspect_ratio: str = "9:16",
     audio_enabled: bool = True,
+    kling_keyframes: bool = False,
 ) -> Any:
-    _ = model
+    if kling_keyframes and (not end_image or _normalize_syntax_provider(syntax_provider, model) != SYNTAX_PROVIDER_KLING):
+        return _result(success=False, video_bytes=None, video_uri=None, attempt_id=attempt_id,
+                       provider_message="Kling Keyframes requires two approved frames and the Kling provider.")
     if TelegramClient is None:
         return _result(
             success=False,
@@ -2788,6 +2870,7 @@ async def _run_fallback_async(
                             timeout=timeout,
                             initial_last_info=last_info,
                             audio_enabled=audio_enabled,
+                            **({"keyframe_end_image": end_image} if kling_keyframes else {}),
                         )
 
                 start_file = io.BytesIO(start_image)
@@ -2796,7 +2879,7 @@ async def _run_fallback_async(
                 sent_ids.add(int(start_msg.id))
                 reply_anchor = int(start_msg.id)
                 if provider_kind == SYNTAX_PROVIDER_KLING:
-                    if end_image:
+                    if end_image and not kling_keyframes:
                         last_info = "Kling Syntax UI uses the start image only; end frame was not sent."
                     if prompt_shortened:
                         last_info = " ".join(
@@ -2825,6 +2908,7 @@ async def _run_fallback_async(
                         timeout=timeout,
                         initial_last_info=last_info,
                         audio_enabled=audio_enabled,
+                        **({"keyframe_end_image": end_image} if kling_keyframes else {}),
                     )
                 if end_image:
                     end_file = io.BytesIO(end_image)
@@ -3384,6 +3468,7 @@ def run_syntax_telethon_fallback(
     syntax_provider: str | None = None,
     aspect_ratio: str = "9:16",
     audio_enabled: bool = True,
+    kling_keyframes: bool = False,
 ) -> Any:
     """Run Syntax fallback transport and return unified fallback result."""
     attempt_id = uuid4().hex
@@ -3400,6 +3485,7 @@ def run_syntax_telethon_fallback(
             syntax_provider=syntax_provider,
             aspect_ratio=aspect_ratio,
             audio_enabled=audio_enabled,
+            **({"kling_keyframes": True} if kling_keyframes else {}),
         )
     )
 
