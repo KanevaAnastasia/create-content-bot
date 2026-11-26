@@ -670,14 +670,23 @@ def _video_dialogue_direction(scene):
     return f"{direction}\n{dialogue}"
 
 
+def _strip_video_prompt_boilerplate(text):
+    # Older overrides could have been copied from a prompt with these automatic instructions.
+    for sentence in (
+        "Do not add overlay text.",
+        "Continue directly from the supplied last frame of the previous scene, matching the initial pose and composition.",
+    ):
+        text = text.replace(sentence, "")
+    return text.strip()
+
+
 def _video_prompt(scene, duration, opening, appearance):
-    override = str(scene.get("video_prompt_override") or "").strip()
+    override = _strip_video_prompt_boilerplate(str(scene.get("video_prompt_override") or ""))
     performance_cue = _video_dialogue_direction(scene)
-    continuation = ("Continue directly from the supplied last frame of the previous scene, matching the initial pose and composition."
-                    if scene.get("continue_previous") else "")
     if override:
-        notes = [note for note in (continuation, performance_cue if scene["turns"] else "") if note and note not in override]
-        return "\n".join([override, *notes])
+        if not scene["turns"] or performance_cue in override:
+            return override
+        return f"{override}\n{performance_cue}"
     visible_cues = {
         "alarm": "the alarm clock visibly vibrates",
         "click": "the Hero presses the clock button",
@@ -689,7 +698,7 @@ def _video_prompt(scene, duration, opening, appearance):
     cue_notes = "\n".join(f"At {at:g}s: {action}." for at, action in cues)
     entrance = "Boss enters at the scripted moment and is visible before his first line." if appearance else ""
     return "\n".join(filter(None, (
-        "Keep the framing and characters consistent with the supplied artwork. Do not add overlay text.", continuation,
+        "Keep the framing and characters consistent with the supplied artwork.",
         " ".join(filter(None, (opening, appearance))), entrance, performance_cue, cue_notes,
     )))
 
@@ -721,8 +730,10 @@ async def _rewrite_video_prompt(scene, current, feedback):
         gemini_generate_sync,
         "Перепиши промпт движения только этого кадра по замечанию пользователя. "
         "Сохрани действие, таймкоды, ракурс и роли говорящих из сценария, кроме явно изменённых деталей движения. "
-        "Не добавляй реплики, технастройки или текст в кадре. Верни только готовый видеопромпт.\n"
-        f"Текущий промпт:\n{current}\nПравка:\n{feedback}",
+        "Оставь указания для движения, камеры и игры персонажей. Убери инструкции о титрах, "
+        "этапе монтажа и связи с предыдущей сценой. Не добавляй новые реплики или технастройки. "
+        "Верни только готовый видеопромпт.\n"
+        f"Текущий промпт:\n{_strip_video_prompt_boilerplate(current)}\nПравка:\n{feedback}",
         model_profile=GEMINI_MODEL_PROFILE_EDIT,
     )
     return str(result or "").strip()

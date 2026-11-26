@@ -498,7 +498,8 @@ def test_continuation_button_keeps_exact_last_frame_and_uses_single_image(tmp_pa
     asyncio.run(workflow.handle_text(update, session, "ОК"))
     request = generate.await_args.kwargs
     assert request["start_image"] == b"exact frame" and request["end_image"] is None
-    assert "kling_keyframes" not in request and "Continue directly" in request["prompt"]
+    assert "kling_keyframes" not in request
+    assert "Continue directly" not in request["prompt"] and "overlay text" not in request["prompt"]
 
 
 def test_motion_feedback_after_video_keeps_scene_and_approved_start_frame(monkeypatch):
@@ -534,6 +535,12 @@ def test_scene_video_prompt_override_is_sent_without_boilerplate():
     scene = parse_script(PILOT_SCRIPT)[2]
     prompt = "At 0s: the alarm clock visibly vibrates with 06:00 on its display.\nAt 0.75s: the Hero presses the clock button."
     scene["video_prompt_override"] = prompt
+    assert workflow._video_prompt(scene, 7, *frame_actions(scene)) == prompt
+    scene["video_prompt_override"] = (
+        "Do not add overlay text.\n"
+        "Continue directly from the supplied last frame of the previous scene, matching the initial pose and composition.\n"
+        + prompt
+    )
     assert workflow._video_prompt(scene, 7, *frame_actions(scene)) == prompt
 
 
