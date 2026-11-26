@@ -25,6 +25,7 @@ FRAME_POLICY = 3
 IMAGE_STAGES = {"image", "boss_image"}
 SPEECH_TIMING_BUTTON = "Сдвинуть озвучку"
 SPEECH_TIMING_HINT = "Укажи, когда должна начаться речь от начала сцены. Например: 4,4 или 00:04.4."
+VIDEO_PROMPT_BUTTON = "Видеопромпт"
 NO_TEXT = (
     "All artwork surfaces must be completely unmarked. No letters, numbers, digits, speech bubbles, "
     "captions, pictograms or watermarks. Clock screens and papers are solid blank shapes. "
@@ -56,8 +57,15 @@ def keyboard(session):
         rows = [["ОК"], ["Показать сцену", "Сценарий"]]
         if stage in IMAGE_STAGES:
             rows.extend([["ИЗМЕНИТЬ"], ["ФИДБЕК"], ["ПЕРЕГЕНЕРИРОВАТЬ"]])
+        elif stage == "video_prompt":
+            rows.extend([["ПРОМПТ:", "ФИДБЕК"]])
+            review = data.get("video_prompt_review") or {}
+            if review.get("return_stage") or review.get("pending_input"):
+                rows.append(["Отмена"])
         elif stage in {"audio", "video", "edit"}:
             rows.append(["Перегенерировать"])
+            if stage in {"video", "edit"}:
+                rows.append([VIDEO_PROMPT_BUTTON])
             if stage == "edit" and data["scenes"][data["index"]].get("audio"):
                 rows.append([SPEECH_TIMING_BUTTON])
                 if data.get("speech_timing_input_scene") == data["index"]:
@@ -403,23 +411,36 @@ async def _handle_frame_feedback(update, session, text):
     return True
 
 
-def _video_prompt(scene, duration, opening, appearance):
-    override = str(scene.get("video_prompt_override") or "").strip()
-    if override:
-        return override
-
+def _video_dialogue_direction(scene):
+    turns = scene["turns"]
+    speakers = {turn["speaker"] for turn in turns}
+    if not speakers:
+        return "No one speaks. Keep mouths still throughout the shot."
     roles = {"boss": "Boss, the red-edged shadow", "hero": "Hero, the human character"}
     dialogue = "\n".join(
         f"{index}. {roles[turn['speaker']]} speaks: {turn['text']}"
-        for index, turn in enumerate(scene["turns"], 1)
+        for index, turn in enumerate(turns, 1)
     )
-    performance_cue = (
-        "Follow the dialogue in order. Only the current speaker moves their mouth. "
-        "When Boss speaks, animate the shadow's mouth while Hero listens with his lips closed. "
-        "When Hero speaks, animate Hero's mouth while Boss stays quiet with his mouth still. "
-        "Listeners react with their eyes or posture.\n" + dialogue
-        if dialogue else ""
-    )
+    if speakers == {"boss"}:
+        direction = "Only Boss speaks. The Hero keeps his lips closed throughout the shot and reacts with his eyes or posture."
+    elif speakers == {"hero"}:
+        direction = "Only the Hero speaks. If Boss is visible, his mouth stays still throughout the shot."
+    else:
+        direction = (
+            "Follow the dialogue in order. Only the current speaker moves their mouth. "
+            "When Boss speaks, animate the shadow's mouth while Hero listens with his lips closed. "
+            "When Hero speaks, animate Hero's mouth while Boss stays quiet with his mouth still."
+        )
+    return f"{direction}\n{dialogue}"
+
+
+def _video_prompt(scene, duration, opening, appearance):
+    override = str(scene.get("video_prompt_override") or "").strip()
+    performance_cue = _video_dialogue_direction(scene)
+    if override:
+        if not scene["turns"] or performance_cue in override:
+            return override
+        return f"{override}\n{performance_cue}"
     frame_notes = "\n".join(
         f"{label} correction (applies only to this frame): {scene['frame_feedback'][key]}"
         for key, label in (("image", "Opening frame"), ("boss_image", "Ending frame"))
@@ -441,7 +462,41 @@ def _video_prompt(scene, duration, opening, appearance):
     )))
 
 
-async def _video(update, data, scene):
+def _video_prompt_for_review(scene):
+    from .handlers_media_core import enforce_video_prompt_visual_source_rule
+    from ..syntax_telethon_fallback import _prepare_prompt_for_syntax, _syntax_prompt_max_chars
+
+    text = enforce_video_prompt_visual_source_rule(_video_prompt(scene, _duration(scene), *frame_actions(scene)))
+    limit = _syntax_prompt_max_chars()
+    if not text or len(text) > limit:
+        raise ValueError(f"Пришли текст видеопромпта длиной до {limit} символов.")
+    prepared = _prepare_prompt_for_syntax(text, max_len=limit + 32)
+    if prepared is None or len(prepared[0]) > limit:
+        raise ValueError(f"Пришли текст видеопромпта длиной до {limit} символов.")
+    return prepared[0]
+
+
+def _open_video_prompt(data, scene, *, return_stage=None):
+    text = _video_prompt_for_review(scene)
+    data["video_prompt_review"] = {"index": data["index"], "text": text, "return_stage": return_stage}
+    data["stage"] = "video_prompt"
+
+
+async def _rewrite_video_prompt(scene, current, feedback):
+    from ..llm_utils import GEMINI_MODEL_PROFILE_EDIT, gemini_generate_sync
+
+    result = await asyncio.to_thread(
+        gemini_generate_sync,
+        "Перепиши промпт движения только этого кадра по замечанию пользователя. "
+        "Сохрани действие, таймкоды, ракурс и роли говорящих из сценария, кроме явно изменённых деталей движения. "
+        "Не добавляй реплики, технастройки или текст в кадре. Верни только готовый видеопромпт.\n"
+        f"Текущий промпт:\n{current}\nПравка:\n{feedback}",
+        model_profile=GEMINI_MODEL_PROFILE_EDIT,
+    )
+    return str(result or "").strip()
+
+
+async def _video(update, data, scene, *, approved_prompt=None):
     from .handlers_media_core import _generate_video_bytes_with_high_load_retry
     from ..syntax_telethon_fallback import SYNTAX_PROVIDER_KLING
 
@@ -451,7 +506,7 @@ async def _video(update, data, scene):
     if appearance and not scene.get("boss_image"):
         raise ValueError("Для Kling Keyframes нужны два опорных кадра. Сначала открой и утверди конечный кадр.")
     end_image = Path(scene["boss_image"]).read_bytes() if appearance else None
-    prompt = _video_prompt(scene, duration, opening, appearance)
+    prompt = approved_prompt if approved_prompt is not None else _video_prompt(scene, duration, opening, appearance)
     raw = await _generate_video_bytes_with_high_load_retry(
         update, prompt=prompt, model="kling_3_0", duration_sec=duration,
         start_image=start_image, end_image=end_image,
@@ -546,7 +601,71 @@ def _replace_scene(data, body):
                     replacement[key] = previous[key]
     data["scenes"][index] = replacement
     data.pop("masters", None)
+    data.pop("video_prompt_review", None)
     data["stage"] = "scene"
+
+
+async def _handle_video_prompt_review(update, session, text):
+    from .handlers_media_scene import _extract_format_or_feedback, _extract_prompt_override
+
+    data = session[KEY]
+    stage = data["stage"]
+    low = text.strip().casefold()
+    scene = data["scenes"][data["index"]]
+    if stage in {"video", "edit"} and (low == VIDEO_PROMPT_BUTTON.casefold() or stage == "video" and low == "перегенерировать"):
+        _open_video_prompt(data, scene, return_stage=stage)
+    elif stage != "video_prompt" or low in {"показать сцену", "сценарий"} or re.fullmatch(r"сцена\s+\d+", low):
+        return False
+    else:
+        review = data.get("video_prompt_review") or {}
+        if low in {"ок", "ok"}:
+            if review.get("pending_input"):
+                await update.message.reply_text("Пришли правку или нажми «Отмена».", reply_markup=keyboard(session))
+                return True
+            current = _video_prompt_for_review(scene)
+            if review.get("index") != data["index"] or current != review.get("text"):
+                _open_video_prompt(data, scene, return_stage=review.get("return_stage"))
+            else:
+                await _video(update, data, scene, approved_prompt=review["text"])
+                scene["video_duration"] = _duration(scene)
+                scene.pop("previews", None)
+                scene.pop("approved", None)
+                data.pop("masters", None)
+                data.pop("video_prompt_review", None)
+                data["stage"] = "video"
+        elif low == "отмена":
+            if review.get("pending_input"):
+                review.pop("pending_input", None)
+            elif review.get("return_stage"):
+                data["stage"] = review["return_stage"]
+                data.pop("video_prompt_review", None)
+        elif low in {"перегенерировать", VIDEO_PROMPT_BUTTON.casefold()}:
+            pass
+        else:
+            replacement = _extract_prompt_override(text)
+            feedback = _extract_format_or_feedback(text)
+            if low.rstrip(":") in {"фидбек", "фидбэк", "feedback"}:
+                review["pending_input"] = "feedback"
+                _save(update, session)
+                await update.message.reply_text("Напиши, что изменить в видеопромпте.", reply_markup=keyboard(session))
+                return True
+            if replacement == "" or low in {"промпт", "промт"}:
+                review["pending_input"] = "replace"
+                _save(update, session)
+                await update.message.reply_text("Пришли полный текст видеопромпта.", reply_markup=keyboard(session))
+                return True
+            if feedback is not None or replacement is None and review.get("pending_input") == "feedback":
+                replacement = await _rewrite_video_prompt(scene, review.get("text") or _video_prompt_for_review(scene),
+                                                          feedback or text.strip())
+            replacement = text.strip() if replacement is None else replacement
+            if not replacement:
+                raise ValueError("Видеопромпт пустой. Пришли текст или комментарий.")
+            revised = dict(scene, video_prompt_override=replacement)
+            _open_video_prompt(data, revised, return_stage=review.get("return_stage"))
+            scene["video_prompt_override"] = replacement
+    _save(update, session)
+    await _show(update, session)
+    return True
 
 
 async def _show(update, session):
@@ -584,11 +703,18 @@ async def _show(update, session):
         elif frame_actions(scene)[1]:
             note = "Кадр до появления Босса. «ОК» откроет отдельный кадр с Боссом."
         else:
-            note = "Все персонажи уже в кадре. «ОК» запустит Kling в режиме Image to video."
+            note = "Все персонажи уже в кадре. «ОК» покажет видеопромпт или сохранённый клип."
     elif stage == "boss_image":
         with Path(scene["boss_image"]).open("rb") as file:
             await update.message.reply_photo(photo=file, caption=f"{scene['title']} · Босс появился")
-        note = "«ОК» запустит немой Kling 3.0 в режиме Keyframes с обоими кадрами."
+        note = "«ОК» покажет видеопромпт или сохранённый клип. Оба кадра передадутся в Kling Keyframes."
+    elif stage == "video_prompt":
+        review = data.get("video_prompt_review") or {}
+        prompt = review.get("text") or _video_prompt_for_review(scene)
+        message = f"{scene['title']} · видеопромпт\n\n{prompt}"
+        for offset in range(0, len(message), 3800):
+            await update.message.reply_text(message[offset:offset + 3800])
+        note = "«ОК» запустит Kling с этим текстом. «ПРОМПТ:» заменит текст целиком. «ФИДБЕК» позволит внести правку."
     elif stage == "video":
         with Path(scene["video"]).open("rb") as file:
             await update.message.reply_video(video=file, caption=scene["title"])
@@ -619,6 +745,8 @@ async def handle_text(update, session, text):
             return
         if await _handle_speech_timing(update, session, text):
             return
+        if await _handle_video_prompt_review(update, session, text):
+            return
         if await _handle_frame_feedback(update, session, text):
             return
         if low == "сценарий":
@@ -634,6 +762,7 @@ async def handle_text(update, session, text):
             if index > next_pending:
                 raise ValueError("Сначала утверди монтаж предыдущих сцен.")
             data["index"], data["stage"] = index, "scene"
+            data.pop("video_prompt_review", None)
         elif low == "показать сцену" and stage in {"music", "done"}:
             data["stage"] = "scene"
         elif low == "добавить музыку" and stage == "done":
@@ -664,8 +793,6 @@ async def handle_text(update, session, text):
                 elif stage == "boss_image":
                     await _boss_image(data, scene)
                     scene.pop("video", None)
-                elif stage == "video":
-                    await _video(update, data, scene)
                 elif stage == "edit":
                     await _edit(data, scene)
                 else:
@@ -710,10 +837,10 @@ async def handle_text(update, session, text):
                         await _boss_image(data, scene)
                     data["stage"] = "boss_image"
                 else:
-                    if not scene.get("video"):
-                        await _video(update, data, scene)
-                    scene["video_duration"] = _duration(scene)
-                    data["stage"] = "video"
+                    if scene.get("video"):
+                        data["stage"] = "video"
+                    else:
+                        _open_video_prompt(data, scene)
             elif stage == "video":
                 if not scene.get("previews"):
                     await _edit(data, scene)

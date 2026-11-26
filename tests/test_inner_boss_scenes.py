@@ -57,7 +57,8 @@ def test_scene_workflow_advances_only_after_preview_approval(monkeypatch):
         scene["image"] = "generated.png"
         scene["frame_policy"] = workflow.FRAME_POLICY
 
-    async def video(update, data, scene):
+    async def video(update, data, scene, *, approved_prompt):
+        assert approved_prompt
         scene["video"] = "generated.mp4"
 
     async def edit(data, scene):
@@ -66,7 +67,7 @@ def test_scene_workflow_advances_only_after_preview_approval(monkeypatch):
     monkeypatch.setattr(workflow, "_image", AsyncMock(side_effect=image))
     monkeypatch.setattr(workflow, "_video", AsyncMock(side_effect=video))
     monkeypatch.setattr(workflow, "_edit", AsyncMock(side_effect=edit))
-    for stage in ("scene", "image", "video", "edit"):
+    for stage in ("scene", "image", "video_prompt", "video", "edit"):
         asyncio.run(workflow.handle_text(update, session, "OK"))
         assert session[workflow.KEY]["stage"] == stage
         assert session[workflow.KEY]["index"] == 0
@@ -152,6 +153,9 @@ def test_appearance_frame_requires_its_own_approval(monkeypatch):
     monkeypatch.setattr(workflow, "_video", AsyncMock())
     asyncio.run(workflow.handle_text(update, session, "OK"))
     assert data["stage"] == "boss_image"
+    workflow._video.assert_not_called()
+    asyncio.run(workflow.handle_text(update, session, "OK"))
+    assert data["stage"] == "video_prompt"
     workflow._video.assert_not_called()
     asyncio.run(workflow.handle_text(update, session, "OK"))
     assert data["stage"] == "video"
@@ -313,3 +317,32 @@ def test_scene_video_prompt_override_is_sent_without_boilerplate():
     prompt = "At 0s: the alarm clock visibly vibrates with 06:00 on its display.\nAt 0.75s: the Hero presses the clock button."
     scene["video_prompt_override"] = prompt
     assert workflow._video_prompt(scene, 7, *frame_actions(scene)) == prompt
+
+
+def test_boss_only_retake_requires_approval_of_the_new_prompt(monkeypatch):
+    session = {}
+    workflow.initialize(session, "Сцена 1. Зеркало\nГерой смотрит в зеркало. Там появляется Босс.\nБосс: «Ну и куда ты в них сходил?»")
+    data = session[workflow.KEY]
+    data["stage"] = "video"
+    scene = data["scenes"][0]
+    scene.update(video="old.mp4", image="before.png", boss_image="after.png")
+    update = SimpleNamespace(message=SimpleNamespace(reply_text=AsyncMock()))
+    monkeypatch.setattr(workflow, "_save", lambda *_: None)
+    monkeypatch.setattr(workflow, "_show", AsyncMock())
+    monkeypatch.setattr(workflow, "_video", AsyncMock())
+
+    asyncio.run(workflow.handle_text(update, session, "Перегенерировать"))
+    assert data["stage"] == "video_prompt"
+    text = data["video_prompt_review"]["text"]
+    assert "Only Boss speaks." in text and "The Hero keeps his lips closed" in text
+    assert "When Hero speaks" not in text
+    asyncio.run(workflow.handle_text(update, session, "ПРОМПТ:"))
+    asyncio.run(workflow.handle_text(update, session, "ОК"))
+    workflow._video.assert_not_awaited()
+    asyncio.run(workflow.handle_text(update, session, "Камера неподвижна. Герой слушает."))
+    updated = data["video_prompt_review"]["text"]
+    assert updated.startswith("Камера неподвижна.") and "Only Boss speaks." in updated
+    assert scene["video"] == "old.mp4"
+    asyncio.run(workflow.handle_text(update, session, "ОК"))
+    workflow._video.assert_awaited_once_with(update, data, scene, approved_prompt=updated)
+    assert data["stage"] == "video"
