@@ -2366,6 +2366,13 @@ def _write_burned_subtitle_ass(
             size = max(1, min(size, round(size * layout.width * 0.80 / max(1.0, line_width))))
         x = round(layout.width * float(cue.get("anchor_x_ratio", 0.5)))
         y = round(layout.height * float(cue.get("anchor_ratio", 0.28)))
+        if cue.get("yellow_script"):
+            from .editorial_approved import H, W
+            from .editorial_font_selection import yellow_script_title
+
+            color, drawing, title_width = yellow_script_title(cue["language"], cue["text"])
+            scale_x, scale_y = layout.width / W, layout.height / H
+            x -= round(title_width * scale_x / 2)
         accent_font, accent_colour, style_tags = STORY_WORD_SYNC_FONT_NAME, "&HAAE8FF&", ""
         alignment = 8
         if cue.get("clock_display"):
@@ -2383,6 +2390,12 @@ def _write_burned_subtitle_ass(
             if frame_end <= frame_start:
                 break
             at = f"{{\\an{alignment}\\pos({x + dx * shift},{y + dy * shift})\\fn{accent_font}\\fs{size}\\b1\\c{accent_colour}{style_tags}}}"
+            if cue.get("yellow_script"):
+                at = (
+                    f"{{\\an7\\pos({x + dx * shift},{y + dy * shift})\\fscx{scale_x * 100:.5f}"
+                    f"\\fscy{scale_y * 100:.5f}\\bord0\\shad1\\1c{_ass_colour_from_hex(color)}&\\1a&H00&\\p1}}"
+                )
+                text = drawing + r"{\p0}"
             lines.append(
                 f"Dialogue: 4,{_ass_timestamp(frame_start)},{_ass_timestamp(frame_end)},"
                 f"{SUBTITLE_STYLE_NAME},,0,0,0,,{at}{text}"

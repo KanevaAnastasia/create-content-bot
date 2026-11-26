@@ -14,8 +14,8 @@ from telegram import ReplyKeyboardMarkup
 
 from ..discipline_modes import BOSS, BOSS_VOICE_ID, MALE_VOICE_ID, SHORT_FORMATS
 from ..inner_boss_scenes import (
-    DIRECTIVE, PILOT_SCRIPT, SCRIPT_HEADER, effect_events, frame_actions,
-    parse_script, render_master, render_scene, speech_lead,
+    DIRECTIVE, PILOT_SCRIPT, SCRIPT_HEADER, TITLE_POSITION_HINT, TITLE_POSITION_LABEL, effect_events, frame_actions,
+    parse_script, render_master, render_scene, speech_lead, title_position,
 )
 
 STATE = "waiting_inner_boss_scene_workflow"
@@ -598,6 +598,26 @@ def _replace_scene(data, body):
     data["stage"] = "scene"
 
 
+async def _handle_title_position(update, session, text):
+    data = session[KEY]
+    directive = DIRECTIVE.fullmatch(text.strip())
+    if data["stage"] != "edit" or not directive or directive[1].casefold() != TITLE_POSITION_LABEL:
+        return False
+    index = data["index"]
+    scene = data["scenes"][index]
+    if scene.get("title_style") != "2":
+        raise ValueError("В этой сцене нет титра в жёлтом стиле 2.")
+    position = title_position(directive[2], _duration(scene))
+    revised = dict(scene, body=revise_scene(scene, text), title_position=position)
+    await _edit(data, revised)
+    revised.pop("approved", None)
+    data["scenes"][index] = revised
+    data.pop("masters", None)
+    _save(update, session)
+    await _show(update, session)
+    return True
+
+
 async def _handle_video_prompt_review(update, session, text):
     from .handlers_media_scene import _extract_format_or_feedback, _extract_prompt_override
 
@@ -717,6 +737,8 @@ async def _show(update, session):
             with Path(preview).open("rb") as file:
                 await update.message.reply_video(video=file, caption=f"{scene['title']} · монтаж {lang.upper()}")
         note = "«ОК» закрепит монтаж и откроет следующую сцену. Для правки пришли новый текст сцены."
+        if scene.get("title_style") == "2":
+            note += "\n" + TITLE_POSITION_HINT
         if scene.get("audio"):
             note += "\n«Сдвинуть озвучку» задаёт время начала речи в этой сцене."
             if scene.get("speech_start_sec") is not None:
@@ -737,6 +759,8 @@ async def handle_text(update, session, text):
             await _show(update, session)
             return
         if await _handle_speech_timing(update, session, text):
+            return
+        if await _handle_title_position(update, session, text):
             return
         if await _handle_video_prompt_review(update, session, text):
             return

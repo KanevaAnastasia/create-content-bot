@@ -7,7 +7,7 @@ import pytest
 from app.handlers import inner_boss_workflow as workflow
 from app.inner_boss_scenes import (
     PILOT_SCRIPT, clock_overlays, day_overlay, dialogue_caption_cues, effect_events, frame_actions, parse_script, render_master,
-    render_scene,
+    render_scene, title_overlays,
 )
 from app.session_store import _chat_session_cache_payload
 
@@ -43,6 +43,39 @@ def test_montage_only_correction_keeps_approved_paid_assets():
     assert revised["fx_times"]["click"] == [6]
     assert data["scenes"][1] is next_scene
     assert _chat_session_cache_payload(session)[workflow.KEY]["scenes"][0]["video"] == old["video"]
+
+
+def test_scene_five_title_is_bilingual_and_hero_stays_silent():
+    scene = parse_script(PILOT_SCRIPT)[4]
+    assert scene["turns"] == [{"speaker": "boss", "text": "Ты просто ленивый!"}]
+    assert "Only Boss speaks." in workflow._video_dialogue_direction(scene)
+    assert "повторяешь" not in " ".join(frame_actions(scene))
+    ru, = title_overlays(scene, 9, "ru")
+    en, = title_overlays(scene, 9, "en")
+    assert ru["text"] == "Лень это не то, кто ты.\nЭто то, что ты повторяешь"
+    assert en["text"] == "Laziness isn’t who you are.\nIt’s what you keep doing."
+    assert ru["yellow_script"] and ru["shake"] and ru["start_sec"] == en["start_sec"] == 3
+    assert ru["anchor_ratio"] == pytest.approx(0.063)
+
+
+def test_moving_title_during_edit_reuses_picture_and_audio(monkeypatch):
+    session = {}
+    workflow.initialize(session, PILOT_SCRIPT)
+    data = session[workflow.KEY]
+    data.update(index=4, stage="edit", masters={"ru": "old.mp4"})
+    scene = data["scenes"][4]
+    scene.update(video="original.mp4", image="original.png", audio={"ru": {"duration": 1}}, approved=True)
+    monkeypatch.setattr(workflow, "_save", lambda *_: None)
+    monkeypatch.setattr(workflow, "_show", AsyncMock())
+    edit = AsyncMock()
+    monkeypatch.setattr(workflow, "_edit", edit)
+    assert asyncio.run(workflow._handle_title_position(None, session, "Позиция титра: 4,25 48 12"))
+    revised = data["scenes"][4]
+    edit.assert_awaited_once_with(data, revised)
+    assert data["stage"] == "edit" and "masters" not in data and "approved" not in revised
+    assert all(revised[key] == scene[key] for key in ("video", "image", "audio", "turns"))
+    ru, = title_overlays(revised, 9, "ru")
+    assert ru["start_sec"] == 4.25 and ru["anchor_x_ratio"] == 0.48 and ru["anchor_ratio"] == 0.12
 
 
 def test_scene_workflow_advances_only_after_preview_approval(monkeypatch):

@@ -192,3 +192,25 @@ def drawings(sid, lang, parts, role, visible, foreground=False, hierarchy=False)
         (color, rectangles(mask))
         for color, mask in layers(sid, lang, parts, role, visible, foreground, hierarchy)
     )
+
+
+@lru_cache(maxsize=32)
+def yellow_script_title(language, text):
+    """Lay out the approved style 2 accent as a standalone montage title."""
+    style = selection()["styles"]["2"]
+    key = style["fonts"][0]
+    parts = tuple((key, line.strip()) for line in text.splitlines() if line.strip())
+    if not parts:
+        return "", "", 0
+    shaped = _shaped_parts(parts, False)
+    masks = []
+    for part in parts:
+        mask = _alpha(shaped[part][-1])
+        masks.append(mask.crop(mask.getbbox() or (0, 0, 1, 1)))
+    width = 510
+    scale = min(width / max(mask.width for mask in masks), 47 / max(mask.height for mask in masks))
+    canvas = Image.new("L", (width, 56 * len(masks)))
+    for index, mask in enumerate(masks):
+        size = (max(1, round(mask.width * scale)), max(1, round(mask.height * scale)))
+        canvas.paste(mask.resize(size, Image.Resampling.LANCZOS), ((width - size[0]) // 2, index * 56))
+    return style[language][0]["color"], rectangles(canvas), width

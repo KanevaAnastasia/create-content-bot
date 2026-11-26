@@ -15,7 +15,9 @@ DAY_MARKER = re.compile(
 )
 SPEAKER = re.compile(r'(?i)(?<!\w)(босс|вася|василий|герой)\s*(?::\s*|(?=[«"“]))')
 QUOTED = re.compile(r'«([^»]+)»|"([^"]+)"|“([^”]+)”')
-DIRECTIVE = re.compile(r"(?im)^\s*(звук|титр|титр en|в кадре)\s*:\s*([^\n]+)")
+DIRECTIVE = re.compile(r"(?im)^\s*(звук|титр|титр en|стиль титра|позиция титра|в кадре)\s*:\s*([^\n]+)")
+TITLE_POSITION_LABEL = "позиция титра"
+TITLE_POSITION_HINT = "Укажи секунду появления, X и Y в процентах. Например, «Позиция титра: 3 50 6,3»."
 SOUNDS = (
     ("alarm", r"\bбудильник\w*"),
     ("click", r"\bщелч\w*|выключает будильник|будильник замолкает"),
@@ -26,6 +28,16 @@ SOUNDS = (
     ("wind", r"\bветер\b|\bветра\b"),
     ("paper", r"\bшорох\w*"),
 )
+
+
+def title_position(value: str, duration: float) -> dict:
+    parts = value.replace(",", ".").split()
+    if len(parts) != 3 or not all(re.fullmatch(r"[0-9]+(?:\.[0-9]+)?", item) for item in parts):
+        raise ValueError(TITLE_POSITION_HINT)
+    start, x, y = map(float, parts)
+    if not (0 <= start < duration - 0.2 and 0 < x < 100 and 0 <= y < 100):
+        raise ValueError(f"Титр должен появиться внутри сцены ({duration:g} с), X и Y укажи внутри кадра.")
+    return {"start_sec": start, "anchor_x_ratio": x / 100, "anchor_ratio": y / 100}
 
 
 def parse_script(text: str) -> list[dict]:
@@ -81,6 +93,11 @@ def parse_script(text: str) -> list[dict]:
             "fx": [key for key, pattern in SOUNDS if re.search(pattern, fx_text, re.I)], "fx_times": fx_times,
             "titles": {"ru": labels.get("титр", []), "en": labels.get("титр en", [])},
         })
+        if labels.get("стиль титра") == ["2"]:
+            scenes[-1]["title_style"] = "2"
+            position = labels.get(TITLE_POSITION_LABEL)
+            if position:
+                scenes[-1]["title_position"] = title_position(position[-1], seconds)
     return scenes
 
 
@@ -112,9 +129,12 @@ PILOT_SCRIPT = """Сцена 1. День 1 · 8 секунд
 Герой садится у двери и надевает кроссовки. Босс смотрит на него из зеркала.
 Босс: «Ты просто ленивый!»
 Герой поднимает глаза.
-Герой: «Я смогу измениться! Лень — это не то, кто ты. Это то, что ты повторяешь!»
 Он затягивает шнурки, открывает дверь и выходит.
 Звук: щелчок замка.
+Титр: Лень это не то, кто ты. | Это то, что ты повторяешь
+Титр EN: Laziness isn’t who you are. | It’s what you keep doing.
+Стиль титра: 2
+Позиция титра: 3 50 6,3
 
 Сцена 6. Первая пробежка · 8 секунд
 Герой добегает до первого фонаря и останавливается. Упирается руками в колени, тяжело дышит. Впереди виден второй фонарь. Рядом появляется Босс.
@@ -192,6 +212,27 @@ def day_overlay(scene: dict, duration: float, language: str) -> list[dict]:
         "text": f"{label} {day}", "start_sec": 0.0, "end_sec": duration,
         "anchor_x_ratio": 0.075, "anchor_ratio": 0.09, "anchor_top_left": True, "shake": False,
     }]
+
+
+def title_overlays(scene: dict, duration: float, language: str) -> list[dict]:
+    titles = scene["titles"][language]
+    if not titles:
+        return []
+    styled = scene.get("title_style") == "2"
+    position = scene.get("title_position") or {}
+    start = float(position.get("start_sec", 0.65))
+    span = (duration - start - 0.2) / len(titles)
+    style = {
+        "yellow_script": True,
+        "language": language,
+        "anchor_x_ratio": position.get("anchor_x_ratio", 0.5),
+        "anchor_ratio": position.get("anchor_ratio", 81 / 1280),
+    } if styled else {}
+    return [
+        {"text": title.replace(" | ", "\n") if styled else title, "start_sec": start + index * span,
+         "end_sec": start + (index + 1) * span, "shake": index == len(titles) - 1, **style}
+        for index, title in enumerate(titles)
+    ]
 
 
 def clock_overlays(scene: dict, duration: float, *, speech_end: float = 0.0) -> list[dict]:
@@ -302,13 +343,7 @@ def render_scene(scene: dict, path: Path, *, language: str, duration: int) -> No
         events=effect_events(scene, duration, speech_end),
     )
     captions = dialogue_caption_cues(scene, audio, language=language, lead=lead, duration=duration) if audio else []
-    titles = scene["titles"][language]
-    duration_per_title = (duration - 0.85) / len(titles) if titles else 0
-    accents = [
-        {"text": title, "start_sec": 0.65 + i * duration_per_title,
-         "end_sec": 0.65 + (i + 1) * duration_per_title, "shake": i == len(titles) - 1}
-        for i, title in enumerate(titles)
-    ]
+    accents = title_overlays(scene, duration, language)
     accents.extend(day_overlay(scene, duration, language))
     accents.extend(clock_overlays(scene, duration, speech_end=speech_end if speech_cue is not None or exact_start is not None else 0.0))
     width, height = _video_dimensions(raw)
