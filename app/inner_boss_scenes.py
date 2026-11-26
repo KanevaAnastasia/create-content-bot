@@ -21,6 +21,7 @@ CONTINUITY_DIRECTIVE = f"Склейка: {CONTINUE_PREVIOUS}"
 END_FRAME_OPTIONS = {"не нужен": "none", "создать": "generate", "загрузить": "upload"}
 TITLE_POSITION_LABEL = "позиция титра"
 TITLE_POSITION_HINT = "Укажи секунду появления, X и Y в процентах. Например, «Позиция титра: 3 50 6,3»."
+TITLE_STYLES = {"2": "2", "последовательно": "sequential"}
 SOUNDS = (
     ("alarm", r"\bбудильник\w*"),
     ("click", r"\bщелч\w*|выключает будильник|будильник замолкает"),
@@ -96,8 +97,8 @@ def parse_script(text: str) -> list[dict]:
             "fx": [key for key, pattern in SOUNDS if re.search(pattern, fx_text, re.I)], "fx_times": fx_times,
             "titles": {"ru": labels.get("титр", []), "en": labels.get("титр en", [])},
         })
-        if labels.get("стиль титра") == ["2"]:
-            scenes[-1]["title_style"] = "2"
+        if style := TITLE_STYLES.get(labels.get("стиль титра", [""])[-1].casefold()):
+            scenes[-1]["title_style"] = style
             position = labels.get(TITLE_POSITION_LABEL)
             if position:
                 scenes[-1]["title_position"] = title_position(position[-1], seconds)
@@ -141,10 +142,12 @@ PILOT_SCRIPT = """Сцена 1. День 1 · 8 секунд
 Герой поднимает глаза.
 Он затягивает шнурки, открывает дверь и выходит.
 Звук: щелчок замка.
-Титр: Лень это не то, кто ты. | Это то, что ты повторяешь
-Титр EN: Laziness isn’t who you are. | It’s what you keep doing.
-Стиль титра: 2
-Позиция титра: 3 50 6,3
+Титр: Лень это не то, кто ты.
+Титр: Это то, что ты повторяешь
+Титр EN: Laziness isn’t who you are.
+Титр EN: It’s what you keep doing.
+Стиль титра: Последовательно
+Позиция титра: 3 50 28
 
 Сцена 6. Первая пробежка · 8 секунд
 Герой добегает до первого фонаря и останавливается. Упирается руками в колени, тяжело дышит. Впереди виден второй фонарь. Рядом появляется Босс.
@@ -179,6 +182,7 @@ PILOT_SCRIPT = """Сцена 1. День 1 · 8 секунд
 Титр: Дисциплина помогает продолжать.
 Титр EN: Motivation helps you start.
 Титр EN: Discipline helps you keep going.
+Стиль титра: Последовательно
 Звук: шаги.
 
 Сцена 12. Вершина · 7 секунд
@@ -232,12 +236,12 @@ def title_overlays(scene: dict, duration: float, language: str) -> list[dict]:
     position = scene.get("title_position") or {}
     start = float(position.get("start_sec", 0.65))
     span = (duration - start - 0.2) / len(titles)
-    style = {
-        "yellow_script": True,
-        "language": language,
-        "anchor_x_ratio": position.get("anchor_x_ratio", 0.5),
-        "anchor_ratio": position.get("anchor_ratio", 81 / 1280),
-    } if styled else {}
+    style = {key: position[key] for key in ("anchor_x_ratio", "anchor_ratio") if key in position}
+    if styled:
+        style = {
+            "yellow_script": True, "language": language, "anchor_x_ratio": 0.5,
+            "anchor_ratio": 81 / 1280, **style,
+        }
     return [
         {"text": title.replace(" | ", "\n") if styled else title, "start_sec": start + index * span,
          "end_sec": start + (index + 1) * span, "shake": index == len(titles) - 1, **style}

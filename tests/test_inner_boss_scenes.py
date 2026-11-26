@@ -51,12 +51,12 @@ def test_scene_five_title_is_bilingual_and_hero_stays_silent():
     assert scene["turns"] == [{"speaker": "boss", "text": "Ты просто ленивый!"}]
     assert "Only Boss speaks." in workflow._video_dialogue_direction(scene)
     assert "повторяешь" not in " ".join(frame_actions(scene))
-    ru, = title_overlays(scene, 9, "ru")
-    en, = title_overlays(scene, 9, "en")
-    assert ru["text"] == "Лень это не то, кто ты.\nЭто то, что ты повторяешь"
-    assert en["text"] == "Laziness isn’t who you are.\nIt’s what you keep doing."
-    assert ru["yellow_script"] and ru["shake"] and ru["start_sec"] == en["start_sec"] == 3
-    assert ru["anchor_ratio"] == pytest.approx(0.063)
+    ru = title_overlays(scene, 9, "ru")
+    en = title_overlays(scene, 9, "en")
+    assert [cue["text"] for cue in ru] == ["Лень это не то, кто ты.", "Это то, что ты повторяешь"]
+    assert [cue["text"] for cue in en] == ["Laziness isn’t who you are.", "It’s what you keep doing."]
+    assert "yellow_script" not in ru[0] and [cue["shake"] for cue in ru] == [False, True]
+    assert ru[0]["start_sec"] == en[0]["start_sec"] == 3 and ru[0]["anchor_ratio"] == pytest.approx(0.28)
 
 
 def test_moving_title_during_edit_reuses_picture_and_audio(monkeypatch):
@@ -75,7 +75,7 @@ def test_moving_title_during_edit_reuses_picture_and_audio(monkeypatch):
     edit.assert_awaited_once_with(data, revised)
     assert data["stage"] == "edit" and "masters" not in data and "approved" not in revised
     assert all(revised[key] == scene[key] for key in ("video", "image", "audio", "turns"))
-    ru, = title_overlays(revised, 9, "ru")
+    ru = title_overlays(revised, 9, "ru")[0]
     assert ru["start_sec"] == 4.25 and ru["anchor_x_ratio"] == 0.48 and ru["anchor_ratio"] == 0.12
 
 

@@ -128,6 +128,8 @@ def draft_script(idea: str) -> str:
             "Внутри сцены чередуй описания действия и отдельные реплики в порядке монтажа. "
             "Речь оформляй только Босс: «реплика» или Герой: «реплика». Не используй имена в диалоге. "
             "Звуковые эффекты пиши отдельной строкой «Звук:». Надписи без озвучки пиши строками «Титр:». "
+            "Если две части одной мысли должны появляться по очереди, дай им отдельные строки «Титр:» "
+            "и укажи «Стиль титра: Последовательно». "
             "Если действие продолжается прямо с последнего кадра предыдущей сцены, "
             f"пиши отдельной строкой «{CONTINUITY_DIRECTIVE}». Начни описание с той же позы и расстановки. "
             "Учитывай явное требование к конечному кадру. Укажи отдельной строкой «Последний кадр: не нужен», "
@@ -877,8 +879,8 @@ async def _handle_title_position(update, session, text):
         return False
     index = data["index"]
     scene = data["scenes"][index]
-    if scene.get("title_style") != "2":
-        raise ValueError("В этой сцене нет титра в жёлтом стиле 2.")
+    if scene.get("title_style") not in {"2", "sequential"}:
+        raise ValueError("Выбери стиль титра для этой сцены, чтобы задать его позицию.")
     position = title_position(directive[2], _duration(scene))
     revised = dict(scene, body=revise_scene(scene, text), title_position=position)
     await _edit(data, revised)
@@ -1119,7 +1121,7 @@ async def _show(update, session):
             with Path(preview).open("rb") as file:
                 await update.message.reply_video(video=file, caption=f"{scene['title']} · монтаж {lang.upper()}")
         note = "«ОК» закрепит монтаж и откроет следующую сцену. Для правки пришли новый текст сцены."
-        if scene.get("title_style") == "2":
+        if scene.get("title_style") in {"2", "sequential"}:
             note += "\n" + TITLE_POSITION_HINT
         if scene.get("audio"):
             note += "\n«Сдвинуть озвучку» задаёт время начала речи в этой сцене."
