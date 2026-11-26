@@ -628,12 +628,19 @@ async def _handle_video_prompt_review(update, session, text):
     stage = data["stage"]
     low = text.strip().casefold()
     scene = data["scenes"][data["index"]]
+    navigation = low in {"показать сцену", "сценарий", "прислать ролик"} or re.fullmatch(r"сцена\s+\d+", low)
+    script_edit = SCRIPT_HEADER.match(text) or DIRECTIVE.search(text)
+    video_feedback = (
+        stage == "video" and not navigation and not script_edit
+        and low not in {"ок", "ok", "отмена", "перегенерировать", VIDEO_PROMPT_BUTTON.casefold()}
+    )
     if stage in {"video", "edit"} and (low == VIDEO_PROMPT_BUTTON.casefold() or stage == "video" and low == "перегенерировать"):
         _open_video_prompt(data, scene, return_stage=stage)
-    elif stage != "video_prompt" or low in {"показать сцену", "сценарий"} or re.fullmatch(r"сцена\s+\d+", low):
+    elif navigation or (stage != "video_prompt" and not video_feedback):
         return False
     else:
-        review = data.get("video_prompt_review") or {}
+        review = ({"return_stage": stage, "pending_input": "feedback"} if video_feedback
+                  else data.get("video_prompt_review") or {})
         if low in {"ок", "ok"}:
             if review.get("pending_input"):
                 await update.message.reply_text("Пришли правку или нажми «Отмена».", reply_markup=keyboard(session))
@@ -661,11 +668,17 @@ async def _handle_video_prompt_review(update, session, text):
             replacement = _extract_prompt_override(text)
             feedback = _extract_format_or_feedback(text)
             if low.rstrip(":") in {"фидбек", "фидбэк", "feedback"}:
+                if video_feedback:
+                    _open_video_prompt(data, scene, return_stage=stage)
+                    review = data["video_prompt_review"]
                 review["pending_input"] = "feedback"
                 _save(update, session)
                 await update.message.reply_text("Напиши, что изменить в видеопромпте.", reply_markup=keyboard(session))
                 return True
             if replacement == "" or low in {"промпт", "промт"}:
+                if video_feedback:
+                    _open_video_prompt(data, scene, return_stage=stage)
+                    review = data["video_prompt_review"]
                 review["pending_input"] = "replace"
                 _save(update, session)
                 await update.message.reply_text("Пришли полный текст видеопромпта.", reply_markup=keyboard(session))
@@ -736,7 +749,8 @@ async def _show(update, session):
     elif stage == "video":
         with Path(scene["video"]).open("rb") as file:
             await update.message.reply_video(video=file, caption=scene["title"])
-        note = "«ОК» сведёт речь, звуки и титры этой сцены."
+        note = ("«ОК» сведёт речь, звуки и титры этой сцены. "
+                "Если нужно поправить движение или камеру, напиши правку здесь или нажми «Видеопромпт».")
     else:
         for lang, preview in scene["previews"].items():
             with Path(preview).open("rb") as file:

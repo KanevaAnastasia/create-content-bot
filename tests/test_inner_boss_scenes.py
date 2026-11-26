@@ -345,6 +345,35 @@ def test_boss_passes_both_images_and_preserves_alarm_cues(tmp_path, monkeypatch)
     assert "At 0.75s: the Hero presses the clock button" in second["prompt"]
 
 
+def test_motion_feedback_after_video_keeps_scene_and_approved_start_frame(monkeypatch):
+    session = {}
+    workflow.initialize(session, PILOT_SCRIPT)
+    data = session[workflow.KEY]
+    data.update(index=6, stage="video")
+    scene = data["scenes"][6]
+    scene.update(image="approved-start.png", video="previous-video.mp4", frame_policy=workflow.FRAME_POLICY)
+    body = scene["body"]
+    update = SimpleNamespace(message=SimpleNamespace(reply_text=AsyncMock()))
+    monkeypatch.setattr(workflow, "_save", lambda *_: None)
+    monkeypatch.setattr(workflow, "_show", AsyncMock())
+    rewrite = AsyncMock(return_value="Hold side profile. Run right, transition to a walk at 5 s.")
+    generate_image = AsyncMock()
+    generate_video = AsyncMock()
+    monkeypatch.setattr(workflow, "_rewrite_video_prompt", rewrite)
+    monkeypatch.setattr(workflow, "_image", generate_image)
+    monkeypatch.setattr(workflow, "_video", generate_video)
+
+    asyncio.run(workflow.handle_text(update, session, "Герой бежит вправо и не поворачивает голову."))
+
+    rewrite.assert_awaited_once()
+    assert data["stage"] == "video_prompt"
+    assert data["video_prompt_review"]["return_stage"] == "video"
+    assert data["video_prompt_review"]["text"] == rewrite.return_value
+    assert scene["body"] == body and scene["image"] == "approved-start.png" and scene["video"] == "previous-video.mp4"
+    generate_image.assert_not_awaited()
+    generate_video.assert_not_awaited()
+
+
 def test_scene_video_prompt_override_is_sent_without_boilerplate():
     scene = parse_script(PILOT_SCRIPT)[2]
     prompt = "At 0s: the alarm clock visibly vibrates with 06:00 on its display.\nAt 0.75s: the Hero presses the clock button."
