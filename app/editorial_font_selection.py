@@ -208,9 +208,10 @@ def yellow_script_title(language, text):
         mask = _alpha(shaped[part][-1])
         masks.append(mask.crop(mask.getbbox() or (0, 0, 1, 1)))
     width = 510
-    scale = min(width / max(mask.width for mask in masks), 47 / max(mask.height for mask in masks))
-    canvas = Image.new("L", (width, 56 * len(masks)))
+    line_height = 62
+    scale = min(width / max(mask.width for mask in masks), 58 / max(mask.height for mask in masks))
+    canvas = Image.new("L", (width, line_height * len(masks)))
     for index, mask in enumerate(masks):
         size = (max(1, round(mask.width * scale)), max(1, round(mask.height * scale)))
-        canvas.paste(mask.resize(size, Image.Resampling.LANCZOS), ((width - size[0]) // 2, index * 56))
+        canvas.paste(mask.resize(size, Image.Resampling.LANCZOS), ((width - size[0]) // 2, index * line_height))
     return style[language][0]["color"], rectangles(canvas), width
