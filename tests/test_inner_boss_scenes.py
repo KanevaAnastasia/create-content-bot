@@ -15,7 +15,7 @@ def test_pilot_and_inline_format_preserve_speakers_and_silent_titles():
     assert sum(scene["duration"] for scene in scenes) == 90
     assert [line["text"] for scene in scenes[5:] for line in scene["turns"] if line["speaker"] == "hero"] == ["Слышу"]
     assert scenes[10]["turns"] == [] and len(scenes[10]["titles"]["ru"]) == 2
-    assert effect_events(scenes[2], 7, 0).count(("alarm", 2.3, 0.48)) == 1
+    assert effect_events(scenes[2], 7, 0).count(("alarm", 2.3, 1.0)) == 1
     inline, = parse_script(
         'Сцена 1. Утро\nЗвонит будильник. **Босс:** «Ещё пять минут». '
         'Герой: "Ладно". Герой засыпает.\nЗвук: гром@1.2'

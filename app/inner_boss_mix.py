@@ -3,12 +3,15 @@
 import math
 import re
 import wave
+from pathlib import Path
 
 import numpy as np
 
 from .discipline_modes import BOSS, MODE_KEY
 
 SAMPLE_RATE = 24000
+ALARM_SOUND = Path(__file__).resolve().parents[1] / "assets/sounds/inner_boss/alarm.wav"
+ALARM_DURATION = 1.0
 SOUND_TYPES = ("quiet", "alarm_click", "footsteps", "breathing", "wind", "rain", "paper", "tap")
 SOUND_PREFIX = "inner_boss:"
 MIX_VOLUME = 0.65
@@ -198,16 +201,18 @@ def score(path, scenes, *, duration, intro_duration, silence, include_music=True
     def step(ts):
         return (0.16 * np.sin(2 * np.pi * 76 * ts) + 0.08 * noise(ts)) * np.exp(-22 * ts)
 
+    def ring(at, length):
+        with wave.open(str(ALARM_SOUND), "rb") as source:
+            samples = np.frombuffer(source.readframes(source.getnframes()), dtype="<i2")
+        add(at, min(length, len(samples) / SAMPLE_RATE), lambda ts: samples[:len(ts)] * (0.65 / 32768))
+
     cursor = intro_duration
     for index, (scene, length) in enumerate(scenes):
         _, cue, *markers = _scene_track(scene).split(":")
         if cue == "alarm_click":
             click_at = min(0.55, length * 0.7)
             if index or "opening" not in markers:
-                for beat in (0.0, 0.31):
-                    if beat < click_at:
-                        add(cursor + beat, min(0.16, click_at - beat),
-                            lambda ts: 0.09 * np.sin(2 * np.pi * 880 * ts))
+                ring(cursor, click_at)
             add(cursor + click_at, min(0.07, length - click_at), click)
         elif cue == "footsteps":
             for offset in np.arange(0.19, max(0, length - 0.06), 0.43):
@@ -231,8 +236,7 @@ def score(path, scenes, *, duration, intro_duration, silence, include_music=True
         cursor += length
     for cue, at, length in events:
         if cue == "alarm":
-            for beat in (0, 0.31):
-                add(at + beat, 0.16, lambda ts: 0.09 * np.sin(2 * np.pi * 880 * ts))
+            ring(at, length)
         elif cue == "click":
             add(at, 0.07, click)
         elif cue == "thunder":

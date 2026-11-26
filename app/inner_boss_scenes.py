@@ -171,7 +171,7 @@ def frame_actions(scene: dict) -> tuple[str, str]:
     return clean, ""
 
 
-def clock_overlays(scene: dict, duration: float) -> list[dict]:
+def clock_overlays(scene: dict, duration: float, *, speech_end: float = 0.0) -> list[dict]:
     times = [match[0] for match in CLOCK.finditer(scene["visual"])]
     if not times:
         return []
@@ -180,7 +180,7 @@ def clock_overlays(scene: dict, duration: float) -> list[dict]:
         {"anchor_x_ratio": float(position[0]), "anchor_ratio": float(position[1]), "clock_display": True}
         if isinstance(position, (list, tuple)) and len(position) == 2 else {"anchor_ratio": 0.15}
     )
-    change = max(1.7, duration - 1.15)
+    change = max(1.7, duration - 1.15, speech_end + 0.18 if speech_end else 0.0)
     has_change = times[-1] != times[0]
     first_end = (change if has_change else duration) if style.get("clock_display") else min(1.7, duration)
     cues = [{"text": times[0], "start_sec": 0.0, "end_sec": first_end, "shake": False, **style}]
@@ -193,7 +193,7 @@ def effect_events(scene: dict, duration: float, speech_end: float) -> list[tuple
     events = []
     for cue in scene["fx"]:
         start, length = {
-            "alarm": (0.0, 0.48),
+            "alarm": (0.0, inner_boss_mix.ALARM_DURATION),
             "click": (min(duration - 0.15, max(0.58, speech_end + 0.15)), 0.07),
             "thunder": (0.56 if "alarm" in scene["fx"] else 0.2, 1.6),
             "rain": (0.0, duration),
@@ -229,6 +229,15 @@ def render_scene(scene: dict, path: Path, *, language: str, duration: int) -> No
     audio = scene.get("audio", {}).get(language)
     lead = speech_lead(scene)
     speech_end = lead + audio["duration"] if audio else 0.0
+    speech_cue = scene.get("speech_not_before_sec")
+    hold = 0.0
+    if audio and speech_cue is not None:
+        # End both dubs at the same action. The shorter language enters later.
+        speech_end = float(speech_cue) + max(a["duration"] for a in scene["audio"].values())
+        lead = speech_end - audio["duration"]
+        duration_with_tail = max(duration, round(speech_end + 0.65, 3))
+        hold = duration_with_tail - duration
+        duration = duration_with_tail
     if speech_end > duration:
         raise ValueError("В клип не помещается утверждённая реплика.")
     stem, ass = path.with_suffix(".wav"), path.with_suffix(".ass")
@@ -248,7 +257,7 @@ def render_scene(scene: dict, path: Path, *, language: str, duration: int) -> No
          "end_sec": 0.65 + (i + 1) * duration_per_title, "shake": i == len(titles) - 1}
         for i, title in enumerate(titles)
     ]
-    accents.extend(clock_overlays(scene, duration))
+    accents.extend(clock_overlays(scene, duration, speech_end=speech_end if speech_cue is not None else 0.0))
     width, height = _video_dimensions(raw)
     _write_burned_subtitle_ass(ass, captions, accent_cues=accents, video_width=width, video_height=height)
     ffmpeg = _resolve_ffmpeg()
@@ -262,8 +271,9 @@ def render_scene(scene: dict, path: Path, *, language: str, duration: int) -> No
         ]
     else:
         cmd += ["-map", "1:a:0"]
+    hold_filter = f"tpad=stop_mode=clone:stop_duration={hold:.3f}," if hold else ""
     _run_ffmpeg(cmd + [
-        "-map", "0:v:0", "-vf", f"{_subtitle_filter(ass)},scale=1080:1920:force_original_aspect_ratio=decrease,"
+        "-map", "0:v:0", "-vf", f"{hold_filter}{_subtitle_filter(ass)},scale=1080:1920:force_original_aspect_ratio=decrease,"
         "pad=1080:1920:(ow-iw)/2:(oh-ih)/2,fps=30,setsar=1",
         "-t", str(duration), "-c:v", "libx264", "-pix_fmt", "yuv420p", "-preset", "fast",
         "-c:a", "aac", "-ar", "48000", "-ac", "1", "-movflags", "+faststart", str(path),

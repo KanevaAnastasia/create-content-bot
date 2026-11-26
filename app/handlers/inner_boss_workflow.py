@@ -330,6 +330,8 @@ def _replace_scene(data, body):
                 and previous.get("video")):
             replacement["video"] = previous["video"]
             replacement["video_duration"] = previous.get("video_duration", _duration(previous))
+            if "speech_not_before_sec" in previous:
+                replacement["speech_not_before_sec"] = previous["speech_not_before_sec"]
     data["scenes"][index] = replacement
     data.pop("masters", None)
     data["stage"] = "scene"
