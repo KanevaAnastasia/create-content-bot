@@ -8,6 +8,7 @@ from pathlib import Path
 from . import inner_boss_mix
 
 SCRIPT_HEADER = re.compile(r"(?im)^\s{0,3}(?:#{1,6}\s*)?(?:\*\*)?сцена\s+(\d+)\b[^\n]*")
+DAY_MARKER = re.compile(r"^[ \t]*(?:день|day)[ \t]+([0-9]{1,4})(?=[ \t]*(?:$|[.:·–—-]))[ \t]*(?:[.:·–—-][ \t]*)?", re.I | re.M)
 SPEAKER = re.compile(r'(?i)(?<!\w)(босс|вася|василий|герой)\s*(?::\s*|(?=[«"“]))')
 QUOTED = re.compile(r'«([^»]+)»|"([^"]+)"|“([^”]+)”')
 DIRECTIVE = re.compile(r"(?im)^\s*(звук|титр|титр en|в кадре)\s*:\s*([^\n]+)")
@@ -160,9 +161,13 @@ APPEARANCE = re.compile(
 
 def frame_actions(scene: dict) -> tuple[str, str]:
     """Return a text-free opening beat and, when written, the Boss appearance beat."""
+    visual = scene["visual"]
+    marker = DAY_MARKER.match(visual)
+    if marker:
+        visual = visual[marker.end():]
     visual = re.sub(
         r"(?i)\bна (?:будильнике|часах)\s+(?:(?:снова|уже)\s+)?\d{1,2}:\d{2}\.?",
-        " ", scene["visual"],
+        " ", visual,
     )
     clean = " ".join(QUOTED.sub("", CLOCK.sub("", visual)).split())
     sentences = re.split(r"(?<=[.!?])\s+", clean)
@@ -170,6 +175,18 @@ def frame_actions(scene: dict) -> tuple[str, str]:
         if index and APPEARANCE.search(sentence):
             return " ".join(sentences[:index]), " ".join(sentences[index:])
     return clean, ""
+
+
+def day_overlay(scene: dict, duration: float, language: str) -> list[dict]:
+    header = re.sub(r"^сцена\s+\d+\b[ .:·–—-]*", "", scene["title"], flags=re.I)
+    marker = DAY_MARKER.match(scene["body"]) or DAY_MARKER.match(header)
+    if not marker:
+        return []
+    label = "Day" if language == "en" else "День"
+    return [{
+        "text": f"{label} {marker[1]}", "start_sec": 0.0, "end_sec": duration,
+        "anchor_x_ratio": 0.075, "anchor_ratio": 0.09, "anchor_top_left": True, "shake": False,
+    }]
 
 
 def clock_overlays(scene: dict, duration: float, *, speech_end: float = 0.0) -> list[dict]:
@@ -287,6 +304,7 @@ def render_scene(scene: dict, path: Path, *, language: str, duration: int) -> No
          "end_sec": 0.65 + (i + 1) * duration_per_title, "shake": i == len(titles) - 1}
         for i, title in enumerate(titles)
     ]
+    accents.extend(day_overlay(scene, duration, language))
     accents.extend(clock_overlays(scene, duration, speech_end=speech_end if speech_cue is not None or exact_start is not None else 0.0))
     width, height = _video_dimensions(raw)
     _write_burned_subtitle_ass(ass, captions, accent_cues=accents, video_width=width, video_height=height)

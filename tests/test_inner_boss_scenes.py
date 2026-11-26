@@ -6,7 +6,8 @@ import pytest
 
 from app.handlers import inner_boss_workflow as workflow
 from app.inner_boss_scenes import (
-    PILOT_SCRIPT, clock_overlays, dialogue_caption_cues, effect_events, frame_actions, parse_script, render_master, render_scene,
+    PILOT_SCRIPT, clock_overlays, day_overlay, dialogue_caption_cues, effect_events, frame_actions, parse_script, render_master,
+    render_scene,
 )
 from app.session_store import _chat_session_cache_payload
 
@@ -117,6 +118,18 @@ def test_appearance_anchors_exclude_dialogue_and_clock_digits():
     assert [cue["start_sec"] for cue in on_clock] == [0, 6.85]
     assert on_clock[0]["end_sec"] == on_clock[1]["start_sec"]
     assert all(cue["clock_display"] and cue["anchor_x_ratio"] == 0.091 for cue in on_clock)
+
+
+def test_day_card_uses_explicit_header_or_first_line():
+    scenes = parse_script(PILOT_SCRIPT)
+    assert day_overlay(scenes[0], 8, "en")[0]["text"] == "Day 1"
+    assert day_overlay(scenes[1], 7, "ru")[0]["text"] == "День 2"
+    assert day_overlay(scenes[2], 7, "ru") == []
+    scene, = parse_script("Сцена 1. Утро\nДень 12. Герой встаёт с кровати.")
+    cue, = day_overlay(scene, 7, "ru")
+    assert cue["text"] == "День 12" and cue["anchor_top_left"]
+    assert cue["start_sec"] == 0 and cue["end_sec"] == 7
+    assert frame_actions(scene) == ("Герой встаёт с кровати.", "")
 
 
 def test_appearance_frame_requires_its_own_approval(monkeypatch):
