@@ -289,6 +289,41 @@ def test_silent_scene_and_music_render_real_video(tmp_path):
 
 
 
+def test_opening_title_can_skip_spoken_word_without_showing_duplicate_caption(tmp_path, monkeypatch):
+    from app import inner_boss_mix, post_production
+
+    sentence = "Давай еще пять минуточек"
+    scene, = parse_script(f"Сцена 1. Утро\nБосс наклоняется.\nБосс: «{sentence}».")
+    scene.update(video=str(tmp_path / "raw.mp4"), speech_start_sec=1)
+    scene["audio"] = {"ru": {
+        "path": str(tmp_path / "voice.wav"),
+        "duration": len(sentence) / 20,
+        "alignment": {
+            "characters": list(sentence),
+            "character_start_times_seconds": [i / 20 for i in range(len(sentence))],
+            "character_end_times_seconds": [(i + 1) / 20 for i in range(len(sentence))],
+        },
+    }}
+    written = {}
+    monkeypatch.setattr(inner_boss_mix, "score", lambda *args, **kwargs: None)
+    monkeypatch.setattr(post_production, "_media_duration", lambda *args: 3)
+    monkeypatch.setattr(post_production, "_video_dimensions", lambda *args: (720, 1280))
+    monkeypatch.setattr(post_production, "_run_ffmpeg", lambda *args, **kwargs: None)
+
+    def capture(path, captions, **kwargs):
+        written.update(captions=captions, **kwargs)
+
+    monkeypatch.setattr(post_production, "_write_burned_subtitle_ass", capture)
+    render_scene(scene, tmp_path / "edit.mp4", language="ru", duration=3,
+                 opening_title_style={"editorial_style_id": "2", "skip_spoken_words": 1})
+
+    title, = written["title_cues"]
+    assert title["text"] == "Еще пять минуточек"
+    assert title["start_sec"] == pytest.approx(1.3)
+    assert [word["text"] for word in title["word_timing"]] == ["Еще", "пять", "минуточек"]
+    assert written["captions"] == []
+
+
 def test_appearance_anchors_exclude_dialogue_and_clock_digits():
     scene = parse_script(PILOT_SCRIPT)[0]
     opening, appearance = frame_actions(scene)

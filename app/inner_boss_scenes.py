@@ -384,6 +384,14 @@ def render_scene(
         captions = [cue for cue in captions if cue["start_sec"] >= timing[-1]["end"] - 0.01]
         if len(scene["turns"]) == 1:
             captions = []
+        skip = opening_title_style.get("skip_spoken_words", 0)
+        if not isinstance(skip, int) or not 0 <= skip < len(timing):
+            raise ValueError("В заголовке должно остаться хотя бы одно слово первой реплики.")
+        timing = timing[skip:]
+        if skip:
+            word = timing[0]["text"]
+            timing[0]["text"] = word[:1].upper() + word[1:]
+            line = " ".join(row["text"] for row in timing)
         titles.append({"text": line, "language": language, "start_sec": timing[0]["start"], "end_sec": end,
                        "word_timing": timing, "always_foreground": True})
     accents = title_overlays(scene, duration, language)
