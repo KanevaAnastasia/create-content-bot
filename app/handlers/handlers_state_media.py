@@ -6753,7 +6753,7 @@ async def _scene_media_start_ok(
         )
         prompt = _append_scene_identity_to_image_prompt(
             styled_base_prompt,
-            scene,
+            opening_scene,
             include_location=False,
             allow_grandma_face_crop_rule=not silence_mode,
         )
