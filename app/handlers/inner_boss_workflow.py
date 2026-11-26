@@ -21,11 +21,12 @@ from ..inner_boss_scenes import (
 STATE = "waiting_inner_boss_scene_workflow"
 KEY = "inner_boss_scene_workflow"
 LOGGER = logging.getLogger(__name__)
-FRAME_POLICY = 2
+FRAME_POLICY = 3
 NO_TEXT = (
     "All artwork surfaces must be completely unmarked. No letters, numbers, digits, speech bubbles, "
     "captions, pictograms or watermarks. Clock screens and papers are solid blank shapes. "
-    "Use only flat geometric 2D silhouettes, stable original character proportions and the dark navy palette."
+    "Use polished flat 2D geometry, stable original character proportions and the dark navy palette. "
+    "Render recognizable furniture and a few purposeful details in flat color planes."
 )
 REFERENCE = Path(__file__).resolve().parents[2] / "assets/story/inner_boss_character_reference.png"
 
@@ -234,6 +235,7 @@ async def _image(data, scene):
     path.write_bytes(result)
     scene["image"], scene["frame_policy"] = str(path), FRAME_POLICY
     scene.pop("boss_image", None)
+    scene.pop("clock_position", None)
 
 
 async def _boss_image(data, scene):
@@ -244,7 +246,8 @@ async def _boss_image(data, scene):
         "Edit the first reference as the exact same vertical 9:16 shot. Preserve lens, framing, perspective, "
         "all props and their screen positions, the Hero's identity, and the flat nighttime 2D style. "
         "Add the Boss wall shadow from the second reference. Keep him visibly separated from the Hero. "
-        "Depict only the instant Boss has just appeared. " + NO_TEXT + "\n" + appearance
+        "Depict only the instant Boss has just appeared. " + NO_TEXT + "\n"
+        + re.split(r"(?<=[.!?])\s+", appearance, maxsplit=1)[0]
     )
     result = await asyncio.to_thread(
         generate_image_vertex, prompt,
@@ -263,12 +266,18 @@ async def _video(update, data, scene):
     opening, appearance = frame_actions(scene)
     seconds = max(3, math.ceil(duration - APPEARANCE_LEAD)) if appearance else duration
     source = scene["boss_image"] if appearance else scene["image"]
+    dialogue = "\n".join(f"{turn['speaker']}: {turn['text']}" for turn in scene["turns"])
+    performance_cue = (
+        "\nOff-screen dialogue for performance timing only. React with gaze and restrained expressions in sequence. "
+        "Keep the generated clip completely silent and never display these lines as graphics.\n" + dialogue
+        if dialogue else ""
+    )
     prompt = (
         f"{seconds}-second Kling 3.0 image-to-video shot. No audio. 9:16. "
         "Animate the supplied start image, matching all identities and materials. "
         + ("Boss is already present in the first frame. Preserve his silhouette and framing. " if appearance else "")
         + "Use gaze and facial reactions, no lip sync or audio. " + NO_TEXT + " "
-        + SHORT_FORMATS[BOSS].motion + "\n" + (appearance or opening)
+        + SHORT_FORMATS[BOSS].motion + "\n" + (appearance or opening) + performance_cue
     )
     raw = await _generate_video_bytes_with_high_load_retry(
         update, prompt=prompt, model="kling_3_0", duration_sec=seconds,
@@ -308,7 +317,7 @@ def _replace_scene(data, body):
             if key in previous:
                 replacement[key] = previous[key]
     if frame_actions(replacement) == frame_actions(previous) and previous.get("image"):
-        for key in ("image", "frame_policy", "boss_image"):
+        for key in ("image", "frame_policy", "boss_image", "clock_position"):
             if key in previous:
                 replacement[key] = previous[key]
         if (replacement["turns"] == previous["turns"] and _duration(replacement) == _duration(previous)

@@ -2364,7 +2364,12 @@ def _write_burned_subtitle_ass(
             font = ImageFont.truetype(str(font_path), size=size)
             line_width = max(font.getlength(line) for line in accent_lines)
             size = max(1, min(size, round(size * layout.width * 0.80 / max(1.0, line_width))))
-        x, y = layout.width // 2, round(layout.height * float(cue.get("anchor_ratio", 0.28)))
+        x = round(layout.width * float(cue.get("anchor_x_ratio", 0.5)))
+        y = round(layout.height * float(cue.get("anchor_ratio", 0.28)))
+        accent_font, accent_colour, clock_tags = STORY_WORD_SYNC_FONT_NAME, "&HAAE8FF&", ""
+        if cue.get("clock_display"):
+            size = max(1, round(layout.height * 0.016))
+            accent_font, accent_colour, clock_tags = "Courier New", "&H526AFF&", r"\bord0\shad0"
         shift = max(2, round(layout.width * 0.005))
         offsets = ((-1, 0), (1, 1), (-1, -1), (1, 0), (0, 0)) if cue.get("shake", True) else ((0, 0),)
         for index, (dx, dy) in enumerate(offsets):
@@ -2372,7 +2377,7 @@ def _write_burned_subtitle_ass(
             frame_end = end if index == len(offsets) - 1 else min(end, frame_start + 0.055)
             if frame_end <= frame_start:
                 break
-            at = f"{{\\an8\\pos({x + dx * shift},{y + dy * shift})\\fn{STORY_WORD_SYNC_FONT_NAME}\\fs{size}\\b1\\c&HAAE8FF&}}"
+            at = f"{{\\an8\\pos({x + dx * shift},{y + dy * shift})\\fn{accent_font}\\fs{size}\\b1\\c{accent_colour}{clock_tags}}}"
             lines.append(
                 f"Dialogue: 4,{_ass_timestamp(frame_start)},{_ass_timestamp(frame_end)},"
                 f"{SUBTITLE_STYLE_NAME},,0,0,0,,{at}{text}"

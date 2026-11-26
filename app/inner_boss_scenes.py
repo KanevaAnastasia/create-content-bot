@@ -79,7 +79,7 @@ def parse_script(text: str) -> list[dict]:
 
 
 PILOT_SCRIPT = """Сцена 1. День 1 · 8 секунд
-На будильнике 06:00. Звонит будильник. Герой открывает глаза. На стене за кроватью появляется Босс.
+Общий боковой план спальни в ночной 2D-рисовке. Герой спит с закрытыми глазами на деревянной кровати внизу кадра. Под головой подушка, на синем одеяле видны складки. Слева тумбочка с будильником, справа наверху окно со шторами. На будильнике 06:00. Звонит будильник. Герой приоткрывает глаза, и на стене над кроватью появляется Босс.
 Босс: «Давай ещё пять минуточек».
 Герой: «Ладно, пять минуточек ничего не изменят».
 Герой тянется к кнопке. Щелчок, будильник замолкает. Он снова укрывается и закрывает глаза. Склейка в том же ракурсе. На часах уже 09:00.
@@ -175,11 +175,17 @@ def clock_overlays(scene: dict, duration: float) -> list[dict]:
     times = [match[0] for match in CLOCK.finditer(scene["visual"])]
     if not times:
         return []
-    cues = [{"text": times[0], "start_sec": 0.0, "end_sec": min(1.7, duration),
-             "shake": False, "anchor_ratio": 0.15}]
-    if times[-1] != times[0]:
-        cues.append({"text": times[-1], "start_sec": max(1.7, duration - 1.15),
-                     "end_sec": duration, "shake": False, "anchor_ratio": 0.15})
+    position = scene.get("clock_position")
+    style = (
+        {"anchor_x_ratio": float(position[0]), "anchor_ratio": float(position[1]), "clock_display": True}
+        if isinstance(position, (list, tuple)) and len(position) == 2 else {"anchor_ratio": 0.15}
+    )
+    change = max(1.7, duration - 1.15)
+    has_change = times[-1] != times[0]
+    first_end = (change if has_change else duration) if style.get("clock_display") else min(1.7, duration)
+    cues = [{"text": times[0], "start_sec": 0.0, "end_sec": first_end, "shake": False, **style}]
+    if has_change:
+        cues.append({"text": times[-1], "start_sec": change, "end_sec": duration, "shake": False, **style})
     return cues
 
 

@@ -103,13 +103,18 @@ def test_silent_scene_and_music_render_real_video(tmp_path):
 def test_appearance_anchors_exclude_dialogue_and_clock_digits():
     scene = parse_script(PILOT_SCRIPT)[0]
     opening, appearance = frame_actions(scene)
-    assert "открывает глаза" in opening
+    assert "спит с закрытыми глазами" in opening
+    assert "приоткрывает глаза" in appearance
     assert "Босс" not in opening and "появляется Босс" in appearance
     assert "минуточек" not in opening + appearance
     assert "06:00" not in opening + appearance and "09:00" not in opening + appearance
     cues = clock_overlays(scene, 8)
     assert [cue["text"] for cue in cues] == ["06:00", "09:00"]
     assert [cue["start_sec"] for cue in cues] == [0, 6.85]
+    scene["clock_position"] = [0.091, 0.772]
+    on_clock = clock_overlays(scene, 8)
+    assert on_clock[0]["end_sec"] == on_clock[1]["start_sec"]
+    assert all(cue["clock_display"] and cue["anchor_x_ratio"] == 0.091 for cue in on_clock)
 
 
 def test_appearance_frame_requires_its_own_approval(monkeypatch):
