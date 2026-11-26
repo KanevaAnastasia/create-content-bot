@@ -5,7 +5,9 @@ from unittest.mock import AsyncMock
 import pytest
 
 from app.handlers import inner_boss_workflow as workflow
-from app.inner_boss_scenes import PILOT_SCRIPT, clock_overlays, effect_events, frame_actions, parse_script, render_master, render_scene
+from app.inner_boss_scenes import (
+    PILOT_SCRIPT, clock_overlays, dialogue_caption_cues, effect_events, frame_actions, parse_script, render_master, render_scene,
+)
 from app.session_store import _chat_session_cache_payload
 
 
@@ -141,6 +143,26 @@ def test_appearance_frame_requires_its_own_approval(monkeypatch):
     workflow._video.assert_awaited_once()
 
 
+@pytest.mark.parametrize("use_segments", [False, True])
+def test_caption_turns_split_even_when_provider_joins_the_text(use_segments):
+    lines = ["Just five more minutes.", "Okay, five minutes won't make a difference."]
+    text = "".join(lines)
+    scene = {"en_turns": lines}
+    audio = {"alignment": {
+        "characters": list(text),
+        "character_start_times_seconds": [i / 10 for i in range(len(text))],
+        "character_end_times_seconds": [(i + 1) / 10 for i in range(len(text))],
+    }}
+    if use_segments:
+        audio["turn_starts"] = [0, len(lines[0])]
+    cues = dialogue_caption_cues(scene, audio, language="en", lead=1, duration=9)
+    boundary = 1 + len(lines[0]) / 10
+    assert all(cue["end_sec"] <= boundary for cue in cues if cue["start_sec"] < boundary)
+    rendered_words = {word for cue in cues for word in cue["fixed_block_words"]}
+    assert {"minutes.", "Okay,"} <= rendered_words
+    assert not any("minutes.Okay," in cue["fixed_block_words"] for cue in cues)
+
+
 def test_boss_passes_both_images_only_for_the_appearance_scene(tmp_path, monkeypatch):
     from app.handlers import handlers_media_core
 
@@ -160,4 +182,7 @@ def test_boss_passes_both_images_only_for_the_appearance_scene(tmp_path, monkeyp
     assert first["start_image"] == b"\x01" and first["end_image"] == b"\x02"
     assert first["kling_keyframes"] is True and first["audio_enabled"] is False
     assert first["duration_sec"] == 8 and "Keyframes" in first["prompt"]
+    assert "When Boss speaks, animate the shadow's mouth while Hero listens with his lips closed." in first["prompt"]
+    assert "When Hero speaks, animate Hero's mouth while Boss stays quiet" in first["prompt"]
+    assert first["prompt"].index("1. Boss, the red-edged shadow speaks:") < first["prompt"].index("2. Hero, the human character speaks:")
     assert second["end_image"] is None and "kling_keyframes" not in second

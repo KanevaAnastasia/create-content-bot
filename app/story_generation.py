@@ -421,6 +421,7 @@ class StoryAudioResult:
     request_id: str | None = None
     history_item_id: str | None = None
     model_id: str = "eleven_v4"
+    dialogue_turn_starts: tuple[int, ...] = ()
 
 
 def _clean_title(value: Any) -> str:
@@ -717,8 +718,22 @@ def _timed_dialogue_endpoint_result(
     if not isinstance(data, dict):
         raise RuntimeError('ElevenLabs вернул некорректные данные озвучки. Проверьте историю перед повтором.')
     audio_b64 = str(data.get("audio_base64") or "").strip()
-    from .story_alignment import response_alignment
+    from .story_alignment import history_alignment, response_alignment
     alignment = response_alignment(data)
+    turn_starts = ()
+    segments = data.get("voice_segments")
+    if len(inputs) > 1 and isinstance(segments, list) and len(segments) == len(inputs):
+        # Segment character offsets refer to the original, not normalized, text.
+        original = history_alignment(data.get("alignment"))
+        if original and all(
+            isinstance(segment, dict) and segment.get("dialogue_input_index") == index
+            and type(segment.get("character_start_index")) is int
+            for index, segment in enumerate(segments)
+        ):
+            starts = tuple(segment["character_start_index"] for segment in segments)
+            if starts[0] == 0 and list(starts) == sorted(set(starts)) and starts[-1] < len(original["characters"]):
+                alignment = original
+                turn_starts = starts
     if not audio_b64:
         raise RuntimeError("ElevenLabs timed TTS did not return audio_base64.")
     if not alignment:
@@ -746,6 +761,7 @@ def _timed_dialogue_endpoint_result(
         request_id=response.headers.get("request-id") or response.headers.get("x-request-id"),
         history_item_id=response.headers.get("history-item-id"),
         model_id=DEFAULT_ELEVENLABS_TTS_MODEL,
+        dialogue_turn_starts=turn_starts,
     )
 
 

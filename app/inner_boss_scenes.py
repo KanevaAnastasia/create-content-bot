@@ -1,6 +1,7 @@
 """Scene scripts and local picture/sound assembly for the Inner Boss workflow."""
 from __future__ import annotations
 
+from itertools import accumulate
 import re
 from pathlib import Path
 
@@ -214,12 +215,44 @@ def speech_lead(scene: dict) -> float:
     return 0.16
 
 
+def dialogue_caption_cues(scene: dict, audio: dict, *, language: str, lead: float, duration: float) -> list[dict]:
+    from .post_production import _alignment_word_rows, build_word_synced_subtitle_cues
+
+    alignment = audio["alignment"]
+    characters = alignment["characters"]
+    lines = [turn["text"] for turn in scene["turns"]] if language == "ru" else scene["en_turns"]
+    starts = audio.get("turn_starts")
+    if not starts:
+        starts = [0]
+        if len(lines) > 1:
+            # Older dialogue results can join two speakers with no separator.
+            # Match the approved words at character level before building words.
+            indices = [index for index, char in enumerate(characters) if char.isalnum()]
+            parts = ["".join(char for char in text if char.isalnum()).casefold() for text in lines]
+            actual = "".join(characters[index] for index in indices).casefold()
+            if not all(parts) or actual != "".join(parts):
+                raise ValueError(f"Не удалось разделить реплики в субтитрах {language.upper()} по таймингам озвучки.")
+            sizes = [sum(char.isalnum() for char in text) for text in lines]
+            starts.extend(indices[offset] for offset in accumulate(sizes[:-1]))
+    ranges = zip(starts, [*starts[1:], len(characters)], strict=True)
+    groups = [_alignment_word_rows({key: values[lo:hi] for key, values in alignment.items()}) for lo, hi in ranges]
+    groups = [group for group in groups if group]
+    captions = []
+    for index, group in enumerate(groups):
+        boundary = groups[index + 1][0][1] + lead if index + 1 < len(groups) else duration
+        end = min(duration, boundary, group[-1][2] + lead + 0.16)
+        words = [(word, start + lead, min(stop + lead, end)) for word, start, stop in group]
+        captions.extend(build_word_synced_subtitle_cues(
+            words, window_end_sec=end, timing_source="elevenlabs_alignment",
+        ))
+    return captions
+
+
 def render_scene(scene: dict, path: Path, *, language: str, duration: int) -> None:
     """Render a dialogue/SFX preview with no background score."""
     from .post_production import (
-        _alignment_word_rows, _media_duration, _resolve_ffmpeg, _run_ffmpeg,
+        _media_duration, _resolve_ffmpeg, _run_ffmpeg,
         _subtitle_filter, _video_dimensions, _write_burned_subtitle_ass,
-        build_word_synced_subtitle_cues,
     )
 
     raw = Path(scene["video"])
@@ -245,11 +278,7 @@ def render_scene(scene: dict, path: Path, *, language: str, duration: int) -> No
         stem, [], duration=duration, intro_duration=0, silence=(0, 0), include_music=False,
         events=effect_events(scene, duration, speech_end),
     )
-    captions = []
-    if audio:
-        words = [(word, start + lead, end + lead) for word, start, end in _alignment_word_rows(audio["alignment"])]
-        captions = build_word_synced_subtitle_cues(words, window_end_sec=min(duration, speech_end + 0.16),
-                                                   timing_source="elevenlabs_alignment")
+    captions = dialogue_caption_cues(scene, audio, language=language, lead=lead, duration=duration) if audio else []
     titles = scene["titles"][language]
     duration_per_title = (duration - 0.85) / len(titles) if titles else 0
     accents = [

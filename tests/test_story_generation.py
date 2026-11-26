@@ -172,6 +172,15 @@ def test_story_dialogue_audio_keeps_turn_order_and_voice_ids(monkeypatch):
                     "character_start_times_seconds": [0.0, 0.2],
                     "character_end_times_seconds": [0.2, 0.4],
                 },
+                "alignment": {
+                    "characters": ["Д", "а", "Д", "а"],
+                    "character_start_times_seconds": [0.0, 0.2, 1.0, 1.2],
+                    "character_end_times_seconds": [0.2, 0.4, 1.2, 1.4],
+                },
+                "voice_segments": [
+                    {"dialogue_input_index": 0, "character_start_index": 0},
+                    {"dialogue_input_index": 1, "character_start_index": 2},
+                ],
             }
 
     def fake_post(_url, **kwargs):
@@ -192,6 +201,8 @@ def test_story_dialogue_audio_keeps_turn_order_and_voice_ids(monkeypatch):
         {"text": "Вторая реплика.", "voice_id": "voice-b"},
     ]
     assert result.audio_bytes == b"dialogue-audio"
+    assert result.dialogue_turn_starts == (0, 2)
+    assert result.alignment["character_start_times_seconds"] == [0.0, 0.2, 1.0, 1.2]
 
 
 def test_story_english_voiceover_is_unabridged_translation_of_approved_russian_text(monkeypatch):

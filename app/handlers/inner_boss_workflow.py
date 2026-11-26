@@ -198,8 +198,8 @@ async def _audio(update, session, scene):
             continue
         lines = [item["text"] for item in turns] if lang == "ru" else scene["en_turns"]
         inputs = [{"text": line, "voice_id": voice_ids[turn["speaker"]]} for turn, line in zip(turns, lines)]
-        if len({item["voice_id"] for item in inputs}) == 1:
-            result = await asyncio.to_thread(generate_story_audio, " ".join(lines), language=lang,
+        if len(inputs) == 1:
+            result = await asyncio.to_thread(generate_story_audio, lines[0], language=lang,
                                              voice_id=inputs[0]["voice_id"])
         else:
             result = await asyncio.to_thread(generate_story_dialogue_audio, inputs, language=lang)
@@ -207,6 +207,8 @@ async def _audio(update, session, scene):
             raise ValueError(f"Озвучка {lang.upper()} пришла без точных таймингов.")
         path = await asyncio.to_thread(store_story_audio, int(update.effective_chat.id), result)
         paths[lang] = {"path": path, "duration": result.duration_sec, "alignment": result.alignment}
+        if result.dialogue_turn_starts:
+            paths[lang]["turn_starts"] = list(result.dialogue_turn_starts)
         _save(update, session)
 
 
@@ -271,21 +273,29 @@ async def _video(update, data, scene):
     opening, appearance = frame_actions(scene)
     start_image = Path(scene["image"]).read_bytes()
     end_image = Path(scene["boss_image"]).read_bytes() if appearance else None
-    dialogue = "\n".join(f"{turn['speaker']}: {turn['text']}" for turn in scene["turns"])
+    roles = {"boss": "Boss, the red-edged shadow", "hero": "Hero, the human character"}
+    dialogue = "\n".join(
+        f"{index}. {roles[turn['speaker']]} speaks: {turn['text']}"
+        for index, turn in enumerate(scene["turns"], 1)
+    )
     performance_cue = (
-        "\nOff-screen dialogue for performance timing only. React with gaze and restrained expressions in sequence. "
-        "Keep the generated clip completely silent and never display these lines as graphics.\n" + dialogue
-        if dialogue else ""
+        "\nAct out these lines in exactly the listed order. Only the named speaker makes visible speech-like "
+        "mouth movements and a small expressive gesture during their own line. "
+        "When Boss speaks, animate the shadow's mouth while Hero listens with his lips closed. "
+        "When Hero speaks, animate Hero's mouth while Boss stays quiet with his mouth still. "
+        "A reaction from a listener uses eyes or posture. Let each speaker stop before the next starts. "
+        "The clip must be silent. Dialogue audio is added in the edit. Never display the lines as graphics.\n" + dialogue
+        if dialogue else "\nNo dialogue in this shot. Keep all mouths still."
     )
     prompt = (
         f"{duration}-second Kling 3.0 {'Keyframes' if appearance else 'image-to-video'} shot. No audio. 9:16. "
         "Animate the supplied artwork, matching all identities and materials. "
         + ("Use the first image as the opening state and the second as the ending anchor. "
-           "At the first sound cue the hero's eyelids open halfway and Boss appears early. "
-           "Keep the fixed camera, bed, clock, window and all other geometry pinned to their screen positions. "
-           "Hold the final Boss silhouette while the Hero reacts and settles. Keep the clock display blank. "
+           "Boss enters at the scripted moment and must be clearly visible before his first line. "
+           "Preserve the camera framing and the fixed scenery shared by the reference images. "
+           "If there is a clock in the shot, keep its display blank. "
            if appearance else "")
-        + "Use gaze and facial reactions, no lip sync or audio. " + NO_TEXT + " "
+        + NO_TEXT + " "
         + SHORT_FORMATS[BOSS].motion + "\n" + " ".join(filter(None, (opening, appearance))) + performance_cue
     )
     raw = await _generate_video_bytes_with_high_load_retry(
