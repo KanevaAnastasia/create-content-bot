@@ -163,7 +163,7 @@ def accent_scene_numbers(scenes):
     return [index for index, scene in enumerate(scenes, 1) if "accent" in _scene_track(scene).split(":")[2:]]
 
 
-def score(path, scenes, *, duration, intro_duration, silence):
+def score(path, scenes, *, duration, intro_duration, silence, include_music=True, events=()):
     """Write an exact-length, reusable music-and-foley stem without an external provider."""
     if not math.isfinite(duration) or duration <= 0:
         raise ValueError("Inner Boss soundtrack requires a positive timeline.")
@@ -171,15 +171,16 @@ def score(path, scenes, *, duration, intro_duration, silence):
     t = np.arange(size, dtype=np.float32) / SAMPLE_RATE
     mix = np.zeros(size, dtype=np.float32)
     rng = np.random.default_rng(144)
-    before, after = silence
-    pulse = np.maximum(0, np.sin(2 * np.pi * 1.25 * t)) ** 8
-    envelope = np.minimum(1, t / 1.2) * np.minimum(1, (duration - t) / 0.48)
-    envelope *= np.maximum(np.clip((before - t) / 0.32, 0, 1), np.clip((t - after) / 0.65, 0, 1))
-    envelope *= (t >= intro_duration)
-    motif = np.sin(2 * np.pi * 110 * t) + 0.27 * np.sin(2 * np.pi * 164.81 * t)
-    lift = np.clip((t - after) / 2.0, 0, 1)
-    mix += envelope * (0.036 * motif + 0.035 * pulse * np.sin(2 * np.pi * 55 * t)
-                       + 0.038 * lift * np.sin(2 * np.pi * 220 * t))
+    if include_music:
+        before, after = silence
+        pulse = np.maximum(0, np.sin(2 * np.pi * 1.25 * t)) ** 8
+        envelope = np.minimum(1, t / 1.2) * np.minimum(1, (duration - t) / 0.48)
+        envelope *= np.maximum(np.clip((before - t) / 0.32, 0, 1), np.clip((t - after) / 0.65, 0, 1))
+        envelope *= (t >= intro_duration)
+        motif = np.sin(2 * np.pi * 110 * t) + 0.27 * np.sin(2 * np.pi * 164.81 * t)
+        lift = np.clip((t - after) / 2.0, 0, 1)
+        mix += envelope * (0.036 * motif + 0.035 * pulse * np.sin(2 * np.pi * 55 * t)
+                           + 0.038 * lift * np.sin(2 * np.pi * 220 * t))
 
     def add(at, seconds, make):
         left = min(size, max(0, round(at * SAMPLE_RATE)))
@@ -228,6 +229,33 @@ def score(path, scenes, *, duration, intro_duration, silence):
 
             add(cursor, length, texture)
         cursor += length
+    for cue, at, length in events:
+        if cue == "alarm":
+            for beat in (0, 0.31):
+                add(at + beat, 0.16, lambda ts: 0.09 * np.sin(2 * np.pi * 880 * ts))
+        elif cue == "click":
+            add(at, 0.07, click)
+        elif cue == "thunder":
+            def thunder(ts):
+                roll = np.sin(2 * np.pi * (45 * ts - 4 * ts ** 2))
+                return (0.15 * roll + 0.10 * noise(ts)) * np.clip(ts / 0.06, 0, 1) * np.exp(-2.1 * ts)
+            add(at, length, thunder)
+        elif cue == "footsteps":
+            for offset in np.arange(0, length, 0.48):
+                add(at + offset, 0.13, step)
+        elif cue == "paper":
+            add(at, length, lambda ts: 0.09 * noise(ts) * np.sin(2 * np.pi * 12 * ts) ** 2 * np.exp(-6 * ts))
+        elif cue in {"rain", "wind", "breathing"}:
+            gain = {"rain": 0.055, "wind": 0.10, "breathing": 0.13}[cue]
+
+            def atmosphere(ts):
+                width = min(17, len(ts))
+                soft = np.convolve(noise(ts), np.ones(width) / width, mode="same")
+                pulse = 0.25 + 0.75 * np.sin(np.pi * ts) ** 2 if cue == "breathing" else 1
+                return gain * soft * pulse * np.clip(ts / 0.13, 0, 1) * np.clip((length - ts) / 0.2, 0, 1)
+
+            add(at, length, atmosphere)
+
     with wave.open(str(path), "wb") as out:
         out.setparams((1, 2, SAMPLE_RATE, 0, "NONE", "not compressed"))
         out.writeframes((np.clip(mix, -1, 1) * 32767).astype("<i2").tobytes())

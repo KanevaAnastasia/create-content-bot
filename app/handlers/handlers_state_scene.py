@@ -1290,6 +1290,9 @@ def keyboard_for_session_state(session: dict):
     if (session or {}).get("state") == DISCIPLINE_OFFER:
         return discipline_offer_markup(session.get("discipline_queue_idea_id"))
     state = str((session or {}).get("state") or "")
+    from .inner_boss_workflow import STATE as BOSS_SCENE_STATE, keyboard as boss_keyboard
+    if state == BOSS_SCENE_STATE:
+        return boss_keyboard(session)
     if state in {
         STATE_REFINING_CONCEPT,
         STATE_REFINING_RECIPE,
@@ -7871,6 +7874,24 @@ async def on_audio(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     chat_id = int(update.effective_chat.id)
     session = SESSIONS.get(chat_id) or {}
     state = str(session.get("state") or "")
+    from .inner_boss_workflow import KEY as BOSS_SCENE_KEY, STATE as BOSS_SCENE_STATE, finish as finish_boss
+    if state == BOSS_SCENE_STATE and session.get(BOSS_SCENE_KEY, {}).get("stage") == "music":
+        try:
+            media_bytes, _ = await _extract_visualization_audio_bytes(update, context)
+            if not media_bytes:
+                raise ValueError("Пришли музыку аудиофайлом.")
+            await finish_boss(update, session, media_bytes)
+        except ValueError as exc:
+            await update.message.reply_text(str(exc))
+        except Exception:
+            logger.exception("inner_boss.final_music_failed")
+            note = (
+                "Ролик собран. Нажми «Прислать ролик», чтобы повторить отправку."
+                if session[BOSS_SCENE_KEY]["stage"] == "done"
+                else "Сборка с музыкой не завершилась. Можно повторить загрузку."
+            )
+            await update.message.reply_text(note)
+        return
     if state == STATE_WAITING_REFERENCE_CUSTOM_MUSIC:
         media_bytes, media_meta = await _extract_visualization_audio_bytes(update, context)
         await handle_reference_custom_music_upload(
@@ -8715,6 +8736,10 @@ async def _on_text_impl(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     }:
         _restore_advertising_campaign_choice(session)
         SESSIONS[chat_id] = session
+    from .inner_boss_workflow import STATE as BOSS_SCENE_STATE, handle_text as handle_boss_scene
+    if session.get("state") == BOSS_SCENE_STATE and text.strip().casefold() != NAV_BUTTON_START_OVER.casefold():
+        await handle_boss_scene(update, session, text)
+        return
     if await _handle_navigation_buttons(update, chat_id=chat_id, session=session, text=text):
         return
     if await _handle_draft_buttons(update, context, chat_id=chat_id, session=session, text=text):

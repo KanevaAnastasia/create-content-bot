@@ -2366,9 +2366,10 @@ def _write_burned_subtitle_ass(
             size = max(1, min(size, round(size * layout.width * 0.80 / max(1.0, line_width))))
         x, y = layout.width // 2, round(layout.height * 0.28)
         shift = max(2, round(layout.width * 0.005))
-        for index, (dx, dy) in enumerate(((-1, 0), (1, 1), (-1, -1), (1, 0), (0, 0))):
+        offsets = ((-1, 0), (1, 1), (-1, -1), (1, 0), (0, 0)) if cue.get("shake", True) else ((0, 0),)
+        for index, (dx, dy) in enumerate(offsets):
             frame_start = start + index * 0.055
-            frame_end = end if index == 4 else min(end, frame_start + 0.055)
+            frame_end = end if index == len(offsets) - 1 else min(end, frame_start + 0.055)
             if frame_end <= frame_start:
                 break
             at = f"{{\\an8\\pos({x + dx * shift},{y + dy * shift})\\fn{STORY_WORD_SYNC_FONT_NAME}\\fs{size}\\b1\\c&HAAE8FF&}}"

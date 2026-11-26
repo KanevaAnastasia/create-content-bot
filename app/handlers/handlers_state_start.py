@@ -60,7 +60,7 @@ from .handlers_generation_utils import (
 from .handlers_keyboards import DRAFT_BUTTON_SAVE, reply_text_without_keyboard, safe_reply_text
 from .handlers_state_media import send_social_descriptions_for_recipe
 from ..project_modes import PENDING_MODE_KEY, project_mode_rows, project_mode_labels
-from ..discipline_modes import BOSS, BOSS_PILOT, LABELS, MODE_KEY, SHORT_FORMATS, active_mode, mode_from_label
+from ..discipline_modes import BOSS, LABELS, MODE_KEY, SHORT_FORMATS, active_mode, mode_from_label
 from ..directorial_notes import direction_for_session
 from ..dish_visuals import build_dish_visual_brief
 from ..llm_utils import TEXT_MODEL_PROFILE_SHORT
@@ -1382,13 +1382,26 @@ async def _handle_waiting_inner_boss_idea_state(
     if not idea:
         await update.message.reply_text("Напиши идею ролика обычным сообщением.")
         return True
-    source = BOSS_PILOT if idea.casefold() == "пилот" else idea
+    from .inner_boss_workflow import PILOT_SCRIPT, SCRIPT_HEADER, announce, draft_script, initialize
+
+    try:
+        script = (
+            PILOT_SCRIPT if idea.casefold() == "пилот"
+            else idea if SCRIPT_HEADER.search(idea)
+            else await asyncio.to_thread(draft_script, idea)
+        )
+        initialize(session, script)
+    except ValueError as exc:
+        await update.message.reply_text(str(exc))
+        return True
+    except Exception as exc:
+        await update.message.reply_text(f"Не удалось подготовить сценарий. {_user_error_message(exc)}")
+        return True
     session.pop(SERIES_PENDING_RECIPE_SESSION_KEY, None)
-    session[STORY_SOURCE_SESSION_KEY] = source
-    session["user_input"] = source
-    from ..directorial_notes import remember_notes
-    remember_notes(session, source)
-    return await _start_initial_story_voiceover(update, context, chat_id=chat_id, session=session)
+    session["story_title"] = "Я уже встал" if idea.casefold() == "пилот" else "Внутренний босс"
+    SESSIONS[chat_id] = session
+    await announce(update.message, session)
+    return True
 
 
 async def _handle_waiting_story_english_choice_state(

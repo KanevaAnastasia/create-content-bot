@@ -27,13 +27,15 @@ def test_mode_selection_survives_resume_and_disables_dialogue(monkeypatch,label,
         assert session[start.STORY_ENGLISH_REQUESTED_SESSION_KEY] is True
         assert session['state'] == story_generation.STATE_WAITING_INNER_BOSS_IDEA
         launch.assert_not_awaited()
+        from app.handlers import inner_boss_workflow
         asyncio.run(start._handle_waiting_inner_boss_idea_state(
             SimpleNamespace(message=message), None, chat_id=1, session=session,
-            text="Боюсь открыть тест после недели подготовки.",
+            text="Сцена 1. Тест\nГерой открывает тест после недели подготовки.",
         ))
-        assert session[start.STORY_SOURCE_SESSION_KEY] == "Боюсь открыть тест после недели подготовки."
+        assert session['state'] == inner_boss_workflow.STATE
+        assert session[inner_boss_workflow.KEY]['scenes'][0]['visual'] == "Герой открывает тест после недели подготовки."
         assert start.SERIES_PENDING_RECIPE_SESSION_KEY not in session
-        launch.assert_awaited_once()
+        launch.assert_not_awaited()
     else:
         assert session['state'] == start.STATE_WAITING_STORY_ENGLISH_CHOICE
     assert _chat_session_cache_payload(session)[modes.MODE_KEY]==mode
@@ -372,11 +374,15 @@ def test_workspace_boss_menu_opens_idea_step_without_an_extra_prompt(monkeypatch
     asyncio.run(guest_handlers._start_workspace_format(update, None, 1, session, modes.LABELS[modes.BOSS]))
     assert session['state'] == story_generation.STATE_WAITING_INNER_BOSS_IDEA
     writer.assert_not_awaited()
+    from app.handlers import inner_boss_workflow
+    draft = "Сцена 1. Курс\nГерой взялся за курс и бросает после ошибки."
+    monkeypatch.setattr(inner_boss_workflow, 'draft_script', lambda idea: draft)
     asyncio.run(start._handle_waiting_inner_boss_idea_state(
-        update, None, chat_id=1, session=session, text='Вася взялся за курс и бросает после ошибки.',
+        update, None, chat_id=1, session=session, text='Герой взялся за курс и бросает после ошибки.',
     ))
-    writer.assert_awaited_once()
-    assert writer.await_args.kwargs['session'][start.STORY_SOURCE_SESSION_KEY].endswith('после ошибки.')
+    writer.assert_not_awaited()
+    assert session['state'] == inner_boss_workflow.STATE
+    assert session[start.STORY_SOURCE_SESSION_KEY] == draft
 
 
 def test_literary_story_reuses_only_approved_recurring_book_characters(monkeypatch, tmp_path):

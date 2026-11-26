@@ -39,6 +39,8 @@ def session_is_busy(session: dict | None) -> bool:
     if not session:
         return False
     state = str(session.get("state") or "")
+    if state == "waiting_inner_boss_scene_workflow":
+        return (session.get("inner_boss_scene_workflow") or {}).get("stage") != "done"
     if state == "ready_for_production":
         # Scene generation finishes before the external final worker delivers
         # videos and captions. Do not overwrite that run while rendering.

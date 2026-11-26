@@ -149,7 +149,8 @@ def reconcile(chat_id):
             return
         if session.get(KEY) == str(row.id):
             row.run_id = str(session.get('generation_run_id') or row.run_id or '') or None
-            if session.get('social_descriptions_sent'):
+            boss_complete = (session.get('inner_boss_scene_workflow') or {}).get('stage') == 'done'
+            if session.get('social_descriptions_sent') or boss_complete:
                 row.status = 'completed'
                 row.completed_at = datetime.now(timezone.utc)
             elif not session.get('state'):
@@ -232,7 +233,7 @@ async def deliver(bot, chat_id, *, force=False, locked=False):
 
 
 def build_story_session(row, *, english=True):
-    from .discipline_modes import ARCHIVE, LITERARY, MODE_KEY, SHORT_FORMATS
+    from .discipline_modes import ARCHIVE, BOSS, LITERARY, MODE_KEY, SHORT_FORMATS
     from .directorial_notes import remember_notes
     from .handlers.handlers_state_start import STATE_WAITING_STORY_SCRIPT_APPROVAL
     creative_headings = ('Ведущий приём внимания\n', 'Операторское решение\n', 'Анимационное решение\n')
@@ -269,6 +270,11 @@ def build_story_session(row, *, english=True):
     if row.mode == LEARNING:
         session.setdefault('series_title_by_lang', {'ru': row.series, 'en': 'Learning to Learn'})
         session['series_counter_by_lang'] = {'ru': f'Метод {row.episode}', 'en': f'Method {row.episode}'}
+    if row.mode == BOSS:
+        from .handlers.inner_boss_workflow import SCRIPT_HEADER, initialize
+        if SCRIPT_HEADER.search(row.script):
+            initialize(session, row.script)
+            return session
     remember_notes(session, source)
     return session
 
@@ -354,6 +360,15 @@ async def callback(update, context):
         if action == 's':
             await deliver(context.bot, chat_id, force=True, locked=True)
         else:
+            from .handlers.inner_boss_workflow import STATE as BOSS_SCENE_STATE, announce
+            if story["state"] == BOSS_SCENE_STATE:
+                from types import SimpleNamespace
+
+                async def reply_text(text, **kwargs):
+                    return await context.bot.send_message(chat_id, text, **kwargs)
+
+                await announce(SimpleNamespace(reply_text=reply_text), story)
+                return
             from .handlers.handlers_state_start import STATE_WAITING_GENERATION_MODE, _ask_generation_mode
             if story['state'] == STATE_WAITING_GENERATION_MODE:
                 from types import SimpleNamespace
