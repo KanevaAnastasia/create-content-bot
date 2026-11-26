@@ -182,6 +182,8 @@ def test_image_feedback_edits_only_selected_frame_and_waits_for_approval(tmp_pat
     monkeypatch.setattr(workflow, "_save", lambda *_: None)
     monkeypatch.setattr(workflow, "_show", AsyncMock())
     monkeypatch.setattr(workflow, "_target", lambda _data, suffix: tmp_path / f"new{suffix}")
+    script_rewrite = AsyncMock()
+    monkeypatch.setattr(workflow, "revise_scene", script_rewrite)
     image_requests = []
 
     def generate(prompt, *, reference_images, aspect_ratio):
@@ -190,19 +192,51 @@ def test_image_feedback_edits_only_selected_frame_and_waits_for_approval(tmp_pat
 
     monkeypatch.setattr(vertex_images, "generate_image_vertex", generate)
     original_opening = scene["image"]
-    asyncio.run(workflow.handle_text(update, session, workflow.IMAGE_FEEDBACK_BUTTON))
+    asyncio.run(workflow.handle_text(update, session, "ИЗМЕНИТЬ"))
     asyncio.run(workflow.handle_text(update, session, "ОК"))
     assert not image_requests
     asyncio.run(workflow.handle_text(update, session, "Герой спит с закрытыми глазами"))
     prompt, reference, ratio = image_requests[0]
     assert "Герой спит с закрытыми глазами" in prompt
     assert reference == stage.encode() and ratio == "9:16"
-    assert data["stage"] == stage and not data.get("awaiting_image_feedback")
+    assert data["stage"] == stage and not data.get("scene_image_edit_pending")
     assert scene["audio"]["ru"]["path"] == "voice.mp3" and "video" not in scene
+    script_rewrite.assert_not_called()
     if stage == "image":
         assert "boss_image" not in scene
     else:
         assert scene["image"] == original_opening
+
+
+def test_frame_prompt_feedback_regenerates_without_editing_the_script(monkeypatch):
+    from app import llm_utils
+
+    session = {}
+    workflow.initialize(session, PILOT_SCRIPT)
+    data = session[workflow.KEY]
+    data["stage"] = "image"
+    original = data["scenes"][0]
+    original["image"] = "old.png"
+    original["audio"] = {"ru": {"path": "voice.mp3"}}
+    update = SimpleNamespace(message=SimpleNamespace(reply_text=AsyncMock()))
+    monkeypatch.setattr(workflow, "_save", lambda *_: None)
+    monkeypatch.setattr(workflow, "_show", AsyncMock())
+    monkeypatch.setattr(llm_utils, "gemini_generate_sync", lambda *_, **__: "Крупнее лицо спящего героя.")
+    monkeypatch.setattr(workflow, "_revise_frame", AsyncMock())
+
+    async def create(_data, scene):
+        assert "Крупнее лицо" in scene["frame_prompt_overrides"]["image"]
+        scene["image"] = "new.png"
+
+    monkeypatch.setattr(workflow, "_image", AsyncMock(side_effect=create))
+    asyncio.run(workflow.handle_text(update, session, "ФИДБЕК"))
+    workflow._image.assert_not_awaited()
+    asyncio.run(workflow.handle_text(update, session, "Крупнее лицо"))
+    assert data["stage"] == "image"
+    revised = data["scenes"][0]
+    assert revised["body"] == original["body"] and revised["audio"] == original["audio"]
+    assert revised["image"] == "new.png"
+    workflow._revise_frame.assert_not_awaited()
 
 
 def test_boss_passes_both_images_only_for_the_appearance_scene(tmp_path, monkeypatch):

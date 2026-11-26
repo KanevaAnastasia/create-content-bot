@@ -23,8 +23,6 @@ KEY = "inner_boss_scene_workflow"
 LOGGER = logging.getLogger(__name__)
 FRAME_POLICY = 3
 IMAGE_STAGES = {"image", "boss_image"}
-IMAGE_FEEDBACK_BUTTON = "Исправить изображение"
-IMAGE_FEEDBACK_HINT = "Напиши, что изменить на этом кадре. Например: «Герой спит с закрытыми глазами»."
 NO_TEXT = (
     "All artwork surfaces must be completely unmarked. No letters, numbers, digits, speech bubbles, "
     "captions, pictograms or watermarks. Clock screens and papers are solid blank shapes. "
@@ -48,16 +46,14 @@ def initialize(session: dict, script: str) -> None:
 def keyboard(session):
     data = session[KEY]
     stage = data["stage"]
-    if data.get("awaiting_image_feedback"):
-        rows = [["Отмена"]]
-    elif stage == "music":
+    if stage == "music":
         rows = [["Без музыки"], ["Показать сцену"]]
     elif stage == "done":
         rows = [["Прислать ролик", "Добавить музыку"], ["Показать сцену"]]
     else:
         rows = [["ОК"], ["Показать сцену", "Сценарий"]]
         if stage in IMAGE_STAGES:
-            rows.append([IMAGE_FEEDBACK_BUTTON, "Перегенерировать"])
+            rows.extend([["ИЗМЕНИТЬ"], ["ФИДБЕК"], ["ПЕРЕГЕНЕРИРОВАТЬ"]])
         elif stage in {"audio", "video", "edit"}:
             rows.append(["Перегенерировать"])
     return ReplyKeyboardMarkup(rows, resize_keyboard=True)
@@ -235,6 +231,7 @@ async def _image(data, scene):
             except (OSError, RuntimeError):
                 LOGGER.warning("inner_boss.previous_frame_unavailable")
     opening, appearance = frame_actions(scene)
+    opening = scene.get("frame_prompt_overrides", {}).get("image", opening)
     prompt = (
         SHORT_FORMATS[BOSS].frame
         + "\nVertical 9:16 single opening image. Reference 1 is the exact character model. "
@@ -257,15 +254,14 @@ async def _boss_image(data, scene):
     from ..vertex_images import generate_image_vertex
 
     opening, appearance = frame_actions(scene)
-    feedback = scene.get("frame_feedback", {}).get("boss_image")
+    appearance_override = scene.get("frame_prompt_overrides", {}).get("boss_image")
     prompt = (
         "Edit the first reference as the exact same vertical 9:16 shot. Preserve lens, framing, perspective, "
         "all props and their screen positions, the Hero's identity, and the flat nighttime 2D style. "
         "Add the Boss wall shadow from the second reference. Keep him visibly separated from the Hero. "
         "Depict only the instant Boss has just appeared. " + NO_TEXT + "\n"
-        + re.split(r"(?<=[.!?])\s+", appearance, maxsplit=1)[0]
+        + (appearance_override or re.split(r"(?<=[.!?])\s+", appearance, maxsplit=1)[0])
         + "\nAction leading into this instant. Advance the Hero to the final scripted pose: " + opening
-        + ("\nApply this visual correction to the Boss keyframe: " + feedback if feedback else "")
     )
     result = await asyncio.to_thread(
         generate_image_vertex, prompt,
@@ -294,6 +290,10 @@ async def _revise_frame(data, scene, stage, feedback):
     path = _target(data, "-boss-fix.png" if stage == "boss_image" else "-opening-fix.png")
     path.write_bytes(result)
     scene[stage] = str(path)
+    _invalidate_frame_dependants(data, scene, stage, feedback)
+
+
+def _invalidate_frame_dependants(data, scene, stage, feedback):
     scene.setdefault("frame_feedback", {})[stage] = feedback
     if stage == "image":
         scene["frame_policy"] = FRAME_POLICY
@@ -301,6 +301,98 @@ async def _revise_frame(data, scene, stage, feedback):
     for key in ("video", "video_duration", "previews", "approved"):
         scene.pop(key, None)
     data.pop("masters", None)
+
+
+async def _rewrite_frame_prompt(data, scene, stage, feedback):
+    from ..llm_utils import GEMINI_MODEL_PROFILE_EDIT, gemini_generate_sync
+
+    opening, appearance = frame_actions(scene)
+    current = scene.get("frame_prompt_overrides", {}).get(stage, opening if stage == "image" else appearance)
+    rewritten = await asyncio.to_thread(
+        gemini_generate_sync,
+        "Перепиши промпт только для одного опорного кадра «Внутреннего босса» с учётом фидбэка. "
+        "Выведи один визуальный промпт. Сохрани композицию, реквизит, геометрическую 2D-рисовку и внешность героев. "
+        "Текст, цифры и реплики добавляются на монтаже."
+        f"\nТекущий промпт:\n{current}\nФидбэк:\n{feedback}",
+        model_profile=GEMINI_MODEL_PROFILE_EDIT,
+    )
+    candidate = dict(
+        scene, frame_prompt_overrides={
+            **scene.get("frame_prompt_overrides", {}),
+            stage: f"{rewritten.strip() or current}\nRequired visual correction: {feedback}",
+        },
+        frame_feedback=dict(scene.get("frame_feedback", {})),
+    )
+    generator = _image if stage == "image" else _boss_image
+    await generator(data, candidate)
+    _invalidate_frame_dependants(data, candidate, stage, feedback)
+    data["scenes"][data["index"]] = candidate
+
+
+async def _handle_frame_feedback(update, session, text):
+    data = session[KEY]
+    stage, index = data["stage"], data["index"]
+    if stage not in IMAGE_STAGES:
+        return False
+    from .handlers_media_scene import _extract_format_or_feedback
+    from .handlers_state_media import (
+        SCENE_IMAGE_EDIT_PENDING_KEY, _ask_for_feedback_text, _extract_image_edit_instruction,
+        _is_empty_feedback_command, _pop_scene_image_edit_pending, _set_scene_image_edit_pending,
+    )
+
+    low = text.strip().casefold()
+    pending = data.get(SCENE_IMAGE_EDIT_PENDING_KEY)
+    if data.pop("awaiting_image_feedback", None):
+        _set_scene_image_edit_pending(data, scene_idx=index, target=stage)
+        pending = data[SCENE_IMAGE_EDIT_PENDING_KEY]
+    if pending and pending["target"] == stage and pending["scene_idx"] == index:
+        if low == "отмена":
+            _pop_scene_image_edit_pending(data, scene_idx=index)
+            _save(update, session)
+            await _show(update, session)
+            return True
+        mode = pending.get("mode", "edit")
+        instruction = _extract_format_or_feedback(text)
+        if instruction is None:
+            instruction = _extract_image_edit_instruction(text)
+        if instruction is None:
+            instruction = text.strip()
+    elif low == "отмена":
+        await _show(update, session)
+        return True
+    elif low in {"ок", "ok", "перегенерировать", "показать сцену", "сценарий", "прислать ролик"} or re.fullmatch(r"сцена\s+\d+", low):
+        return False
+    else:
+        instruction = _extract_image_edit_instruction(text)
+        if low == "исправить изображение":
+            instruction = ""
+        mode = "edit" if instruction is not None else "prompt_feedback"
+        if instruction is None:
+            instruction = _extract_format_or_feedback(text)
+        if instruction is None:
+            instruction = "" if _is_empty_feedback_command(text) or low == "фидбэк" else text.strip()
+    if not instruction or (pending and (
+        low in {"ок", "ok", "перегенерировать", "показать сцену", "сценарий", "фидбэк"}
+        or _is_empty_feedback_command(text) or re.fullmatch(r"сцена\s+\d+", low)
+    )):
+        _set_scene_image_edit_pending(data, scene_idx=index, target=stage, mode=mode)
+        _save(update, session)
+        if mode == "edit":
+            await update.message.reply_text("Напишите, что именно поменять в текущем изображении. Можно одной фразой.")
+        else:
+            await _ask_for_feedback_text(update, "кадре")
+        return True
+    scene = data["scenes"][index]
+    if mode == "edit":
+        await update.message.reply_text("Изменяю текущий кадр по вашему описанию.")
+        await _revise_frame(data, scene, stage, instruction)
+    else:
+        await update.message.reply_text("Перегенерирую промпт и кадр по фидбеку.")
+        await _rewrite_frame_prompt(data, scene, stage, instruction)
+    _pop_scene_image_edit_pending(data, scene_idx=index)
+    _save(update, session)
+    await _show(update, session)
+    return True
 
 
 async def _video(update, data, scene):
@@ -377,7 +469,7 @@ def _replace_scene(data, body):
             if key in previous:
                 replacement[key] = previous[key]
     if frame_actions(replacement) == frame_actions(previous) and previous.get("image"):
-        for key in ("image", "frame_policy", "boss_image", "clock_position", "frame_feedback"):
+        for key in ("image", "frame_policy", "boss_image", "clock_position", "frame_feedback", "frame_prompt_overrides"):
             if key in previous:
                 replacement[key] = previous[key]
         if (replacement["turns"] == previous["turns"] and _duration(replacement) == _duration(previous)
@@ -449,23 +541,9 @@ async def handle_text(update, session, text):
     low = text.strip().casefold()
     scene = data["scenes"][data["index"]]
     try:
-        if data.get("awaiting_image_feedback") and stage in IMAGE_STAGES:
-            if low == "отмена":
-                data.pop("awaiting_image_feedback", None)
-            elif low in {"", "ок", "ok", "перегенерировать", "показать сцену", "сценарий",
-                         IMAGE_FEEDBACK_BUTTON.casefold(), "фидбэк", "фидбек", "feedback"}:
-                await update.message.reply_text(IMAGE_FEEDBACK_HINT, reply_markup=keyboard(session))
-                return
-            else:
-                await update.message.reply_text("Исправляю этот кадр.")
-                await _revise_frame(data, scene, stage, text.strip())
-                data.pop("awaiting_image_feedback", None)
-        elif stage in IMAGE_STAGES and low in {IMAGE_FEEDBACK_BUTTON.casefold(), "фидбэк", "фидбек", "feedback"}:
-            data["awaiting_image_feedback"] = True
-            _save(update, session)
-            await update.message.reply_text(IMAGE_FEEDBACK_HINT, reply_markup=keyboard(session))
+        if await _handle_frame_feedback(update, session, text):
             return
-        elif low == "сценарий":
+        if low == "сценарий":
             for item in data["scenes"]:
                 await update.message.reply_text(f"{item['title']}\n\n{item['body']}")
             return
@@ -502,8 +580,6 @@ async def handle_text(update, session, text):
                         raise
                     if _duration(scene) != scene.get("video_duration"):
                         scene.pop("video", None)
-                elif stage in IMAGE_STAGES and scene.get("frame_feedback", {}).get(stage):
-                    await _revise_frame(data, scene, stage, scene["frame_feedback"][stage])
                 elif stage == "image":
                     await _image(data, scene)
                     scene.pop("video", None)
