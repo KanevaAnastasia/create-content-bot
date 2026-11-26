@@ -36,7 +36,7 @@ ADMIN_MANAGE="$ROOT_DIR/admin_panel/manage.py"
 LOCK_FILE="/tmp/content_fabric_bot.lock"
 
 usage() {
-  echo "Usage: $0 {start [-f|--follow]|launchd-foreground|stop [--interrupt-media]|restart [-f|--follow|--interrupt-media]|status|logs [-f|--follow]|adopt <pid>|services-up|services-restart|services-status|final-worker <run_id> [--no-delivery]|final-worker-foreground <run_id> [--no-delivery]|final-worker-status|scheduled-worker [limit]|scheduled-worker-status|celery-worker|celery-worker-foreground|celery-worker-reload|celery-worker-status|celery-beat|celery-beat-foreground|celery-beat-status}"
+  echo "Usage: $0 {start [-f|--follow|--launch-agent]|launchd-foreground|stop [--interrupt-media]|restart [-f|--follow|--interrupt-media]|status|logs [-f|--follow]|adopt <pid>|services-up|services-restart|services-status|final-worker <run_id> [--no-delivery]|final-worker-foreground <run_id> [--no-delivery]|final-worker-status|scheduled-worker [limit]|scheduled-worker-status|celery-worker|celery-worker-foreground|celery-worker-reload|celery-worker-status|celery-beat|celery-beat-foreground|celery-beat-status}"
 }
 
 ensure_runtime() {
@@ -760,7 +760,16 @@ show_logs() {
 
 case "${1:-}" in
   start)
-    start_bot
+    if [[ "${2:-}" == "--launch-agent" ]]; then
+      ensure_runtime
+      if pid_is_running "$(current_pid || true)" || [[ -n "$(unmanaged_bot_pids || true)" ]]; then
+        echo "Bot is already running. Use status to inspect it." >&2
+        exit 1
+      fi
+      install_content_fabric_launchagent com.contentfabric.bot
+    else
+      start_bot
+    fi
     if follow_requested "${2:-}"; then
       show_logs --follow
     fi
@@ -770,6 +779,11 @@ case "${1:-}" in
     ;;
   stop)
     stop_bot "${2:-}"
+    # An explicit stop must also release the KeepAlive job for this bot.
+    # The restart command uses stop_bot directly and retains its launch setup.
+    if command -v launchctl >/dev/null 2>&1 && launchd_service_loaded com.contentfabric.bot; then
+      launchctl bootout "$(launchd_domain)/com.contentfabric.bot"
+    fi
     ;;
   restart)
     stop_bot "${2:-}"

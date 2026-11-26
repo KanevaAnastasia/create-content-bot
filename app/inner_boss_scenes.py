@@ -368,9 +368,11 @@ def render_scene(scene: dict, path: Path, *, language: str, duration: int) -> No
     ], stage="inner_boss_scene")
 
 
-def render_master(clips: list[Path], music: Path | None, output: Path) -> None:
+def render_master(
+    clips: list[Path], music: Path | None, output: Path, *, music_transition: tuple[int, Path] | None = None,
+) -> None:
     """Concatenate approved scene renders; put the optional user's track on top once."""
-    from .post_production import _concat_segments, _resolve_ffmpeg, _run_ffmpeg
+    from .post_production import _concat_segments, _media_duration, _resolve_ffmpeg, _run_ffmpeg
 
     ffmpeg = _resolve_ffmpeg()
     playlist = output.with_suffix(".txt")
@@ -379,10 +381,25 @@ def render_master(clips: list[Path], music: Path | None, output: Path) -> None:
     _concat_segments(ffmpeg=ffmpeg, list_path=playlist, dest_path=dry)
     if music is None:
         return
-    _run_ffmpeg([
-        ffmpeg, "-y", "-i", str(dry), "-i", str(music), "-filter_complex",
-        "[1:a:0]volume=0.20,apad[music];"
-        "[0:a:0][music]amix=inputs=2:duration=first:normalize=0,alimiter=limit=0.95:level=0[a]",
+    inputs = [ffmpeg, "-y", "-i", str(dry), "-i", str(music)]
+    music_filter = "[1:a:0]volume=0.20,apad[music];"
+    if music_transition:
+        scenes_before, track = music_transition
+        if not 0 < scenes_before < len(clips):
+            raise ValueError("Смена музыки должна быть между сценами.")
+        change_at = sum(_media_duration(clip) for clip in clips[:scenes_before])
+        fade = min(0.25, change_at)
+        inputs += ["-i", str(track)]
+        normalize = "aresample=48000,aformat=channel_layouts=stereo"
+        music_filter = (
+            f"[1:a:0]{normalize},apad,atrim=duration={change_at:.6f},"
+            f"afade=t=out:st={change_at - fade:.6f}:d={fade:.6f}[first];"
+            f"[2:a:0]{normalize},afade=t=in:d=0.25[second];"
+            "[first][second]concat=n=2:v=0:a=1,volume=0.20,apad[music];"
+        )
+    mix = "[0:a:0][music]amix=inputs=2:duration=first:normalize=0,alimiter=limit=0.95:level=0[a]"
+    _run_ffmpeg(inputs + [
+        "-filter_complex", music_filter + mix,
         "-map", "0:v:0", "-map", "[a]", "-c:v", "copy", "-c:a", "aac",
         "-movflags", "+faststart", str(output),
     ], stage="inner_boss_master_music")

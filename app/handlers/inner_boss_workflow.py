@@ -26,6 +26,7 @@ IMAGE_STAGES = {"image", "boss_image"}
 SPEECH_TIMING_BUTTON = "Сдвинуть озвучку"
 SPEECH_TIMING_HINT = "Укажи, когда должна начаться речь от начала сцены. Например: 4,4 или 00:04.4."
 VIDEO_PROMPT_BUTTON = "Видеопромпт"
+SAVED_MUSIC_BUTTON = "Собрать с музыкой"
 NO_TEXT = (
     "All artwork surfaces must be completely unmarked. No letters, numbers, digits, speech bubbles, "
     "captions, pictograms or watermarks. Clock screens and papers are solid blank shapes. "
@@ -51,6 +52,8 @@ def keyboard(session):
     stage = data["stage"]
     if stage == "music":
         rows = [["Без музыки"], ["Показать сцену"]]
+        if data.get("music_plan"):
+            rows.insert(0, [SAVED_MUSIC_BUTTON])
     elif stage == "done":
         rows = [["Прислать ролик", "Добавить музыку"], ["Показать сцену"]]
     else:
@@ -688,8 +691,10 @@ async def _show(update, session):
         await announce(update.message, session)
         return
     if stage == "music":
-        await update.message.reply_text("Все сцены утверждены. Пришли музыку аудиофайлом или выбери «Без музыки».",
-                                        reply_markup=keyboard(session))
+        note = "Все сцены утверждены. Пришли музыку аудиофайлом или выбери «Без музыки»."
+        if plan := data.get("music_plan"):
+            note = f"Все сцены утверждены. Первый трек начнётся со сцены 1, второй со сцены {plan['second_scene']}. Выбери «Собрать с музыкой»."
+        await update.message.reply_text(note, reply_markup=keyboard(session))
         return
     if stage == "done":
         await _send_masters(update, session)
@@ -788,6 +793,9 @@ async def handle_text(update, session, text):
             pass
         elif low == "без музыки" and stage == "music":
             await finish(update, session, None)
+            return
+        elif low == SAVED_MUSIC_BUTTON.casefold() and stage == "music" and data.get("music_plan"):
+            await finish(update, session, None, use_saved_music=True)
             return
         elif low in {"ок", "ok", "перегенерировать"}:
             if stage in {"music", "done"}:
@@ -913,7 +921,7 @@ async def _send_masters(update, session):
     await update.message.reply_text("Готовые версии сохранены в админке.", reply_markup=keyboard(session))
 
 
-async def finish(update, session, music_bytes):
+async def finish(update, session, music_bytes, *, use_saved_music=False):
     from ..artifact_store import persist_post_production_artifacts
     from ..generation_store import ensure_generation_run_for_session, mark_generation_run_ready
     from ..post_production import _has_audio_stream
@@ -923,7 +931,15 @@ async def finish(update, session, music_bytes):
         raise ValueError("Сначала утверди монтаж каждой сцены.")
     target = _directory(data)
     music = None
-    if music_bytes:
+    transition = None
+    if use_saved_music:
+        plan = data["music_plan"]
+        music, second = Path(plan["first"]), Path(plan["second"])
+        transition = (plan["second_scene"] - 1, second)
+        for path in (music, second):
+            if not path.is_file() or not await asyncio.to_thread(_has_audio_stream, path):
+                raise ValueError("Один из сохранённых треков недоступен или не распознан как аудио.")
+    elif music_bytes:
         music = target / f"music-{uuid4().hex}.audio"
         music.write_bytes(music_bytes)
         if not await asyncio.to_thread(_has_audio_stream, music):
@@ -933,7 +949,7 @@ async def finish(update, session, music_bytes):
     for lang in data["languages"]:
         destination = target / f"final-{batch}-{lang}.mp4"
         clips = [Path(scene["previews"][lang]) for scene in data["scenes"]]
-        await asyncio.to_thread(render_master, clips, music, destination)
+        await asyncio.to_thread(render_master, clips, music, destination, music_transition=transition)
         masters[lang] = str(destination)
     _snapshot(session)
     run_id, _ = await asyncio.to_thread(ensure_generation_run_for_session, session)
