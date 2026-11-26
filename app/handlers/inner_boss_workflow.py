@@ -29,6 +29,7 @@ CONTINUATION_STAGES = IMAGE_STAGES | {"scene", "audio", "video_prompt"}
 SPEECH_TIMING_BUTTON = "Сдвинуть озвучку"
 SPEECH_TIMING_HINT = "Укажи, когда должна начаться речь от начала сцены. Например: 4,4 или 00:04.4."
 VIDEO_PROMPT_BUTTON = "Видеопромпт"
+PREVIOUS_STEP_BUTTON = "Предыдущий шаг"
 SCENE_EDIT_BUTTON = "Править сцену"
 SCENE_EDIT_STAGES = IMAGE_STAGES | {"scene", "translation", "audio", "video_prompt", "video", "edit"}
 FRAME_SETUP_BUTTON = "Кадры сцены"
@@ -62,9 +63,9 @@ def keyboard(session):
     stage = data["stage"]
     if data.get("frame_setup") and stage in FRAME_SETUP_STAGES:
         rows = [[label] for label in (*FRAME_UPLOAD_BUTTONS, *FRAME_END_BUTTONS, *FRAME_PROMPT_BUTTONS)]
-        return ReplyKeyboardMarkup([*rows, ["Готово", "Отмена"]], resize_keyboard=True)
+        return ReplyKeyboardMarkup([*rows, ["Готово", "Отмена"], [PREVIOUS_STEP_BUTTON]], resize_keyboard=True)
     if stage in SCENE_EDIT_STAGES and data.get("scene_edit_index") == data["index"]:
-        return ReplyKeyboardMarkup([[FRAME_SETUP_BUTTON], ["Отмена"]], resize_keyboard=True)
+        return ReplyKeyboardMarkup([[FRAME_SETUP_BUTTON], ["Отмена"], [PREVIOUS_STEP_BUTTON]], resize_keyboard=True)
     if stage == "music":
         rows = [["Без музыки"], ["Показать сцену"]]
         if data.get("music_plan"):
@@ -94,6 +95,8 @@ def keyboard(session):
                     rows.append(["Отмена"])
         if stage in CONTINUATION_STAGES and _previous_approved_video(data):
             rows.append([CONTINUE_PREVIOUS])
+    if stage != "script":
+        rows.append([PREVIOUS_STEP_BUTTON])
     return ReplyKeyboardMarkup(rows, resize_keyboard=True)
 
 
@@ -898,6 +901,56 @@ async def _handle_scene_edit(update, session, text):
     return True
 
 
+async def _previous_step(update, session):
+    from .handlers_state_media import _pop_scene_image_edit_pending
+
+    data = session[KEY]
+    stage, index = data["stage"], data["index"]
+    scene = data["scenes"][index]
+    review = data.get("video_prompt_review") or {}
+    if setup := data.get("frame_setup"):
+        if setup.get("upload") or setup.get("prompt"):
+            data["frame_setup"] = {"index": setup["index"]}
+        else:
+            data.pop("frame_setup")
+    elif data.pop("scene_edit_index", None) is not None:
+        pass
+    elif data.pop("speech_timing_input_scene", None) is not None:
+        pass
+    elif stage in IMAGE_STAGES and (
+        _pop_scene_image_edit_pending(data, scene_idx=index) or data.pop("awaiting_image_feedback", None)
+    ):
+        pass
+    elif stage == "video_prompt" and review.pop("pending_input", None):
+        pass
+    elif stage == "video":
+        _open_video_prompt(data, scene, return_stage="video")
+        data["video_prompt_review"]["reuse_video"] = True
+    else:
+        if stage == "video_prompt":
+            if _needs_boss_frame(scene) and scene.get("boss_image") and Path(scene["boss_image"]).is_file():
+                previous = "boss_image"
+            else:
+                previous = "image" if scene.get("image") and Path(scene["image"]).is_file() else "scene"
+        elif stage == "image":
+            previous = "audio" if scene.get("audio") else "scene"
+        elif stage == "audio":
+            previous = "translation" if scene.get("en_turns") and "en" in data.get("languages", ()) else "scene"
+        elif stage in {"scene", "music"} and (stage == "music" or index):
+            data["index"] = len(data["scenes"]) - 1 if stage == "music" else index - 1
+            prior = data["scenes"][data["index"]]
+            previous = "edit" if prior.get("previews") else "scene"
+        else:
+            previous = {
+                "script": "script", "scene": "script", "translation": "scene", "boss_image": "image",
+                "end_image": "image", "edit": "video", "done": "music",
+            }.get(stage, "scene")
+        data["stage"] = previous
+        data.pop("video_prompt_review", None)
+    _save(update, session)
+    await _show(update, session)
+
+
 async def _handle_video_prompt_review(update, session, text):
     from .handlers_media_scene import _extract_format_or_feedback, _extract_prompt_override
 
@@ -925,6 +978,9 @@ async def _handle_video_prompt_review(update, session, text):
             current = _video_prompt_for_review(scene)
             if review.get("index") != data["index"] or current != review.get("text"):
                 _open_video_prompt(data, scene, return_stage=review.get("return_stage"))
+            elif review.get("reuse_video") and scene.get("video"):
+                data.pop("video_prompt_review", None)
+                data["stage"] = "video"
             else:
                 await _video(update, data, scene, approved_prompt=review["text"])
                 scene["video_duration"] = _duration(scene)
@@ -1032,8 +1088,7 @@ async def _show(update, session):
             note = "Все персонажи уже в кадре. «ОК» покажет видеопромпт или сохранённый клип."
     elif stage == "boss_image":
         with Path(scene["boss_image"]).open("rb") as file:
-            label = "последний кадр" if scene.get("end_frame_mode") else "Босс появился"
-            await update.message.reply_photo(photo=file, caption=f"{scene['title']} · {label}")
+            await update.message.reply_photo(photo=file, caption=f"{scene['title']} · последний кадр")
         note = "«ОК» покажет видеопромпт или сохранённый клип. Оба кадра передадутся в Kling Keyframes."
     elif stage == "video_prompt":
         review = data.get("video_prompt_review") or {}
@@ -1041,7 +1096,8 @@ async def _show(update, session):
         message = f"{scene['title']} · видеопромпт\n\n{prompt}"
         for offset in range(0, len(message), 3800):
             await update.message.reply_text(message[offset:offset + 3800])
-        note = "«ОК» запустит Kling с этим текстом. «ПРОМПТ:» заменит текст целиком. «ФИДБЕК» позволит внести правку."
+        next_step = "«ОК» покажет сохранённый клип." if review.get("reuse_video") else "«ОК» запустит Kling с этим текстом."
+        note = next_step + " «ПРОМПТ:» заменит текст целиком. «ФИДБЕК» позволит внести правку."
     elif stage == "video":
         with Path(scene["video"]).open("rb") as file:
             await update.message.reply_video(video=file, caption=scene["title"])
@@ -1068,6 +1124,9 @@ async def handle_text(update, session, text):
     low = text.strip().casefold()
     scene = data["scenes"][data["index"]]
     try:
+        if low == PREVIOUS_STEP_BUTTON.casefold():
+            await _previous_step(update, session)
+            return
         if await _handle_frame_setup_input(update, session, text):
             return
         if await _handle_scene_edit(update, session, text):
@@ -1183,6 +1242,8 @@ async def handle_text(update, session, text):
                         data["stage"] = "image"
             elif stage == "translation":
                 await _audio(update, session, scene)
+                if scene.get("video") and _duration(scene) > scene.get("video_duration", scene["duration"]):
+                    _invalidate_frame_dependants(data, scene, "boss_image")
                 data["stage"] = "audio"
             elif stage == "audio":
                 _duration(scene)
@@ -1224,6 +1285,11 @@ async def handle_text(update, session, text):
                      for line in text.splitlines() if line.strip()]
             if len(lines) != len(scene["turns"]) or not all(lines):
                 raise ValueError("Пришли столько же реплик, по одной на строку.")
+            if lines != scene.get("en_turns"):
+                scene.get("audio", {}).pop("en", None)
+                scene.pop("previews", None)
+                scene.pop("approved", None)
+                data.pop("masters", None)
             scene["en_turns"] = lines
         elif stage in {"scene", "translation", "audio", "image", "boss_image", "video", "edit"}:
             _replace_scene(data, await asyncio.to_thread(revise_scene, scene, text))

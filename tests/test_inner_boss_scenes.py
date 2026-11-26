@@ -138,6 +138,40 @@ def test_scene_edit_button_works_from_translation_without_approving_audio(monkey
     audio.assert_not_awaited()
 
 
+def test_previous_step_restores_last_frame_and_reuses_video(tmp_path, monkeypatch):
+    session = {}
+    workflow.initialize(session, PILOT_SCRIPT)
+    data = session[workflow.KEY]
+    data.update(index=9, stage="video")
+    scene = data["scenes"][9]
+    for name in ("image", "boss_image", "video"):
+        file = tmp_path / name
+        file.write_bytes(b"saved")
+        scene[name] = str(file)
+    scene["frame_policy"] = workflow.FRAME_POLICY
+    update = SimpleNamespace(message=SimpleNamespace(reply_text=AsyncMock()))
+    monkeypatch.setattr(workflow, "_save", lambda *_: None)
+    monkeypatch.setattr(workflow, "_show", AsyncMock())
+    paid = AsyncMock()
+    for name in ("_image", "_boss_image", "_video"):
+        monkeypatch.setattr(workflow, name, paid)
+    assert any(row[0].text == workflow.PREVIOUS_STEP_BUTTON for row in workflow.keyboard(session).keyboard)
+
+    asyncio.run(workflow.handle_text(update, session, workflow.PREVIOUS_STEP_BUTTON))
+    assert data["stage"] == "video_prompt" and data["video_prompt_review"]["reuse_video"]
+    asyncio.run(workflow.handle_text(update, session, "ОК"))
+    assert data["stage"] == "video"
+
+    asyncio.run(workflow.handle_text(update, session, workflow.PREVIOUS_STEP_BUTTON))
+    asyncio.run(workflow.handle_text(update, session, workflow.PREVIOUS_STEP_BUTTON))
+    assert data["stage"] == "boss_image" and data["index"] == 9
+    assert scene["boss_image"] == str(tmp_path / "boss_image")
+    assert "video_prompt_review" not in data
+    asyncio.run(workflow.handle_text(update, session, workflow.PREVIOUS_STEP_BUTTON))
+    assert data["stage"] == "image" and scene["video"] == str(tmp_path / "video")
+    paid.assert_not_awaited()
+
+
 def test_manual_frame_setup_for_future_scene_and_independent_prompt_edits(tmp_path, monkeypatch):
     from io import BytesIO
 
