@@ -1204,6 +1204,7 @@ _KEYFRAME_FILES_SELECTOR = 'input[type="file"][x-ref="fileInput"][multiple]'
 
 def _wait_for_syntax_keyframes_count_sync(page: Any, expected: int | None, *, timeout: int) -> int:
     deadline = time.monotonic() + timeout / 1000
+    count = None
     while time.monotonic() < deadline:
         text = page.evaluate(
             "selector => document.querySelector(selector)?.parentElement?.parentElement?.innerText",
@@ -1215,7 +1216,7 @@ def _wait_for_syntax_keyframes_count_sync(page: Any, expected: int | None, *, ti
             if expected is None or count == expected:
                 return count
         page.wait_for_timeout(250)
-    raise RuntimeError(f"Syntax Kling Keyframes did not confirm the frame count: expected={expected}.")
+    raise TimeoutError(f"Syntax Kling Keyframes frame count: expected={expected}, observed={count}.")
 
 
 def _wait_for_syntax_kling_keyframes_sync(page: Any) -> None:
@@ -1246,13 +1247,25 @@ def _upload_syntax_kling_keyframes_sync(page: Any, start_image: bytes, end_image
         uploader.get_by_role("button", name=re.compile(r"^(Remove file|Удалить файл)$", re.I)).first.click(timeout=10_000)
         count -= 1
         _wait_for_syntax_keyframes_count_sync(page, count, timeout=15_000)
-    files = []
-    for role, image in (("start", start_image), ("end", end_image)):
+    for expected, (role, image) in enumerate((("start", start_image), ("end", end_image)), 1):
         extension = _image_ext(image)
-        files.append({"name": f"{role}_frame.{extension}",
-                      "mimeType": "image/png" if extension == "png" else "image/jpeg", "buffer": image})
-    field.set_input_files(files, timeout=30_000)
-    _wait_for_syntax_kling_keyframes_sync(page)
+        file = {"name": f"{role}_frame.{extension}",
+                "mimeType": "image/png" if extension == "png" else "image/jpeg", "buffer": image}
+        # Syntx may accept only one file from a batch. Wait for the first to
+        # finish before adding the second through the same form input.
+        field.set_input_files(file, timeout=30_000)
+        try:
+            _wait_for_syntax_keyframes_count_sync(page, expected, timeout=30_000)
+        except TimeoutError:
+            page.wait_for_load_state("networkidle", timeout=15_000)
+            observed = _wait_for_syntax_keyframes_count_sync(page, None, timeout=5_000)
+            if observed == expected - 1:
+                logger.warning("syntax.kling.keyframe_upload_retry role=%s confirmed=%s", role, observed)
+                field.set_input_files(file, timeout=30_000)
+                _wait_for_syntax_keyframes_count_sync(page, expected, timeout=30_000)
+            elif observed != expected:
+                raise
+        logger.info("syntax.kling.keyframe_upload_confirmed role=%s count=%s", role, expected)
     logger.info("syntax.kling.keyframes_upload_confirmed")
 
 
@@ -1333,7 +1346,8 @@ def _fill_syntax_kling_webapp_sync(
                 except Exception as exc:
                     controls = _syntax_visible_controls_snapshot_sync(page)
                     suffix = f" Visible controls: {controls}" if controls else ""
-                    raise RuntimeError(f"Syntax Kling form did not become ready.{suffix}") from exc
+                    reason = _sanitize_syntax_webview_error(exc)
+                    raise RuntimeError(f"Syntax Kling form did not become ready: {reason}.{suffix}") from exc
 
                 if not keyframe_end_image:
                     _click_syntax_option_sync(page, "Версия", version)

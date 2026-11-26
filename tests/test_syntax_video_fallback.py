@@ -2390,15 +2390,32 @@ def test_kling_keyframes_upload_in_order_in_main_field(existing):
     page = MagicMock()
     field = page.locator.return_value
     uploader = field.locator.return_value
-    counts = list(range(existing, -1, -1)) + [2]
+    counts = list(range(existing, -1, -1)) + [1, 2]
     page.evaluate.side_effect = [f"Загружено ({count}/2)" for count in counts]
     start = b"\x89PNG\r\n\x1a\nstart"
     end = b"\x89PNG\r\n\x1a\nend"
 
     telethon_fallback._upload_syntax_kling_keyframes_sync(page, start, end)
     assert all(call.args == ('input[type="file"][x-ref="fileInput"][multiple]',) for call in page.locator.call_args_list)
-    files = field.set_input_files.call_args.args[0]
+    files = [call.args[0] for call in field.set_input_files.call_args_list]
     assert [file["buffer"] for file in files] == [start, end]
     assert [file["name"] for file in files] == ["start_frame.png", "end_frame.png"]
     assert uploader.get_by_role.return_value.first.click.call_count == existing
     assert page.evaluate.call_count == len(counts)
+
+
+@pytest.mark.parametrize("observed, expected_uploads", [(1, ["start_frame.jpg", "end_frame.jpg", "end_frame.jpg"]),
+                                                        (2, ["start_frame.jpg", "end_frame.jpg"])])
+def test_keyframes_only_retry_a_frame_missing_after_upload_timeout(monkeypatch, observed, expected_uploads):
+    from unittest.mock import MagicMock
+
+    from app import syntax_telethon_fallback as adapter
+
+    page = MagicMock()
+    count = MagicMock(side_effect=[0, 1, TimeoutError(), observed, 2])
+    monkeypatch.setattr(adapter, "_wait_for_syntax_keyframes_count_sync", count)
+    adapter._upload_syntax_kling_keyframes_sync(page, b"start", b"end")
+
+    field = page.locator.return_value
+    assert [call.args[0]["name"] for call in field.set_input_files.call_args_list] == expected_uploads
+    page.wait_for_load_state.assert_called_once_with("networkidle", timeout=15_000)
