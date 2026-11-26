@@ -252,6 +252,8 @@ def test_inner_boss_art_direction_reaches_opening_ending_and_frame_edits(tmp_pat
 
 def test_silent_scene_and_music_render_real_video(tmp_path):
     import subprocess
+    import wave
+    from array import array
 
     from app.post_production import _has_audio_stream, _media_duration, _resolve_ffmpeg
 
@@ -261,19 +263,29 @@ def test_silent_scene_and_music_render_real_video(tmp_path):
     raw = tmp_path / "raw.mp4"
     subprocess.run([ffmpeg, "-v", "error", "-f", "lavfi", "-i", "color=blue:s=180x320:d=3:r=30",
                     "-c:v", "libx264", str(raw)], check=True)
-    scene, = parse_script("Сцена 1. Утро · 3 секунды\nГерой открывает глаза.\nЗвук: гром\nТитр: Я уже встал.")
+    scene, = parse_script("Сцена 1. Утро · 3 секунды\nГерой открывает глаза.\nЗвук: гром, щелчок@1.5\nТитр: Я уже встал.")
     scene["video"] = str(raw)
     edited = tmp_path / "edit.mp4"
-    render_scene(scene, edited, language="ru", duration=3)
+    clicks = render_scene(scene, edited, language="ru", duration=3, defer_clicks=True)
+    assert clicks == [("click", 1.5, 0.07)]
     assert _has_audio_stream(edited)
     assert _media_duration(edited) == pytest.approx(3, abs=0.08)
     assert "Я уже встал." in edited.with_suffix(".ass").read_text()
     music = tmp_path / "music.wav"
     subprocess.run([ffmpeg, "-v", "error", "-f", "lavfi", "-i", "sine=frequency=440:duration=1", str(music)], check=True)
     output = tmp_path / "master.mp4"
-    render_master([edited], music, output)
+    render_master([edited, edited], music, output, loop_music=True, scene_clicks=[clicks, clicks])
     assert _has_audio_stream(output)
-    assert _media_duration(output) == pytest.approx(3, abs=0.15)
+    assert _media_duration(output) == pytest.approx(6, abs=0.15)
+    with wave.open(str(tmp_path / "master-clicks.wav"), "rb") as stem:
+        rate = stem.getframerate()
+        channels = stem.getnchannels()
+        samples = array("h", stem.readframes(stem.getnframes()))
+    for click_time in (1.5, _media_duration(edited) + 1.5):
+        onset = round(click_time * rate) * channels
+        window = round(0.05 * rate) * channels
+        assert not any(samples[onset - window:onset])
+        assert any(samples[onset:onset + window])
 
 
 

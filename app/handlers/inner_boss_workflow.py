@@ -16,7 +16,7 @@ from telegram import ReplyKeyboardMarkup
 from ..discipline_modes import BOSS, BOSS_VOICE_ID, MALE_VOICE_ID
 from ..inner_boss_scenes import (
     CONTINUE_PREVIOUS, CONTINUITY_DIRECTIVE, DIRECTIVE, PILOT_SCRIPT, SCRIPT_HEADER, TITLE_POSITION_HINT,
-    TITLE_POSITION_LABEL, effect_events, frame_actions, parse_script, render_master, render_scene, speech_lead,
+    TITLE_POSITION_LABEL, effect_events, frame_actions, parse_script, render_final_master, render_scene, speech_lead,
     title_position,
 )
 
@@ -783,7 +783,10 @@ async def _edit(data, scene):
     previews = {}
     for language in data["languages"]:
         path = _target(data, f"-edit-{language}.mp4")
-        await asyncio.to_thread(render_scene, scene, path, language=language, duration=_duration(scene))
+        await asyncio.to_thread(
+            render_scene, scene, path, language=language, duration=_duration(scene),
+            opening_title_style=data.get("opening_title_style") if data["index"] == 0 else None,
+        )
         previews[language] = str(path)
     scene["previews"] = previews
 
@@ -1068,7 +1071,10 @@ async def _show(update, session):
     if stage == "music":
         note = "Все сцены утверждены. Пришли музыку аудиофайлом или выбери «Без музыки»."
         if plan := data.get("music_plan"):
-            note = f"Все сцены утверждены. Первый трек начнётся со сцены 1, второй со сцены {plan['second_scene']}. Выбери «Собрать с музыкой»."
+            if plan.get("second"):
+                note = f"Все сцены утверждены. Первый трек начнётся со сцены 1, второй со сцены {plan['second_scene']}. Выбери «Собрать с музыкой»."
+            else:
+                note = "Все сцены утверждены. Выбери «Собрать с музыкой», чтобы поставить сохранённый трек на весь ролик."
         await update.message.reply_text(note, reply_markup=keyboard(session))
         return
     if stage == "done":
@@ -1356,7 +1362,7 @@ async def _send_masters(update, session):
 async def finish(update, session, music_bytes, *, use_saved_music=False):
     from ..artifact_store import persist_post_production_artifacts
     from ..generation_store import ensure_generation_run_for_session, mark_generation_run_ready
-    from ..post_production import _has_audio_stream
+    from ..post_production import _has_audio_stream, _video_dimensions
 
     data = session[KEY]
     if not all(scene.get("approved") for scene in data["scenes"]):
@@ -1364,11 +1370,17 @@ async def finish(update, session, music_bytes, *, use_saved_music=False):
     target = _directory(data)
     music = None
     transition = None
+    loop_music = False
     if use_saved_music:
         plan = data["music_plan"]
-        music, second = Path(plan["first"]), Path(plan["second"])
-        transition = (plan["second_scene"] - 1, second)
-        for path in (music, second):
+        music = Path(plan["first"])
+        tracks = [music]
+        if plan.get("second"):
+            second = Path(plan["second"])
+            tracks.append(second)
+            transition = (plan["second_scene"] - 1, second)
+        loop_music = bool(plan.get("loop")) and transition is None
+        for path in tracks:
             if not path.is_file() or not await asyncio.to_thread(_has_audio_stream, path):
                 raise ValueError("Один из сохранённых треков недоступен или не распознан как аудио.")
     elif music_bytes:
@@ -1378,21 +1390,23 @@ async def finish(update, session, music_bytes, *, use_saved_music=False):
             raise ValueError("Этот файл не распознан как аудио.")
     batch = uuid4().hex[:10]
     masters = {}
+    renders = {}
     for lang in data["languages"]:
         destination = target / f"final-{batch}-{lang}.mp4"
-        clips = [Path(scene["previews"][lang]) for scene in data["scenes"]]
-        await asyncio.to_thread(render_master, clips, music, destination, music_transition=transition)
+        await asyncio.to_thread(
+            render_final_master, data["scenes"], destination, language=lang, music=music,
+            music_transition=transition, loop_music=loop_music, opening_title_style=data.get("opening_title_style"),
+        )
+        width, height = await asyncio.to_thread(_video_dimensions, destination)
         masters[lang] = str(destination)
+        renders[lang] = {"titled_subtitled_music": {"video_path": str(destination), "width": width, "height": height}}
     _snapshot(session)
     run_id, _ = await asyncio.to_thread(ensure_generation_run_for_session, session)
     if not run_id:
         raise RuntimeError("Could not record the Inner Boss run in the admin.")
     await asyncio.to_thread(persist_post_production_artifacts, session, {
         "artifact_bundle_key": data["id"],
-        "renders_by_language": {
-            lang: {"titled_subtitled_music": {"video_path": path, "width": 1080, "height": 1920}}
-            for lang, path in masters.items()
-        },
+        "renders_by_language": renders,
     })
     data["masters"], data["stage"] = masters, "done"
     _save(update, session)

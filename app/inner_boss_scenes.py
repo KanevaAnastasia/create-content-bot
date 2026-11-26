@@ -322,10 +322,13 @@ def dialogue_caption_cues(scene: dict, audio: dict, *, language: str, lead: floa
     return captions
 
 
-def render_scene(scene: dict, path: Path, *, language: str, duration: int) -> None:
+def render_scene(
+    scene: dict, path: Path, *, language: str, duration: float,
+    opening_title_style: dict | None = None, defer_clicks: bool = False,
+) -> list[tuple[str, float, float]]:
     """Render a dialogue/SFX preview with no background score."""
     from .post_production import (
-        _media_duration, _resolve_ffmpeg, _run_ffmpeg,
+        _alignment_word_rows, _media_duration, _resolve_ffmpeg, _run_ffmpeg,
         _subtitle_filter, _video_dimensions, _write_burned_subtitle_ass,
     )
 
@@ -352,16 +355,43 @@ def render_scene(scene: dict, path: Path, *, language: str, duration: int) -> No
     if speech_end > duration:
         raise ValueError("В клип не помещается утверждённая реплика.")
     stem, ass = path.with_suffix(".wav"), path.with_suffix(".ass")
+    events = effect_events(scene, duration, speech_end)
+    clicks = []
+    if defer_clicks:
+        clicks = [event for event in events if event[0] == "click" and event[2] > 0]
+        events = [event for event in events if event[0] != "click"]
     inner_boss_mix.score(
         stem, [], duration=duration, intro_duration=0, silence=(0, 0), include_music=False,
-        events=effect_events(scene, duration, speech_end),
+        events=events,
     )
     captions = dialogue_caption_cues(scene, audio, language=language, lead=lead, duration=duration) if audio else []
+    titles = []
+    if opening_title_style and audio and scene["turns"]:
+        line = scene["turns"][0]["text"] if language == "ru" else scene["en_turns"][0]
+        words = line.split()
+        def normalize(word):
+            return "".join(ch for ch in word.casefold().replace("ё", "е") if ch.isalnum())
+
+        starts = audio.get("turn_starts") or []
+        first_turn_end = starts[1] if len(starts) > 1 else None
+        alignment = {key: values[:first_turn_end] for key, values in audio["alignment"].items()}
+        aligned = _alignment_word_rows(alignment)[:len(words)]
+        if not words or [normalize(word) for word in words] != [normalize(row[0]) for row in aligned]:
+            raise ValueError("Первая реплика не совпадает с таймингами заголовка.")
+        timing = [{"text": word, "start": lead + start, "end": lead + stop}
+                  for word, (_, start, stop) in zip(words, aligned, strict=True)]
+        end = min(duration, timing[-1]["end"] + 0.35)
+        captions = [cue for cue in captions if cue["start_sec"] >= timing[-1]["end"] - 0.01]
+        if len(scene["turns"]) == 1:
+            captions = []
+        titles.append({"text": line, "language": language, "start_sec": timing[0]["start"], "end_sec": end,
+                       "word_timing": timing, "always_foreground": True})
     accents = title_overlays(scene, duration, language)
     accents.extend(day_overlay(scene, duration, language))
     accents.extend(clock_overlays(scene, duration, speech_end=speech_end if speech_cue is not None or exact_start is not None else 0.0))
     width, height = _video_dimensions(raw)
-    _write_burned_subtitle_ass(ass, captions, accent_cues=accents, video_width=width, video_height=height)
+    _write_burned_subtitle_ass(ass, captions, accent_cues=accents, title_cues=titles, title_style=opening_title_style,
+                               video_width=width, video_height=height)
     ffmpeg = _resolve_ffmpeg()
     cmd = [ffmpeg, "-y", "-i", str(raw), "-i", str(stem)]
     if audio:
@@ -380,28 +410,46 @@ def render_scene(scene: dict, path: Path, *, language: str, duration: int) -> No
         "-t", str(duration), "-c:v", "libx264", "-pix_fmt", "yuv420p", "-preset", "fast",
         "-c:a", "aac", "-ar", "48000", "-ac", "1", "-movflags", "+faststart", str(path),
     ], stage="inner_boss_scene")
+    return clicks
 
 
 def render_master(
     clips: list[Path], music: Path | None, output: Path, *, music_transition: tuple[int, Path] | None = None,
+    loop_music: bool = False, scene_clicks: list[list[tuple[str, float, float]]] | None = None,
 ) -> None:
     """Concatenate approved scene renders; put the optional user's track on top once."""
     from .post_production import _concat_segments, _media_duration, _resolve_ffmpeg, _run_ffmpeg
 
     ffmpeg = _resolve_ffmpeg()
     playlist = output.with_suffix(".txt")
-    playlist.write_text("".join(f"file '{clip.name}'\n" for clip in clips), encoding="utf-8")
-    dry = output.with_name(output.stem + "-dry.mp4") if music else output
+    durations = [round(float(_media_duration(clip) or 0), 6) for clip in clips]
+    if not durations or not all(duration > 0 for duration in durations):
+        raise ValueError("Не удалось определить длительность сцен для монтажа.")
+    playlist.write_text("".join(f"file '{clip.name}'\nduration {duration:.6f}\n"
+                                for clip, duration in zip(clips, durations, strict=True)), encoding="utf-8")
+    click_events = [
+        (cue, round(offset + at, 6), length)
+        for offset, events in zip(accumulate(durations[:-1], initial=0), scene_clicks or [[] for clip in clips], strict=True)
+        for cue, at, length in events
+    ]
+    dry = output.with_name(output.stem + "-dry.mp4") if music or click_events else output
     _concat_segments(ffmpeg=ffmpeg, list_path=playlist, dest_path=dry)
-    if music is None:
+    if dry == output:
         return
-    inputs = [ffmpeg, "-y", "-i", str(dry), "-i", str(music)]
-    music_filter = "[1:a:0]volume=0.20,apad[music];"
-    if music_transition:
+    inputs = [ffmpeg, "-y", "-i", str(dry)]
+    streams = ["[0:a:0]"]
+    music_filter = ""
+    if music:
+        if loop_music:
+            inputs += ["-stream_loop", "-1"]
+        inputs += ["-i", str(music)]
+        music_filter = "[1:a:0]volume=0.20,apad[music];"
+        streams.append("[music]")
+    if music and music_transition:
         scenes_before, track = music_transition
         if not 0 < scenes_before < len(clips):
             raise ValueError("Смена музыки должна быть между сценами.")
-        change_at = sum(_media_duration(clip) for clip in clips[:scenes_before])
+        change_at = sum(durations[:scenes_before])
         fade = min(0.25, change_at)
         inputs += ["-i", str(track)]
         normalize = "aresample=48000,aformat=channel_layouts=stereo"
@@ -411,9 +459,44 @@ def render_master(
             f"[2:a:0]{normalize},afade=t=in:d=0.25[second];"
             "[first][second]concat=n=2:v=0:a=1,volume=0.20,apad[music];"
         )
-    mix = "[0:a:0][music]amix=inputs=2:duration=first:normalize=0,alimiter=limit=0.95:level=0[a]"
+    if click_events:
+        stem = output.with_name(output.stem + "-clicks.wav")
+        inner_boss_mix.score(
+            stem, [], duration=sum(durations), intro_duration=0, silence=(0, 0),
+            include_music=False, events=click_events,
+        )
+        streams.append(f"[{inputs.count('-i')}:a:0]")
+        inputs += ["-i", str(stem)]
+    mix = "".join(streams) + (
+        f"amix=inputs={len(streams)}:duration=first:normalize=0,"
+        "alimiter=limit=0.95:level=0:latency=1[a]"
+    )
     _run_ffmpeg(inputs + [
         "-filter_complex", music_filter + mix,
         "-map", "0:v:0", "-map", "[a]", "-c:v", "copy", "-c:a", "aac",
         "-movflags", "+faststart", str(output),
     ], stage="inner_boss_master_music")
+
+
+def render_final_master(
+    scenes: list[dict], output: Path, *, language: str, music: Path | None,
+    music_transition: tuple[int, Path] | None = None, loop_music: bool = False,
+    opening_title_style: dict | None = None,
+) -> None:
+    from .post_production import _resolve_ffmpeg, _upscale_master_to_4k
+
+    clips, clicks = [], []
+    for index, scene in enumerate(scenes):
+        clip = Path(scene["previews"][language])
+        style = opening_title_style if index == 0 else None
+        events = []
+        if "click" in scene["fx"] or style:
+            clip = output.with_name(f"{output.stem}-scene-{index + 1:02}.mp4")
+            events = render_scene(scene, clip, language=language, duration=scene.get("video_duration") or scene["duration"],
+                                  opening_title_style=style, defer_clicks=True)
+        clips.append(clip)
+        clicks.append(events)
+    mixed = output.with_name(output.stem + "-1080p.mp4")
+    render_master(clips, music, mixed, music_transition=music_transition, loop_music=loop_music,
+                  scene_clicks=clicks)
+    _upscale_master_to_4k(ffmpeg=_resolve_ffmpeg(), src_path=mixed, dest_path=output)
