@@ -163,6 +163,48 @@ def test_caption_turns_split_even_when_provider_joins_the_text(use_segments):
     assert not any("minutes.Okay," in cue["fixed_block_words"] for cue in cues)
 
 
+@pytest.mark.parametrize("stage", ["image", "boss_image"])
+def test_image_feedback_edits_only_selected_frame_and_waits_for_approval(tmp_path, monkeypatch, stage):
+    from app import vertex_images
+
+    session = {}
+    workflow.initialize(session, PILOT_SCRIPT)
+    data = session[workflow.KEY]
+    data["stage"] = stage
+    scene = data["scenes"][0]
+    for key in ("image", "boss_image"):
+        path = tmp_path / f"{key}.png"
+        path.write_bytes(key.encode())
+        scene[key] = str(path)
+    scene["audio"] = {"ru": {"path": "voice.mp3"}}
+    scene["video"] = "old.mp4"
+    update = SimpleNamespace(message=SimpleNamespace(reply_text=AsyncMock()))
+    monkeypatch.setattr(workflow, "_save", lambda *_: None)
+    monkeypatch.setattr(workflow, "_show", AsyncMock())
+    monkeypatch.setattr(workflow, "_target", lambda _data, suffix: tmp_path / f"new{suffix}")
+    image_requests = []
+
+    def generate(prompt, *, reference_images, aspect_ratio):
+        image_requests.append((prompt, reference_images[0], aspect_ratio))
+        return b"updated image"
+
+    monkeypatch.setattr(vertex_images, "generate_image_vertex", generate)
+    original_opening = scene["image"]
+    asyncio.run(workflow.handle_text(update, session, workflow.IMAGE_FEEDBACK_BUTTON))
+    asyncio.run(workflow.handle_text(update, session, "ОК"))
+    assert not image_requests
+    asyncio.run(workflow.handle_text(update, session, "Герой спит с закрытыми глазами"))
+    prompt, reference, ratio = image_requests[0]
+    assert "Герой спит с закрытыми глазами" in prompt
+    assert reference == stage.encode() and ratio == "9:16"
+    assert data["stage"] == stage and not data.get("awaiting_image_feedback")
+    assert scene["audio"]["ru"]["path"] == "voice.mp3" and "video" not in scene
+    if stage == "image":
+        assert "boss_image" not in scene
+    else:
+        assert scene["image"] == original_opening
+
+
 def test_boss_passes_both_images_only_for_the_appearance_scene(tmp_path, monkeypatch):
     from app.handlers import handlers_media_core
 
