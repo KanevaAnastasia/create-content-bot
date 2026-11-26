@@ -125,3 +125,14 @@ def syntax_provider_for_scene_generation(scene: dict[str, Any] | None, value: An
     if model.startswith("veo"):
         return SYNTAX_PROVIDER_VEO
     return syntax_provider_for_generation_mode(value)
+
+
+def kling_start_frame_cast(scene: dict[str, Any]) -> list[str] | None:
+    """Return the explicitly planned starting cast, if the scene has that information."""
+    opening = scene.get("start_frame_characters")
+    cast = scene.get("characters")
+    if not isinstance(opening, list) or not isinstance(cast, list):
+        return None
+    if not all(isinstance(name, str) and name in cast for name in opening):
+        return None
+    return list(dict.fromkeys(opening))

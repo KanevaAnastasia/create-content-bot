@@ -626,6 +626,23 @@ def test_story_production_always_keeps_approved_environment_in_start_prompt(monk
     assert "Цветовая гамма: зелёный, янтарный и небесно-голубой" in start_prompt
 
 
+def test_story_clips_request_end_frame_only_for_a_later_entrance(monkeypatch):
+    def prompts(*_args, **_kwargs):
+        return json.dumps({"prompts": [
+            {"start_frame_characters": ["vasily", "knopka"], "end_frame_prompt_ru": "Лишний конечный кадр"},
+            {"start_frame_characters": ["vasily"], "end_frame_prompt_ru": "Кнопка входит справа"},
+        ]})
+
+    monkeypatch.setattr(story_generation, "gemini_generate_sync", prompts)
+    cast = {"characters": ["vasily", "knopka"], "action": "Вася смотрит в сторону двери"}
+    first, second = story_generation.generate_story_production([cast, cast])["json_plan"]
+    assert first["end_frame_prompt"] == "пусто" and not first["end_frame_requested"]
+    assert "image-to-video" in first["video_prompt"]
+    assert second["end_frame_requested"] and second["end_frame_prompt"] == "Кнопка входит справа"
+    assert second["start_frame_characters"] == ["vasily"]
+    assert "Keyframes" in second["video_prompt"] and "Ещё не появились: knopka" in second["start_frame_prompt"]
+
+
 def test_story_historical_scene_drops_conflicting_contemporary_style(monkeypatch):
     def fake_gemini(_prompt, **_kwargs):
         return json.dumps(

@@ -26,6 +26,7 @@ from ..generation_modes import (
     is_silence_generation,
     is_story_generation,
     is_advertising_generation,
+    kling_start_frame_cast,
     syntax_provider_for_scene_generation,
 )
 from ..llm_utils import TEXT_MODEL_PROFILE_SHORT
@@ -6705,8 +6706,22 @@ async def _scene_media_start_ok(
     except Exception as e:
         await _safe_reply_text(update.message, f"Ошибка подготовки промпта: {e}")
         return True
+    opening_scene = scene
+    start_cast = kling_start_frame_cast(scene)
+    if syntax_provider_for_scene_generation(scene, session) == SYNTAX_PROVIDER_KLING and start_cast is not None:
+        arriving = set(scene["characters"]) - set(start_cast)
+        if arriving:
+            opening_scene = {
+                **scene,
+                "characters": start_cast,
+                "story_required_reference_ids": [
+                    key for key in scene.get("story_required_reference_ids") or [] if key not in arriving
+                ],
+            }
+            if isinstance(scene.get("references"), dict):
+                opening_scene["references"] = {key: value for key, value in scene["references"].items() if key not in arriving}
     scene_reference_images = _load_scene_reference_images(
-        scene,
+        opening_scene,
         include_location=False,
         prompt_keys=("start_frame_prompt", "start_frame_prompt_ru"),
     )
@@ -8181,6 +8196,18 @@ async def _scene_media_video_ok(
     end_bytes = selected_image_bytes_for_video(scene, kind="end")
 
     model, syntax_provider, video_audio_enabled = _scene_video_runtime_policy(scene, session)
+    if syntax_provider == SYNTAX_PROVIDER_KLING:
+        start_cast = kling_start_frame_cast(scene)
+        needs_end_frame = _scene_needs_end_frame_step(scene) if start_cast is None else any(
+            character not in start_cast for character in scene["characters"]
+        )
+        if not needs_end_frame:
+            end_bytes = None
+        elif not end_bytes:
+            await _safe_reply_text(update.message, "Для Kling Keyframes сначала утверди конечный кадр сцены.")
+            session["scene_media_substep"] = SCENE_MEDIA_SUBSTEP_END
+            await _send_next_scene_media_step(update, session)
+            return True
     aspect_ratio = _scene_aspect_ratio(scene, session)
     scene["aspect_ratio"] = aspect_ratio
     video_quality = "720" if str(session.get("generation_mode") or "").strip().lower() == "silence" else "1080"

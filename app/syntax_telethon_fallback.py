@@ -16,7 +16,7 @@ import re
 import threading
 import time
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, Callable
 from uuid import uuid4
 
 from .syntax_getvideo_download import fetch_mp4_bytes_from_getvideo_page
@@ -996,6 +996,7 @@ def _click_syntax_kling_generate_sync(
     *,
     timeout_ms: int = 10_000,
     wait_for_form_ready: bool = True,
+    verify_before_click: Callable[[], None] | None = None,
 ) -> str:
     generate_re = re.compile("Сгенерировать|Generate", re.IGNORECASE)
     before = _syntax_kling_submit_snapshot_sync(page)
@@ -1030,6 +1031,8 @@ def _click_syntax_kling_generate_sync(
             visible_label = str(button.inner_text(timeout=timeout_ms) or "").strip()
         if visible_label and not generate_re.search(visible_label):
             raise RuntimeError(f"Syntax visible submit button has unexpected label: {visible_label}")
+        if verify_before_click is not None:
+            verify_before_click()
         logger.info("syntax.kling.click_visible_generate label=%s", visible_label or "<unavailable>")
         button.click(timeout=timeout_ms)
 
@@ -1242,8 +1245,20 @@ def _wait_for_syntax_kling_mode_sync(page: Any, mode: str) -> None:
 
 def _syntax_kling_has_mode_selector_sync(page: Any) -> bool:
     with contextlib.suppress(Exception):
-        return bool(page.get_by_text(re.compile(r"^(?:Режим|Mode)$", re.I)).first.is_visible())
+        return bool(page.evaluate(
+            """selector => !!document.querySelector(selector) ||
+                [...document.querySelectorAll('label')].some(
+                    node => /^(?:Режим|Mode)$/i.test(node.textContent.trim())
+                )""",
+            _KEYFRAME_FILES_SELECTOR,
+        ))
     return False
+
+
+def _verify_legacy_kling_image_sync(page: Any) -> None:
+    if _syntax_kling_has_mode_selector_sync(page):
+        raise RuntimeError("Kling mode controls appeared late. Image upload and mode could not be verified.")
+    page.get_by_role("button", name=re.compile(r"^(Remove file|Удалить файл)$", re.I)).first.wait_for(timeout=10_000)
 
 
 def _upload_syntax_kling_frames_sync(page: Any, frames: list[tuple[str, bytes]], *, capacity: int | None) -> None:
@@ -1378,16 +1393,18 @@ def _fill_syntax_kling_webapp_sync(
                 else:
                     _disable_syntax_audio_sync(page)
 
-                if mode:
+                def verify_frames_and_mode() -> None:
+                    if not mode:
+                        _verify_legacy_kling_image_sync(page)
+                        return
                     _wait_for_syntax_kling_mode_sync(page, mode)
                     if keyframe_end_image:
                         _wait_for_syntax_kling_keyframes_sync(page)
                     else:
                         _wait_for_syntax_keyframes_count_sync(page, 1, timeout=30_000, capacity=None)
-                elif _syntax_kling_has_mode_selector_sync(page):
-                    raise RuntimeError("Kling mode controls appeared late. Image upload and mode could not be verified.")
+
                 try:
-                    _click_syntax_kling_generate_sync(page)
+                    _click_syntax_kling_generate_sync(page, verify_before_click=verify_frames_and_mode)
                 except Exception as exc:
                     if keyframe_end_image and "ERR_SOCKET_NOT_CONNECTED" in str(exc):
                         raise SyntaxSubmissionUnconfirmedError(
@@ -2740,9 +2757,11 @@ async def _run_fallback_async(
     audio_enabled: bool = True,
     kling_keyframes: bool = False,
 ) -> Any:
-    if kling_keyframes and (not end_image or _normalize_syntax_provider(syntax_provider, model) != SYNTAX_PROVIDER_KLING):
+    provider_kind = _normalize_syntax_provider(syntax_provider, model)
+    if kling_keyframes and (not end_image or provider_kind != SYNTAX_PROVIDER_KLING):
         return _result(success=False, video_bytes=None, video_uri=None, attempt_id=attempt_id,
                        provider_message="Kling Keyframes requires two approved frames and the Kling provider.")
+    use_keyframes = provider_kind == SYNTAX_PROVIDER_KLING and bool(end_image)
     if TelegramClient is None:
         return _result(
             success=False,
@@ -2772,6 +2791,8 @@ async def _run_fallback_async(
     bot_username = _normalize_username(os.getenv("SYNTAX_BOT_USERNAME", "syntxaibot"))
 
     prompt_source = str(prompt or "").strip()
+    if use_keyframes:
+        prompt_source = re.sub(r"(?i)(Kling\s+3\.0\s+)image-to-video\b", r"\1Keyframes", prompt_source)
     if not prompt_source:
         return _result(
             success=False,
@@ -2810,7 +2831,6 @@ async def _run_fallback_async(
     expected_lang_token = _expected_lang_token_from_prompt(prompt_text)
     sent_ids: set[int] = set()
     last_info = ""
-    provider_kind = _normalize_syntax_provider(syntax_provider, model)
 
     session_candidate = _acquire_syntax_session_candidate(acquire_timeout_sec)
     if session_candidate is None:
@@ -2905,7 +2925,7 @@ async def _run_fallback_async(
                             timeout=timeout,
                             initial_last_info=last_info,
                             audio_enabled=audio_enabled,
-                            **({"keyframe_end_image": end_image} if kling_keyframes else {}),
+                            **({"keyframe_end_image": end_image} if use_keyframes else {}),
                         )
 
                 start_file = io.BytesIO(start_image)
@@ -2914,8 +2934,6 @@ async def _run_fallback_async(
                 sent_ids.add(int(start_msg.id))
                 reply_anchor = int(start_msg.id)
                 if provider_kind == SYNTAX_PROVIDER_KLING:
-                    if end_image and not kling_keyframes:
-                        last_info = "Kling Syntax UI uses the start image only; end frame was not sent."
                     if prompt_shortened:
                         last_info = " ".join(
                             x
@@ -2943,7 +2961,7 @@ async def _run_fallback_async(
                         timeout=timeout,
                         initial_last_info=last_info,
                         audio_enabled=audio_enabled,
-                        **({"keyframe_end_image": end_image} if kling_keyframes else {}),
+                        **({"keyframe_end_image": end_image} if use_keyframes else {}),
                     )
                 if end_image:
                     end_file = io.BytesIO(end_image)

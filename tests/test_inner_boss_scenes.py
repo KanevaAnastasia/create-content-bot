@@ -60,17 +60,13 @@ def test_scene_workflow_advances_only_after_preview_approval(monkeypatch):
     async def video(update, data, scene):
         scene["video"] = "generated.mp4"
 
-    async def end_image(data, scene):
-        scene["end_image"] = "end.png"
-
     async def edit(data, scene):
         scene["previews"] = {"ru": "edited.mp4"}
 
     monkeypatch.setattr(workflow, "_image", AsyncMock(side_effect=image))
-    monkeypatch.setattr(workflow, "_end_image", AsyncMock(side_effect=end_image))
     monkeypatch.setattr(workflow, "_video", AsyncMock(side_effect=video))
     monkeypatch.setattr(workflow, "_edit", AsyncMock(side_effect=edit))
-    for stage in ("scene", "image", "end_image", "video", "edit"):
+    for stage in ("scene", "image", "video", "edit"):
         asyncio.run(workflow.handle_text(update, session, "OK"))
         assert session[workflow.KEY]["stage"] == stage
         assert session[workflow.KEY]["index"] == 0
@@ -128,7 +124,9 @@ def test_day_card_uses_explicit_header_or_first_line():
     scenes = parse_script(PILOT_SCRIPT)
     assert day_overlay(scenes[0], 8, "en")[0]["text"] == "Day 1"
     assert day_overlay(scenes[1], 7, "ru")[0]["text"] == "День 2"
-    assert day_overlay(scenes[2], 7, "ru") == []
+    assert day_overlay(scenes[2], 7, "ru")[0]["text"] == "День 3-345"
+    assert day_overlay(scenes[2], 7, "en")[0]["text"] == "Day 3-345"
+    assert day_overlay(scenes[3], 8, "ru") == []
     scene, = parse_script("Сцена 1. Утро\nДень 12. Герой встаёт с кровати.")
     cue, = day_overlay(scene, 7, "ru")
     assert cue["text"] == "День 12" and cue["anchor_top_left"]
@@ -303,7 +301,8 @@ def test_boss_passes_both_images_and_preserves_alarm_cues(tmp_path, monkeypatch)
     assert "When Boss speaks, animate the shadow's mouth while Hero listens with his lips closed." in first["prompt"]
     assert "When Hero speaks, animate Hero's mouth while Boss stays quiet" in first["prompt"]
     assert first["prompt"].index("1. Boss, the red-edged shadow speaks:") < first["prompt"].index("2. Hero, the human character speaks:")
-    assert second["end_image"] == b"\x02" and second["kling_keyframes"] is True
+    assert second["end_image"] is None and "kling_keyframes" not in second
+    assert "image-to-video" in second["prompt"]
     assert "At 0s: the alarm clock visibly vibrates" in second["prompt"]
     assert "At 2.3s: the alarm clock visibly vibrates" in second["prompt"]
     assert "At 0.75s: the Hero presses the clock button" in second["prompt"]

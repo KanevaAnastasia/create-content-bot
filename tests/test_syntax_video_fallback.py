@@ -1216,7 +1216,12 @@ def test_fill_syntax_kling_webapp_selects_the_mode_before_submitting(monkeypatch
         telethon_fallback, "_upload_syntax_kling_keyframes_sync",
         lambda _page, start, end: calls.append(("pair", f"{len(start)}, {len(end)}")),
     )
-    monkeypatch.setattr(telethon_fallback, "_click_syntax_kling_generate_sync", lambda *_args, **_kwargs: calls.append(("generate", "")))
+    def generate(_page, *, verify_before_click):
+        verify_before_click()
+        calls.append(("generate", ""))
+
+    monkeypatch.setattr(telethon_fallback, "_verify_legacy_kling_image_sync", lambda _page: None)
+    monkeypatch.setattr(telethon_fallback, "_click_syntax_kling_generate_sync", generate)
     monkeypatch.setattr(telethon_fallback, "_wait_for_syntax_kling_form_ready_sync", lambda *_args, **_kwargs: None)
     monkeypatch.setattr(
         telethon_fallback,

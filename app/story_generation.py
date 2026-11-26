@@ -21,6 +21,7 @@ from .discipline_modes import (
     SHORT_FORMATS, STORY_CAST_MODES, TWO_LIVES, boss_opening_has_alarm, opening_sentence,
     script_direction, visual_direction,
 )
+from .generation_modes import kling_start_frame_cast
 from .llm_utils import GEMINI_MODEL_PROFILE_CREATIVE, extract_json_object, gemini_generate_sync
 from .story_visual_text import STORY_VISUAL_TEXT_RULES
 
@@ -2450,7 +2451,11 @@ def generate_story_production(
         camera_instruction = "Use each approved camera_direction literally, including a locked-off first shot. Do not add an unplanned zoom or camera move. Stay inside the source-image boundaries. "
     prompt = (
         "Create production prompts for an approved narrated story timeline. Return only a JSON object with key prompts, "
-        "one item per input scene in exactly the same order. Each item has start_frame_prompt_ru and video_prompt_en.\n"
+        "one item per input scene in exactly the same order. Each item has start_frame_prompt_ru, video_prompt_en, "
+        "start_frame_characters and end_frame_prompt_ru. start_frame_characters lists IDs from the approved scene cast "
+        "that are already visible in the opening frame. Exclude only characters whose later entrance is explicit in the action. "
+        "If everyone is visible at the start, use the full list and return 'пусто' for end_frame_prompt_ru. "
+        "If a character enters later, describe the final pose after that entrance with the same scene and framing.\n"
         "START: self-contained Russian vertical 9:16 still-frame prompt, precise composition/camera, action not yet completed, "
         "correct era, project character identity and age, and only the requested characters. Explicitly include each scene's "
         "location, lighting and color_palette. Preserve the current physical setting across adjacent semantic beats: the same architecture, "
@@ -2488,6 +2493,22 @@ def generate_story_production(
             else str(candidate.get("start_frame_prompt_ru") or "").strip() or _fallback_start_prompt(scene)
         )
         start_prompt = _ensure_story_environment_in_start_prompt(start_prompt, scene)
+        cast = list(scene.get("characters") or [])
+        opening_cast = kling_start_frame_cast(dict(scene, start_frame_characters=candidate.get("start_frame_characters")))
+        if opening_cast is None:
+            opening_cast = kling_start_frame_cast(scene)
+        if opening_cast is None:
+            opening_cast = cast
+        arriving = [name for name in cast if name not in opening_cast]
+        end_prompt = "пусто"
+        if arriving:
+            labels = scene.get("story_character_labels") or {}
+            initial_names = ", ".join(str(labels.get(name) or name) for name in opening_cast) or "без персонажей"
+            arriving_names = ", ".join(str(labels.get(name) or name) for name in arriving)
+            start_prompt += f" На момент старта в кадре только: {initial_names}. Ещё не появились: {arriving_names}."
+            end_prompt = str(candidate.get("end_frame_prompt_ru") or "").strip()
+            if not end_prompt or end_prompt.casefold() == "пусто":
+                end_prompt = f"В том же ракурсе после описанного появления в кадре видны: {arriving_names}. {scene.get('action') or ''}"
         # Motion in cast-led stories uses the accepted action and camera; a second
         # free-form camera interpretation can contradict the approved blocking.
         video_prompt = (_fallback_video_prompt(scene) if scene.get(MODE_KEY) in STORY_CAST_MODES else
@@ -2513,6 +2534,9 @@ def generate_story_production(
             duration_sec=generation_duration,
         )
         video_prompt = ensure_story_video_camera_safety(video_prompt, allow_reveal=bool(scene.get("story_camera_reveal_requested")))
+        if arriving:
+            video_prompt = video_prompt.replace("Kling 3.0 image-to-video", "Kling 3.0 Keyframes", 1)
+            video_prompt += " Begin with the approved opening cast. Introduce the remaining characters at the scripted moment; use the approved ending frame."
         excerpt = str(scene.get("narration_excerpt") or scene.get("text") or "").strip()
         scene_out = dict(scene)
         scene_out.update(
@@ -2524,8 +2548,9 @@ def generate_story_production(
                 "generation_mode": "story",
                 "aspect_ratio": "9:16",
                 "start_frame_prompt": start_prompt,
-                "end_frame_prompt": "пусто",
-                "end_frame_requested": False,
+                "start_frame_characters": opening_cast,
+                "end_frame_prompt": end_prompt,
+                "end_frame_requested": bool(arriving),
                 "video_prompt": video_prompt,
                 "video_prompt_by_lang": {"ru": video_prompt},
                 "speech_by_lang": {"ru": excerpt},

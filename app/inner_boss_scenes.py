@@ -8,7 +8,11 @@ from pathlib import Path
 from . import inner_boss_mix
 
 SCRIPT_HEADER = re.compile(r"(?im)^\s{0,3}(?:#{1,6}\s*)?(?:\*\*)?сцена\s+(\d+)\b[^\n]*")
-DAY_MARKER = re.compile(r"^[ \t]*(?:день|day)[ \t]+([0-9]{1,4})(?=[ \t]*(?:$|[.:·–—-]))[ \t]*(?:[.:·–—-][ \t]*)?", re.I | re.M)
+DAY_MARKER = re.compile(
+    r"^[ \t]*(?:день|day)[ \t]+([0-9]{1,4}(?:[ \t]*[-–—][ \t]*[0-9]{1,4})?)"
+    r"(?=[ \t]*(?:$|[.:·–—-]))[ \t]*(?:[.:·–—-][ \t]*)?",
+    re.I | re.M,
+)
 SPEAKER = re.compile(r'(?i)(?<!\w)(босс|вася|василий|герой)\s*(?::\s*|(?=[«"“]))')
 QUOTED = re.compile(r'«([^»]+)»|"([^"]+)"|“([^”]+)”')
 DIRECTIVE = re.compile(r"(?im)^\s*(звук|титр|титр en|в кадре)\s*:\s*([^\n]+)")
@@ -93,7 +97,7 @@ PILOT_SCRIPT = """Сцена 1. День 1 · 8 секунд
 Герой выключает будильник и поворачивается к стене. Кроссовки остаются у двери.
 Звук: будильник, дождь, гром, щелчок.
 
-Сцена 3. Следующие месяцы · 7 секунд
+Сцена 3. День 3-345 · 7 секунд
 Тот же ракурс. Звонит будильник, рука нажимает кнопку. За окном меняются сезоны. С каждым новым утром слышны тот же сигнал и тот же щелчок. В последний раз герой выключает будильник с закрытыми глазами.
 Звук: будильник@0, щелчок@0.75, будильник@2.3, щелчок@3.05, будильник@4.6, щелчок@5.35.
 
@@ -172,8 +176,9 @@ def frame_actions(scene: dict) -> tuple[str, str]:
     clean = " ".join(QUOTED.sub("", CLOCK.sub("", visual)).split())
     sentences = re.split(r"(?<=[.!?])\s+", clean)
     for index, sentence in enumerate(sentences):
-        if index and APPEARANCE.search(sentence):
-            return " ".join(sentences[:index]), " ".join(sentences[index:])
+        if APPEARANCE.search(sentence):
+            opening = " ".join(sentences[:index]) or "Начальный момент перед появлением Босса."
+            return opening, " ".join(sentences[index:])
     return clean, ""
 
 
@@ -183,8 +188,9 @@ def day_overlay(scene: dict, duration: float, language: str) -> list[dict]:
     if not marker:
         return []
     label = "Day" if language == "en" else "День"
+    day = re.sub(r"[ \t]+", "", marker[1])
     return [{
-        "text": f"{label} {marker[1]}", "start_sec": 0.0, "end_sec": duration,
+        "text": f"{label} {day}", "start_sec": 0.0, "end_sec": duration,
         "anchor_x_ratio": 0.075, "anchor_ratio": 0.09, "anchor_top_left": True, "shake": False,
     }]
 

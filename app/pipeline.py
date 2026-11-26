@@ -3088,6 +3088,7 @@ async def _generate_silence_full_production(
             model=str(scene_out.get("model", "")),
             title_safe_top=False,
         )
+        scene_out["start_frame_characters"] = list(scene_out.get("characters") or [])
         scene_out["end_frame_prompt"] = "пусто"
         scene_out["end_frame_requested"] = False
         prompt_ru = append_prompt_timing_hints(
