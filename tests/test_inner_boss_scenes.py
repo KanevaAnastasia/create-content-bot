@@ -325,7 +325,7 @@ def test_boss_only_retake_requires_approval_of_the_new_prompt(monkeypatch):
     data = session[workflow.KEY]
     data["stage"] = "video"
     scene = data["scenes"][0]
-    scene.update(video="old.mp4", image="before.png", boss_image="after.png")
+    scene.update(video="old.mp4", image="before.png", boss_image="after.png", frame_feedback={"image": "Большое зеркало"})
     update = SimpleNamespace(message=SimpleNamespace(reply_text=AsyncMock()))
     monkeypatch.setattr(workflow, "_save", lambda *_: None)
     monkeypatch.setattr(workflow, "_show", AsyncMock())
@@ -336,6 +336,7 @@ def test_boss_only_retake_requires_approval_of_the_new_prompt(monkeypatch):
     text = data["video_prompt_review"]["text"]
     assert "Only Boss speaks." in text and "The Hero keeps his lips closed" in text
     assert "When Hero speaks" not in text
+    assert "Большое зеркало" not in text and "Opening frame correction" not in text
     asyncio.run(workflow.handle_text(update, session, "ПРОМПТ:"))
     asyncio.run(workflow.handle_text(update, session, "ОК"))
     workflow._video.assert_not_awaited()

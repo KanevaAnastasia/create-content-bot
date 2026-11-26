@@ -305,11 +305,10 @@ async def _revise_frame(data, scene, stage, feedback):
     path = _target(data, "-boss-fix.png" if stage == "boss_image" else "-opening-fix.png")
     path.write_bytes(result)
     scene[stage] = str(path)
-    _invalidate_frame_dependants(data, scene, stage, feedback)
+    _invalidate_frame_dependants(data, scene, stage)
 
 
-def _invalidate_frame_dependants(data, scene, stage, feedback):
-    scene.setdefault("frame_feedback", {})[stage] = feedback
+def _invalidate_frame_dependants(data, scene, stage):
     if stage == "image":
         scene["frame_policy"] = FRAME_POLICY
         scene.pop("boss_image", None)
@@ -337,11 +336,10 @@ async def _rewrite_frame_prompt(data, scene, stage, feedback):
             **scene.get("frame_prompt_overrides", {}),
             stage: f"{rewritten.strip() or current}\nRequired visual correction: {feedback}",
         },
-        frame_feedback=dict(scene.get("frame_feedback", {})),
     )
     generator = _image if stage == "image" else _boss_image
     await generator(data, candidate)
-    _invalidate_frame_dependants(data, candidate, stage, feedback)
+    _invalidate_frame_dependants(data, candidate, stage)
     data["scenes"][data["index"]] = candidate
 
 
@@ -441,11 +439,6 @@ def _video_prompt(scene, duration, opening, appearance):
         if not scene["turns"] or performance_cue in override:
             return override
         return f"{override}\n{performance_cue}"
-    frame_notes = "\n".join(
-        f"{label} correction (applies only to this frame): {scene['frame_feedback'][key]}"
-        for key, label in (("image", "Opening frame"), ("boss_image", "Ending frame"))
-        if (key == "image" or appearance) and key in scene.get("frame_feedback", {})
-    )
     visible_cues = {
         "alarm": "the alarm clock visibly vibrates",
         "click": "the Hero presses the clock button",
@@ -458,7 +451,7 @@ def _video_prompt(scene, duration, opening, appearance):
     entrance = "Boss enters at the scripted moment and is visible before his first line." if appearance else ""
     return "\n".join(filter(None, (
         "Keep the framing and characters consistent with the supplied artwork. Do not add overlay text.",
-        " ".join(filter(None, (opening, appearance))), entrance, performance_cue, frame_notes, cue_notes,
+        " ".join(filter(None, (opening, appearance))), entrance, performance_cue, cue_notes,
     )))
 
 
@@ -589,7 +582,7 @@ def _replace_scene(data, body):
             if key in previous:
                 replacement[key] = previous[key]
     if frame_actions(replacement) == frame_actions(previous) and previous.get("image"):
-        for key in ("image", "frame_policy", "boss_image", "clock_position", "frame_feedback", "frame_prompt_overrides"):
+        for key in ("image", "frame_policy", "boss_image", "clock_position", "frame_prompt_overrides"):
             if key in previous:
                 replacement[key] = previous[key]
         if (replacement["turns"] == previous["turns"] and _duration(replacement) == _duration(previous)
