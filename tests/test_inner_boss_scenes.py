@@ -297,12 +297,19 @@ def test_boss_passes_both_images_and_preserves_alarm_cues(tmp_path, monkeypatch)
     first, second = [call.kwargs for call in run.await_args_list]
     assert first["start_image"] == b"\x01" and first["end_image"] == b"\x02"
     assert first["kling_keyframes"] is True and first["audio_enabled"] is False
-    assert first["duration_sec"] == 8 and "Keyframes" in first["prompt"]
+    assert first["duration_sec"] == 8 and "Keyframes" not in first["prompt"]
     assert "When Boss speaks, animate the shadow's mouth while Hero listens with his lips closed." in first["prompt"]
     assert "When Hero speaks, animate Hero's mouth while Boss stays quiet" in first["prompt"]
     assert first["prompt"].index("1. Boss, the red-edged shadow speaks:") < first["prompt"].index("2. Hero, the human character speaks:")
     assert second["end_image"] is None and "kling_keyframes" not in second
-    assert "image-to-video" in second["prompt"]
+    assert "image-to-video" not in second["prompt"] and "No audio" not in second["prompt"]
     assert "At 0s: the alarm clock visibly vibrates" in second["prompt"]
     assert "At 2.3s: the alarm clock visibly vibrates" in second["prompt"]
     assert "At 0.75s: the Hero presses the clock button" in second["prompt"]
+
+
+def test_scene_video_prompt_override_is_sent_without_boilerplate():
+    scene = parse_script(PILOT_SCRIPT)[2]
+    prompt = "At 0s: the alarm clock visibly vibrates with 06:00 on its display.\nAt 0.75s: the Hero presses the clock button."
+    scene["video_prompt_override"] = prompt
+    assert workflow._video_prompt(scene, 7, *frame_actions(scene)) == prompt

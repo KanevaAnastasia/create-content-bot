@@ -403,6 +403,44 @@ async def _handle_frame_feedback(update, session, text):
     return True
 
 
+def _video_prompt(scene, duration, opening, appearance):
+    override = str(scene.get("video_prompt_override") or "").strip()
+    if override:
+        return override
+
+    roles = {"boss": "Boss, the red-edged shadow", "hero": "Hero, the human character"}
+    dialogue = "\n".join(
+        f"{index}. {roles[turn['speaker']]} speaks: {turn['text']}"
+        for index, turn in enumerate(scene["turns"], 1)
+    )
+    performance_cue = (
+        "Follow the dialogue in order. Only the current speaker moves their mouth. "
+        "When Boss speaks, animate the shadow's mouth while Hero listens with his lips closed. "
+        "When Hero speaks, animate Hero's mouth while Boss stays quiet with his mouth still. "
+        "Listeners react with their eyes or posture.\n" + dialogue
+        if dialogue else ""
+    )
+    frame_notes = "\n".join(
+        f"{label} correction (applies only to this frame): {scene['frame_feedback'][key]}"
+        for key, label in (("image", "Opening frame"), ("boss_image", "Ending frame"))
+        if (key == "image" or appearance) and key in scene.get("frame_feedback", {})
+    )
+    visible_cues = {
+        "alarm": "the alarm clock visibly vibrates",
+        "click": "the Hero presses the clock button",
+    }
+    cues = sorted(
+        (at, visible_cues[cue]) for cue, at, _ in effect_events(scene, duration, 0.0)
+        if cue == "alarm" or (cue == "click" and "alarm" in scene["fx"] and cue in scene.get("fx_times", {}))
+    )
+    cue_notes = "\n".join(f"At {at:g}s: {action}." for at, action in cues)
+    entrance = "Boss enters at the scripted moment and is visible before his first line." if appearance else ""
+    return "\n".join(filter(None, (
+        "Keep the framing and characters consistent with the supplied artwork. Do not add overlay text.",
+        " ".join(filter(None, (opening, appearance))), entrance, performance_cue, frame_notes, cue_notes,
+    )))
+
+
 async def _video(update, data, scene):
     from .handlers_media_core import _generate_video_bytes_with_high_load_retry
     from ..syntax_telethon_fallback import SYNTAX_PROVIDER_KLING
@@ -413,46 +451,7 @@ async def _video(update, data, scene):
     if appearance and not scene.get("boss_image"):
         raise ValueError("Для Kling Keyframes нужны два опорных кадра. Сначала открой и утверди конечный кадр.")
     end_image = Path(scene["boss_image"]).read_bytes() if appearance else None
-    roles = {"boss": "Boss, the red-edged shadow", "hero": "Hero, the human character"}
-    dialogue = "\n".join(
-        f"{index}. {roles[turn['speaker']]} speaks: {turn['text']}"
-        for index, turn in enumerate(scene["turns"], 1)
-    )
-    performance_cue = (
-        "\nAct out these lines in exactly the listed order. Only the named speaker makes visible speech-like "
-        "mouth movements and a small expressive gesture during their own line. "
-        "When Boss speaks, animate the shadow's mouth while Hero listens with his lips closed. "
-        "When Hero speaks, animate Hero's mouth while Boss stays quiet with his mouth still. "
-        "A reaction from a listener uses eyes or posture. Let each speaker stop before the next starts. "
-        "The clip must be silent. Dialogue audio is added in the edit. Never display the lines as graphics.\n" + dialogue
-        if dialogue else "\nNo dialogue in this shot. Keep all mouths still."
-    )
-    frame_notes = "\n".join(
-        f"{label} correction (applies only to this frame): {scene['frame_feedback'][key]}"
-        for key, label in (("image", "Opening frame"), ("boss_image", "Ending frame"))
-        if (key == "image" or appearance) and key in scene.get("frame_feedback", {})
-    )
-    visible_cues = {
-        "alarm": "the alarm clock visibly vibrates with its display blank",
-        "click": "the Hero presses the clock button",
-    }
-    cues = sorted(
-        (at, visible_cues[cue]) for cue, at, _ in effect_events(scene, duration, 0.0)
-        if cue == "alarm" or (cue == "click" and "alarm" in scene["fx"] and cue in scene.get("fx_times", {}))
-    )
-    cue_notes = "\n".join(f"At {at:g}s: {action}." for at, action in cues)
-    prompt = (
-        f"{duration}-second Kling 3.0 {'Keyframes' if appearance else 'image-to-video'} shot. No audio. 9:16. "
-        "Animate the supplied artwork, matching all identities and materials. "
-        "Preserve the camera framing and the fixed scenery of the opening image. "
-        "If there is a clock in the shot, keep its display blank. "
-        + ("Use the first image as the opening state and the second as the ending anchor. "
-           "Boss enters at the scripted moment and must be clearly visible before his first line. " if appearance else "")
-        + NO_TEXT + " "
-        + SHORT_FORMATS[BOSS].motion + "\n" + " ".join(filter(None, (opening, appearance))) + performance_cue
-        + ("\nHonor these approved visual corrections at their specified moments:\n" + frame_notes if frame_notes else "")
-        + ("\nVisible actions on the editing timeline. Audio and clock digits are added separately:\n" + cue_notes if cue_notes else "")
-    )
+    prompt = _video_prompt(scene, duration, opening, appearance)
     raw = await _generate_video_bytes_with_high_load_retry(
         update, prompt=prompt, model="kling_3_0", duration_sec=duration,
         start_image=start_image, end_image=end_image,
