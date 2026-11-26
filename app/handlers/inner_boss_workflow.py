@@ -13,7 +13,7 @@ from uuid import UUID, uuid4, uuid5
 
 from telegram import ReplyKeyboardMarkup
 
-from ..discipline_modes import BOSS, BOSS_VOICE_ID, MALE_VOICE_ID, SHORT_FORMATS
+from ..discipline_modes import BOSS, BOSS_VOICE_ID, MALE_VOICE_ID
 from ..inner_boss_scenes import (
     CONTINUE_PREVIOUS, CONTINUITY_DIRECTIVE, DIRECTIVE, PILOT_SCRIPT, SCRIPT_HEADER, TITLE_POSITION_HINT,
     TITLE_POSITION_LABEL, effect_events, frame_actions, parse_script, render_master, render_scene, speech_lead,
@@ -38,10 +38,20 @@ FRAME_UPLOAD_BUTTONS = {"Загрузить первый кадр": "image", "З
 FRAME_PROMPT_BUTTONS = {"Промпт первого кадра": "image", "Промпт последнего кадра": "boss_image"}
 FRAME_END_BUTTONS = {"Без последнего кадра": "none", "Создать последний кадр": "generate"}
 SAVED_MUSIC_BUTTON = "Собрать с музыкой"
+FRAME_ART_DIRECTION = (
+    "Inner Boss art direction: flat geometric 2D cel illustration. Clean rounded silhouettes, "
+    "restrained outlines, layered flat color shapes and small soft lighting accents. "
+    "Use deep navy backgrounds and mustard accents, with lighting appropriate to the scene. "
+    "Match the approved face, hair, proportions and clothing. The Boss, when present, is a dark silhouette "
+    "with the Hero's hair shape and a restrained red rim. No photorealism, 3D materials or heavy texture. "
+    "For a new shot, default to a side-on camera perpendicular to the action, with profile poses "
+    "and movement parallel to the picture plane. For a close-up, retain the same side of the action. "
+    "When editing or matching an approved frame, keep its camera angle and screen direction. "
+    "Follow any explicit camera or framing change given for the current shot."
+)
 NO_TEXT = (
     "All artwork surfaces must be completely unmarked. No letters, numbers, digits, speech bubbles, "
     "captions, pictograms or watermarks. Clock screens and papers are solid blank shapes. "
-    "Use polished flat 2D geometry, stable original character proportions and the dark navy palette. "
     "Render recognizable furniture and a few purposeful details in flat color planes."
 )
 STYLE_DIR = Path(__file__).resolve().parents[2] / "assets/story"
@@ -334,12 +344,13 @@ async def _image(data, scene):
     opening, appearance = frame_actions(scene)
     opening = scene.get("frame_prompt_overrides", {}).get("image", opening)
     prompt = (
-        SHORT_FORMATS[BOSS].frame
-        + "\nVertical 9:16 single opening image. Reference 1 is the exact character model. "
-        "Reference 2 fixes the 2D graphic style, shape detail and night palette. Choose the layout and scenery from the scene. "
+        FRAME_ART_DIRECTION
+        + "\nVertical 9:16 single opening image. Reference 1 fixes character identity only. "
+        "Reference 2 shows the drawing style and side-on staging. Use the setting and light from the current scene. "
         "When returning to the pilot bedroom match the same bed, left-hand clock and upper-right window. "
         "If reference 3 is present it is the last approved frame: use it to match geography and object positions "
-        "in the same location, and preserve the character model across a location change. Frame the initial pose. "
+        "in the same location, and preserve the character model across a location change. "
+        "Depict the initial pose and positions before the scene's action advances. "
         + ("Show only the Hero. The wall must be completely empty where Boss will appear later. " if appearance else "")
         + NO_TEXT + "\n" + opening
     )
@@ -378,7 +389,7 @@ async def _boss_image(data, scene):
             + "\nAction leading into this instant. Advance the Hero to the final scripted pose: " + opening
         )
     result = await asyncio.to_thread(
-        generate_image_vertex, prompt,
+        generate_image_vertex, f"{FRAME_ART_DIRECTION}\n{prompt}",
         reference_images=[Path(scene["image"]).read_bytes(), REFERENCE.read_bytes()], aspect_ratio="9:16",
     )
     path = _target(data, "-boss.png")
@@ -390,6 +401,7 @@ async def _revise_frame(data, scene, stage, feedback):
     from ..vertex_images import generate_image_vertex
 
     prompt = (
+        FRAME_ART_DIRECTION + "\n"
         "Edit reference image 1 in place. It is the exact approved composition and drawing style for this shot. "
         "Reference image 2 anchors the Hero and Boss designs. Preserve identities, the vertical framing, colors, "
         "lighting and prop positions except for changes explicitly requested below. "
@@ -564,7 +576,8 @@ async def _rewrite_frame_prompt(data, scene, stage, feedback):
     rewritten = await asyncio.to_thread(
         gemini_generate_sync,
         "Перепиши промпт только для одного опорного кадра «Внутреннего босса» с учётом фидбэка. "
-        "Выведи один визуальный промпт. Сохрани композицию, реквизит, геометрическую 2D-рисовку и внешность героев. "
+        "Выведи один визуальный промпт. Сохрани композицию, реквизит и внешность героев. "
+        "Сохрани ракурс утверждённого кадра, если в правке не указан другой. Постоянные правила рисовки добавит бот. "
         "Текст, цифры и реплики добавляются на монтаже."
         f"\nТекущий промпт:\n{current}\nФидбэк:\n{feedback}",
         model_profile=GEMINI_MODEL_PROFILE_EDIT,

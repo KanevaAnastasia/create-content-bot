@@ -224,6 +224,32 @@ def test_script_can_set_last_frame_requirement_independently_of_cast():
     assert "Последний кадр" not in " ".join(frame_actions(single) + frame_actions(pair))
 
 
+def test_inner_boss_art_direction_reaches_opening_ending_and_frame_edits(tmp_path, monkeypatch):
+    from unittest.mock import Mock
+
+    from app import vertex_images
+
+    scene, = parse_script("Сцена 1\nГерой добегает до гребня. Вдали рассвет.")
+    scene["end_frame_mode"] = "generate"
+    generate = Mock(return_value=b"frame")
+    monkeypatch.setattr(vertex_images, "generate_image_vertex", generate)
+    monkeypatch.setattr(workflow, "_target", lambda _, suffix: tmp_path / f"frame{suffix}")
+    data = {"index": 0}
+
+    asyncio.run(workflow._image(data, scene))
+    asyncio.run(workflow._boss_image(data, scene))
+    asyncio.run(workflow._revise_frame(data, scene, "boss_image", "Покажи героя со спины на рассвете."))
+
+    opening, ending, edit = (call.args[0] for call in generate.call_args_list)
+    for prompt in (opening, ending, edit):
+        assert prompt.startswith(workflow.FRAME_ART_DIRECTION)
+        assert "side-on camera" in prompt and "Follow any explicit camera" in prompt
+        assert "flat geometric 2D" in prompt and "soft lighting accents" in prompt
+    assert "Reference 1 fixes character identity only" in opening
+    assert "Depict the initial pose" in opening and "Depict the final visible beat only" in ending
+    assert "Покажи героя со спины на рассвете." in edit
+
+
 def test_silent_scene_and_music_render_real_video(tmp_path):
     import subprocess
 
