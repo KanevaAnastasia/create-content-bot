@@ -28,7 +28,9 @@ NO_TEXT = (
     "Use polished flat 2D geometry, stable original character proportions and the dark navy palette. "
     "Render recognizable furniture and a few purposeful details in flat color planes."
 )
-REFERENCE = Path(__file__).resolve().parents[2] / "assets/story/inner_boss_character_reference.png"
+STYLE_DIR = Path(__file__).resolve().parents[2] / "assets/story"
+REFERENCE = STYLE_DIR / "inner_boss_character_reference.png"
+VISUAL_REFERENCE = STYLE_DIR / "inner_boss_visual_reference.png"
 
 
 def initialize(session: dict, script: str) -> None:
@@ -211,7 +213,7 @@ async def _audio(update, session, scene):
 async def _image(data, scene):
     from ..vertex_images import generate_image_vertex
 
-    references = [REFERENCE.read_bytes()]
+    references = [REFERENCE.read_bytes(), VISUAL_REFERENCE.read_bytes()]
     if data["index"]:
         previous = data["scenes"][data["index"] - 1]
         previous_video = previous.get("video")
@@ -225,8 +227,11 @@ async def _image(data, scene):
     opening, appearance = frame_actions(scene)
     prompt = (
         SHORT_FORMATS[BOSS].frame
-        + "\nVertical 9:16 single opening image. Use the first reference for the exact character model. "
-        "Keep the setting from any previous frame only if it is the same location. Frame the initial pose. "
+        + "\nVertical 9:16 single opening image. Reference 1 is the exact character model. "
+        "Reference 2 fixes the 2D graphic style, shape detail and night palette. Choose the layout and scenery from the scene. "
+        "When returning to the pilot bedroom match the same bed, left-hand clock and upper-right window. "
+        "If reference 3 is present it is the last approved frame: use it to match geography and object positions "
+        "in the same location, and preserve the character model across a location change. Frame the initial pose. "
         + ("Show only the Hero. The wall must be completely empty where Boss will appear later. " if appearance else "")
         + NO_TEXT + "\n" + opening
     )
