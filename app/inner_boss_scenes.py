@@ -151,6 +151,60 @@ PILOT_SCRIPT = """Сцена 1. День 1 · 8 секунд
 Звук: ветер, дыхание."""
 
 
+CLOCK = re.compile(r"(?<!\d)(?:[01]?\d|2[0-3]):[0-5]\d(?!\d)")
+APPEARANCE = re.compile(
+    r"(?i)\b(?:появляется\s+босс|босс\s+появляется|босс\s+возникает|возникает\s+босс)"
+)
+
+
+def frame_actions(scene: dict) -> tuple[str, str]:
+    """Return a text-free opening beat and, when written, the Boss appearance beat."""
+    visual = re.sub(
+        r"(?i)\bна (?:будильнике|часах)\s+(?:(?:снова|уже)\s+)?\d{1,2}:\d{2}\.?",
+        " ", scene["visual"],
+    )
+    clean = " ".join(QUOTED.sub("", CLOCK.sub("", visual)).split())
+    sentences = re.split(r"(?<=[.!?])\s+", clean)
+    for index, sentence in enumerate(sentences):
+        if index and APPEARANCE.search(sentence):
+            return " ".join(sentences[:index]), " ".join(sentences[index:])
+    return clean, ""
+
+
+def clock_overlays(scene: dict, duration: float) -> list[dict]:
+    times = [match[0] for match in CLOCK.finditer(scene["visual"])]
+    if not times:
+        return []
+    cues = [{"text": times[0], "start_sec": 0.0, "end_sec": min(1.7, duration),
+             "shake": False, "anchor_ratio": 0.15}]
+    if times[-1] != times[0]:
+        cues.append({"text": times[-1], "start_sec": max(1.7, duration - 1.15),
+                     "end_sec": duration, "shake": False, "anchor_ratio": 0.15})
+    return cues
+
+
+APPEARANCE_LEAD = 0.8
+
+
+def join_appearance(opening: Path, clip: Path, output: Path, duration: int) -> None:
+    """Cut from the approved opening artwork to the clip's Boss keyframe."""
+    from .post_production import _media_duration, _resolve_ffmpeg, _run_ffmpeg
+
+    movement = duration - APPEARANCE_LEAD
+    actual = _media_duration(clip)
+    if not actual or not movement - 0.08 <= actual <= movement + 1.05:
+        raise ValueError("Длина клипа с Боссом не соответствует утверждённому монтажу.")
+    filters = ("scale=1080:1920:force_original_aspect_ratio=decrease,"
+               "pad=1080:1920:(ow-iw)/2:(oh-ih)/2,setsar=1,fps=30,format=yuv420p")
+    _run_ffmpeg([
+        _resolve_ffmpeg(), "-y", "-loop", "1", "-framerate", "30", "-i", str(opening), "-i", str(clip),
+        "-filter_complex",
+        f"[0:v]{filters},trim=duration={APPEARANCE_LEAD},setpts=PTS-STARTPTS[a];"
+        f"[1:v]{filters},trim=duration={movement},setpts=PTS-STARTPTS[b];[a][b]concat=n=2:v=1:a=0[v]",
+        "-map", "[v]", "-an", "-c:v", "libx264", "-preset", "fast", "-movflags", "+faststart", str(output),
+    ], stage="inner_boss_appearance")
+
+
 def effect_events(scene: dict, duration: float, speech_end: float) -> list[tuple[str, float, float]]:
     events = []
     for cue in scene["fx"]:
@@ -169,6 +223,13 @@ def effect_events(scene: dict, duration: float, speech_end: float) -> list[tuple
     return events
 
 
+def speech_lead(scene: dict) -> float:
+    arrival = bool(frame_actions(scene)[1])
+    if "alarm" in scene["fx"] or (arrival and scene["turns"] and scene["turns"][0]["speaker"] == "boss"):
+        return 0.82
+    return 0.16
+
+
 def render_scene(scene: dict, path: Path, *, language: str, duration: int) -> None:
     """Render a dialogue/SFX preview with no background score."""
     from .post_production import (
@@ -182,7 +243,7 @@ def render_scene(scene: dict, path: Path, *, language: str, duration: int) -> No
     if not measured or measured + 0.08 < duration or measured - duration > 1.05:
         raise ValueError("Длина клипа не совпадает с монтажом. Утверди другую длительность или клип.")
     audio = scene.get("audio", {}).get(language)
-    lead = 0.82 if "alarm" in scene["fx"] else 0.16
+    lead = speech_lead(scene)
     speech_end = lead + audio["duration"] if audio else 0.0
     if speech_end > duration:
         raise ValueError("В клип не помещается утверждённая реплика.")
@@ -203,6 +264,7 @@ def render_scene(scene: dict, path: Path, *, language: str, duration: int) -> No
          "end_sec": 0.65 + (i + 1) * duration_per_title, "shake": i == len(titles) - 1}
         for i, title in enumerate(titles)
     ]
+    accents.extend(clock_overlays(scene, duration))
     width, height = _video_dimensions(raw)
     _write_burned_subtitle_ass(ass, captions, accent_cues=accents, video_width=width, video_height=height)
     ffmpeg = _resolve_ffmpeg()

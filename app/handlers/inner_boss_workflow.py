@@ -4,6 +4,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import math
 import os
 import re
 from pathlib import Path
@@ -12,11 +13,20 @@ from uuid import UUID, uuid4, uuid5
 from telegram import ReplyKeyboardMarkup
 
 from ..discipline_modes import BOSS, BOSS_VOICE_ID, MALE_VOICE_ID, SHORT_FORMATS
-from ..inner_boss_scenes import DIRECTIVE, PILOT_SCRIPT, SCRIPT_HEADER, parse_script, render_master, render_scene
+from ..inner_boss_scenes import (
+    APPEARANCE_LEAD, DIRECTIVE, PILOT_SCRIPT, SCRIPT_HEADER, frame_actions, join_appearance,
+    parse_script, render_master, render_scene, speech_lead,
+)
 
 STATE = "waiting_inner_boss_scene_workflow"
 KEY = "inner_boss_scene_workflow"
 LOGGER = logging.getLogger(__name__)
+FRAME_POLICY = 2
+NO_TEXT = (
+    "All artwork surfaces must be completely unmarked. No letters, numbers, digits, speech bubbles, "
+    "captions, pictograms or watermarks. Clock screens and papers are solid blank shapes. "
+    "Use only flat geometric 2D silhouettes, stable original character proportions and the dark navy palette."
+)
 REFERENCE = Path(__file__).resolve().parents[2] / "assets/story/inner_boss_character_reference.png"
 
 
@@ -37,7 +47,7 @@ def keyboard(session):
         rows = [["Прислать ролик", "Добавить музыку"], ["Показать сцену"]]
     else:
         rows = [["ОК"], ["Показать сцену", "Сценарий"]]
-        if stage in {"audio", "image", "video", "edit"}:
+        if stage in {"audio", "image", "boss_image", "video", "edit"}:
             rows.append(["Перегенерировать"])
     return ReplyKeyboardMarkup(rows, resize_keyboard=True)
 
@@ -157,9 +167,7 @@ def _target(data, suffix):
 
 
 def _duration(scene):
-    import math
-
-    lead = 0.82 if "alarm" in scene["fx"] else 0.16
+    lead = speech_lead(scene)
     longest = max((asset["duration"] for asset in scene.get("audio", {}).values()), default=0)
     result = max(scene["duration"], math.ceil(lead + longest + 0.25))
     if result > 15:
@@ -167,10 +175,8 @@ def _duration(scene):
     return result
 
 
-def _ordered_action(scene):
-    # The story order matters for blocking, with only translated clock numerals
-    # permitted in the generated footage. Exclude editorial titles from Kling.
-    return re.sub(r"(?im)^\s*(?:звук|титр(?: en)?)\s*:.*$", "", scene["body"]).strip()
+def _clean_opening(scene):
+    return scene.get("image") and scene.get("frame_policy") == FRAME_POLICY
 
 
 async def _audio(update, session, scene):
@@ -215,18 +221,38 @@ async def _image(data, scene):
                 references.append(await asyncio.to_thread(extract_last_video_frame, video_path=Path(previous_video)))
             except (OSError, RuntimeError):
                 LOGGER.warning("inner_boss.previous_frame_unavailable")
+    opening, appearance = frame_actions(scene)
     prompt = (
         SHORT_FORMATS[BOSS].frame
-        + "\nVertical 9:16 opening frame of the scene below. The first sheet is the exact character model: "
-        "the left and center are the same Hero, the right is Boss. Only depict those present at this opening beat. "
-        "If a previous frame is supplied preserve its location and prop geometry only if the scene is in the same place. "
-        "Show the initial pose before the action. No captions or lettering; only specified clock digits may be visible.\n"
-        + _ordered_action(scene)
+        + "\nVertical 9:16 single opening image. Use the first reference for the exact character model. "
+        "Keep the setting from any previous frame only if it is the same location. Frame the initial pose. "
+        + ("Show only the Hero. The wall must be completely empty where Boss will appear later. " if appearance else "")
+        + NO_TEXT + "\n" + opening
     )
     result = await asyncio.to_thread(generate_image_vertex, prompt, reference_images=references, aspect_ratio="9:16")
     path = _target(data, ".png")
     path.write_bytes(result)
-    scene["image"] = str(path)
+    scene["image"], scene["frame_policy"] = str(path), FRAME_POLICY
+    scene.pop("boss_image", None)
+
+
+async def _boss_image(data, scene):
+    from ..vertex_images import generate_image_vertex
+
+    _, appearance = frame_actions(scene)
+    prompt = (
+        "Edit the first reference as the exact same vertical 9:16 shot. Preserve lens, framing, perspective, "
+        "all props and their screen positions, the Hero's identity, and the flat nighttime 2D style. "
+        "Add the Boss wall shadow from the second reference. Keep him visibly separated from the Hero. "
+        "Depict only the instant Boss has just appeared. " + NO_TEXT + "\n" + appearance
+    )
+    result = await asyncio.to_thread(
+        generate_image_vertex, prompt,
+        reference_images=[Path(scene["image"]).read_bytes(), REFERENCE.read_bytes()], aspect_ratio="9:16",
+    )
+    path = _target(data, "-boss.png")
+    path.write_bytes(result)
+    scene["boss_image"] = str(path)
 
 
 async def _video(update, data, scene):
@@ -234,20 +260,27 @@ async def _video(update, data, scene):
     from ..syntax_telethon_fallback import SYNTAX_PROVIDER_KLING
 
     duration = _duration(scene)
+    opening, appearance = frame_actions(scene)
+    seconds = max(3, math.ceil(duration - APPEARANCE_LEAD)) if appearance else duration
+    source = scene["boss_image"] if appearance else scene["image"]
     prompt = (
-        f"{duration}-second Kling 3.0 image-to-video shot. No audio. 9:16. "
-        "Animate the approved opening image in this order, matching all identities and materials. "
-        "The quoted dialogue is a timing guide only. Use gaze and facial reactions, no lip sync or audio, "
-        "no added subtitles. Retain only the clock digits requested in the action. "
-        + SHORT_FORMATS[BOSS].motion + "\n" + _ordered_action(scene)
+        f"{seconds}-second Kling 3.0 image-to-video shot. No audio. 9:16. "
+        "Animate the supplied start image, matching all identities and materials. "
+        + ("Boss is already present in the first frame. Preserve his silhouette and framing. " if appearance else "")
+        + "Use gaze and facial reactions, no lip sync or audio. " + NO_TEXT + " "
+        + SHORT_FORMATS[BOSS].motion + "\n" + (appearance or opening)
     )
     raw = await _generate_video_bytes_with_high_load_retry(
-        update, prompt=prompt, model="kling_3_0", duration_sec=duration,
-        start_image=Path(scene["image"]).read_bytes(), end_image=None,
+        update, prompt=prompt, model="kling_3_0", duration_sec=seconds,
+        start_image=Path(source).read_bytes(), end_image=None,
         quality="1080", aspect_ratio="9:16", audio_enabled=False, syntax_provider=SYNTAX_PROVIDER_KLING,
     )
     path = _target(data, ".mp4")
     path.write_bytes(raw)
+    if appearance:
+        joined = _target(data, "-appearance.mp4")
+        await asyncio.to_thread(join_appearance, Path(scene["image"]), path, joined, duration)
+        path = joined
     scene["video"] = str(path)
 
 
@@ -274,8 +307,10 @@ def _replace_scene(data, body):
         for key in ("audio", "en_turns"):
             if key in previous:
                 replacement[key] = previous[key]
-    if replacement["visual"] == previous["visual"] and previous.get("image"):
-        replacement["image"] = previous["image"]
+    if frame_actions(replacement) == frame_actions(previous) and previous.get("image"):
+        for key in ("image", "frame_policy", "boss_image"):
+            if key in previous:
+                replacement[key] = previous[key]
         if (replacement["turns"] == previous["turns"] and _duration(replacement) == _duration(previous)
                 and previous.get("video")):
             replacement["video"] = previous["video"]
@@ -315,7 +350,16 @@ async def _show(update, session):
     elif stage == "image":
         with Path(scene["image"]).open("rb") as file:
             await update.message.reply_photo(photo=file, caption=scene["title"])
-        note = "«ОК» запустит немой клип Kling."
+        if not _clean_opening(scene):
+            note = "Этот кадр был создан по старому промту. Нажми «Перегенерировать», чтобы сделать чистый."
+        elif frame_actions(scene)[1]:
+            note = "Кадр до появления Босса. «ОК» откроет отдельный кадр с Боссом."
+        else:
+            note = "«ОК» запустит немой клип Kling."
+    elif stage == "boss_image":
+        with Path(scene["boss_image"]).open("rb") as file:
+            await update.message.reply_photo(photo=file, caption=f"{scene['title']} · Босс появился")
+        note = "«ОК» запустит немой Kling с этого кадра. Первый кадр бот добавит на монтаже."
     elif stage == "video":
         with Path(scene["video"]).open("rb") as file:
             await update.message.reply_video(video=file, caption=scene["title"])
@@ -374,6 +418,9 @@ async def handle_text(update, session, text):
                 elif stage == "image":
                     await _image(data, scene)
                     scene.pop("video", None)
+                elif stage == "boss_image":
+                    await _boss_image(data, scene)
+                    scene.pop("video", None)
                 elif stage == "video":
                     await _video(update, data, scene)
                 elif stage == "edit":
@@ -401,7 +448,7 @@ async def handle_text(update, session, text):
                         await _audio(update, session, scene)
                         data["stage"] = "audio"
                     else:
-                        if not scene.get("image"):
+                        if not _clean_opening(scene):
                             await _image(data, scene)
                         data["stage"] = "image"
             elif stage == "translation":
@@ -409,14 +456,21 @@ async def handle_text(update, session, text):
                 data["stage"] = "audio"
             elif stage == "audio":
                 _duration(scene)
-                if not scene.get("image"):
+                if not _clean_opening(scene):
                     await _image(data, scene)
                 data["stage"] = "image"
-            elif stage == "image":
-                if not scene.get("video"):
-                    await _video(update, data, scene)
-                scene["video_duration"] = _duration(scene)
-                data["stage"] = "video"
+            elif stage in {"image", "boss_image"}:
+                if not _clean_opening(scene):
+                    raise ValueError("Этот кадр был сделан по старому промту. Сначала нажми «Перегенерировать».")
+                if stage == "image" and frame_actions(scene)[1]:
+                    if not scene.get("boss_image"):
+                        await _boss_image(data, scene)
+                    data["stage"] = "boss_image"
+                else:
+                    if not scene.get("video"):
+                        await _video(update, data, scene)
+                    scene["video_duration"] = _duration(scene)
+                    data["stage"] = "video"
             elif stage == "video":
                 if not scene.get("previews"):
                     await _edit(data, scene)
@@ -436,7 +490,7 @@ async def handle_text(update, session, text):
             if len(lines) != len(scene["turns"]) or not all(lines):
                 raise ValueError("Пришли столько же реплик, по одной на строку.")
             scene["en_turns"] = lines
-        elif stage in {"scene", "translation", "audio", "image", "video", "edit"}:
+        elif stage in {"scene", "translation", "audio", "image", "boss_image", "video", "edit"}:
             _replace_scene(data, await asyncio.to_thread(revise_scene, scene, text))
         else:
             raise ValueError("На этом шаге пришли музыку файлом или открой сцену по номеру.")

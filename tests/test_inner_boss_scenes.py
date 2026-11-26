@@ -5,7 +5,7 @@ from unittest.mock import AsyncMock
 import pytest
 
 from app.handlers import inner_boss_workflow as workflow
-from app.inner_boss_scenes import PILOT_SCRIPT, effect_events, parse_script, render_master, render_scene
+from app.inner_boss_scenes import PILOT_SCRIPT, clock_overlays, effect_events, frame_actions, join_appearance, parse_script, render_master, render_scene
 from app.session_store import _chat_session_cache_payload
 
 
@@ -52,6 +52,7 @@ def test_scene_workflow_advances_only_after_preview_approval(monkeypatch):
 
     async def image(data, scene):
         scene["image"] = "generated.png"
+        scene["frame_policy"] = workflow.FRAME_POLICY
 
     async def video(update, data, scene):
         scene["video"] = "generated.mp4"
@@ -96,3 +97,65 @@ def test_silent_scene_and_music_render_real_video(tmp_path):
     render_master([edited], music, output)
     assert _has_audio_stream(output)
     assert _media_duration(output) == pytest.approx(3, abs=0.15)
+
+
+
+def test_appearance_anchors_exclude_dialogue_and_clock_digits():
+    scene = parse_script(PILOT_SCRIPT)[0]
+    opening, appearance = frame_actions(scene)
+    assert "открывает глаза" in opening
+    assert "Босс" not in opening and "появляется Босс" in appearance
+    assert "минуточек" not in opening + appearance
+    assert "06:00" not in opening + appearance and "09:00" not in opening + appearance
+    cues = clock_overlays(scene, 8)
+    assert [cue["text"] for cue in cues] == ["06:00", "09:00"]
+    assert [cue["start_sec"] for cue in cues] == [0, 6.85]
+
+
+def test_appearance_frame_requires_its_own_approval(monkeypatch):
+    session = {"story_english_requested": False}
+    workflow.initialize(session, "Сцена 1. Утро\nГерой открывает глаза. На стене появляется Босс.")
+    data = session[workflow.KEY]
+    data["stage"], data["languages"] = "image", ["ru"]
+    scene = data["scenes"][0]
+    scene.update(image="before.png", frame_policy=workflow.FRAME_POLICY)
+    update = SimpleNamespace(message=SimpleNamespace(reply_text=AsyncMock()))
+    monkeypatch.setattr(workflow, "_save", lambda *_: None)
+    monkeypatch.setattr(workflow, "_show", AsyncMock())
+
+    async def make_appearance(data, scene):
+        scene["boss_image"] = "after.png"
+
+    monkeypatch.setattr(workflow, "_boss_image", AsyncMock(side_effect=make_appearance))
+    monkeypatch.setattr(workflow, "_video", AsyncMock())
+    asyncio.run(workflow.handle_text(update, session, "OK"))
+    assert data["stage"] == "boss_image"
+    workflow._video.assert_not_called()
+    asyncio.run(workflow.handle_text(update, session, "OK"))
+    assert data["stage"] == "video"
+    workflow._video.assert_awaited_once()
+
+
+def test_join_appearance_uses_both_frames_without_overbuying(tmp_path):
+    import subprocess
+
+    from PIL import Image
+    from app.post_production import _media_duration, _resolve_ffmpeg
+
+    ffmpeg = _resolve_ffmpeg()
+    if not ffmpeg:
+        pytest.skip("ffmpeg is unavailable")
+    opening = tmp_path / "before.png"
+    Image.new("RGB", (180, 320), "blue").save(opening)
+    clip, output = tmp_path / "after.mp4", tmp_path / "joined.mp4"
+    subprocess.run([ffmpeg, "-v", "error", "-f", "lavfi", "-i", "color=red:s=180x320:d=3:r=30",
+                    "-c:v", "libx264", str(clip)], check=True)
+    join_appearance(opening, clip, output, 3)
+    assert _media_duration(output) == pytest.approx(3, abs=0.06)
+    for second, expected in ((0.2, "blue"), (1.2, "red")):
+        sample = subprocess.check_output([
+            ffmpeg, "-v", "error", "-ss", str(second), "-i", str(output), "-frames:v", "1",
+            "-vf", "scale=2:2", "-f", "rawvideo", "-pix_fmt", "rgb24", "-",
+        ])
+        r, _, b = sample[:3]
+        assert (b > r) == (expected == "blue")

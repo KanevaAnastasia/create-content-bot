@@ -2364,7 +2364,7 @@ def _write_burned_subtitle_ass(
             font = ImageFont.truetype(str(font_path), size=size)
             line_width = max(font.getlength(line) for line in accent_lines)
             size = max(1, min(size, round(size * layout.width * 0.80 / max(1.0, line_width))))
-        x, y = layout.width // 2, round(layout.height * 0.28)
+        x, y = layout.width // 2, round(layout.height * float(cue.get("anchor_ratio", 0.28)))
         shift = max(2, round(layout.width * 0.005))
         offsets = ((-1, 0), (1, 1), (-1, -1), (1, 0), (0, 0)) if cue.get("shake", True) else ((0, 0),)
         for index, (dx, dy) in enumerate(offsets):
