@@ -1199,24 +1199,27 @@ def _upload_syntax_kling_start_frame_sync(page: Any, start_image: bytes, *, time
     logger.info("syntax.kling.start_frame_transfer_completed bytes=%s extension=%s", len(start_image), extension)
 
 
-_KEYFRAME_UPLOAD_READY_JS = r"""({minimum}) => {
-    const match = /remove file|delete file|удалить|remove image|remove frame/i;
-    const visible = node => node && node.getClientRects().length > 0;
-    const inputs = [...document.querySelectorAll('input[type=file]')];
-    const scoped = inputs.map(input => input.closest('.syntx-field, .syntx-form-field') || input.parentElement);
-    const previews = new Set(scoped.flatMap(container =>
-        [...(container?.querySelectorAll('img') || [])].filter(img =>
-            visible(img) && img.naturalWidth > 32 && !/\.svg(?:$|\?)/i.test(img.getAttribute('src') || ''))
-    ));
-    const removes = [...document.querySelectorAll('button, [role=button]')].filter(node =>
-        visible(node) && match.test([node.textContent, node.title, node.getAttribute('aria-label')].join(' '))
-    );
-    return removes.length >= minimum || previews.size >= minimum;
-}"""
+_KEYFRAME_FILES_SELECTOR = 'input[type="file"][x-ref="fileInput"][multiple]'
 
 
-def _wait_for_syntax_kling_keyframes_sync(page: Any, minimum: int = 2) -> None:
-    page.wait_for_function(_KEYFRAME_UPLOAD_READY_JS, arg={"minimum": minimum}, timeout=60_000)
+def _wait_for_syntax_keyframes_count_sync(page: Any, expected: int | None, *, timeout: int) -> int:
+    deadline = time.monotonic() + timeout / 1000
+    while time.monotonic() < deadline:
+        text = page.evaluate(
+            "selector => document.querySelector(selector)?.parentElement?.parentElement?.innerText",
+            _KEYFRAME_FILES_SELECTOR,
+        )
+        match = re.search(r"(?:Загружено|Uploaded)\s*\(\s*([012])\s*/\s*2\s*\)", text or "", re.I)
+        if match:
+            count = int(match.group(1))
+            if expected is None or count == expected:
+                return count
+        page.wait_for_timeout(250)
+    raise RuntimeError(f"Syntax Kling Keyframes did not confirm the frame count: expected={expected}.")
+
+
+def _wait_for_syntax_kling_keyframes_sync(page: Any) -> None:
+    _wait_for_syntax_keyframes_count_sync(page, 2, timeout=60_000)
 
 
 def _wait_for_syntax_keyframes_selection_sync(page: Any) -> None:
@@ -1235,26 +1238,21 @@ def _wait_for_syntax_keyframes_selection_sync(page: Any) -> None:
 
 def _upload_syntax_kling_keyframes_sync(page: Any, start_image: bytes, end_image: bytes) -> None:
     """Transfer the ordered pair and verify accepted previews before submitting."""
-    inputs = page.locator("input[type=file]")
-    page.wait_for_function(
-        """() => {
-            const fields = [...document.querySelectorAll('input[type=file]')];
-            return fields.length === 2 || (fields.length === 1 && fields[0].multiple);
-        }""",
-        timeout=15_000,
-    )
+    # The other file input belongs to the hidden Telegram media picker.
+    field = page.locator(_KEYFRAME_FILES_SELECTOR)
+    uploader = field.locator("xpath=../..")
+    count = _wait_for_syntax_keyframes_count_sync(page, None, timeout=30_000)
+    while count:
+        uploader.get_by_role("button", name=re.compile(r"^(Remove file|Удалить файл)$", re.I)).first.click(timeout=10_000)
+        count -= 1
+        _wait_for_syntax_keyframes_count_sync(page, count, timeout=15_000)
     files = []
     for role, image in (("start", start_image), ("end", end_image)):
         extension = _image_ext(image)
         files.append({"name": f"{role}_frame.{extension}",
                       "mimeType": "image/png" if extension == "png" else "image/jpeg", "buffer": image})
-    if inputs.count() == 1:
-        inputs.first.set_input_files(files, timeout=30_000)
-        _wait_for_syntax_kling_keyframes_sync(page)
-    else:
-        for index, file in enumerate(files):
-            inputs.nth(index).set_input_files(file, timeout=30_000)
-            _wait_for_syntax_kling_keyframes_sync(page, index + 1)
+    field.set_input_files(files, timeout=30_000)
+    _wait_for_syntax_kling_keyframes_sync(page)
     logger.info("syntax.kling.keyframes_upload_confirmed")
 
 

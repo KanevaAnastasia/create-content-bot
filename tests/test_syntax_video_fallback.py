@@ -2381,26 +2381,24 @@ def test_settings_and_button_processing_are_not_generation_confirmation(text):
     assert adapter._syntax_kling_submission_state_after_change("Настройки Veo", text) == ""
 
 
-@pytest.mark.parametrize("slot_count", [1, 2])
-def test_kling_keyframes_upload_in_order_and_require_confirmation(slot_count):
+@pytest.mark.parametrize("existing", [0, 2])
+def test_kling_keyframes_upload_in_order_in_main_field(existing):
     from unittest.mock import MagicMock
 
     import app.syntax_telethon_fallback as telethon_fallback
 
     page = MagicMock()
-    inputs = page.locator.return_value
-    inputs.count.return_value = slot_count
-    fields = [MagicMock(), MagicMock()]
-    inputs.nth.side_effect = fields.__getitem__
+    field = page.locator.return_value
+    uploader = field.locator.return_value
+    counts = list(range(existing, -1, -1)) + [2]
+    page.evaluate.side_effect = [f"Загружено ({count}/2)" for count in counts]
     start = b"\x89PNG\r\n\x1a\nstart"
     end = b"\x89PNG\r\n\x1a\nend"
 
     telethon_fallback._upload_syntax_kling_keyframes_sync(page, start, end)
-    if slot_count == 1:
-        files = inputs.first.set_input_files.call_args.args[0]
-    else:
-        files = [field.set_input_files.call_args.args[0] for field in fields]
+    assert all(call.args == ('input[type="file"][x-ref="fileInput"][multiple]',) for call in page.locator.call_args_list)
+    files = field.set_input_files.call_args.args[0]
     assert [file["buffer"] for file in files] == [start, end]
     assert [file["name"] for file in files] == ["start_frame.png", "end_frame.png"]
-    assert page.wait_for_function.call_args.kwargs["arg"] == {"minimum": 2}
-    assert page.wait_for_function.call_count == slot_count + 1
+    assert uploader.get_by_role.return_value.first.click.call_count == existing
+    assert page.evaluate.call_count == len(counts)
