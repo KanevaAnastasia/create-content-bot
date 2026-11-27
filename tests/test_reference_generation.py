@@ -7,9 +7,10 @@ from app.project_modes import project_mode_rows
 from app import reference_generation as reference
 
 
-def test_reference_mode_only_appears_in_grandma_menu():
+def test_reference_mode_appears_in_grandma_and_discipline_menus():
     assert ["По референсу"] in project_mode_rows("grandma_kitchen")
-    assert ["По референсу"] not in project_mode_rows("discipline")
+    assert ["По референсу"] in project_mode_rows("discipline")
+    assert ["По референсу"] not in project_mode_rows("other")
 
 
 def test_reference_mode_selection_waits_for_image_and_skips_series():
@@ -39,11 +40,11 @@ def test_reference_mode_selection_waits_for_image_and_skips_series():
     start.SESSIONS.pop(918273, None)
 
 
-def test_reference_mode_is_rejected_outside_grandma_project():
+def test_reference_mode_is_rejected_in_unrelated_projects():
     from app.handlers import handlers_state_start as start
 
     message = SimpleNamespace(reply_text=AsyncMock())
-    session = {start._PROJECT_KEY_SESSION: "discipline", "generation_mode": "story"}
+    session = {start._PROJECT_KEY_SESSION: "other", "generation_mode": "story"}
 
     asyncio.run(
         start._handle_waiting_generation_mode_state(
@@ -56,7 +57,58 @@ def test_reference_mode_is_rejected_outside_grandma_project():
     )
 
     assert session["generation_mode"] == "story"
-    assert "только в проекте бабушки" in message.reply_text.await_args.args[0]
+    assert "Дисциплина" in message.reply_text.await_args.args[0]
+
+
+def test_discipline_reference_scene_uses_only_approved_vasily(tmp_path, monkeypatch):
+    from app.generation_store import _scene_prompt_payload, merge_scene_prompt_payload
+    from app.handlers import handlers_media_scene
+
+    image = tmp_path / "vasily.png"
+    image.write_bytes(b"approved vasily")
+    monkeypatch.setattr(handlers_media_scene, "ASSETS", {"characters": {
+        "grandma": {"base": str(image)}, "cat": {"base": str(image)},
+    }})
+    calls = Mock(return_value="Вася на ступенях")
+    monkeypatch.setattr(reference, "gemini_generate_sync", calls)
+    hero = {"display_name": "Василий", "description": "Кудрявый герой", "asset_uri": image.as_uri()}
+    prompt = reference.generate_reference_image_prompt(b"composition", comment="Камера спускается", vasily=hero)
+    sent_prompt = calls.call_args.args[0]
+    assert "Василий" in sent_prompt and "Кудрявый герой" in sent_prompt
+    assert "Тимоша" not in sent_prompt and "Grandma Kitchen" not in sent_prompt
+    scene = reference.build_reference_scene(source_image=b"composition", image_prompt=prompt, vasily=hero)
+    assert scene["characters"] == ["vasily"] and scene["model"] == "veo3_fast"
+    assert scene["duration_sec"] == 8 and scene["aspect_ratio"] == "9:16"
+    assert handlers_media_scene._resolve_scene_references(scene) == {"vasily": str(image)}
+    assert handlers_media_scene._load_scene_reference_images(scene) == [b"approved vasily"]
+    saved = _scene_prompt_payload(scene)
+    restored = {"prompt_meta_json": saved["prompt_meta_json"]}
+    merge_scene_prompt_payload(restored, saved)
+    assert restored["characters"] == ["vasily"]
+    assert handlers_media_scene._load_scene_reference_images(restored) == [b"approved vasily"]
+
+    from app.handlers.handlers_media_core import enforce_video_prompt_voice_requirements
+    from app.pipeline import append_veo3_video_framing_constraints
+
+    motion = "Wide side view. Pull back to reveal the stairs, with quiet audience ambience."
+    assert enforce_video_prompt_voice_requirements(motion, restored) == motion
+    assert append_veo3_video_framing_constraints(motion, restored) == motion
+
+
+def test_discipline_photo_with_caption_skips_grandma_cast_selection(monkeypatch):
+    from app.handlers import handlers_state_scene as handler
+
+    chat_id = 918275
+    session = {"state": reference.STATE_WAITING_REFERENCE_IMAGE, "selected_project_key": "discipline"}
+    monkeypatch.setitem(handler.SESSIONS, chat_id, session)
+    monkeypatch.setattr(handler, "_extract_any_image_from_update", AsyncMock(return_value=b"reference"))
+    start = AsyncMock(return_value=True)
+    monkeypatch.setattr(handler, "_start_reference_prompt_approval", start)
+    update = SimpleNamespace(effective_chat=SimpleNamespace(id=chat_id),
+                             message=SimpleNamespace(caption="Вася на сцене", reply_text=AsyncMock()))
+    asyncio.run(handler.on_photo(update, None))
+    start.assert_awaited_once_with(update, None, chat_id=chat_id, session=session, comment="Вася на сцене")
+    assert session[reference.REFERENCE_SOURCE_IMAGE_SESSION_KEY] == b"reference"
 
 
 def test_reference_extra_characters_parse_multiple_known_names():

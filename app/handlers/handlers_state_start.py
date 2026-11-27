@@ -1611,8 +1611,8 @@ async def _handle_waiting_generation_mode_state(
     if mode == GENERATION_MODE_ADVICE and str(session.get(_PROJECT_KEY_SESSION) or "grandma_kitchen") != "grandma_kitchen":
         await update.message.reply_text("Формат «Совет» доступен для проекта бабушки. Выберите проект бабушки и начните снова.")
         return True
-    if mode == GENERATION_MODE_REFERENCE and str(session.get(_PROJECT_KEY_SESSION) or "grandma_kitchen") != "grandma_kitchen":
-        await update.message.reply_text("Режим «По референсу» доступен только в проекте бабушки.")
+    if mode == GENERATION_MODE_REFERENCE and str(session.get(_PROJECT_KEY_SESSION) or "grandma_kitchen") not in {"grandma_kitchen", "discipline"}:
+        await update.message.reply_text("Режим «По референсу» доступен в проектах бабушки и «Дисциплина».")
         return True
     if not requested_format and not retry_story:
         session.pop(MODE_KEY, None)

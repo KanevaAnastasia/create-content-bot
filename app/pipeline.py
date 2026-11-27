@@ -47,7 +47,10 @@ from .llm_utils import (
     gemini_generate_sync,
 )
 from .advice_generation import ADVICE_SCENE_RULE
-from .generation_modes import GENERATION_MODE_ADVICE, GENERATION_MODE_LONG, GENERATION_MODE_NORMAL, GENERATION_MODE_SILENCE, normalize_generation_mode
+from .generation_modes import (
+    GENERATION_MODE_ADVICE, GENERATION_MODE_LONG, GENERATION_MODE_NORMAL, GENERATION_MODE_SILENCE,
+    normalize_generation_mode, uses_project_cast_for_reference,
+)
 from .multilingual import language_name, target_languages_from_env
 from . import pipeline_llm_steps as llm_steps
 from .scene_speech_budget import (
@@ -581,6 +584,8 @@ def append_veo3_video_framing_constraints(
     Идемпотентно для актуального правила; устаревший ``veo3_framing:`` заменяет на строгий close-up.
     """
     vp = (video_prompt or "").strip()
+    if scene and uses_project_cast_for_reference(scene):
+        return vp
     model = model_fallback
     if scene is not None:
         model = str(scene.get("model", model_fallback) or model_fallback).lower().strip()

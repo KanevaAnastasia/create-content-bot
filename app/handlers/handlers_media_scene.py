@@ -30,6 +30,7 @@ from ..session_store import save_session_if_possible
 from ..vertex_images import generate_image_vertex, generate_image_vertex_result, next_image_generation_model
 from ..visual_props import append_visual_prop_descriptions
 from ..grandma_scene_contract import append_episode_prop_locks
+from ..generation_modes import uses_project_cast_for_reference
 
 logger = logging.getLogger("bot")
 PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
@@ -1175,6 +1176,8 @@ def _reference_keys_for_scene(
     _ = include_location
     keys_order: list[str] = []
     chars = scene.get("characters")
+    if uses_project_cast_for_reference(scene):
+        return [key for key in (chars or []) if key in refs]
     prompt_blob = _scene_prompt_blob(scene, prompt_keys)
     character_prompt_blob = f"{prompt_blob} {_scene_supplemental_prompt_blob(scene)}".strip()
     fruit_only_closeup = _fruit_only_closeup_prompt(prompt_blob)
@@ -1227,6 +1230,14 @@ def _resolve_scene_references(scene: dict, *, prompt_keys: tuple[str, ...] | Non
     reconcile_story_prop_references(scene, prompt_keys=prompt_keys)
     out: dict[str, str] = {}
     refs = scene.get("references")
+    if uses_project_cast_for_reference(scene):
+        if not isinstance(refs, dict):
+            return out
+        return {
+            key: path.strip()
+            for key, path in refs.items()
+            if key in (scene.get("characters") or []) and isinstance(path, str) and path.strip()
+        }
     prompt_blob = _scene_prompt_blob(scene, prompt_keys)
     character_prompt_blob = f"{prompt_blob} {_scene_supplemental_prompt_blob(scene)}".strip()
     fruit_only_closeup = _fruit_only_closeup_prompt(prompt_blob)

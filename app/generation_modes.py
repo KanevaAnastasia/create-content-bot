@@ -93,6 +93,10 @@ def is_reference_generation(value: Any) -> bool:
     return normalize_generation_mode(value) == GENERATION_MODE_REFERENCE
 
 
+def uses_project_cast_for_reference(scene: dict[str, Any]) -> bool:
+    return is_reference_generation(scene) and bool(scene.get("story_required_reference_ids"))
+
+
 def target_languages_for_generation_mode(value: Any, default: list[str]) -> list[str]:
     if (
         is_silence_generation(value)

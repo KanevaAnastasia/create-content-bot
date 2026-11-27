@@ -16,7 +16,7 @@ from telegram.ext import ContextTypes
 from ..assets import ASSETS
 from ..character_catalog import sanitize_character_names_and_keys
 from ..constants import ELEVENLABS_VOICE_ID_ENV_NAME, STATE_READY_FOR_PRODUCTION
-from ..generation_modes import SYNTAX_PROVIDER_VEO
+from ..generation_modes import SYNTAX_PROVIDER_VEO, uses_project_cast_for_reference
 from ..llm_utils import (
     GEMINI_MODEL_PROFILE_EDIT,
     GEMINI_QUOTA_EXHAUSTED_USER_MESSAGE,
@@ -1658,6 +1658,8 @@ def enforce_video_prompt_voice_requirements(
     Строку ``CHARACTERS SPEAKS:`` с репликой формирует только LLM (см. промпты production / rewrite).
     """
     vp = (video_prompt or "").strip()
+    if scene and uses_project_cast_for_reference(scene):
+        return enforce_video_prompt_visual_source_rule(vp)
     lang = (target_language or "ru").strip().lower()
     lang_rule = _VOICE_RULES_BY_LANGUAGE.get(lang, _VOICE_RULES_BY_LANGUAGE["en"])
     required_lock = _voice_lock_for_language(lang)

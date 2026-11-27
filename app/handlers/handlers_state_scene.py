@@ -287,6 +287,7 @@ from ..reference_generation import (
     build_reference_scene,
     generate_reference_description,
     generate_reference_image_prompt,
+    load_reference_vasily,
     parse_reference_extra_characters,
     reference_character_choices_text,
     reference_character_summary,
@@ -6331,6 +6332,11 @@ async def _start_reference_prompt_approval(
     extras = [str(key) for key in session.get(REFERENCE_CHARACTERS_SESSION_KEY) or []]
     session[REFERENCE_COMMENT_SESSION_KEY] = str(comment or "").strip()
     try:
+        vasily = (
+            await asyncio.to_thread(load_reference_vasily)
+            if session.get("selected_project_key") == "discipline"
+            else None
+        )
         await reply_text_without_keyboard(update.message, "Генерирую промпт кадра по референсу, ждите.")
         image_prompt = await _call_with_503_retries(
             update,
@@ -6342,6 +6348,7 @@ async def _start_reference_prompt_approval(
                 source_image,
                 comment=session[REFERENCE_COMMENT_SESSION_KEY],
                 extra_characters=extras,
+                vasily=vasily,
             ),
         )
         if not str(image_prompt or "").strip():
@@ -6358,6 +6365,7 @@ async def _start_reference_prompt_approval(
         image_prompt=str(image_prompt).strip(),
         comment=session[REFERENCE_COMMENT_SESSION_KEY],
         extra_characters=extras,
+        vasily=vasily,
     )
     session.pop(REFERENCE_SOURCE_IMAGE_SESSION_KEY, None)
     session[GENERATION_MODE_SESSION_KEY] = GENERATION_MODE_REFERENCE
@@ -8489,6 +8497,21 @@ async def on_photo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
                 return
             session[REFERENCE_SOURCE_IMAGE_SESSION_KEY] = image_bytes
             session[REFERENCE_COMMENT_SESSION_KEY] = str(getattr(update.message, "caption", "") or "").strip()
+            if session.get("selected_project_key") == "discipline":
+                session["state"] = STATE_WAITING_REFERENCE_COMMENT
+                SESSIONS[chat_id] = session
+                if session[REFERENCE_COMMENT_SESSION_KEY]:
+                    await _start_reference_prompt_approval(
+                        update, context, chat_id=chat_id, session=session,
+                        comment=session[REFERENCE_COMMENT_SESSION_KEY],
+                    )
+                else:
+                    await _reply_text_with_optional_markup(
+                        update,
+                        "Референс принят. Вася будет главным героем. Опишите действие или нажмите «Без комментария».",
+                        reply_markup=_reference_comment_markup(),
+                    )
+                return
             session["state"] = STATE_WAITING_REFERENCE_CHARACTERS
             SESSIONS[chat_id] = session
             await _reply_text_with_optional_markup(

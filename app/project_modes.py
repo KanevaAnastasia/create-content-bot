@@ -9,7 +9,7 @@ def project_mode_rows(project_key=None):
     if project == "discipline":
         return [["История"], [LABELS[VASYA], LABELS[REFRAME]],
                 [LABELS[FLOW], LABELS[BOSS]], [LABELS[TWO_LIVES], LABELS[ARCHIVE]], [LABELS[LEARNING], LABELS[LITERARY]],
-                [LABELS[FORK], LABELS[EXPERIMENT]], ["Очередь Дисциплины"],
+                [LABELS[FORK], LABELS[EXPERIMENT]], ["По референсу"], ["Очередь Дисциплины"],
                 ["Визуализация"], ["Копия"], ["Реклама"]]
     rows = [["Обычный", "Совет"], ["По референсу"]] if project == "grandma_kitchen" else [["Обычный"]]
     return rows + [["Silence"], ["Длинный"], ["Копия"], ["История"], ["Визуализация"], ["Реклама"]]

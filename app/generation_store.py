@@ -12,6 +12,7 @@ import sqlalchemy as sa
 from sqlalchemy import select
 
 from .db import SessionLocal
+from .generation_modes import uses_project_cast_for_reference
 from .models import GenerationArtifact, GenerationRun, Scene, SceneTextRevision, VideoResult
 
 MEDIA_CURSOR_STATE = "waiting_scene_media"
@@ -344,7 +345,7 @@ def _infer_dialogue_from_scene_prompt(scene: dict[str, Any]) -> list[dict[str, s
 
 
 def _allows_missing_core_grandma_cat(scene: dict[str, Any]) -> bool:
-    if str(scene.get("generation_mode") or "").strip().lower() == "story":
+    if str(scene.get("generation_mode") or "").strip().lower() == "story" or uses_project_cast_for_reference(scene):
         return True
     chars = scene.get("characters")
     normalized = {str(ch).strip().lower() for ch in chars if str(ch).strip()} if isinstance(chars, list) else set()
