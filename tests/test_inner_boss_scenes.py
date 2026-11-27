@@ -274,9 +274,10 @@ def test_silent_scene_and_music_render_real_video(tmp_path):
     music = tmp_path / "music.wav"
     subprocess.run([ffmpeg, "-v", "error", "-f", "lavfi", "-i", "sine=frequency=440:duration=1", str(music)], check=True)
     output = tmp_path / "master.mp4"
-    render_master([edited, edited], music, output, loop_music=True, scene_clicks=[clicks, clicks])
+    render_master([edited, edited, edited], music, output, loop_music=True, scene_clicks=[clicks, clicks, []],
+                  rhythmic_clicks_from_scene=2)
     assert _has_audio_stream(output)
-    assert _media_duration(output) == pytest.approx(6, abs=0.15)
+    assert _media_duration(output) == pytest.approx(9, abs=0.15)
     with wave.open(str(tmp_path / "master-clicks.wav"), "rb") as stem:
         rate = stem.getframerate()
         channels = stem.getnchannels()
@@ -286,6 +287,10 @@ def test_silent_scene_and_music_render_real_video(tmp_path):
         window = round(0.05 * rate) * channels
         assert not any(samples[onset - window:onset])
         assert any(samples[onset:onset + window])
+    start = _media_duration(edited) + 0.1
+    for tick in (start, start + 0.48, start + 2.88, start + 3.36):
+        offset = round(tick * rate) * channels
+        assert any(samples[offset:offset + round(0.02 * rate) * channels])
 
 
 
@@ -347,6 +352,11 @@ def test_day_card_uses_explicit_header_or_first_line():
     assert day_overlay(scenes[1], 7, "ru")[0]["text"] == "День 2"
     assert day_overlay(scenes[2], 7, "ru")[0]["text"] == "День 3-345"
     assert day_overlay(scenes[2], 7, "en")[0]["text"] == "Day 3-345"
+    panels = dict(scenes[2], panel_days=[5, 15, 67, 156, 345])
+    labels = day_overlay(panels, 7, "en")
+    assert [label["text"] for label in labels] == ["Day 5", "Day 15", "Day 67", "Day 156", "Day 345"]
+    assert [label["anchor_ratio"] for label in labels] == pytest.approx([0.013, 0.213, 0.413, 0.613, 0.813])
+    assert all(label["start_sec"] == 0 and label["end_sec"] == 7 for label in labels)
     assert day_overlay(scenes[3], 8, "ru") == []
     scene, = parse_script("Сцена 1. Утро\nДень 12. Герой встаёт с кровати.")
     cue, = day_overlay(scene, 7, "ru")

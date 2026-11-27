@@ -425,7 +425,7 @@ def _invalidate_frame_dependants(data, scene, stage):
         if scene.get("end_frame_mode") != "upload":
             scene.pop("boss_image", None)
         scene.pop("end_image", None)
-    for key in ("video", "video_duration", "previews", "approved"):
+    for key in ("video", "video_by_language", "video_duration", "previews", "approved"):
         scene.pop(key, None)
     data.pop("masters", None)
 
@@ -776,6 +776,7 @@ async def _video(update, data, scene, *, approved_prompt=None):
     )
     path = _target(data, ".mp4")
     path.write_bytes(raw)
+    scene.pop("video_by_language", None)
     scene["video"] = str(path)
 
 
@@ -848,6 +849,8 @@ def _replace_scene(data, body):
         body = body[supplied.end():].strip()
     replacement, = parse_script(f"{header}\n{body}")
     replacement["title"] = re.sub(r"(?i)сцена\s+1\b", f"Сцена {index + 1}", replacement["title"], count=1)
+    if previous.get("panel_days"):
+        replacement["panel_days"] = previous["panel_days"]
     if previous.get("end_frame_mode") and not replacement.get("end_frame_mode"):
         replacement["end_frame_mode"] = previous["end_frame_mode"]
     if manual_roles := previous.get("manual_frame_prompt_roles"):
@@ -879,7 +882,7 @@ def _replace_scene(data, body):
                 and previous.get("video")):
             replacement["video"] = previous["video"]
             replacement["video_duration"] = previous.get("video_duration", _duration(previous))
-            for key in ("speech_not_before_sec", "speech_start_sec"):
+            for key in ("speech_not_before_sec", "speech_start_sec", "video_by_language"):
                 if key in previous:
                     replacement[key] = previous[key]
     data["scenes"][index] = replacement
@@ -1396,6 +1399,7 @@ async def finish(update, session, music_bytes, *, use_saved_music=False):
         await asyncio.to_thread(
             render_final_master, data["scenes"], destination, language=lang, music=music,
             music_transition=transition, loop_music=loop_music, opening_title_style=data.get("opening_title_style"),
+            rhythmic_clicks_from_scene=data.get("rhythmic_clicks_from_scene"),
         )
         width, height = await asyncio.to_thread(_video_dimensions, destination)
         masters[lang] = str(destination)

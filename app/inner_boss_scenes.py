@@ -216,16 +216,21 @@ def frame_actions(scene: dict) -> tuple[str, str]:
 
 
 def day_overlay(scene: dict, duration: float, language: str) -> list[dict]:
+    label = "Day" if language == "en" else "День"
+    style = {"start_sec": 0.0, "end_sec": duration, "anchor_top_left": True, "shake": False}
+    if panel_days := scene.get("panel_days"):
+        return [
+            {**style, "text": f"{label} {day}", "anchor_x_ratio": 0.385,
+             "anchor_ratio": (index + 0.065) / len(panel_days), "font_height_ratio": 0.043}
+            for index, day in enumerate(panel_days)
+        ]
     header = re.sub(r"^сцена\s+\d+\b[ .:·–—-]*", "", scene["title"], flags=re.I)
     marker = DAY_MARKER.match(scene["body"]) or DAY_MARKER.match(header)
     if not marker:
         return []
-    label = "Day" if language == "en" else "День"
     day = re.sub(r"[ \t]+", "", marker[1])
-    return [{
-        "text": f"{label} {day}", "start_sec": 0.0, "end_sec": duration,
-        "anchor_x_ratio": 0.075, "anchor_ratio": 0.09, "anchor_top_left": True, "shake": False,
-    }]
+    return [{**style, "text": f"{label} {day}", "anchor_x_ratio": 0.075,
+             "anchor_ratio": 0.065, "font_height_ratio": 0.050}]
 
 
 def title_overlays(scene: dict, duration: float, language: str) -> list[dict]:
@@ -332,7 +337,7 @@ def render_scene(
         _subtitle_filter, _video_dimensions, _write_burned_subtitle_ass,
     )
 
-    raw = Path(scene["video"])
+    raw = Path(scene.get("video_by_language", {}).get(language) or scene["video"])
     measured = _media_duration(raw)
     if not measured or measured + 0.08 < duration or measured - duration > 1.05:
         raise ValueError("Длина клипа не совпадает с монтажом. Утверди другую длительность или клип.")
@@ -424,6 +429,7 @@ def render_scene(
 def render_master(
     clips: list[Path], music: Path | None, output: Path, *, music_transition: tuple[int, Path] | None = None,
     loop_music: bool = False, scene_clicks: list[list[tuple[str, float, float]]] | None = None,
+    rhythmic_clicks_from_scene: int | None = None,
 ) -> None:
     """Concatenate approved scene renders; put the optional user's track on top once."""
     from .post_production import _concat_segments, _media_duration, _resolve_ffmpeg, _run_ffmpeg
@@ -440,6 +446,13 @@ def render_master(
         for offset, events in zip(accumulate(durations[:-1], initial=0), scene_clicks or [[] for clip in clips], strict=True)
         for cue, at, length in events
     ]
+    if rhythmic_clicks_from_scene is not None:
+        if not 1 <= rhythmic_clicks_from_scene <= len(clips):
+            raise ValueError("Сцена начала ритма выходит за монтаж.")
+        start = sum(durations[:rhythmic_clicks_from_scene - 1]) + 0.10
+        end = sum(durations) - 0.07
+        click_events.extend(("rhythmic_click", round(start + beat * 0.48, 6), 0.07)
+                            for beat in range(max(0, int((end - start) / 0.48) + 1)))
     dry = output.with_name(output.stem + "-dry.mp4") if music or click_events else output
     _concat_segments(ffmpeg=ffmpeg, list_path=playlist, dest_path=dry)
     if dry == output:
@@ -489,7 +502,7 @@ def render_master(
 def render_final_master(
     scenes: list[dict], output: Path, *, language: str, music: Path | None,
     music_transition: tuple[int, Path] | None = None, loop_music: bool = False,
-    opening_title_style: dict | None = None,
+    opening_title_style: dict | None = None, rhythmic_clicks_from_scene: int | None = None,
 ) -> None:
     from .post_production import _resolve_ffmpeg, _upscale_master_to_4k
 
@@ -498,7 +511,7 @@ def render_final_master(
         clip = Path(scene["previews"][language])
         style = opening_title_style if index == 0 else None
         events = []
-        if "click" in scene["fx"] or style:
+        if "click" in scene["fx"] or style or day_overlay(scene, scene["duration"], language):
             clip = output.with_name(f"{output.stem}-scene-{index + 1:02}.mp4")
             events = render_scene(scene, clip, language=language, duration=scene.get("video_duration") or scene["duration"],
                                   opening_title_style=style, defer_clicks=True)
@@ -506,5 +519,5 @@ def render_final_master(
         clicks.append(events)
     mixed = output.with_name(output.stem + "-1080p.mp4")
     render_master(clips, music, mixed, music_transition=music_transition, loop_music=loop_music,
-                  scene_clicks=clicks)
+                  scene_clicks=clicks, rhythmic_clicks_from_scene=rhythmic_clicks_from_scene)
     _upscale_master_to_4k(ffmpeg=_resolve_ffmpeg(), src_path=mixed, dest_path=output)
