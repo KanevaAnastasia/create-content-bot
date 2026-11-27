@@ -240,7 +240,7 @@ def score(path, scenes, *, duration, intro_duration, silence, include_music=True
         elif cue == "click":
             add(at, 0.07, click)
         elif cue == "rhythmic_click":
-            add(at, length, lambda ts: 0.24 * click(ts))
+            add(at, length, lambda ts: 0.9 * click(ts))
         elif cue == "thunder":
             def thunder(ts):
                 roll = np.sin(2 * np.pi * (45 * ts - 4 * ts ** 2))

@@ -274,7 +274,8 @@ def test_silent_scene_and_music_render_real_video(tmp_path):
     music = tmp_path / "music.wav"
     subprocess.run([ffmpeg, "-v", "error", "-f", "lavfi", "-i", "sine=frequency=440:duration=1", str(music)], check=True)
     output = tmp_path / "master.mp4"
-    render_master([edited, edited, edited], music, output, loop_music=True, scene_clicks=[clicks, clicks, []],
+    render_master([edited, edited, edited], music, output, loop_music=True,
+                  scene_clicks=[clicks, [("click", 1.64, 0.07)], []],
                   rhythmic_clicks_from_scene=2)
     assert _has_audio_stream(output)
     assert _media_duration(output) == pytest.approx(9, abs=0.15)
@@ -282,15 +283,18 @@ def test_silent_scene_and_music_render_real_video(tmp_path):
         rate = stem.getframerate()
         channels = stem.getnchannels()
         samples = array("h", stem.readframes(stem.getnframes()))
-    for click_time in (1.5, _media_duration(edited) + 1.5):
+    for click_time in (1.5, _media_duration(edited) + 1.64):
         onset = round(click_time * rate) * channels
         window = round(0.05 * rate) * channels
         assert not any(samples[onset - window:onset])
-        assert any(samples[onset:onset + window])
-    start = _media_duration(edited) + 0.1
-    for tick in (start, start + 0.48, start + 2.88, start + 3.36):
+        assert any(samples[onset:onset + round(0.02 * rate) * channels])
+    start = _media_duration(edited)
+    assert not any(samples[round((start - 0.1) * rate) * channels:round(start * rate) * channels])
+    for beat in range(25):
+        tick = start + beat * 0.24
         offset = round(tick * rate) * channels
-        assert any(samples[offset:offset + round(0.02 * rate) * channels])
+        transient = samples[offset:offset + round(0.02 * rate) * channels]
+        assert max(map(abs, transient)) > 4500
 
 
 

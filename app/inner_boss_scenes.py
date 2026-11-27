@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 from itertools import accumulate
+import math
 import re
 from pathlib import Path
 
@@ -449,10 +450,14 @@ def render_master(
     if rhythmic_clicks_from_scene is not None:
         if not 1 <= rhythmic_clicks_from_scene <= len(clips):
             raise ValueError("Сцена начала ритма выходит за монтаж.")
-        start = sum(durations[:rhythmic_clicks_from_scene - 1]) + 0.10
-        end = sum(durations) - 0.07
-        click_events.extend(("rhythmic_click", round(start + beat * 0.48, 6), 0.07)
-                            for beat in range(max(0, int((end - start) / 0.48) + 1)))
+        start = sum(durations[:rhythmic_clicks_from_scene - 1])
+        end = sum(durations)
+        beat_interval = 0.24
+        click_length = 0.10
+        for beat in range(math.ceil((end - start) / beat_interval)):
+            at = round(start + beat * beat_interval, 6)
+            if at < end:
+                click_events.append(("rhythmic_click", at, min(click_length, end - at)))
     dry = output.with_name(output.stem + "-dry.mp4") if music or click_events else output
     _concat_segments(ffmpeg=ffmpeg, list_path=playlist, dest_path=dry)
     if dry == output:
