@@ -1800,3 +1800,67 @@ def test_viral_brief_series_context_reaches_model_and_changes_cache(monkeypatch)
     assert len(prompts) == 2
     assert 'Новогодние рецепты' in prompts[0]
     assert 'Летние рецепты' in prompts[1]
+
+
+def test_scene_revision_uses_latest_plan_as_authority_over_old_recipe():
+    latest = [{"scene": 1, "text": "Рождественская ярмарка дома"}]
+    payload = pipeline_llm_steps.build_scenes_plan_payload(
+        "трдельники", "Обернуть плёнкой и перенести на металл", "Убрать плёнку", latest,
+    )
+    assert payload["revision_context"]["base"] == "previous_scenes"
+    assert payload["revision_context"]["recipe_role"] == "reference_only"
+    assert payload["revision_context"]["preserve_unrequested_fields"] is True
+    assert payload["previous_scenes"] == latest
+
+
+def test_explicit_scene_only_revision_preserves_other_scenes_after_postprocessing(monkeypatch):
+    from copy import deepcopy
+    previous = [{"scene": n, "text": f"Утверждённая фраза {n}",
+                 "action": f"Утверждённое действие {n}", "model": "veo3_fast",
+                 "prompt_meta_json": {"custom": [n]}} for n in range(1, 7)]
+    original = deepcopy(previous)
+    generated = [{"scene": n, "text": f"Самовольная фраза {n}",
+                  "action": "Бабушка ставит пергамент в аэрогриль", "model": "veo3_fast"}
+                 for n in range(1, 7)]
+    async def fake_model(prompt):
+        return json.dumps(generated, ensure_ascii=False)
+    monkeypatch.setattr(pipeline_llm_steps, "gemini_text", fake_model)
+    result = asyncio.run(pipeline.generate_scenes_plan(
+        "Трдельники", full_recipe_text="400 г теста, яйцо, сахар, корица",
+        previous_scenes=previous,
+        user_feedback="1. Исправить первую фразу\n2. Всё ок только в сцене 3 поставить с пергаментом",
+        latest_feedback="Всё ок только в сцене 3 поставить с пергаментом",
+    ))
+    assert len(result["json_plan"]) == 6
+    for index in (0, 1, 3, 4, 5):
+        assert result["json_plan"][index] == original[index]
+    assert "пергамент" in result["json_plan"][2]["action"]
+    assert previous == original
+
+
+@pytest.mark.parametrize("numbers", [[1,2,3,4], [1,2,3,3,5,6]])
+def test_scene_only_revision_rejects_renumbering_instead_of_replacing_plan(monkeypatch, numbers):
+    async def fake_model(prompt):
+        return json.dumps([{"scene": n, "text": "новый", "action": "ставит"} for n in numbers])
+    monkeypatch.setattr(pipeline_llm_steps, "gemini_text", fake_model)
+    with pytest.raises(ValueError, match="структуру"):
+        asyncio.run(pipeline.generate_scenes_plan(
+            "Трдельники", full_recipe_text="тесто",
+            previous_scenes=[{"scene": n, "text": str(n)} for n in range(1,7)],
+            user_feedback="Все ок только в сцене 3 бабушка ставит с пергаментом",
+        ))
+
+
+@pytest.mark.parametrize('feedback, expected', [
+    ('Все ок только в сцене 3 поставить с пергаментом', 3),
+    ('Исправь: Только в сцене 2 поменять действие', 2),
+    ('Все ок, только в сцене 3, бабушка ставит с пергаментом', 3),
+    ('Только в сцене 3 и 4 поменять действие', None),
+    ('Только в сцене 3, 4 поменять действие', None),
+    ('Только в сцене 3 поменять действие и первую фразу', None),
+    ('Можно 5 или 6 сцен убрать дважды легко в первом кадре и правку в 3ей сцене', None),
+    ('Убери упоминание о плёнке вообще', None),
+])
+def test_scene_revision_scope_is_conservative(feedback, expected):
+    from app.scene_plan_revision import exclusive_scene_number
+    assert exclusive_scene_number(feedback) == expected

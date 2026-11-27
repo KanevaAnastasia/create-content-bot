@@ -66,6 +66,7 @@ from .scene_utils import (
 from .viral_retention import enrich_scenes_with_retention, normalize_viral_concept_brief, review_first_phrase
 from .visual_props import append_visual_prop_descriptions
 from .grandma_scene_contract import SINGLE_TAKE_RULE, lock_episode_props, append_episode_prop_locks
+from .scene_plan_revision import exclusive_scene_number, preserve_other_scenes
 
 logger = logging.getLogger("bot")
 
@@ -2454,6 +2455,7 @@ async def generate_scenes_plan(
     *,
     full_recipe_text: str,
     user_feedback: str | None = None,
+    latest_feedback: str | None = None,
     previous_scenes: list[dict[str, Any]] | None = None,
     on_attempt_failure: Callable[[dict[str, Any]], Awaitable[None]] | None = None,
     viral_concept_brief: dict[str, Any] | None = None,
@@ -2478,6 +2480,10 @@ async def generate_scenes_plan(
     from .directorial_notes import RULE
     comment = RULE + (generation_comment or "").strip()
     mode = normalize_generation_mode(generation_mode)
+    editable_scene_number = (
+        exclusive_scene_number(latest_feedback if latest_feedback is not None else fb)
+        if previous_scenes and mode in {GENERATION_MODE_NORMAL, GENERATION_MODE_ADVICE} else None
+    )
     if mode == GENERATION_MODE_ADVICE:
         comment = (comment + "\n\n" + ADVICE_SCENE_RULE).strip()
     remove_neighbor_cats = _feedback_requests_remove_neighbor_cats(fb)
@@ -2570,6 +2576,8 @@ async def generate_scenes_plan(
             romantic_drama_subplot=effective_romantic_subplot,
             generation_comment=comment,
         )
+        payload["latest_feedback"] = latest_feedback if latest_feedback is not None else fb
+        payload["editable_scene_number"] = editable_scene_number
         prompt = llm_steps.build_scenes_plan_prompt(payload)
 
     async def _emit_failure(payload_cb: dict[str, Any]) -> None:
@@ -2599,6 +2607,9 @@ async def generate_scenes_plan(
         raise
 
     coerced = _coerce_llm_scene_items_to_objects(extract_json_array(raw_once), concept=concept)
+    if editable_scene_number is not None:
+        # Validate before normalization can hide dropped/duplicated scene numbers.
+        coerced = preserve_other_scenes(previous_scenes, coerced, editable_scene_number)
     if mode == GENERATION_MODE_SILENCE:
         arr = _ensure_scene_block_len(coerced, min_n=5, max_n=8)
     elif mode == GENERATION_MODE_LONG:
@@ -2653,6 +2664,9 @@ async def generate_scenes_plan(
     _enforce_romantic_subplot_characters(raw_scenes, romantic_subplot)
     if mode in {GENERATION_MODE_NORMAL, GENERATION_MODE_ADVICE}:
         raw_scenes = lock_episode_props(raw_scenes)
+        if editable_scene_number is not None:
+            # Postprocessors may rewrite speech, props or metadata outside the target.
+            raw_scenes = preserve_other_scenes(previous_scenes, raw_scenes, editable_scene_number)
         if raw_scenes and isinstance(viral_concept_brief, dict):
             viral_concept_brief = dict(viral_concept_brief)
             viral_concept_brief["strongest_first_phrase"] = str(raw_scenes[0].get("text") or "")

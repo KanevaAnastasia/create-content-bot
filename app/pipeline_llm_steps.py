@@ -490,6 +490,11 @@ def build_scenes_plan_payload(
         "generation_comment": (generation_comment or "").strip(),
         "dialogue_feedback_hint": _dialogue_feedback_hint(feedback),
         "previous_scenes": scene_context(previous_scenes),
+        "revision_context": {
+            "base": "previous_scenes" if previous_scenes else "full_recipe_text",
+            "recipe_role": "reference_only" if previous_scenes else "source",
+            "preserve_unrequested_fields": bool(previous_scenes),
+        },
         "assets": _character_assets_only(),
         "character_short_descriptions": _character_short_descriptions(),
         "required_characters": ["grandma", "cat"],
@@ -644,6 +649,13 @@ def build_scenes_plan_prompt(payload: dict[str, Any]) -> str:
         "длина речи без всех подстрок [пауза] не больше speech budget.\n"
         "Для каждой сцены верни speech_plan: 1-3 коротких spoken chunks в порядке произнесения, чтобы потом по ним можно было собрать тайминги субтитров.\n"
         "Если в payload есть непустой feedback или previous_scenes — это режим РЕДАКТИРОВАНИЯ, а не генерации с нуля. "
+        "previous_scenes — последняя показанная пользователю версия, основа редактирования. "
+        "full_recipe_text и viral_concept_brief в этом режиме служат справкой: не возвращай из них "
+        "удалённые материалы, действия, старые реплики или прежнюю структуру. "
+        "Сначала последняя явная правка, затем накопленные требования, затем previous_scenes. "
+        "Не пересочиняй незатронутые реплики, действия и метаданные: копируй их дословно. "
+        "Не меняй количество и нумерацию сцен без явной просьбы о перестройке. "
+        "Если задан editable_scene_number, меняй только эту сцену; верни полный массив с исходной нумерацией. "
         "Сначала прочитай previous_scenes, затем примени feedback как точные правки по указанным сценам: "
         "если feedback содержит нумерованный список накопленных правок, выполни каждый пункт по порядку; "
         "новая правка отменяет старую только при явном противоречии, иначе нельзя терять ни один предыдущий пункт. "

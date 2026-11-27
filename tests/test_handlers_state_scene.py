@@ -710,11 +710,14 @@ def test_cumulative_advice_scene_feedback_preserves_earlier_corrections():
     ]
 
 
-def test_advice_scene_refinement_sends_cumulative_feedback_to_model(monkeypatch):
+@pytest.mark.parametrize("mode", ["normal", "advice"])
+def test_advice_scene_refinement_sends_cumulative_feedback_to_model(monkeypatch, mode):
     captured_feedback: list[str] = []
+    captured_previous = []
+    captured_latest = []
     session = {
         "state": "waiting_scene_approval",
-        "generation_mode": "advice",
+        "generation_mode": mode,
         "selected_concept": "Как солить разные блюда",
         "recipe_full_text": "Суп, картошка, макароны и мясо.",
         "scenes_plan": [{"scene": 1, "text": "Старый план", "model": "veo3_fast"}],
@@ -727,6 +730,8 @@ def test_advice_scene_refinement_sends_cumulative_feedback_to_model(monkeypatch)
 
     async def _fake_generate(*_args, **kwargs):
         captured_feedback.append(kwargs["user_feedback"])
+        captured_previous.append(kwargs["previous_scenes"])
+        captured_latest.append(kwargs["latest_feedback"])
         return {
             "json_plan": [{"scene": 1, "text": "Новый план", "model": "veo3_fast"}],
             "text_plan": "СЦЕНА 1",
@@ -761,6 +766,10 @@ def test_advice_scene_refinement_sends_cumulative_feedback_to_model(monkeypatch)
     assert "количество соли для картошки" in captured_feedback[0]
     assert "1. укажи количество соли для картошки" in captured_feedback[1]
     assert "2. скажи, что соль чувствуется не сразу" in captured_feedback[1]
+
+    assert captured_previous[0][0]["text"] == "Старый план"
+    assert captured_previous[1][0]["text"] == "Новый план"
+    assert captured_latest[1] == "Добавь: скажи, что соль чувствуется не сразу"
 
 
 def test_on_text_first_step_generate_button_without_session():
@@ -4639,3 +4648,28 @@ def test_advertising_production_ignores_stale_english_overlay():
     module._apply_overlay_title_to_production(session, production)
     assert production['overlay_title_by_lang'] == {'ru': 'Совет'}
     assert production['overlay_subtitle_by_lang'] == {'ru': 'Мягкость'}
+
+
+def test_scene_refinement_failure_keeps_last_shown_plan(monkeypatch):
+    from copy import deepcopy
+    previous = [{"scene": n, "text": f"Фраза {n}"} for n in range(1, 7)]
+    session = {"state": "waiting_scene_approval", "selected_concept": "Трдельники",
+               "recipe_full_text": "400 г теста", "scenes_plan": deepcopy(previous),
+               "scenes_text": "Последний хороший план"}
+    replies = []
+    class Message:
+        async def reply_text(self, text, reply_markup=None):
+            replies.append(text)
+    async def failed_model(*args, **kwargs):
+        raise ValueError("Модель изменила структуру сцен при точечной правке.")
+    async def call(update, context, chat_id, name, fn):
+        return await fn()
+    monkeypatch.setattr("app.handlers.handlers_state_scene.generate_scenes_plan", failed_model)
+    monkeypatch.setattr("app.handlers.handlers_state_scene._call_with_503_retries", call)
+    asyncio.run(_handle_scene_approval_refine(
+        SimpleNamespace(message=Message()), None, chat_id=1032, session=session,
+        text="Все ок только в сцене 3 поставить с пергаментом"))
+    assert session["scenes_plan"] == previous
+    assert session["scenes_text"] == "Последний хороший план"
+    assert session["state"] == "waiting_scene_approval"
+    assert not any("Обновила план" in reply for reply in replies)

@@ -5999,7 +5999,7 @@ _SCENE_PLAN_FEEDBACK_HISTORY_LIMIT = 12
 
 
 def _cumulative_scene_plan_feedback(session: dict, text: str) -> str:
-    """Persist advice-scene corrections so a later edit cannot silently drop an earlier one."""
+    """Persist scene corrections so a later edit cannot silently drop an earlier one."""
     cleaned = re.sub(r"^(?:исправь|добавь)\s*:\s*", "", str(text or "").strip(), flags=re.IGNORECASE)
     raw_history = session.get(SCENE_PLAN_FEEDBACK_HISTORY_SESSION_KEY)
     history = [
@@ -6027,7 +6027,7 @@ async def _handle_scene_approval_refine(update: Update, context: ContextTypes.DE
     session["user_feedback"] = text
     cumulative_feedback = (
         _cumulative_scene_plan_feedback(session, text)
-        if normalize_generation_mode(session.get(GENERATION_MODE_SESSION_KEY)) == GENERATION_MODE_ADVICE
+        if normalize_generation_mode(session.get(GENERATION_MODE_SESSION_KEY)) in {GENERATION_MODE_NORMAL, GENERATION_MODE_ADVICE}
         else text
     )
     _update_end_frame_scene_requests(session, text)
@@ -6177,6 +6177,7 @@ async def _handle_scene_approval_refine(update: Update, context: ContextTypes.DE
                 session["selected_concept"],
                 full_recipe_text=str(session.get("recipe_full_text") or "").strip(),
                 user_feedback=cumulative_feedback,
+                latest_feedback=text,
                 previous_scenes=session.get("scenes_plan"),
                 on_attempt_failure=_on_scene_plan_fail_refine,
                 viral_concept_brief=session.get("viral_concept_brief"),
