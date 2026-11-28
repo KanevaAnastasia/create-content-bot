@@ -385,6 +385,36 @@ def test_workspace_boss_menu_opens_idea_step_without_an_extra_prompt(monkeypatch
     assert session[start.STORY_SOURCE_SESSION_KEY] == draft
 
 
+def test_literary_story_keeps_cast_when_one_interval_spans_two_beats(monkeypatch):
+    beats = [
+        {"beat": 1, "start_sec": 0, "end_sec": 2.8, "narration_excerpt": "Алан вошёл."},
+        {"beat": 2, "start_sec": 2.8, "end_sec": 9.6, "narration_excerpt": "Продавщица протянула хлеб."},
+        {"beat": 3, "start_sec": 9.6, "end_sec": 13.6, "narration_excerpt": "Алан вышел."},
+    ]
+    monkeypatch.setattr(story_generation, "build_semantic_narration_beats", lambda *_: beats)
+    cast = [
+        {"id": "alan", "display_name": "Алан", "description": "Зелёное пальто"},
+        {"id": "baker", "display_name": "Продавщица", "description": "Охристый фартук"},
+    ]
+    monkeypatch.setattr(story_generation, "gemini_generate_sync", lambda *_args, **_kwargs: json.dumps({
+        "characters": cast,
+        "beats": [
+            {"beat": 1, "clip_visuals": [{"characters": ["alan"], "visual": "Алан входит."}]},
+            {"beat": 2, "clip_visuals": [{"characters": ["alan", "baker"], "visual": "Продавщица подаёт багет."}]},
+            {"beat": 3, "clip_visuals": [{"characters": ["alan"], "visual": "Алан выходит."}]},
+        ],
+    }))
+    plan = story_generation.generate_story_scene_plan(
+        source_story="Алан в булочной.", voiceover_text="Алан в булочной.", duration_sec=13.6,
+        alignment={}, project_slug="discipline", discipline_mode=modes.LITERARY,
+    )["json_plan"]
+    assert [(s["semantic_beat"], s["semantic_clip_index"], s["semantic_clip_count"]) for s in plan] == [
+        (1, 1, 1), (2, 1, 1), (3, 1, 1),
+    ]
+    assert plan[1]["characters"] == ["alan", "baker"]
+    assert plan[1]["action"] == "Продавщица подаёт багет."
+
+
 def test_literary_story_reuses_only_approved_recurring_book_characters(monkeypatch, tmp_path):
     from app.handlers import handlers_state_scene as scene_handler
 

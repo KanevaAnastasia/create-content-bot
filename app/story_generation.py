@@ -10,6 +10,7 @@ import re
 import subprocess
 import tempfile
 import uuid
+from collections import Counter
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -1244,7 +1245,7 @@ def enforce_discipline_narrative_cast(scenes, project_characters):
         for scene in scenes:
             ids = list(dict.fromkeys(str(value) for value in scene.get("characters") or []))
             if not ids or any(key not in named_cast for key in ids):
-                raise ValueError("Укажите действующих персонажей книги из библии в каждом кадре.")
+                raise ValueError(f"В плане видеоряда для кадра {scene.get('scene', '?')} не удалось определить персонажей книги.")
             scene["characters"] = ids
             scene["story_character_descriptions"] = {key: named_cast[key]["description"] for key in ids}
             scene["story_character_labels"] = {key: named_cast[key]["display_name"] for key in ids}
@@ -1365,7 +1366,16 @@ def _history_beat_clips(beats):
             result.append({"scene": len(result)+1, "start_sec": round(a, 3), "end_sec": round(b, 3),
                 "generation_duration_sec": max(3, math.ceil(round(b-a, 3))),
                 "narration_excerpt": " ".join(str(v.get("narration_excerpt") or "") for v in overlaps),
-                "semantic_beat": int(owner.get("beat") or 1), "semantic_clip_index": n+1, "semantic_clip_count": count})
+                "semantic_beat": int(owner.get("beat") or 1)})
+    # A timing interval may straddle a beat boundary. The planner groups clips
+    # by their owning beat, so index them within that same group.
+    beat_counts = Counter(clip["semantic_beat"] for clip in result)
+    beat_indices = Counter()
+    for clip in result:
+        beat = clip["semantic_beat"]
+        beat_indices[beat] += 1
+        clip["semantic_clip_index"] = beat_indices[beat]
+        clip["semantic_clip_count"] = beat_counts[beat]
     return result
 
 
