@@ -290,8 +290,17 @@ FFMPEG_VIDEO_SIZE_RE = re.compile(r"\b(\d{2,5})x(\d{2,5})\b")
 
 
 def _render_dimensions_for_scenes(scenes: list[dict[str, Any]]) -> tuple[int, int]:
-    if any(str(scene.get("aspect_ratio") or "").strip() == "16:9" for scene in scenes if isinstance(scene, dict)):
-        return HORIZONTAL_TARGET_WIDTH, HORIZONTAL_TARGET_HEIGHT
+    for scene in scenes:
+        if not isinstance(scene, dict):
+            continue
+        aspect_ratio = str(scene.get("aspect_ratio") or "").strip()
+        if aspect_ratio not in {"16:9", "9:16"}:
+            # DB-restored guest scenes retain the format in prompt metadata.
+            meta = scene.get("prompt_meta_json")
+            if isinstance(meta, dict):
+                aspect_ratio = str(meta.get("guest_aspect_ratio") or "").strip()
+        if aspect_ratio == "16:9":
+            return HORIZONTAL_TARGET_WIDTH, HORIZONTAL_TARGET_HEIGHT
     return TARGET_WIDTH, TARGET_HEIGHT
 
 

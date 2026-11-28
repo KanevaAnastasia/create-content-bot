@@ -398,7 +398,8 @@ def test_speech_text_from_prompt_stops_before_inline_instruction_blocks():
     )
 
 
-def test_build_post_production_uses_horizontal_dimensions_for_long_mode(monkeypatch):
+@pytest.mark.parametrize("restored_guest", [False, True])
+def test_build_post_production_uses_horizontal_dimensions_for_long_mode(monkeypatch, restored_guest):
     scenes = [
         {
             "duration_sec": 8,
@@ -407,6 +408,9 @@ def test_build_post_production_uses_horizontal_dimensions_for_long_mode(monkeypa
             "speech_by_lang": {"ru": "Длинная сцена"},
         }
     ]
+    if restored_guest:
+        scenes[0].pop("aspect_ratio")
+        scenes[0]["prompt_meta_json"] = {"guest_mode": True, "guest_aspect_ratio": "16:9"}
     candidate = register_video_candidate(scenes[0], language="ru", video_bytes=b"scene-1")
     candidate["approved_for_production"] = True
 
@@ -2129,3 +2133,13 @@ def test_inner_boss_final_edit_renders_local_music_and_word_timed_accents(tmp_pa
         word = {"ru": "Дисциплина", "en": "Discipline"}[lang]
         second = script.index(word) * step
         assert start.startswith(f"Dialogue: 4,0:00:{second:05.2f},")
+
+
+@pytest.mark.parametrize("scene,expected", [
+    ({"prompt_meta_json": {"guest_aspect_ratio": "9:16"}}, (1080, 1920)),
+    ({"aspect_ratio": "9:16", "prompt_meta_json": {"guest_aspect_ratio": "16:9"}}, (1080, 1920)),
+    ({"prompt_meta_json": None}, (1080, 1920)),
+    ({"prompt_meta_json": "invalid"}, (1080, 1920)),
+])
+def test_render_dimensions_preserve_portrait_and_explicit_format(scene, expected):
+    assert post_production._render_dimensions_for_scenes([scene]) == expected
