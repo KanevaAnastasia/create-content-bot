@@ -98,7 +98,26 @@ def test_busy_includes_review_and_external_final_render(state, extra, busy):
     assert queue.session_is_busy({"state": state, **extra}) is busy
 
 
-def test_ready_waits_then_delivers_all_scenarios_with_photos(db):
+@pytest.mark.parametrize("mode,approved,error,state,busy", [
+    ("reference", True, False, "ready_for_production", False),
+    ("reference", False, False, "ready_for_production", True),
+    ("reference", True, True, "ready_for_production", True),
+    ("story", True, False, "ready_for_production", True),
+    ("reference", True, False, "waiting_reference_description_approval", True),
+])
+def test_reference_completion_releases_queue_only_after_final_approval(mode, approved, error, state, busy):
+    assert queue.session_is_busy({
+        "state": state, "generation_mode": mode,
+        "reference_description_approved": approved,
+        "reference_publication_copy_error": error,
+    }) is busy
+
+
+@pytest.mark.parametrize("completed", [
+    {"social_descriptions_sent": True},
+    {"generation_mode": "reference", "reference_description_approved": True},
+])
+def test_ready_waits_then_delivers_all_scenarios_with_photos(db, completed):
     from app.state import SESSIONS
     product = add_product(db, status="ready", prepared=prepared())
     SESSIONS[123] = {"state": "waiting_scene_media", "generation_run_id": "old"}
@@ -106,7 +125,7 @@ def test_ready_waits_then_delivers_all_scenarios_with_photos(db):
     asyncio.run(queue.deliver_ready_product(bot, 123))
     bot.send_message.assert_not_called()
     assert SESSIONS[123]["generation_run_id"] == "old"
-    SESSIONS[123] = {"state": "ready_for_production", "social_descriptions_sent": True}
+    SESSIONS[123] = {"state": "ready_for_production", **completed}
     asyncio.run(queue.deliver_ready_product(bot, 123))
     assert bot.send_message.await_count == 7
     assert SESSIONS[123][queue.PRODUCT_KEY] == str(product)

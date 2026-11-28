@@ -42,6 +42,14 @@ def session_is_busy(session: dict | None) -> bool:
     if state == "waiting_inner_boss_scene_workflow":
         return (session.get("inner_boss_scene_workflow") or {}).get("stage") != "done"
     if state == "ready_for_production":
+        # Reference mode ends at description approval, after media delivery.
+        # It does not use the ordinary final worker's descriptions-sent flag.
+        # Recognize persisted completed sessions too, without rewriting them.
+        if session.get("generation_mode") == "reference":
+            return not (
+                session.get("reference_description_approved") is True
+                and not session.get("reference_publication_copy_error")
+            )
         # Scene generation finishes before the external final worker delivers
         # videos and captions. Do not overwrite that run while rendering.
         return not bool(session.get("social_descriptions_sent"))

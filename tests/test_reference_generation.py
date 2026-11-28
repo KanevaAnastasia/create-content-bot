@@ -581,6 +581,8 @@ def test_reference_description_approval_marks_run_ready(monkeypatch):
     )
 
     assert result is True
+    from app.advertising_queue import session_is_busy
+    assert not session_is_busy(session)
     assert session["reference_description_approved"] is True
     assert session["state"] == scene_handler.STATE_READY_FOR_PRODUCTION
     mark_ready.assert_called_once_with(session)
