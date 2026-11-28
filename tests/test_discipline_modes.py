@@ -415,6 +415,34 @@ def test_literary_story_keeps_cast_when_one_interval_spans_two_beats(monkeypatch
     assert plan[1]["action"] == "Продавщица подаёт багет."
 
 
+def test_story_keeps_motion_and_cut_out_of_opening_image_prompt(monkeypatch):
+    instructions = []
+
+    def planner(prompt, **_kwargs):
+        instructions.append(prompt)
+        return json.dumps({"prompts": [{
+            "start_frame_prompt_ru": "Крупно Алан в профиль. Ладонь продавщицы держит багет над прилавком.",
+            "start_frame_characters": ["alan"],
+        }]})
+
+    monkeypatch.setattr(story_generation, "gemini_generate_sync", planner)
+    scene = {
+        modes.MODE_KEY: modes.LITERARY,
+        "story_visual_style_key": "literary_illustration",
+        "characters": ["alan"],
+        "duration_sec": 5,
+        "action": "Алан поднимает взгляд.",
+        "performance_direction": "Продавщица кладёт багет и убирает руку.",
+        "cut_to_next": "По взгляду склейка на башню.",
+    }
+    result, = story_generation.generate_story_production([scene])["json_plan"]
+    assert "time zero" in instructions[0]
+    assert "Продавщица кладёт багет" not in result["start_frame_prompt"]
+    assert scene["cut_to_next"] not in result["start_frame_prompt"]
+    assert scene["performance_direction"] in result["video_prompt"]
+    assert scene["cut_to_next"] in result["video_prompt"]
+
+
 def test_literary_story_reuses_only_approved_recurring_book_characters(monkeypatch, tmp_path):
     from app.handlers import handlers_state_scene as scene_handler
 

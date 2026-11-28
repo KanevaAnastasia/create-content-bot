@@ -2366,12 +2366,14 @@ def _fallback_start_prompt(scene: dict[str, Any]) -> str:
     retro_style = f"Единый визуальный стиль всего ролика: {selected_style}. " if not reference_style_only else ""
     era_line = f"Эпоха и стиль: {scene.get('era_style')}. " if str(scene.get("era_style") or "").strip() else ""
     prompt = (
-        "Вертикальный кадр 9:16, кинематографичная композиция без текста. "
-        f"{scene.get('action')}. {grandma}{cat}{retro_style}"
+        "Вертикальный кадр 9:16, стоп-кадр на 0:00 до первого движения. "
+        f"По следующему действию определи только исходную позу и положение предметов: {scene.get('action')}. "
+        "Покажи одну исходную точку без движения, реакции после действия и результата. "
+        f"{grandma}{cat}{retro_style}"
         f"Локация: {scene.get('location') or 'пространство, логично следующее из действия'}. "
         f"Свет: {scene.get('lighting') or 'кинематографичный естественный свет'}. "
         f"Цветовая гамма: {scene.get('color_palette') or 'гармоничная цветная палитра проекта'}. "
-        f"{era_line}План: {scene.get('shot_type')}. Подготовка движения камеры: {scene.get('camera_direction') or 'static shot'}. "
+        f"{era_line}Начальный план: {scene.get('shot_type')}. "
         "Без добавленных логотипов, водяных знаков и субтитров. "
         + STORY_VISUAL_TEXT_RULES
     )
@@ -2466,12 +2468,14 @@ def generate_story_production(
         "that are already visible in the opening frame. Exclude only characters whose later entrance is explicit in the action. "
         "If everyone is visible at the start, use the full list and return 'пусто' for end_frame_prompt_ru. "
         "If a character enters later, describe the final pose after that entrance with the same scene and framing.\n"
-        "START: self-contained Russian vertical 9:16 still-frame prompt, precise composition/camera, action not yet completed, "
-        "correct era, project character identity and age, and only the requested characters. Explicitly include each scene's "
+        "START: self-contained Russian vertical 9:16 still frame at time zero, immediately before the first movement. "
+        "Describe only the initial body pose, gaze, prop positions and static framing. Keep motion, reactions after the first "
+        "movement, camera travel, edit transitions and the action's result in VIDEO only. Include the correct era, "
+        "character identity, age and requested opening cast. Explicitly include each scene's "
         "location, lighting and color_palette. Preserve the current physical setting across adjacent semantic beats: the same architecture, "
         "key props, lighting basis and palette remain recognizable. Change it only when the approved scene has location_transition=true; "
         "then visually establish the motivated arrival described in transition_note and keep that new setting continuous in following clips. "
-        "Never invent an unapproved change of setting. Follow the planned camera direction. "
+        "Never invent an unapproved change of setting. Use only the framing at the start of the planned shot. "
         + style_instruction
         +
         "No added text overlays, subtitles, logos or watermarks.\n"
@@ -2480,7 +2484,8 @@ def generate_story_production(
         "It must begin with the matching '<duration>-second Kling 3.0 image-to-video shot. No audio.' prefix "
         "and explicitly forbid dialogue, speech, lip sync, music, ambient sound, on-screen text, subtitles, logos and watermark. "
         f"{camera_instruction}"
-        "Animate only the approved visual beat; preserve the start-frame character identity, age, era, objects and composition. "
+        "Begin exactly in the supplied START composition and pose at time zero. Then animate the approved visual beat in order; "
+        "preserve the start-frame character identity, age, era, objects and composition. "
         "The clip itself is silent because one external ElevenLabs narration track is added after all clips are approved.\n"
         "If feedback is present, revise previous_prompts literally without changing scene count, order, generation_duration_sec or narration excerpts.\n\n"
         + json.dumps(payload, ensure_ascii=False, indent=2)
@@ -2537,7 +2542,6 @@ def generate_story_production(
         shot_direction = shot_direction_text(scene)
         if shot_direction:
             video_prompt += " " + shot_direction + " Execute only this clip's action; the boundary describes an edit, not a location morph inside this clip."
-            start_prompt += " Starting pose must prepare the following action, not show its completed result: " + str(scene.get("performance_direction") or "")[:800]
         video_prompt = _ensure_story_camera_direction(
             video_prompt,
             scene.get("camera_direction"),
