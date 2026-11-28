@@ -3697,47 +3697,20 @@ def _reference_original_audio_choice_markup() -> ReplyKeyboardMarkup:
 
 
 async def _start_reference_description_approval(update: Update, session: dict) -> bool:
-    production = session.get("production") or {}
-    scenes = production.get("json_plan") if isinstance(production, dict) else None
-    scene = scenes[0] if isinstance(scenes, list) and scenes and isinstance(scenes[0], dict) else {}
+    from ..reference_publication_copy import prepare_copy
+
     try:
-        await reply_text_without_keyboard(
-            update.message,
-            "Готовлю короткое описание в одно предложение.",
-        )
-        description = await asyncio.to_thread(
-            generate_reference_description,
-            image_prompt=str(scene.get("start_frame_prompt") or ""),
-            video_prompt=str(scene.get("video_prompt") or ""),
-            comment=str(session.get(REFERENCE_COMMENT_SESSION_KEY) or ""),
-        )
-        if not str(description or "").strip():
-            raise RuntimeError("модель вернула пустое описание")
+        await prepare_copy(update, session)
     except Exception as exc:
-        logger.exception("reference description generation after music choice failed")
-        session[REFERENCE_DESCRIPTION_SESSION_KEY] = ""
-        session["state"] = STATE_WAITING_REFERENCE_DESCRIPTION_APPROVAL
-        await _reply_text_with_optional_markup(
-            update,
-            f"Музыка выбрана, но описание пока не сгенерировалось: {_user_error_message(exc)}. "
-            "Нажмите «ПЕРЕГЕНЕРИРОВАТЬ».",
-            reply_markup=ReplyKeyboardMarkup(
-                [["ПЕРЕГЕНЕРИРОВАТЬ"], [NAV_BUTTON_START_OVER]],
-                resize_keyboard=True,
-                one_time_keyboard=False,
-            ),
-        )
-        return True
-    session[REFERENCE_DESCRIPTION_SESSION_KEY] = str(description).strip()
-    session["reference_description_approved"] = False
-    session["state"] = STATE_WAITING_REFERENCE_DESCRIPTION_APPROVAL
+        logger.exception("reference publication copy generation failed")
+        await _safe_reply_text(update.message, f"Ошибка генерации описаний: {_user_error_message(exc)}")
     await _reply_text_with_optional_markup(
         update,
-        "Короткое описание на апрув:\n\n" + str(description).strip(),
+        "Проверьте описания для платформ. «ОК» утвердит тексты без публикации. "
+        "Через «ФИДБЕК» можно задать мысль или правку для всех вариантов.",
         reply_markup=ReplyKeyboardMarkup(
             [["ОК"], ["ФИДБЕК"], ["ПЕРЕГЕНЕРИРОВАТЬ"], [NAV_BUTTON_START_OVER]],
-            resize_keyboard=True,
-            one_time_keyboard=False,
+            resize_keyboard=True, one_time_keyboard=False,
         ),
     )
     return True

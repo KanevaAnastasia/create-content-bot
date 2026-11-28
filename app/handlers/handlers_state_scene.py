@@ -6441,40 +6441,18 @@ async def _regenerate_reference_description(
     session: dict,
     feedback: str = "",
 ) -> bool:
-    scenes = (session.get("production") or {}).get("json_plan") or []
-    scene = scenes[0] if scenes and isinstance(scenes[0], dict) else {}
+    from ..reference_publication_copy import prepare_copy
+
     try:
-        await reply_text_without_keyboard(update.message, "Готовлю новое короткое описание.")
-        description = await _call_with_503_retries(
-            update,
-            context,
-            chat_id,
-            "generate_reference_description",
-            lambda: asyncio.to_thread(
-                generate_reference_description,
-                image_prompt=str(scene.get("start_frame_prompt") or ""),
-                video_prompt=str(scene.get("video_prompt") or ""),
-                comment=str(session.get(REFERENCE_COMMENT_SESSION_KEY) or ""),
-                current=str(session.get(REFERENCE_DESCRIPTION_SESSION_KEY) or ""),
-                feedback=feedback,
-            ),
-        )
-        if not str(description or "").strip():
-            raise RuntimeError("модель вернула пустое описание")
-    except ServiceUnavailableRetriesExhaustedError as exc:
-        await update.message.reply_text(str(exc))
-        return True
+        await prepare_copy(update, session, feedback=feedback)
     except Exception as exc:
-        logger.exception("reference description generation failed")
-        await update.message.reply_text(f"Ошибка генерации описания: {_user_error_message(exc)}")
-        return True
-    session[REFERENCE_DESCRIPTION_SESSION_KEY] = str(description).strip()
-    session[REFERENCE_DESCRIPTION_FEEDBACK_PENDING_KEY] = False
-    session["state"] = STATE_WAITING_REFERENCE_DESCRIPTION_APPROVAL
+        logger.exception("reference publication copy regeneration failed")
+        await update.message.reply_text(f"Ошибка генерации описаний: {_user_error_message(exc)}")
     SESSIONS[chat_id] = session
     await _reply_text_with_optional_markup(
         update,
-        "Короткое описание на апрув:\n\n" + str(description).strip(),
+        "Проверьте описания для платформ. «ОК» утвердит тексты без публикации. "
+        "«ФИДБЕК» изменит мысль или подачу, «ПЕРЕГЕНЕРИРОВАТЬ» предложит новые варианты.",
         reply_markup=_reference_description_markup(),
     )
     return True
@@ -6490,6 +6468,13 @@ async def _handle_reference_description_state(
 ) -> bool:
     low = str(text or "").strip().casefold()
     if low in {"ок", "ok", "approve", "утвердить"}:
+        if session.get("reference_publication_copy_error"):
+            await update.message.reply_text("Новые описания не получены. Нажмите «ПЕРЕГЕНЕРИРОВАТЬ» или пришлите «ФИДБЕК».")
+            return True
+        from ..reference_publication_copy import COPY_KEY, save_bot_publication_copy
+        pending = session.get(COPY_KEY)
+        if pending:
+            save_bot_publication_copy(session, pending, approved=True)
         session["reference_description_approved"] = True
         session[REFERENCE_DESCRIPTION_FEEDBACK_PENDING_KEY] = False
         session["state"] = STATE_READY_FOR_PRODUCTION
@@ -6498,11 +6483,16 @@ async def _handle_reference_description_state(
         await _reply_text_with_optional_markup(
             update,
             "Режим «По референсу» завершён. Кадр, Veo-видео, вариант оригинального аудио, "
-            "выбранный вариант музыки и короткое описание утверждены. Ничего не опубликовано.",
+            "выбранный вариант музыки и описания утверждены. Ничего не опубликовано.",
             reply_markup=first_step_menu_markup(),
         )
         return True
-    if low in {"фидбек", "feedback"}:
+    if low.startswith(("фидбек:", "feedback:")) and str(text).split(":", 1)[1].strip():
+        return await _regenerate_reference_description(
+            update, context, chat_id=chat_id, session=session,
+            feedback=str(text).split(":", 1)[1].strip(),
+        )
+    if low in {"фидбек", "feedback", "фидбек:", "feedback:"}:
         session[REFERENCE_DESCRIPTION_FEEDBACK_PENDING_KEY] = True
         SESSIONS[chat_id] = session
         await update.message.reply_text("Пришлите правку к описанию одним сообщением.")
