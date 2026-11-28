@@ -73,9 +73,8 @@ def test_discipline_reference_scene_uses_only_approved_vasily(tmp_path, monkeypa
     monkeypatch.setattr(reference, "gemini_generate_sync", calls)
     hero = {"display_name": "Василий", "description": "Кудрявый герой", "asset_uri": image.as_uri()}
     prompt = reference.generate_reference_image_prompt(b"composition", comment="Камера спускается", vasily=hero)
-    sent_prompt = calls.call_args.args[0]
-    assert "Василий" in sent_prompt and "Кудрявый герой" in sent_prompt
-    assert "Тимоша" not in sent_prompt and "Grandma Kitchen" not in sent_prompt
+    assert prompt == "Камера спускается"
+    calls.assert_not_called()
     scene = reference.build_reference_scene(source_image=b"composition", image_prompt=prompt, vasily=hero)
     assert scene["characters"] == ["vasily"] and scene["model"] == "veo3_fast"
     assert scene["duration_sec"] == 8 and scene["aspect_ratio"] == "9:16"
@@ -159,10 +158,8 @@ def test_reference_image_prompt_uses_visual_input_and_comment(monkeypatch):
         extra_characters=["grandfather"],
     )
 
-    assert result == "Готовый промпт кадра"
-    assert captured["images"] == [b"image"]
-    assert "Пусть дедушка держит самовар" in captured["prompt"]
-    assert "grandfather" in captured["prompt"]
+    assert result == "Пусть дедушка держит самовар"
+    assert captured == {}
 
 
 def test_reference_video_prompt_uses_approved_frame(monkeypatch):

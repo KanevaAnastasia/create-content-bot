@@ -214,95 +214,18 @@ _SERIES_SESSION_KEYS = (
     SERIES_CHOICE_CONFIRMED_SESSION_KEY,
 )
 
-# A new /generate or /quick request starts a new piece of content. Keep
-# account/project preferences in the chat session, but never carry database
-# bindings or generated content from the previous run into the new workflow.
-# Continuation/resume paths do not call _start_generation_with_recipe and keep
-# their run binding intact.
-_NEW_GENERATION_STALE_KEYS = (
-    "social_descriptions_sent",
-    "social_descriptions_approved",
-    "social_descriptions_pending",
-    "final_social_descriptions_triggered_at",
-    "advertising_queue_product_id",
-    "discipline_queue_idea_id",
-    "advertising_product_paths",
-    "story_character_references",
-    "story_character_bible",
-    "discipline_narrative_mode",
-    "reference_source_image",
-    "reference_comment",
-    "reference_characters",
-    "reference_short_description",
-    "reference_description_approved",
-    "reference_description_feedback_pending",
-    "reference_original_audio_choice",
-    "reference_music_choice",
-    "reference_music_source_path",
-    "reference_music_result_path",
-    "generation_run_id",
-    "scene_db_ids_by_index",
-    "production",
-    "scenes_plan",
-    "scenes_text",
-    "recipe_steps",
-    "selected_concept",
-    "selected_concept_name",
-    "recipe_title",
-    "recipe_name",
-    "recipe_full_text",
-    "user_input",
-    "viral_concept_brief",
-    "romantic_drama_subplot",
-    "retention_review",
-    OVERLAY_TITLE_SESSION_KEY,
-    OVERLAY_TITLE_BY_LANG_SESSION_KEY,
-    OVERLAY_TITLE_STYLE_SESSION_KEY,
-    OVERLAY_SUBTITLE_BY_LANG_SESSION_KEY,
-    OVERLAY_SUBTITLE_DECIDED_SESSION_KEY,
-    OVERLAY_SUBTITLE_TRANSLATION_PENDING_SESSION_KEY,
-    OVERLAY_TITLE_PENDING_NEXT_SESSION_KEY,
-    STORY_SOURCE_SESSION_KEY,
-    STORY_TITLE_SESSION_KEY,
-    STORY_VOICEOVER_SESSION_KEY,
-    STORY_ENGLISH_REQUESTED_SESSION_KEY,
-    STORY_VISUAL_STYLE_SESSION_KEY,
-    VISUALIZATION_SOURCE_MEDIA_SESSION_KEY,
-    VISUALIZATION_TRANSCRIPT_SEGMENTS_SESSION_KEY,
-    VISUALIZATION_INPUT_KIND_SESSION_KEY,
-    DISCIPLINE_INTRO_ENABLED_SESSION_KEY,
-    DISCIPLINE_INTRO_DIALOGUE_SESSION_KEY,
-    DISCIPLINE_INTRO_DIALOGUE_VERSIONS_SESSION_KEY,
-    DISCIPLINE_INTRO_IMAGE_PATH_SESSION_KEY,
-    DISCIPLINE_INTRO_IMAGE_VERSIONS_SESSION_KEY,
-    DISCIPLINE_INTRO_AUDIO_PATH_SESSION_KEY,
-    DISCIPLINE_INTRO_VIDEO_PATH_SESSION_KEY,
-    DISCIPLINE_INTRO_VIDEO_VERSIONS_SESSION_KEY,
-    DISCIPLINE_INTRO_APPROVED_VIDEO_PATH_SESSION_KEY,
-    DISCIPLINE_INTRO_APPROVED_PROVIDER_SESSION_KEY,
-    ADVERTISING_SOURCE_SESSION_KEY,
-    ADVERTISING_PRODUCT_PATH_SESSION_KEY,
-    ADVERTISING_PRODUCT_BRIEF_SESSION_KEY,
-    ADVERTISING_CONTENT_TYPE_SESSION_KEY,
-    ADVERTISING_CAMPAIGNS_SESSION_KEY,
-    ADVERTISING_SELECTED_CAMPAIGN_SESSION_KEY,
-    ADVERTISING_FORMAT_SESSION_KEY,
-    ADVERTISING_POST_TEXT_SESSION_KEY,
-    ADVERTISING_POST_IMAGE_PATHS_SESSION_KEY,
-    ADVERTISING_POST_IMAGE_PROMPTS_SESSION_KEY,
-    ADVERTISING_POST_IMAGE_INDEX_SESSION_KEY,
-    ADVERTISING_POST_CURRENT_IMAGE_PATH_SESSION_KEY,
-    *_SERIES_SESSION_KEYS,
-    _SERIES_CHOICE_IDS_SESSION_KEY,
-    _SERIES_TRANSLATION_PENDING_SESSION_KEY,
-)
+# A new run inherits account/project preferences only. Unknown fields belong to
+# the old run by default, so future generation features cannot leak across runs.
+_NEW_GENERATION_PREFERENCE_KEYS = frozenset({
+    "selected_project_key", "project_id", "bot_user_id", "user_role", "guest_mode",
+    "project_voice_id", "target_languages", "force_story_mode",
+    "project_workspace_mode", "pending_project_generation_mode",
+})
 
 
 def _session_for_new_generation(existing_session: dict) -> dict:
-    session = dict(existing_session)
-    for key in _NEW_GENERATION_STALE_KEYS:
-        session.pop(key, None)
-    return session
+    return {key: value for key, value in existing_session.items()
+            if key in _NEW_GENERATION_PREFERENCE_KEYS}
 
 
 async def _start_description_with_recipe(
@@ -1685,6 +1608,10 @@ async def _handle_waiting_generation_mode_state(
             REFERENCE_SOURCE_IMAGE_SESSION_KEY,
         )
 
+        preferences = _session_for_new_generation(session)
+        session.clear()
+        session.update(preferences)
+        session[GENERATION_MODE_SESSION_KEY] = GENERATION_MODE_REFERENCE
         session["state"] = STATE_WAITING_REFERENCE_IMAGE
         session["target_languages"] = ["ru"]
         session.pop(REFERENCE_SOURCE_IMAGE_SESSION_KEY, None)

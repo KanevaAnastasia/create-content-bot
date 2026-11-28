@@ -2442,7 +2442,9 @@ def _should_enforce_dish_visual_for_scene(session: dict, idx: int) -> bool:
 
 
 def _dish_visual_brief_for_scene(session: dict, scene: dict | None, idx: int) -> str:
-    if is_story_generation(session):
+    if (is_story_generation(session) or is_reference_generation(session)
+            or is_reference_generation(scene or {})
+            or session.get("selected_project_key") == "discipline"):
         return ""
     if not _should_enforce_dish_visual_for_scene(session, idx):
         return ""

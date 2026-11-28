@@ -6337,25 +6337,13 @@ async def _start_reference_prompt_approval(
             if session.get("selected_project_key") == "discipline"
             else None
         )
-        await reply_text_without_keyboard(update.message, "Генерирую промпт кадра по референсу, ждите.")
-        image_prompt = await _call_with_503_retries(
-            update,
-            context,
-            chat_id,
-            "generate_reference_image_prompt",
-            lambda: asyncio.to_thread(
-                generate_reference_image_prompt,
-                source_image,
-                comment=session[REFERENCE_COMMENT_SESSION_KEY],
-                extra_characters=extras,
-                vasily=vasily,
-            ),
+        await reply_text_without_keyboard(update.message, "Использую ваш комментарий как промпт кадра.")
+        image_prompt = generate_reference_image_prompt(
+            source_image,
+            comment=session[REFERENCE_COMMENT_SESSION_KEY],
+            extra_characters=extras,
+            vasily=vasily,
         )
-        if not str(image_prompt or "").strip():
-            raise RuntimeError("модель вернула пустой промпт кадра")
-    except ServiceUnavailableRetriesExhaustedError as exc:
-        await update.message.reply_text(str(exc))
-        return True
     except Exception as exc:
         logger.exception("reference image prompt generation failed")
         await update.message.reply_text(f"Ошибка генерации промпта кадра: {_user_error_message(exc)}")
