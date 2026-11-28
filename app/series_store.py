@@ -19,6 +19,7 @@ SERIES_TITLE_BY_LANG_SESSION_KEY = "series_title_by_lang"
 SERIES_VIDEO_INDEX_SESSION_KEY = "series_video_index"
 SERIES_TOTAL_VIDEOS_SESSION_KEY = "series_total_videos"
 SERIES_COUNTER_BY_LANG_SESSION_KEY = "series_counter_by_lang"
+EDITORIAL_SERIES_TITLE_FIRST_KEY = "editorial_series_title_first"
 SERIES_RENDER_COUNTER_ADVANCED_SESSION_KEY = "series_render_counter_advanced"
 SERIES_PENDING_RECIPE_SESSION_KEY = "series_pending_recipe"
 SERIES_PENDING_PREFER_VERTEX_SESSION_KEY = "series_pending_prefer_vertex_api"
@@ -260,18 +261,20 @@ def format_series_label(payload: SeriesPayload) -> str:
     return f"{payload.title_by_lang['ru']} / {payload.title_by_lang['en']} ({payload.video_index}/{payload.total_videos})"
 
 
-def refresh_discipline_series_titles(session: dict[str, Any]) -> None:
-    """The editable series name takes precedence over an old dialogue checkpoint."""
+def refresh_discipline_series_titles(session: dict[str, Any]) -> bool:
+    """Refresh the live series names and return its preferred title order."""
     if session.get("selected_project_key") != "discipline":
-        return
+        return False
     try:
         series_id = uuid.UUID(str(session.get("discipline_content_series_id") or ""))
     except (ValueError, TypeError):
-        return
+        return False
     with SessionLocal() as db:
         row = db.get(ContentSeries, series_id)
         if row is None:
-            return
+            return False
         titles = dict(session.get(SERIES_TITLE_BY_LANG_SESSION_KEY) or {})
         titles.update(ru=row.title_ru, en=row.title_en)
+        metadata = row.meta_json if isinstance(row.meta_json, dict) else {}
     session[SERIES_TITLE_BY_LANG_SESSION_KEY] = titles
+    return metadata.get(EDITORIAL_SERIES_TITLE_FIRST_KEY) is True

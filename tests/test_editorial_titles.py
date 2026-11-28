@@ -112,6 +112,38 @@ def test_discipline_series_picker_builds_three_level_hierarchy_without_rewriting
     assert any('Стивен Кинг / Истории несовершенных ошибок / История 1' in text for text in replies)
 
 
+def test_picker_exchanges_series_and_book_title_roles_from_saved_series(monkeypatch):
+    from app import series_store
+
+    entry = SimpleNamespace(
+        title_ru="На месте героя книг", title_en="In a Book Character's Shoes",
+        meta_json={"editorial_series_title_first": True},
+    )
+    db = SimpleNamespace(get=lambda _model, _id: entry)
+    from contextlib import nullcontext
+    monkeypatch.setattr(series_store, "SessionLocal", lambda: nullcontext(db))
+    session = {
+        "selected_project_key": "discipline",
+        "discipline_content_series_id": "e646ec62-2e08-4db6-99e5-b0a1e75b8349",
+        "overlay_title_by_lang": {"ru": "Бог всегда путешествует инкогнито", "en": "The Man Who Risked It All"},
+        "series_counter_by_lang": {"ru": "История 1", "en": "Story 1"},
+    }
+    update = SimpleNamespace(message=SimpleNamespace(reply_text=AsyncMock()))
+    send = AsyncMock()
+    monkeypatch.setattr(picker, "_send_card", send)
+    assert asyncio.run(picker.ask_picker(update, session)) is True
+    hierarchy = session["overlay_title_style"][titles.HIERARCHY_KEY]
+    assert hierarchy == {
+        "ru": ["На месте героя книг", "Бог всегда путешествует инкогнито", "История 1"],
+        "en": ["In a Book Character's Shoes", "The Man Who Risked It All", "Story 1"],
+    }
+    assert all(call.args[2][titles.HIERARCHY_KEY] == hierarchy for call in send.await_args_list)
+    entry.meta_json = {}
+    assert titles.discipline_series_hierarchy(session)["ru"] == [
+        "Бог всегда путешествует инкогнито", "На месте героя книг", "История 1",
+    ]
+
+
 def test_discipline_series_style_selection_restores_missing_hierarchy(monkeypatch):
     update = SimpleNamespace(message=SimpleNamespace(reply_text=AsyncMock()))
     session = {
